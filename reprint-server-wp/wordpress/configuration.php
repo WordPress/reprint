@@ -216,11 +216,13 @@ function revoke_push_authorization_after_connection_token_added(): void {
  *     Current Reprint Server configuration state.
  *
  *     @type string    $stored_connection_token Option-backed connection token.
- *     @type bool      $is_configured Whether an effective connection token exists.
+ *     @type bool      $is_configured Whether a credential the host accepts exists: an enrolled key on a key host,
+ *                                    an effective connection token on an HMAC host.
  *     @type bool      $has_connection_token_file Whether secret.php supplies the effective connection token.
  *     @type bool      $push_supported Whether this PHP runtime can serve push endpoints.
  *     @type bool|null $managed_push_enabled Hosting-provider push policy, or null when the site controls it.
- *     @type bool      $push_enabled Whether push is authorized for the current connection token.
+ *     @type bool      $push_enabled Whether push is authorized for any enrolled key on a key host, or for the
+ *                                   current connection token on an HMAC host.
  *     @type string    $required_scheme Scheme this host accepts: key when OpenSSL is available, otherwise hmac.
  *     @type array[]   $enrolled_keys Effective enrolled keys, in the shape normalize_public_key_entry() returns.
  *     @type bool      $has_public_keys_file Whether public-keys.php supplies the enrolled keys.
@@ -238,18 +240,35 @@ function revoke_push_authorization_after_connection_token_added(): void {
  * }
  */
 function get_configuration_state(): array {
+    $key_auth_required = \WordPress\Reprint\Server\Utils::key_auth_required();
+    $enrolled_keys = get_enrolled_public_keys();
     $effective_connection_token = get_connection_token();
     $push_supported = push_is_supported();
 
+    if ($key_auth_required) {
+        $is_configured = $enrolled_keys !== [];
+        // get_push_authorization_error() applies the multisite refusal and the managed policy before the key's flag.
+        $push_enabled = false;
+        foreach ($enrolled_keys as $entry) {
+            if (get_push_authorization_error($entry['key_id']) === null) {
+                $push_enabled = true;
+                break;
+            }
+        }
+    } else {
+        $is_configured = $effective_connection_token !== null && $effective_connection_token !== '';
+        $push_enabled = is_push_authorized();
+    }
+
     return [
         'stored_connection_token' => get_option_connection_token(),
-        'is_configured' => $effective_connection_token !== null && $effective_connection_token !== '',
+        'is_configured' => $is_configured,
         'has_connection_token_file' => has_connection_token_file(),
         'push_supported' => $push_supported,
         'managed_push_enabled' => get_managed_push_enabled(),
-        'push_enabled' => $push_supported && is_push_authorized(),
-        'required_scheme' => \WordPress\Reprint\Server\Utils::key_auth_required() ? 'key' : 'hmac',
-        'enrolled_keys' => get_enrolled_public_keys(),
+        'push_enabled' => $push_supported && $push_enabled,
+        'required_scheme' => $key_auth_required ? 'key' : 'hmac',
+        'enrolled_keys' => $enrolled_keys,
         'has_public_keys_file' => has_public_keys_file(),
     ];
 }

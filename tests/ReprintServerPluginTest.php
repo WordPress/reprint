@@ -312,6 +312,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testConfigurationStateDescribesTheEffectiveConnection(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
 
         $configuration = get_configuration_state();
@@ -1082,5 +1083,95 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertSame('', $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION]);
         $this->assertNull(get_connection_token());
         $this->assertStringContainsString('reprint_server_notice=token_removed', (string) $GLOBALS['reprint_server_test_redirect']);
+    }
+
+    /** A stored token is not a credential on a key host, so it does not make the site configured. */
+    public function testKeyHostWithOnlyATokenIsNotConfiguredOnThePage(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'stale-token');
+
+        $state = get_configuration_state();
+        $this->assertFalse($state['is_configured']);
+        $this->assertFalse($state['push_enabled']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('<strong>Not configured yet.</strong>', $html);
+        $this->assertStringContainsString('Enroll a public key', $html);
+        $this->assertStringNotContainsString('name="reprint_server_push_enabled"', $html);
+        $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
+        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
+    }
+
+    public function testKeyHostWithAPushingKeyIsConnectedForDownloadsAndPush(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = true;
+        update_option_public_keys([$entry]);
+
+        $state = get_configuration_state();
+        $this->assertTrue($state['is_configured']);
+        $this->assertTrue($state['push_enabled']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('<strong>Connected for downloads and push.</strong>', $html);
+        $this->assertStringContainsString('At least one enrolled key can change files on this site.', $html);
+        $this->assertStringNotContainsString('<h2>Push access</h2>', $html, 'push grants live in the key table on a key host');
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
+    }
+
+    public function testKeyHostWithANonPushingKeyIsConnectedForDownloadsOnly(): void
+    {
+        update_option_public_keys([$this->sampleKeyEntry()]);
+
+        $state = get_configuration_state();
+        $this->assertTrue($state['is_configured']);
+        $this->assertFalse($state['push_enabled']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('<strong>Connected for downloads.</strong>', $html);
+        $this->assertStringContainsString('No enrolled key can change files', $html);
+    }
+
+    /** The managed policy and the multisite refusal outrank a key's push flag, as they do for a request. */
+    public function testKeyHostPushEnabledFollowsTheManagedPolicyAndMultisiteRefusal(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = true;
+        update_option_public_keys([$entry]);
+
+        putenv('REPRINT_SERVER_PUSH_ENABLED=false');
+        $this->assertFalse(get_configuration_state()['push_enabled']);
+        putenv('REPRINT_SERVER_PUSH_ENABLED');
+
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        update_option_public_keys([$entry]);
+        $this->assertFalse(get_configuration_state()['push_enabled']);
+    }
+
+    /** The network page offers the same read-only token section on a key host as the site page. */
+    public function testMultisiteKeyHostShowsAReadOnlyNetworkTokenWithRemove(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_network_options'][CONNECTION_TOKEN_OPTION] = 'network-token';
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('reprint_server_remove_connection_token', $html);
+        $this->assertStringNotContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
+        $this->assertStringNotContainsString('reprint_server_save_network_token', $html);
+        $this->assertStringContainsString('reprint_server_enroll_public_key', $html);
+    }
+
+    /** On an HMAC host the network page keeps its editable token form. */
+    public function testMultisiteHmacHostKeepsTheEditableNetworkTokenForm(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('reprint_server_save_network_token', $html);
+        $this->assertStringContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
+        $this->assertStringNotContainsString('reprint_server_remove_connection_token', $html);
     }
 }

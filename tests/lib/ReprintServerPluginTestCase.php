@@ -289,6 +289,9 @@ if (!function_exists('esc_attr__')) {
 
 if (!function_exists('current_user_can')) {
     function current_user_can(string $capability): bool {
+        if ($capability === 'manage_network_options') {
+            return !empty($GLOBALS['reprint_server_test_user_can_manage_network']);
+        }
         return $capability === 'manage_options';
     }
 }
@@ -533,6 +536,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $this->original_reprint_server_push_enabled_environment = getenv('REPRINT_SERVER_PUSH_ENABLED');
 
         $GLOBALS['reprint_server_test_multisite'] = false;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = false;
         $GLOBALS['reprint_server_test_network_options'] = [];
         $GLOBALS['reprint_server_test_options'] = [];
         $GLOBALS['reprint_server_registered_settings'] = [];

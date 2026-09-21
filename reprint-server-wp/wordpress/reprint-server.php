@@ -75,12 +75,16 @@ class SettingsPage {
         $this->render_push_access_notice();
         $this->render_configuration_status($configuration);
         $this->render_scheme_status($configuration);
-        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
-        echo '<input type="hidden" name="action" value="reprint_server_save_network_token" />';
-        wp_nonce_field('reprint_server_save_network_token');
-        $this->render_connection_token_field();
-        submit_button();
-        echo '</form>';
+        if ($configuration['required_scheme'] === 'hmac') {
+            echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+            echo '<input type="hidden" name="action" value="reprint_server_save_network_token" />';
+            wp_nonce_field('reprint_server_save_network_token');
+            $this->render_connection_token_field();
+            submit_button();
+            echo '</form>';
+        } else {
+            $this->render_stored_connection_token_section($configuration);
+        }
         echo '<hr /><h2>' . esc_html__('Public keys', 'reprint') . '</h2>';
         $this->render_public_keys_section($configuration);
         echo '</div>';
@@ -305,24 +309,8 @@ class SettingsPage {
                     <?php do_settings_sections('reprint-server'); ?>
                     <?php submit_button(); ?>
                 </form>
-            <?php elseif ($configuration['stored_connection_token'] !== '' || $configuration['has_connection_token_file']): ?>
-                <h2><?php echo esc_html__('Connection token', 'reprint'); ?></h2>
-                <p class="description">
-                <?php
-                echo esc_html(
-                    $configuration['has_connection_token_file']
-                        ? __('secret.php is present but not accepted on this host. Remove it.', 'reprint')
-                        : __('A connection token is stored but not accepted on this host. It is safe to remove.', 'reprint')
-                );
-                ?>
-                </p>
-                <?php if ($configuration['stored_connection_token'] !== '' && !$configuration['has_connection_token_file']): ?>
-                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-                        <input type="hidden" name="action" value="reprint_server_remove_connection_token" />
-                        <?php wp_nonce_field('reprint_server_remove_connection_token'); ?>
-                        <?php submit_button(__('Remove connection token', 'reprint'), 'secondary', 'submit', false); ?>
-                    </form>
-                <?php endif; ?>
+            <?php else: ?>
+                <?php $this->render_stored_connection_token_section($configuration); ?>
             <?php endif; ?>
 
             <hr />
@@ -330,17 +318,19 @@ class SettingsPage {
             <?php $this->render_public_keys_section($configuration); ?>
 
             <?php if ($configuration['is_configured']): ?>
-                <hr />
-                <h2><?php echo esc_html__('Push access', 'reprint'); ?></h2>
-                <p>
-                <?php
-                echo esc_html__(
-                    'You do not need push access when moving this site to another host.',
-                    'reprint'
-                );
-                ?>
-                </p>
-                <?php $this->render_push_access_form($configuration); ?>
+                <?php if ($configuration['required_scheme'] === 'hmac'): ?>
+                    <hr />
+                    <h2><?php echo esc_html__('Push access', 'reprint'); ?></h2>
+                    <p>
+                    <?php
+                    echo esc_html__(
+                        'You do not need push access when moving this site to another host.',
+                        'reprint'
+                    );
+                    ?>
+                    </p>
+                    <?php $this->render_push_access_form($configuration); ?>
+                <?php endif; ?>
 
                 <hr />
                 <h2><?php echo esc_html__('Remote Reprint API URL', 'reprint'); ?></h2>
@@ -390,23 +380,66 @@ class SettingsPage {
             $this->render_notice('warning', $message);
         }
 
+        $key_host = $configuration['required_scheme'] === 'key';
         if (!$configuration['is_configured']) {
             $message = '<strong>'
                 . esc_html__('Not configured yet.', 'reprint')
                 . '</strong> '
-                . esc_html__('Enter a connection token to get started.', 'reprint');
+                . ( $key_host
+                    ? esc_html__('Enroll a public key to get started.', 'reprint')
+                    : esc_html__('Enter a connection token to get started.', 'reprint')
+                );
             $this->render_notice('warning', $message);
             return;
         }
 
         if ($configuration['push_enabled']) {
             $message = '<strong>' . esc_html__('Connected for downloads and push.', 'reprint') . '</strong> '
-                . esc_html__('The current connection token can change files on this site.', 'reprint');
+                . ( $key_host
+                    ? esc_html__('At least one enrolled key can change files on this site.', 'reprint')
+                    : esc_html__('The current connection token can change files on this site.', 'reprint')
+                );
         } else {
             $message = '<strong>' . esc_html__('Connected for downloads.', 'reprint') . '</strong> '
-                . esc_html__('The connection token cannot change files on this site.', 'reprint');
+                . ( $key_host
+                    ? esc_html__('No enrolled key can change files on this site.', 'reprint')
+                    : esc_html__('The connection token cannot change files on this site.', 'reprint')
+                );
         }
         $this->render_notice('info', $message);
+    }
+
+    /**
+     * Read-only connection-token section for a key host, where a stored token is never accepted.
+     *
+     * Renders nothing when no token is stored. An option-stored token gets a Remove button;
+     * a secret.php token is named without one, since this page cannot delete that file.
+     *
+     * @param array $configuration Configuration returned by get_configuration_state().
+     */
+    private function render_stored_connection_token_section(array $configuration): void {
+        if ($configuration['stored_connection_token'] === '' && !$configuration['has_connection_token_file']) {
+            return;
+        }
+        ?>
+        <h2><?php echo esc_html__('Connection token', 'reprint'); ?></h2>
+        <p class="description">
+        <?php
+        echo esc_html(
+            $configuration['has_connection_token_file']
+                ? __('secret.php is present but not accepted on this host. Remove it.', 'reprint')
+                : __('A connection token is stored but not accepted on this host. It is safe to remove.', 'reprint')
+        );
+        ?>
+        </p>
+        <?php if ($configuration['stored_connection_token'] !== '' && !$configuration['has_connection_token_file']): ?>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="reprint_server_remove_connection_token" />
+                <?php wp_nonce_field('reprint_server_remove_connection_token'); ?>
+                <?php submit_button(__('Remove connection token', 'reprint'), 'secondary', 'submit', false); ?>
+            </form>
+        <?php endif; ?>
+        <?php
     }
 
     /**
