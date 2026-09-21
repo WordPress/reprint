@@ -45,7 +45,8 @@ final class PublicKeyClient implements EnvelopeSigner {
             throw new InvalidArgumentException('The private key is not an RSA key.');
         }
         $this->private_key = $private_key;
-        $this->public_key_one_line = Utils::normalize_public_key((string) $details['key']);
+        $public_key_pem = (string) $details['key'];
+        $this->public_key_one_line = Utils::normalize_public_key($public_key_pem);
         $this->key_id = Utils::public_key_fingerprint($this->public_key_one_line);
     }
 
@@ -71,7 +72,8 @@ final class PublicKeyClient implements EnvelopeSigner {
             throw new RuntimeException('Could not export the private key: ' . (string) openssl_error_string());
         }
         $details = openssl_pkey_get_details($keypair);
-        return [$private_key_pem, Utils::normalize_public_key((string) $details['key'])];
+        $public_key_pem = (string) $details['key'];
+        return [$private_key_pem, Utils::normalize_public_key($public_key_pem)];
     }
 
     public function get_public_key(): string {

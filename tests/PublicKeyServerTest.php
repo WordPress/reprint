@@ -86,6 +86,16 @@ final class PublicKeyServerTest extends TestCase
         $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
     }
 
+    public function testHostRuleRunsBeforeAnyHeaderIsRead(): void
+    {
+        $server = $this->server(false);
+
+        $error = $server->verify([], 'GET', '/?reprint-api', '', [], null, false, microtime(true));
+
+        $this->assertSame('This host accepts connection-token authentication only', $error);
+        $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
+    }
+
     public function testNullSeamFollowsTheUtilsRule(): void
     {
         // The test runtime has OpenSSL, so a null seam verifies.
@@ -181,14 +191,17 @@ final class PublicKeyServerTest extends TestCase
 
     public function testMultipartUploadsAreHashedFromTmpFiles(): void
     {
-        $tmp = tempnam(sys_get_temp_dir(), 'pk');
-        file_put_contents($tmp, '[{"path":"L2E="}]');
-        $files = ['file_list' => ['tmp_name' => $tmp, 'name' => 'file_list']];
-        $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api', '[{"path":"L2E="}]');
-        $server = $this->server();
+        $temporary_upload_path = tempnam(sys_get_temp_dir(), 'pk');
+        try {
+            file_put_contents($temporary_upload_path, '[{"path":"L2E="}]');
+            $files = ['file_list' => ['tmp_name' => $temporary_upload_path, 'name' => 'file_list']];
+            $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api', '[{"path":"L2E="}]');
+            $server = $this->server();
 
-        $this->assertNull($server->verify($headers, 'POST', '/?reprint-api', '', $files, null, false, $this->now($headers)));
-        unlink($tmp);
+            $this->assertNull($server->verify($headers, 'POST', '/?reprint-api', '', $files, null, false, $this->now($headers)));
+        } finally {
+            unlink($temporary_upload_path);
+        }
     }
 
     public function testVerifyGlobalsReadsSuperglobals(): void

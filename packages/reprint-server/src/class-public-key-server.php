@@ -94,14 +94,14 @@ final class PublicKeyServer {
         }
 
         $key_id = self::requested_key_id($headers);
-        $signature_b64 = $this->get_header($headers, 'X-Auth-Signature');
-        $nonce = $this->get_header($headers, 'X-Auth-Nonce');
-        $timestamp = $this->get_header($headers, 'X-Auth-Timestamp');
-        $content_hash = $this->get_header($headers, 'X-Auth-Content-Hash');
+        $signature_base64 = self::get_header($headers, 'X-Auth-Signature');
+        $nonce = self::get_header($headers, 'X-Auth-Nonce');
+        $timestamp = self::get_header($headers, 'X-Auth-Timestamp');
+        $content_hash = self::get_header($headers, 'X-Auth-Content-Hash');
 
         foreach ([
             'X-Auth-Key-Id' => $key_id,
-            'X-Auth-Signature' => $signature_b64,
+            'X-Auth-Signature' => $signature_base64,
             'X-Auth-Nonce' => $nonce,
             'X-Auth-Timestamp' => $timestamp,
             'X-Auth-Content-Hash' => $content_hash,
@@ -144,19 +144,18 @@ final class PublicKeyServer {
             }
         }
 
-        $signature = base64_decode($signature_b64, true);
+        $signature = base64_decode($signature_base64, true);
         if ($signature === false || $signature === '') {
             return $this->fail(self::REASON_AUTH_FAILED, 'Malformed signature');
         }
         $public_key = @openssl_pkey_get_public(Utils::public_key_to_pem($this->public_keys_by_id[$key_id]));
         if ($public_key === false) {
+            self::drain_openssl_error_queue();
             return $this->fail(self::REASON_AUTH_FAILED, 'Stored public key ' . $key_id . ' could not be parsed');
         }
         $message = PublicKeyClient::build_message($key_id, $nonce, $timestamp, $content_hash, $method, $request_target, $cursor);
         $result = openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256);
-        // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedWhile -- Drains the error queue so a later message is not polluted by this one.
-        while (openssl_error_string() !== false) {
-        }
+        self::drain_openssl_error_queue();
         if ($result !== 1) {
             return $this->fail(self::REASON_AUTH_FAILED, 'Signature verification failed');
         }
@@ -182,7 +181,7 @@ final class PublicKeyServer {
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
         $cursor = isset($_SERVER[$this->cursor_header_name]) ? (string) $_SERVER[$this->cursor_header_name] : null;
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Routing only; the signature is the check.
-        $endpoint = isset($_GET['endpoint']) ? (string) $_GET['endpoint'] : '';
+        $endpoint = isset($_GET['endpoint']) && is_string($_GET['endpoint']) ? $_GET['endpoint'] : '';
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
         $allow_unsigned_payload = HTTPServer::is_push_endpoint($endpoint);
 
@@ -196,8 +195,7 @@ final class PublicKeyServer {
      * request that carries it. Not a scheme selector.
      */
     public static function requested_key_id(array $headers): ?string {
-        $instance = new self([], 300, 'HTTP_X_EXPORT_CURSOR', false);
-        $value = $instance->get_header($headers, 'X-Auth-Key-Id');
+        $value = self::get_header($headers, 'X-Auth-Key-Id');
         return $value === '' ? null : $value;
     }
 
@@ -241,13 +239,24 @@ final class PublicKeyServer {
         return $message;
     }
 
-    private function get_header(array $headers, string $name): ?string {
+    /**
+     * Empties the OpenSSL error queue so a later, unrelated call does not
+     * report an error left behind by this one.
+     */
+    private static function drain_openssl_error_queue(): void {
+        // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedWhile -- Draining the queue is the entire purpose of this loop.
+        while (openssl_error_string() !== false) {
+        }
+    }
+
+    private static function get_header(array $headers, string $name): ?string {
         $server_name = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
         foreach ($headers as $key => $value) {
             if (!is_string($value)) {
                 continue;
             }
-            if (strcasecmp((string) $key, $name) === 0 || strcasecmp((string) $key, $server_name) === 0) {
+            $header_key = (string) $key;
+            if (strcasecmp($header_key, $name) === 0 || strcasecmp($header_key, $server_name) === 0) {
                 return $value;
             }
         }
