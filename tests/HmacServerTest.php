@@ -23,14 +23,14 @@ final class HmacServerTest extends TestCase
             'X-Auth-Content-Hash' => $content_hash,
         ];
 
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertNull($server->verify($headers, $body, [], 1700000001.0));
     }
 
     public function testMissingHeaderIsRejected(): void
     {
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'Missing X-Auth-Signature header',
@@ -41,7 +41,7 @@ final class HmacServerTest extends TestCase
     public function testInvalidTimestampFormatIsRejected(): void
     {
         $headers = $this->buildHeadersForBody('', 'not-a-number');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'Invalid timestamp format',
@@ -52,7 +52,7 @@ final class HmacServerTest extends TestCase
     public function testExpiredTimestampIsRejected(): void
     {
         $headers = $this->buildHeadersForBody('', '1700000000.000000');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertStringContainsString(
             'Request timestamp expired',
@@ -63,7 +63,7 @@ final class HmacServerTest extends TestCase
     public function testShortNonceIsRejected(): void
     {
         $headers = $this->buildHeadersForBody('', '1700000000.000000', 'shortnonce');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'Nonce must be at least 16 characters',
@@ -75,7 +75,7 @@ final class HmacServerTest extends TestCase
     {
         $headers = $this->buildHeadersForBody('');
         $headers['X-Auth-Signature'] = str_repeat('0', 64);
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'HMAC signature verification failed',
@@ -86,7 +86,7 @@ final class HmacServerTest extends TestCase
     public function testContentHashMismatchIsRejected(): void
     {
         $headers = $this->buildHeadersForBody('signed-body');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'Content hash mismatch: body was modified in transit',
@@ -104,7 +104,7 @@ final class HmacServerTest extends TestCase
             $server_headers['HTTP_' . strtoupper(str_replace('-', '_', $name))] = $value;
         }
 
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertNull($server->verify($server_headers, $body, [], 1700000001.0));
     }
@@ -134,7 +134,7 @@ final class HmacServerTest extends TestCase
                 'a_file' => ['tmp_name' => $tmp_a],
             ];
 
-            $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+            $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
             $this->assertNull($server->verify($headers, 'ignored-body', $files, 1700000001.0));
         } finally {
@@ -147,7 +147,7 @@ final class HmacServerTest extends TestCase
     {
         $headers = $this->buildHeadersForBody('signed-body');
         $headers['X-Auth-Signature'] = str_repeat('0', 64);
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'HMAC signature verification failed',
@@ -160,7 +160,7 @@ final class HmacServerTest extends TestCase
     public function testUploadedFileHashFailureReturnsVerificationError(): void
     {
         $headers = $this->buildHeadersForBody('signed-body');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'Cannot hash uploaded file.',
@@ -175,7 +175,7 @@ final class HmacServerTest extends TestCase
         $client = new Site_Export_HMAC_Client(self::SECRET);
         $url = 'https://example.com/?reprint-api&endpoint=push_upload&push_session_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
         $headers = $client->get_envelope_auth_headers('POST', $url);
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertNull($server->verify_envelope(
             $headers,
@@ -189,7 +189,7 @@ final class HmacServerTest extends TestCase
     {
         $client = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $client->get_envelope_auth_headers('POST', 'https://example.com/?endpoint=push_upload&push_session_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
         $now = (float) $headers['X-Auth-Timestamp'];
 
         $this->assertSame(
@@ -206,7 +206,7 @@ final class HmacServerTest extends TestCase
     public function testEnvelopeRequiresTheUnsignedPayloadHeader(): void
     {
         $headers = $this->buildHeadersForBody('{"command":"push"}');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'Envelope verification requires the literal UNSIGNED-PAYLOAD content hash',
@@ -218,7 +218,7 @@ final class HmacServerTest extends TestCase
     {
         $client = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $client->get_envelope_auth_headers('POST', 'https://example.com/?endpoint=push_upload&push_session_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $this->assertSame(
             'HMAC signature verification failed',
@@ -230,7 +230,7 @@ final class HmacServerTest extends TestCase
     {
         $client = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $client->get_envelope_auth_headers('POST', 'https://example.com/?endpoint=push_upload&push_session_id=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
-        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
 
         $result = $server->verify_envelope(
             $headers,
@@ -259,6 +259,59 @@ final class HmacServerTest extends TestCase
     {
         $client = new Site_Export_HMAC_Client(self::SECRET);
         $this->assertInstanceOf(\WordPress\Reprint\Server\EnvelopeSigner::class, $client);
+    }
+
+    public function testDefaultSeamRefusesOnAnOpensslHost(): void
+    {
+        // The test runtime has OpenSSL, so the two-argument constructor refuses.
+        $headers = $this->buildHeadersForBody('', '1700000000.000000');
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $this->assertNotNull($server->verify($headers, '', [], 1700000001.0));
+        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_REQUIRES_KEY_AUTH, $server->last_error_reason());
+    }
+
+    public function testDefaultSeamFollowsTheUtilsOverride(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        try {
+            $headers = $this->buildHeadersForBody('', '1700000000.000000');
+            $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+            $this->assertNull($server->verify($headers, '', [], 1700000001.0));
+        } finally {
+            \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(null);
+        }
+    }
+
+    public function testRefusesWhenTheHostRequiresKeyAuth(): void
+    {
+        $headers = $this->buildHeadersForBody('', '1700000000.000000');
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, true);
+
+        $this->assertSame(
+            'This host requires key authentication; connection tokens are not accepted',
+            $server->verify($headers, '', [], 1700000001.0)
+        );
+        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_REQUIRES_KEY_AUTH, $server->last_error_reason());
+    }
+
+    public function testEnvelopeAlsoRefusesWhenTheHostRequiresKeyAuth(): void
+    {
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $client->get_envelope_auth_headers('POST', 'https://s.test/?endpoint=push_upload');
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, true);
+
+        $this->assertNotNull($server->verify_envelope($headers, 'POST', '/?endpoint=push_upload', (float) $headers['X-Auth-Timestamp'] + 1.0));
+        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_REQUIRES_KEY_AUTH, $server->last_error_reason());
+    }
+
+    public function testSignatureFailureReportsTheGenericReason(): void
+    {
+        $headers = $this->buildHeadersForBody('', '1700000000.000000');
+        $headers['X-Auth-Signature'] = str_repeat('0', 64);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET, 300, false);
+
+        $this->assertSame('HMAC signature verification failed', $server->verify($headers, '', [], 1700000001.0));
+        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
     private function buildHeadersForBody(

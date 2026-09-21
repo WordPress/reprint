@@ -13,7 +13,7 @@ require_once __DIR__ . '/../../../vendor/autoload.php';
 require_once __DIR__ . '/../../../packages/reprint-server/src/class-http-server.php';
 require_once __DIR__ . '/../../../packages/reprint-server/src/class-hmac-server.php';
 
-$reprint_authentication = new \WordPress\Reprint\Server\HMACServer('multipart-test-secret');
+$reprint_authentication = new \WordPress\Reprint\Server\HMACServer('multipart-test-secret', 300, false);
 $reprint_authentication_error = $reprint_authentication->verify(getallheaders(), '', $_FILES);
 if ($reprint_authentication_error !== null) {
     http_response_code(403);
