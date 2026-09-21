@@ -17,15 +17,21 @@ use function WordPress\Reprint\Server\Plugin\change_connection_token;
 use function WordPress\Reprint\Server\Plugin\change_push_access;
 use function WordPress\Reprint\Server\Plugin\get_configuration_state;
 use function WordPress\Reprint\Server\Plugin\get_connection_token;
+use function WordPress\Reprint\Server\Plugin\get_enrolled_public_keys;
+use function WordPress\Reprint\Server\Plugin\get_enrolled_public_keys_by_id;
 use function WordPress\Reprint\Server\Plugin\get_managed_push_enabled;
 use function WordPress\Reprint\Server\Plugin\get_push_authorization_error;
+use function WordPress\Reprint\Server\Plugin\has_public_keys_file;
 use function WordPress\Reprint\Server\Plugin\is_push_authorized;
 use function WordPress\Reprint\Server\Plugin\register_connection_token_setting;
 use function WordPress\Reprint\Server\Plugin\update_connection_token;
+use function WordPress\Reprint\Server\Plugin\update_option_public_keys;
 use function WordPress\Reprint\Server\Plugin\update_push_authorization;
 use function WordPress\Reprint\Server\Plugin\verify_hmac;
 
 use const WordPress\Reprint\Server\Plugin\CONNECTION_TOKEN_OPTION;
+use const WordPress\Reprint\Server\Plugin\PUBLIC_KEYS_FILE;
+use const WordPress\Reprint\Server\Plugin\PUBLIC_KEYS_OPTION;
 use const WordPress\Reprint\Server\Plugin\PUSH_AUTHORIZATION_OPTION;
 
 require_once __DIR__ . '/lib/ReprintServerPluginTestCase.php';
@@ -575,5 +581,73 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('Settings saved.', $html);
         $this->assertStringNotContainsString('<strong>Settings saved.</strong>', $html);
         $this->assertStringNotContainsString('Push access updated.', $html);
+    }
+
+    private function sampleKeyEntry(string $label = 'laptop'): array
+    {
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        return [
+            'key_id' => \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key),
+            'public_key' => $public_key,
+            'label' => $label,
+            'added_at' => 1700000000,
+            'push' => false,
+        ];
+    }
+
+    public function testNoKeysByDefault(): void
+    {
+        $this->assertSame([], get_enrolled_public_keys());
+        $this->assertSame([], get_enrolled_public_keys_by_id());
+        $this->assertFalse(has_public_keys_file());
+    }
+
+    public function testOptionKeysAreReturnedById(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $this->assertTrue(update_option_public_keys([$entry]));
+
+        $this->assertSame([$entry], get_enrolled_public_keys());
+        $this->assertSame([$entry['key_id'] => $entry['public_key']], get_enrolled_public_keys_by_id());
+    }
+
+    public function testMultisiteStoresKeysInTheNetworkOption(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $entry = $this->sampleKeyEntry();
+        update_option_public_keys([$entry]);
+
+        $this->assertSame([$entry], $GLOBALS['reprint_server_test_network_options'][PUBLIC_KEYS_OPTION]);
+        $this->assertArrayNotHasKey(PUBLIC_KEYS_OPTION, $GLOBALS['reprint_server_test_options']);
+        $this->assertSame([$entry], get_enrolled_public_keys());
+    }
+
+    public function testPublicKeysFileOverridesTheOption(): void
+    {
+        $option_entry = $this->sampleKeyEntry('option');
+        update_option_public_keys([$option_entry]);
+        [, $file_public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Builds the public-keys.php fixture source.
+        file_put_contents(PUBLIC_KEYS_FILE, "<?php return [" . var_export(\WordPress\Reprint\Server\Utils::public_key_to_pem($file_public_key), true) . "];\n");
+
+        try {
+            $this->assertTrue(has_public_keys_file());
+            $enrolled = get_enrolled_public_keys();
+            $this->assertCount(1, $enrolled);
+            $this->assertSame($file_public_key, $enrolled[0]['public_key']);
+            $this->assertSame('public-keys.php', $enrolled[0]['label']);
+            $this->assertSame(\WordPress\Reprint\Server\Utils::public_key_fingerprint($file_public_key), $enrolled[0]['key_id']);
+        } finally {
+            unlink(PUBLIC_KEYS_FILE);
+        }
+    }
+
+    public function testMalformedOptionValueYieldsNoKeys(): void
+    {
+        $GLOBALS['reprint_server_test_options'][PUBLIC_KEYS_OPTION] = 'not an array';
+        $this->assertSame([], get_enrolled_public_keys());
+
+        $GLOBALS['reprint_server_test_options'][PUBLIC_KEYS_OPTION] = [['key_id' => 'x']];
+        $this->assertSame([], get_enrolled_public_keys(), 'entries missing public_key are dropped');
     }
 }

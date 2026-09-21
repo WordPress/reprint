@@ -30,6 +30,9 @@ if (!defined('REPRINT_SERVER_TEST_PLUGIN_DIR')) {
 if (!defined('REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE')) {
     define('REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE', REPRINT_SERVER_TEST_PLUGIN_DIR . 'secret.php');
 }
+if (!defined('REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE')) {
+    define('REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE', REPRINT_SERVER_TEST_PLUGIN_DIR . 'public-keys.php');
+}
 
 // Seed the canonical namespaced constants lib.php would otherwise derive, so
 // the plugin boots without compat.php adopting any SITE_EXPORT_* name.
@@ -41,6 +44,9 @@ if (!defined('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE')) {
         'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE',
         REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE
     );
+}
+if (!defined('WordPress\\Reprint\\Server\\Plugin\\PUBLIC_KEYS_FILE')) {
+    define('WordPress\\Reprint\\Server\\Plugin\\PUBLIC_KEYS_FILE', REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE);
 }
 
 $GLOBALS['reprint_server_test_options'] = [];
@@ -504,12 +510,18 @@ abstract class ReprintServerPluginTestCase extends TestCase
         if (file_exists(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE)) {
             unlink(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE);
         }
+        if (file_exists(REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE)) {
+            unlink(REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE);
+        }
     }
 
     protected function tearDown(): void
     {
         if (file_exists(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE)) {
             unlink(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE);
+        }
+        if (file_exists(REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE)) {
+            unlink(REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE);
         }
 
         if (is_dir(REPRINT_SERVER_TEST_PLUGIN_DIR)) {

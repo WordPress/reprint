@@ -14,6 +14,7 @@ use InvalidArgumentException;
 use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\PushConfigurationException;
+use WordPress\Reprint\Server\RequestAuthenticator;
 use WordPress\Reprint\Server\Utils;
 
 if (!defined('ABSPATH')) {
@@ -37,6 +38,12 @@ if (!defined(__NAMESPACE__ . '\\CONNECTION_TOKEN_OPTION')) {
 }
 if (!defined(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION')) {
     define(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION', 'reprint_server_push_authorized_token_fingerprint');
+}
+if (!defined(__NAMESPACE__ . '\\PUBLIC_KEYS_OPTION')) {
+    define(__NAMESPACE__ . '\\PUBLIC_KEYS_OPTION', 'reprint_server_public_keys');
+}
+if (!defined(__NAMESPACE__ . '\\PUBLIC_KEYS_FILE')) {
+    define(__NAMESPACE__ . '\\PUBLIC_KEYS_FILE', PLUGIN_DIR . 'public-keys.php');
 }
 
 /**
@@ -236,6 +243,127 @@ function update_connection_token(string $connection_token): bool {
         return (bool) update_site_option(CONNECTION_TOKEN_OPTION, $connection_token);
     }
     return (bool) update_option(CONNECTION_TOKEN_OPTION, $connection_token, false);
+}
+
+/** Returns whether the public-keys.php override exists beside the plugin. */
+function has_public_keys_file(): bool {
+    return file_exists(PUBLIC_KEYS_FILE);
+}
+
+/**
+ * Normalizes one stored entry, or returns null when it cannot be used.
+ *
+ * @param mixed $entry Stored value.
+ * @return array|null {
+ *     Normalized entry, or null when the stored value has no usable public key.
+ *
+ *     @type string $key_id     Key id computed from the public key.
+ *     @type string $public_key One-line public key.
+ *     @type string $label      Administrator-facing label, empty when absent.
+ *     @type int    $added_at   Unix timestamp of enrollment, 0 when absent.
+ *     @type bool   $push       Whether this key may push.
+ * }
+ */
+function normalize_public_key_entry($entry): ?array {
+    if (!is_array($entry) || !isset($entry['public_key']) || !is_string($entry['public_key'])) {
+        return null;
+    }
+    try {
+        $public_key = Utils::normalize_public_key($entry['public_key']);
+    } catch (InvalidArgumentException $exception) {
+        return null;
+    }
+    return [
+        'key_id' => Utils::public_key_fingerprint($public_key),
+        'public_key' => $public_key,
+        'label' => isset($entry['label']) && is_string($entry['label']) ? $entry['label'] : '',
+        'added_at' => isset($entry['added_at']) ? (int) $entry['added_at'] : 0,
+        'push' => !empty($entry['push']),
+    ];
+}
+
+/**
+ * Reads keys from the public-keys.php override. The file returns a list of
+ * PEM or one-line public keys. A public key on disk needs integrity, not
+ * secrecy, so this is the stronger storage for hand-provisioned sites.
+ *
+ * @return array[] Entries in the shape normalize_public_key_entry() returns.
+ */
+function get_file_public_keys(): array {
+    if (!has_public_keys_file()) {
+        return [];
+    }
+    $file_keys = require PUBLIC_KEYS_FILE;
+    if (!is_array($file_keys)) {
+        return [];
+    }
+    $entries = [];
+    foreach ($file_keys as $file_key) {
+        $entry = normalize_public_key_entry(['public_key' => $file_key, 'label' => 'public-keys.php']);
+        if ($entry !== null) {
+            $entries[] = $entry;
+        }
+    }
+    return $entries;
+}
+
+/**
+ * Reads keys from the site option, or the network option on multisite.
+ *
+ * @return array[] Entries in the shape normalize_public_key_entry() returns.
+ */
+function get_option_public_keys(): array {
+    if (!function_exists('get_option')) {
+        return [];
+    }
+    $stored = function_exists('is_multisite') && is_multisite() && function_exists('get_site_option')
+        ? get_site_option(PUBLIC_KEYS_OPTION, [])
+        : get_option(PUBLIC_KEYS_OPTION, []);
+    if (!is_array($stored)) {
+        return [];
+    }
+    $entries = [];
+    foreach ($stored as $stored_entry) {
+        $entry = normalize_public_key_entry($stored_entry);
+        if ($entry !== null) {
+            $entries[] = $entry;
+        }
+    }
+    return $entries;
+}
+
+/**
+ * Returns the effective enrolled keys: the file override when present,
+ * otherwise the option. Same precedence secret.php has for the token.
+ *
+ * @return array[] Entries in the shape normalize_public_key_entry() returns.
+ */
+function get_enrolled_public_keys(): array {
+    return has_public_keys_file() ? get_file_public_keys() : get_option_public_keys();
+}
+
+/** @return array<string,string> key id => one-line public key, for RequestAuthenticator. */
+function get_enrolled_public_keys_by_id(): array {
+    $by_id = [];
+    foreach (get_enrolled_public_keys() as $entry) {
+        $by_id[$entry['key_id']] = $entry['public_key'];
+    }
+    return $by_id;
+}
+
+/**
+ * Writes the option-backed key list. Never touches public-keys.php.
+ *
+ * @param array[] $entries Entries in the shape normalize_public_key_entry() returns.
+ */
+function update_option_public_keys(array $entries): bool {
+    if (!function_exists('update_option')) {
+        return false;
+    }
+    if (function_exists('is_multisite') && is_multisite() && function_exists('update_site_option')) {
+        return (bool) update_site_option(PUBLIC_KEYS_OPTION, array_values($entries));
+    }
+    return (bool) update_option(PUBLIC_KEYS_OPTION, array_values($entries), false);
 }
 
 /**
