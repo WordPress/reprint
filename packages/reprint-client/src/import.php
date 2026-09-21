@@ -183,6 +183,7 @@ class ImportClient
         "flat-docroot",
         "merge-wp-content",
         "apply-runtime",
+        "keygen",
     ];
 
     /** Commands that authenticate to the remote site and therefore need a credential. */
@@ -2400,6 +2401,84 @@ class ImportClient
     public static function key_file_path(string $remote_reprint_api_url, string $state_dir): string
     {
         return wp_join_unix_paths(self::remote_state_directory_path($remote_reprint_api_url, $state_dir), self::KEY_FILE_NAME);
+    }
+
+    /**
+     * Generates a keypair and writes the private half to $path with mode 0600.
+     *
+     * @return array {
+     *     @type string $path       Where the private key was written.
+     *     @type string $public_key The one-line public key to enroll on the site.
+     *     @type string $key_id     Fingerprint of the public key.
+     * }
+     * @throws RuntimeException When the file exists and $force is false, or on a write failure.
+     */
+    public static function generate_key_file(string $path, bool $force): array
+    {
+        if (file_exists($path) && !$force) {
+            throw new RuntimeException(
+                "A key already exists at {$path}. It may still be enrolled and in use. Pass --force to replace it."
+            );
+        }
+        $directory = dirname($path);
+        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+            throw new RuntimeException("Could not create {$directory}.");
+        }
+        [$private_key_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $previous_umask = umask(0077);
+        try {
+            if (file_put_contents($path, $private_key_pem) === false) {
+                throw new RuntimeException("Could not write the private key to {$path}.");
+            }
+        } finally {
+            umask($previous_umask);
+        }
+        chmod($path, 0600);
+        return [
+            'path' => $path,
+            'public_key' => $public_key,
+            'key_id' => \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key),
+        ];
+    }
+
+    /**
+     * The text keygen prints, and pull prints when it generated a key itself.
+     *
+     * @param array $generated {
+     *     The result of generate_key_file().
+     *     @type string $path       Where the private key was written.
+     *     @type string $public_key The one-line public key to enroll on the site.
+     *     @type string $key_id     Fingerprint of the public key.
+     * }
+     * @param bool $generated_by_pull  True when pull generated it and stopped.
+     * @param bool $stored_in_state    True when the file is where every later command will find it.
+     */
+    public static function format_enrollment_instructions(array $generated, bool $generated_by_pull, bool $stored_in_state): string
+    {
+        $lines = [];
+        if ($generated_by_pull) {
+            $lines[] = 'No credential found for this site. Generated one:';
+        } else {
+            $lines[] = 'Generated a key for this site:';
+        }
+        $lines[] = '';
+        $lines[] = '  Key id:      ' . $generated['key_id'];
+        $lines[] = '  Stored at:   ' . $generated['path'];
+        $lines[] = '';
+        $lines[] = 'Enroll this public key on the site under Tools → Reprint Server,';
+        if ($generated_by_pull) {
+            $lines[] = 'then run the same command again:';
+        } elseif ($stored_in_state) {
+            $lines[] = 'then run any reprint command against this site; the key is found automatically:';
+        } else {
+            $lines[] = 'then pass --private-key=' . $generated['path'] . ' to every reprint command:';
+        }
+        $lines[] = '';
+        // The key sits at the start of its own line so a whole-line copy
+        // carries no leading whitespace into the enrollment form.
+        $lines[] = $generated['public_key'];
+        $lines[] = '';
+        return implode("\n", $lines);
     }
 
     /**
@@ -14217,6 +14296,21 @@ if (
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
+            'name' => 'out',
+            'type' => 'value',
+            'target' => 'out',
+            'placeholder' => 'PATH',
+            'help' => 'Write the private key here instead of the state directory; later commands then need --private-key=PATH',
+            'commands' => ['keygen'],
+        ],
+        [
+            'name' => 'force',
+            'type' => 'flag',
+            'target' => 'force',
+            'help' => 'Replace an existing key file',
+            'commands' => ['keygen'],
+        ],
+        [
             'name' => 'force-http',
             'type' => 'flag',
             'target' => 'force_http',
@@ -15144,6 +15238,24 @@ if (
                 "any other reprint command can connect to it.\n",
             "extra" => null,
         ],
+        "keygen" => [
+            "level" => "low",
+            "short" => "Generate a private key for one remote site",
+            "usage" => "reprint keygen <remote-reprint-api-url> --state-dir=DIR [--out=PATH] [--force]",
+            "description" =>
+                "Generates a 2048-bit RSA keypair and stores the private half at\n" .
+                "  <state-dir>/remotes/<md5-of-url>/key.pem   (mode 0600)\n" .
+                "beside everything else about that site. Every later command\n" .
+                "finds it there; no --private-key flag is needed.\n" .
+                "\n" .
+                "Prints the public key as one line. Paste it into the site under\n" .
+                "Tools > Reprint Server. Deleting the state directory revokes the\n" .
+                "key: the enrolled public half cannot be used without it.\n" .
+                "\n" .
+                "`reprint pull` generates a key itself when none exists, so this\n" .
+                "command is for scripts that want a deterministic first run.\n",
+            "extra" => null,
+        ],
         "preflight" => [
             "level" => "low",
             "short" => "Probe the remote site and cache its environment",
@@ -15654,7 +15766,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$filesystem_root && !$flat_document_root && $command !== "pull-metadata") {
+    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "keygen"], true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
@@ -15662,9 +15774,9 @@ if (
     if (!$filesystem_root) {
         // For commands that need a filesystem root in the constructor, use the
         // flattened filesystem root. run_apply_runtime will resolve it properly.
-        // pull-metadata reads only state, but ImportClient still expects
-        // a filesystem root path. Point it at state-dir rather than requiring an
-        // otherwise-unused CLI option.
+        // pull-metadata reads only state and keygen only writes a key file, but
+        // ImportClient still expects a filesystem root path. Point it at
+        // state-dir rather than requiring an otherwise-unused CLI option.
         $filesystem_root = $flat_document_root ?: $state_dir;
     }
 
@@ -15672,6 +15784,19 @@ if (
         // Acquire the lock before local push state setup and audit writes so
         // each command owns every local state transition for its complete invocation.
         $reprint_process_lock = new ReprintProcessLock($state_dir);
+        if ($command === 'keygen') {
+            $reprint_key_path = isset($options['out']) && is_string($options['out']) && $options['out'] !== ''
+                ? $options['out']
+                : ImportClient::key_file_path($remote_reprint_api_url, $state_dir);
+            $reprint_generated_key = ImportClient::generate_key_file($reprint_key_path, !empty($options['force']));
+            $reprint_key_stored_in_state =
+                $reprint_key_path === ImportClient::key_file_path($remote_reprint_api_url, $state_dir);
+            fwrite(
+                STDOUT,
+                ImportClient::format_enrollment_instructions($reprint_generated_key, false, $reprint_key_stored_in_state)
+            );
+            exit(0);
+        }
         $reprint_files_push_context = null;
         $reprint_files_diff_push_state_directory = null;
         if ($command === 'files-push') {
