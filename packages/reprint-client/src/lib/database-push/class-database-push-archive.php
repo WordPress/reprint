@@ -161,7 +161,7 @@ class DatabasePushArchive {
                 $select[] = 'IF(' . $size . '>' . self::MAX_ROW_BYTES . ',NULL,' . $value . ') AS ' . $identifier;
             }
             $select[] = $size . ' AS __reprint_row_bytes';
-            $this->database->setAttribute(PDO::MYSQL_ATTR_USE_BUFFERED_QUERY, false);
+            $this->database->setAttribute(( defined('Pdo\\Mysql::ATTR_USE_BUFFERED_QUERY') ? constant('Pdo\\Mysql::ATTR_USE_BUFFERED_QUERY') : PDO::MYSQL_ATTR_USE_BUFFERED_QUERY ), false);
             $this->rows = $this->database->query('SELECT ' . implode(',', $select) . ' FROM ' . $table);
             $this->write_record(['table' => $this->current_table, 'ddl' => $ddl]);
             return true;

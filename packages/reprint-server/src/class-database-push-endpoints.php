@@ -59,7 +59,7 @@ final class DatabasePushEndpoints {
             $database = new PDO(Utils::build_pdo_dsn($credentials['db_host'], $credentials['db_name']), $credentials['db_user'], $credentials['db_password'], [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
                 PDO::ATTR_EMULATE_PREPARES => false,
-                PDO::MYSQL_ATTR_MULTI_STATEMENTS => false,
+                ( defined('Pdo\\Mysql::ATTR_MULTI_STATEMENTS') ? constant('Pdo\\Mysql::ATTR_MULTI_STATEMENTS') : PDO::MYSQL_ATTR_MULTI_STATEMENTS ) => false,
             ]);
             $database->exec('SET NAMES utf8mb4');
             $push_session_id = $config['push_session_id'] ?? '';
