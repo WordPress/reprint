@@ -227,6 +227,7 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
 
     /** @param list<string> $arguments Real CLI arguments. @return array<string,mixed> */
     private function runCli(array $arguments): array {
+        $arguments[] = '--progress=jsonl';
         $process = proc_open($arguments, [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']], $pipes);
         fclose($pipes[0]);
         $output = stream_get_contents($pipes[1]);
@@ -234,9 +235,13 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         fclose($pipes[1]);
         fclose($pipes[2]);
         self::assertSame(0, proc_close($process), $output . $errors);
-        $result = json_decode($output, true);
-        self::assertIsArray($result, $output);
-        return $result;
+        $records = array_map(static fn ($line) => json_decode($line, true, 512, JSON_THROW_ON_ERROR), explode("\n", trim($output)));
+        self::assertCount(2, $records, $output);
+        self::assertIsArray($records[0]);
+        self::assertSame('reprint_report', $records[1]['type']);
+        self::assertSame('db-push', $records[1]['command']);
+        self::assertSame(in_array('--abort', $arguments, true) ? 'aborted' : 'complete', $records[1]['status']);
+        return $records[0];
     }
 
     public function testProcessDeathWithOpenRequestResumesFromReceiverBytes(): void {

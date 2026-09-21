@@ -47,21 +47,23 @@ describeNative('Full database push: pull fixtures and live WordPress', { timeout
         mkdirSync(privateDirectory, { recursive: true });
         writeFileSync(join(privateDirectory, 'requests'), '');
         writeFileSync(join(privateDirectory, 'secret.php'), `<?php return '${secret}';`);
+        // PHP-FPM reads the installed bundle, not the runner's private checkout.
+        const targetPluginDirectory = join(getSiteDir(targetSite), 'wp-content/plugins/reprint-server');
         const targetRoute = `<?php
-require '${projectRoot}/reprint-server-wp/vendor/autoload.php';
+require '${targetPluginDirectory}/vendor/autoload.php';
 define('ABSPATH', '${getSiteDir(targetSite)}/');
 define('DB_HOST', '127.0.0.1');
 define('DB_NAME', '${targetDatabase}');
 define('DB_USER', 'e2e_admin');
 define('DB_PASSWORD', 'e2e_password');
 $GLOBALS['table_prefix'] = 'wp_';
-define('WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\PLUGIN_DIR', '${projectRoot}/reprint-server-wp/');
+define('WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\PLUGIN_DIR', '${targetPluginDirectory}/');
 define('WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\CONNECTION_TOKEN_FILE', '${privateDirectory}/secret.php');
 define('REPRINT_SERVER_PUSH_ENABLED', true);
 register_shutdown_function(static function () {
     file_put_contents('${privateDirectory}/requests', ($_GET['endpoint'] ?? '') . "\\n", FILE_APPEND);
 });
-require '${projectRoot}/reprint-server-wp/lib.php';
+require '${targetPluginDirectory}/lib.php';
 \\WordPress\\Reprint\\Server\\Plugin\\handle_api_request([
     'docroot' => ABSPATH, 'reprint_directory' => '${privateDirectory}', 'database_push' => true,
 ]);
