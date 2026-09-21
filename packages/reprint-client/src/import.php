@@ -651,7 +651,9 @@ class ImportClient
     {
         if (!$allow_http && strncasecmp($remote_reprint_api_url, 'http://', 7) === 0) {
             throw new InvalidArgumentException(
-                'HTTP is insecure. Use HTTPS or pass --allow-unsafe-http.'
+                'The remote Reprint API URL you provided uses HTTP. '
+                . 'HTTP is unencrypted, so transferring a site over it can expose its data, including passwords, to eavesdropping. '
+                . 'Provide an HTTPS URL, or pass --allow-unsafe-http to accept this risk.'
             );
         }
     }

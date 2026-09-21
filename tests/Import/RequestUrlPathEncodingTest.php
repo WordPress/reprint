@@ -57,7 +57,7 @@ final class RequestUrlPathEncodingTest extends TestCase
                 new \ImportClient($remote_reprint_api_url, $this->root . '/state', $this->root . '/files');
                 $this->fail('An HTTP remote Reprint API URL requires explicit permission.');
             } catch (\InvalidArgumentException $error) {
-                $this->assertStringContainsString('HTTP is insecure', $error->getMessage());
+                $this->assertStringContainsString('The remote Reprint API URL you provided uses HTTP.', $error->getMessage());
                 $this->assertStringContainsString('--allow-unsafe-http', $error->getMessage());
             }
             $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');

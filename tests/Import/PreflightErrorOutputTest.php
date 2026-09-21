@@ -130,8 +130,12 @@ final class PreflightErrorOutputTest extends TestCase {
         ]));
 
         $preflight = $this->run_command('preflight', 1, false);
-        $this->assertStringContainsString('HTTP is insecure', $preflight['error']);
-        $this->assertStringContainsString('--allow-unsafe-http', $preflight['error']);
+        $this->assertStringContainsString('The remote Reprint API URL you provided uses HTTP.', $preflight['error']);
+        $this->assertStringContainsString(
+            'HTTP is unencrypted, so transferring a site over it can expose its data, including passwords, to eavesdropping.',
+            $preflight['error']
+        );
+        $this->assertStringContainsString('Provide an HTTPS URL, or pass --allow-unsafe-http to accept this risk.', $preflight['error']);
         $this->assertFileDoesNotExist($this->root . '/requests.log');
         $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
 

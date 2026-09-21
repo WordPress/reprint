@@ -86,7 +86,7 @@ final class FilesDiffCommandTest extends TestCase
 
         $result = $this->runFilesDiff();
         $this->assertSame(1, $result['exit'], $result['output']);
-        $this->assertStringContainsString('HTTP is insecure', $result['stderr']);
+        $this->assertStringContainsString('The remote Reprint API URL you provided uses HTTP.', $result['stderr']);
         $this->assertStringContainsString('--allow-unsafe-http', $result['stderr']);
         $this->assertDirectoryDoesNotExist($this->stateDirectory . '/remotes');
 
