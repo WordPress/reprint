@@ -45,6 +45,10 @@ if (!class_exists('WordPress\\Reprint\\Server\\PublicKeyClient', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-public-key-client.php';
 }
 
+if (!class_exists('WordPress\\Reprint\\Server\\PublicKeyServer', false)) {
+    require_once __DIR__ . '/../packages/reprint-server/src/class-public-key-server.php';
+}
+
 if (!class_exists('WordPress\\Reprint\\Server\\HMACServer', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-hmac-server.php';
 }
