@@ -73,7 +73,7 @@ final class PostProcess {
                 $results[]    = array(
                     'task'          => $current_task,
                     'status'        => 'complete',
-                    'removed_paths' => $client->remove_source_host_plugin_files( $wordpress_root ),
+                    'removed_paths' => $client->remove_local_hosting_plugin_files( $wordpress_root ),
                 );
                 $current_task = null;
             }

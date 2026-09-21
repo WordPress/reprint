@@ -5192,7 +5192,7 @@ class ImportClient
             $abs_output_dir = realpath($abs_output_dir);
         }
 
-        $excluded_local_paths = ( $options['include_host_plugins'] ?? false ) ? [] : $this->get_local_source_host_plugin_paths_to_remove();
+        $excluded_local_paths = ( $options['include_host_plugins'] ?? false ) ? [] : $this->get_local_hosting_plugin_paths_to_remove();
 
         // Step 1: Build the runtime manifest from preflight data.
         $manifest = runtime_manifest_for($preflight_data);
@@ -5380,16 +5380,16 @@ class ImportClient
     }
 
     /**
-     * Remove source-host files using saved preflight, without loading WordPress.
+     * Remove local hosting-plugin files using saved preflight, without loading WordPress.
      * The caller holds the state directory's ReprintProcessLock for this task.
      *
      * @param string $local_document_root Local site root with the standard wp-content layout.
      * @return string[] Paths removed, relative to the local site root.
      */
-    public function remove_source_host_plugin_files(string $local_document_root): array
+    public function remove_local_hosting_plugin_files(string $local_document_root): array
     {
         $this->state = $this->load_state();
-        $removed_paths = $this->record_push_exclusions_and_remove_local_paths($this->get_local_source_host_plugin_paths_to_remove(), $local_document_root);
+        $removed_paths = $this->record_push_exclusions_and_remove_local_paths($this->get_local_hosting_plugin_paths_to_remove(), $local_document_root);
         foreach ($removed_paths as $path) {
             $this->audit_log("POST-PROCESS | removed {$path} (source-host)");
         }
@@ -5420,7 +5420,7 @@ class ImportClient
             || preg_match('~[\\\\\x00]|(^|/)(\.{0,2})(/|$)~', $plugin_basename)) {
             throw new RuntimeException('remove-reprint requires a relative Reprint plugin basename with a plugin directory and no empty, dot, or parent components.');
         }
-        $this->assert_no_unfinished_file_transfers();
+        $this->assert_no_unfinished_files_push_or_files_pull();
         $checkpoint = $this->get_state()->active_resumable_command;
         $pipeline = $this->get_state()->pull_pipeline;
         if (( $checkpoint->command_name !== null && $checkpoint->completion_state !== 'complete' )
@@ -5465,19 +5465,19 @@ class ImportClient
         return $this->record_push_exclusions_and_remove_local_paths($relative_paths, $local_document_root);
     }
 
-    /** @return string[] Source-host paths which may be removed from the local site. */
-    private function get_local_source_host_plugin_paths_to_remove(): array
+    /** @return string[] Hosting-plugin paths relative to the local site root. */
+    private function get_local_hosting_plugin_paths_to_remove(): array
     {
         $this->require_preflight();
         $paths = array_column(excluded_plugins($this->get_state()->preflight_record()['data']), 'local_path');
         if ($paths !== []) {
-            $this->assert_no_unfinished_file_transfers();
+            $this->assert_no_unfinished_files_push_or_files_pull();
         }
         return $paths;
     }
 
-    /** Do not change the exclusions of an unfinished file transfer. */
-    private function assert_no_unfinished_file_transfers(): void
+    /** Do not change push exclusions or remove local files during unfinished files-push or files-pull. */
+    private function assert_no_unfinished_files_push_or_files_pull(): void
     {
         $push_state_directory = wp_join_unix_paths(dirname($this->pull_state_directory), 'push');
         if (is_file(wp_join_unix_paths($push_state_directory, 'sender.json'))) {
