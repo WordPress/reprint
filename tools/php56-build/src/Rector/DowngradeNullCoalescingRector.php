@@ -15,7 +15,9 @@ use PhpParser\Node\Expr\ClassConstFetch;
 use PhpParser\Node\Expr\ConstFetch;
 use PhpParser\Node\Expr\FuncCall;
 use PhpParser\Node\Expr\Isset_;
+use PhpParser\Node\Expr\MethodCall;
 use PhpParser\Node\Expr\PropertyFetch;
+use PhpParser\Node\Expr\StaticCall;
 use PhpParser\Node\Expr\Ternary;
 use PhpParser\Node\Expr\Variable;
 use PhpParser\Node\Name;
@@ -57,7 +59,7 @@ final class DowngradeNullCoalescingRector extends AbstractRector
 
         $temporary_variable_name = $this->temporaryVariableName($node);
 
-        if ($node->left instanceof FuncCall || $node->left instanceof Coalesce) {
+        if ($this->isCall($node->left) || $node->left instanceof Coalesce) {
             $replacement = new Ternary(
                 new NotIdentical(
                     new Assign(new Variable($temporary_variable_name), $node->left),
@@ -115,6 +117,13 @@ final class DowngradeNullCoalescingRector extends AbstractRector
             'Replace null coalescing with a PHP 5.6 conditional without evaluating an effectful expression twice.',
             [new CodeSample('$value = $items["key"] ?? "default";', '$value = isset($items["key"]) ? $items["key"] : "default";')]
         );
+    }
+
+    private function isCall(Expr $expression): bool
+    {
+        return $expression instanceof FuncCall
+            || $expression instanceof StaticCall
+            || $expression instanceof MethodCall;
     }
 
     private function canRepeatInsideIsset(Expr $expression): bool

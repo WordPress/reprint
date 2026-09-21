@@ -77,4 +77,30 @@ describe('Multisite database export over HTTP', () => {
         assert.ok(!response.chunks?.some(chunk => chunk.type === 'sql'), 'A sibling must not return any SQL for this cursor');
         assert.ok(JSON.stringify(response.json || {}).includes('the selected multisite site changed'), JSON.stringify(response.json));
     });
+
+    it('rejects a saved cursor when the same URL now selects a different site', async () => {
+        const url = `${fixture.sites[7].url}/?reprint-api`;
+        const first = await apiRequest(site, 'sql_chunk', mode, { url });
+        const cursor = first.chunks.find(chunk => chunk.type === 'sql')?.headers['x-cursor'];
+        assert.ok(cursor, 'The original site must provide a resume cursor');
+        try {
+            // A network administrator can reassign a path between requests.
+            // The URL still resolves, but its blog ID is no longer the same.
+            runWp(getSiteDir(site), ['eval', `
+                update_blog_details(7, ['path' => '/moved-shop/']);
+                update_blog_details(8, ['path' => '/shop/']);
+            `]);
+            const preflight = await apiRequest(site, 'preflight', mode, { url });
+            assert.equal(preflight.status, 200, JSON.stringify(preflight.json));
+            assert.equal(preflight.json.database.wp.multisite.selection.site_id, 8);
+            const response = await apiRequest(site, 'sql_chunk', { ...mode, cursor }, { url });
+            assert.ok(!response.chunks?.some(chunk => chunk.type === 'sql'), 'The reassigned URL must not return SQL for the old site');
+            assert.ok(JSON.stringify(response.json || {}).includes('the selected multisite site changed'), JSON.stringify(response.json));
+        } finally {
+            runWp(getSiteDir(site), ['eval', `
+                update_blog_details(8, ['path' => '/sibling/']);
+                update_blog_details(7, ['path' => '/shop/']);
+            `]);
+        }
+    });
 });

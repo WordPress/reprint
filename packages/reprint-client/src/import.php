@@ -17,12 +17,15 @@ use Reprint\Importer\Database\DatabaseConnection;
 use Reprint\Importer\Database\MysqliDatabaseConnection;
 use Reprint\Importer\Database\PdoDatabaseConnection;
 use Reprint\Importer\DatabaseUrlRewriteProcessor;
+use Reprint\Importer\MyIsamAutoIncrementStatementRewriter;
 use Reprint\Importer\NullableSpatialColumnStatementRewriter;
+use Reprint\Importer\PostProcess;
 use Reprint\Importer\PreserveLocalSkipException;
 use Reprint\Importer\ProgressReporter;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\RetryLaterException;
 use Reprint\Importer\SpatialSridGuard;
+use Reprint\Importer\MultisiteTarget;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
 use Reprint\Importer\State\DatabaseTableIndexState;
@@ -35,6 +38,7 @@ use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 
 use WordPress\Reprint\Server\FileIndexProcessor;
+use WordPress\Reprint\Server\Utils;
 
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
@@ -49,19 +53,6 @@ use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
 use function WordPress\Filesystem\wp_join_unix_paths;
 use function WordPress\Filesystem\wp_unix_path_segments;
-use function WordPress\Reprint\Server\native_path_format;
-use function WordPress\Reprint\Server\assert_valid_path;
-use function WordPress\Reprint\Server\normalize_path;
-use function WordPress\Reprint\Server\normalize_path_separators;
-use function WordPress\Reprint\Server\is_absolute_path;
-use function WordPress\Reprint\Server\parse_size;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\resolve_symlink_target_path;
-use function WordPress\Reprint\Server\path_is_descendant_of;
-use function WordPress\Reprint\Server\path_remainder_under;
-use function WordPress\Reprint\Server\realpath_with_missing_tail;
-use function WordPress\Reprint\Server\relative_path_under;
-use function WordPress\Reprint\Server\trim_right_slash;
 use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\write_local_index_update;
 
@@ -77,7 +68,6 @@ foreach ([
 ] as $autoloader) {
     if (file_exists($autoloader)) {
         require_once $autoloader;
-        require_once dirname($autoloader) . '/wp-php-toolkit/reprint-server/src/utils.php';
         break;
     }
 }
@@ -102,9 +92,12 @@ require_once __DIR__ . '/lib/url-rewrite/load.php';
 
 // Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
+require_once __DIR__ . '/lib/class-multisite-target.php';
 
 // Load target runtime appliers (consume a runtime manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
+
+require_once __DIR__ . '/lib/post-process/class-post-process.php';
 
 require_once __DIR__ . '/lib/merge/load.php';
 
@@ -461,6 +454,9 @@ class ImportClient
     /** Monotonic seconds at the last compact update or stage change. */
     private float $last_compact_progress_time = 0;
 
+    /** @var array<string,mixed> Final outcome and error details for the current invocation, independent of progress throttling. */
+    public array $command_report_details = [];
+
     /** @var TerminalProgress Renders progress and lifecycle output to the terminal. */
     private TerminalProgress $progress;
 
@@ -558,9 +554,9 @@ class ImportClient
             } elseif ($signal_handling_command === 'db-rewrite-urls') {
                 pcntl_signal(SIGINT, [$this, 'handle_database_url_rewrite_shutdown']);
                 pcntl_signal(SIGTERM, [$this, 'handle_database_url_rewrite_shutdown']);
-            } elseif ($signal_handling_command !== 'files-diff') {
-                // files-diff must not save the pull command's state from a
-                // shutdown handler; default signal behavior ends the report.
+            } elseif (!in_array($signal_handling_command, ['files-diff', 'post-process'], true)) {
+                // files-diff and post-process must not save the pull command's
+                // state from a shutdown handler; default signal behavior ends them.
                 pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
                 pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
             }
@@ -580,14 +576,14 @@ class ImportClient
         if ($referer !== null) {
             $this->request_context_headers['Referer'] = $referer;
         }
-        $this->state_dir = trim_right_slash($state_dir, native_path_format());
-        $this->filesystem_root = trim_right_slash($filesystem_root, native_path_format());
+        $this->state_dir = Utils::trim_right_slash($state_dir, Utils::native_path_format());
+        $this->filesystem_root = Utils::trim_right_slash($filesystem_root, Utils::native_path_format());
         $remote_state_directory = $selected_remote_state_directory === null
             ? self::remote_state_directory_path(
                 $this->remote_reprint_api_url,
                 $this->state_dir
             )
-            : trim_right_slash($selected_remote_state_directory, native_path_format());
+            : Utils::trim_right_slash($selected_remote_state_directory, Utils::native_path_format());
         $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
         $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
@@ -1148,7 +1144,7 @@ class ImportClient
             $this->files_pull_mode =
                 $requested_files_pull_mode ?? $saved_files_pull_mode;
 
-            $absolute_state_directory = realpath_with_missing_tail(
+            $absolute_state_directory = Utils::realpath_with_missing_tail(
                 $this->state_dir[0] === "/"
                     ? $this->state_dir
                     : wp_join_unix_paths(getcwd() ?: "/", $this->state_dir)
@@ -1156,7 +1152,7 @@ class ImportClient
             if (
                 !$abort
                 && $this->files_pull_mode === "mirror"
-                && relative_path_under(
+                && Utils::relative_path_under(
                     $absolute_state_directory,
                     $this->filesystem_root
                 ) !== null
@@ -1377,7 +1373,7 @@ class ImportClient
         }
 
         // preflight fetches a new report; preflight-assert reads the saved one.
-        // Both exit directly, including when the saved report contains an error.
+        // Both return their exit code to the CLI so it can append a command report.
         if ($command === "preflight") {
             $this->run_preflight();
             $this->run_preflight_report();
@@ -1844,7 +1840,7 @@ class ImportClient
         $memory_limit_value = trim( (string) ini_get('memory_limit') );
         $memory_limit_bytes = $memory_limit_value === '' || $memory_limit_value === '-1'
             ? -1
-            : parse_size($memory_limit_value);
+            : Utils::parse_size($memory_limit_value);
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
             'document_root' => $document_root,
@@ -2020,6 +2016,11 @@ class ImportClient
             'steps' => $this->pipeline_steps,
         ], $result);
         $this->progress_reporter->write_file(true);
+
+        $this->command_report_details = array_intersect_key($result, array_flip(['status', 'reason', 'detail']));
+        if (in_array($status, ['failed', 'error'], true)) {
+            $this->command_report_details['error'] = $message;
+        }
 
         // Emit the final JSON line after any preceding progress records.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
@@ -2344,7 +2345,7 @@ class ImportClient
         }
         return [
             'remote_reprint_api_url' => rtrim($remote_reprint_api_url, '?&'),
-            'filesystem_root' => trim_right_slash($resolved_local_filesystem_root, native_path_format()),
+            'filesystem_root' => Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format()),
             'push_state_directory' => $push_state_directory,
         ];
     }
@@ -2391,7 +2392,7 @@ class ImportClient
                 'The filesystem root does not exist or is not a directory: ' . $filesystem_root . '.'
             );
         }
-        $resolved_local_filesystem_root = trim_right_slash($resolved_local_filesystem_root, native_path_format());
+        $resolved_local_filesystem_root = Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format());
         // Resolve an absolute physical path even when its final components do not exist.
         $remote_state_directory = self::remote_state_directory_path(
             $remote_reprint_api_url,
@@ -2405,10 +2406,10 @@ class ImportClient
             }
             $push_state_directory = wp_join_unix_paths($working_directory, $push_state_directory);
         }
-        $push_state_directory = realpath_with_missing_tail(
+        $push_state_directory = Utils::realpath_with_missing_tail(
             $push_state_directory
         );
-        if (path_is_same_as_or_descendant_of($push_state_directory, $resolved_local_filesystem_root)) {
+        if (Utils::path_is_same_as_or_descendant_of($push_state_directory, $resolved_local_filesystem_root)) {
             throw new InvalidArgumentException(
                 'The local push state directory ' . $push_state_directory
                 . ' must be outside the filesystem root ' . $resolved_local_filesystem_root . '.'
@@ -2419,12 +2420,12 @@ class ImportClient
     }
 
     /** Returns `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`. */
-    private static function remote_state_directory_path(
+    public static function remote_state_directory_path(
         string $remote_reprint_api_url,
         string $state_dir
     ): string {
         return wp_join_unix_paths(
-            trim_right_slash($state_dir, native_path_format()),
+            Utils::trim_right_slash($state_dir, Utils::native_path_format()),
             'remotes',
             md5(rtrim($remote_reprint_api_url, '?&'))
         );
@@ -2885,7 +2886,7 @@ class ImportClient
             if (
                 $content_dir !== null &&
                 $uploads_basedir !== null &&
-                !path_is_same_as_or_descendant_of($uploads_basedir, $content_dir)
+                !Utils::path_is_same_as_or_descendant_of($uploads_basedir, $content_dir)
             ) {
                 $this->audit_log(
                     "NON-STANDARD LAYOUT | uploads at {$uploads_basedir} " .
@@ -2974,7 +2975,7 @@ class ImportClient
 
         // Always wipe and recreate so the directory reflects current state.
         if (is_dir($runtime_dir)) {
-            self::rmdir_recursive($runtime_dir);
+            Utils::remove_directory_and_its_contents($runtime_dir);
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
@@ -3020,7 +3021,7 @@ class ImportClient
         foreach ($files as $f) {
             $parent = dirname($f);
             if ($parent !== "" && $parent !== ".") {
-                $by_dir[trim_right_slash($parent, $this->get_state()->remote_path_format())][] = $f;
+                $by_dir[Utils::trim_right_slash($parent, $this->get_state()->remote_path_format())][] = $f;
             }
         }
 
@@ -3124,33 +3125,6 @@ class ImportClient
     }
 
     /**
-     * Recursively remove a directory and all its contents.
-     */
-    private static function rmdir_recursive(string $dir): void
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-        $entries = scandir($dir);
-        if ($entries === false) {
-            return;
-        }
-        foreach ($entries as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
-            $path = wp_join_unix_paths($dir, $entry);
-            if (is_dir($path) && !is_link($path)) {
-                self::rmdir_recursive($path);
-            } else {
-                @unlink($path);
-            }
-        }
-        @rmdir($dir);
-    }
-
-
-    /**
      * Assert that a preflight has already been run and stored in state.
      * Commands which use saved source data must reject a failed report. Local
      * SQL commands can run without preflight, but cannot use a rejected report.
@@ -3173,7 +3147,7 @@ class ImportClient
     /**
      * Command: preflight
      *
-     * Prints the full preflight response as pretty-printed JSON to stdout.
+     * Prints the full preflight response as one JSON line to stdout.
      * The preflight itself already ran in run_preflight() — this just
      * outputs the stored result.
      */
@@ -3181,8 +3155,7 @@ class ImportClient
     {
         $entry = $this->get_state()->preflight_record();
         if ($entry === null) {
-            echo "No preflight data available.\n";
-            exit(1);
+            throw new RuntimeException("No preflight data available.");
         }
         $error = $this->get_preflight_error();
         $this->last_error_code = $error['code'] ?? null;
@@ -3190,17 +3163,18 @@ class ImportClient
         $entry["error"] = $error['message'] ?? null;
         $entry["error_code"] = $this->last_error_code;
         $entry["message"] = $error === null ? "Preflight passed." : "Error: " . $error['message'];
+        $this->command_report_details = $error === null ? [] : array_intersect_key($entry, array_flip(['error', 'error_code', 'http_code']));
         // @TODO: Store paths as base64 strings, not raw strings, since paths can contain arbitrary bytes
         echo json_encode($entry, JSON_UNESCAPED_SLASHES) . "\n";
         $this->write_progress_file($entry["error"]);
-        exit($error === null ? 0 : 1);
+        $this->exit_code = $error === null ? 0 : 1;
     }
 
     /**
      * Command: preflight-assert
      *
      * Inspects the preflight response (already fetched by run_preflight())
-     * and exits with code 0 if migration looks feasible, code 1 if not.
+     * and sets exit code 0 if migration looks feasible, code 1 if not.
      * Prints a human-readable pass/fail summary in terminal mode or one
      * structured result in JSONL mode.
      */
@@ -3341,7 +3315,7 @@ class ImportClient
         ], true);
 
         $this->write_progress_file($error['message'] ?? null);
-        exit($all_pass ? 0 : 1);
+        $this->exit_code = $all_pass ? 0 : 1;
     }
 
     /**
@@ -3954,7 +3928,7 @@ class ImportClient
         $memory_limit_value = trim( (string) ini_get('memory_limit') );
         $memory_limit_bytes = $memory_limit_value === '' || $memory_limit_value === '-1'
             ? -1
-            : parse_size($memory_limit_value);
+            : Utils::parse_size($memory_limit_value);
 
         return $memory_limit_bytes === -1
             || memory_get_usage(true) < $memory_limit_bytes * 0.8;
@@ -4211,7 +4185,7 @@ class ImportClient
     ): bool {
         $candidate_paths = [$local_relative_path];
         foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
-            $remainder = path_remainder_under(
+            $remainder = Utils::path_remainder_under(
                 $local_absolute_path,
                 $local_prefix
             );
@@ -4414,7 +4388,7 @@ class ImportClient
             }
             // Skip if this directory is a subdirectory of an already-visited path,
             // since those files were already included in the parent's index.
-            if (path_is_same_as_or_descendant_of($dir, array_keys($visited))) {
+            if (Utils::path_is_same_as_or_descendant_of($dir, array_keys($visited))) {
                 $this->audit_log(
                     "FOLLOW SYMLINK SKIP | {$dir} already covered by a visited parent",
                     true,
@@ -4561,7 +4535,7 @@ class ImportClient
             }
 
             // Check containment: skip if already under a visited root
-            if (path_is_same_as_or_descendant_of($symlink_target, array_keys($visited))) {
+            if (Utils::path_is_same_as_or_descendant_of($symlink_target, array_keys($visited))) {
                 continue;
             }
 
@@ -4751,6 +4725,13 @@ class ImportClient
      */
     public function run_db_sync(): void
     {
+        if ($this->sql_output_mode === 'mysql'
+            && !empty($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'])) {
+            throw new InvalidArgumentException(
+                'A selected multisite export does not support --sql-output=mysql. '
+                . 'Use pull-db with an empty MySQL target, --new-site-url, and --site-admin.'
+            );
+        }
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
         $sql_file = wp_join_unix_paths($this->state_dir, "db.sql");
 
@@ -4846,7 +4827,10 @@ class ImportClient
                 "message" => "Downloading table metadata",
             ]);
 
-            $this->fetch_database_index();
+            // Whole-network table sizes do not estimate this selected site's rows.
+            if (empty($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'])) {
+                $this->fetch_database_index();
+            }
 
             $tables = (int) ($this->get_state()->db_index->tables ?? 0);
             $this->audit_log(
@@ -5145,6 +5129,11 @@ class ImportClient
 
         $this->require_preflight();
         $preflight_data = $entry["data"];
+        $selection = $preflight_data['database']['wp']['multisite']['selection'] ?? null;
+        if (is_array($selection)
+            && !isset($this->get_state()->apply->rewrite_url[rtrim($selection['home_url'], '/')])) {
+            throw new InvalidArgumentException('Run db-apply with --new-site-url before apply-runtime for a selected network site.');
+        }
         $webhost = $this->get_state()->webhost ?? "other";
 
         // Resolve the target database up front, with the rest of the option
@@ -5215,7 +5204,7 @@ class ImportClient
 
         if (!empty($flat_document_root)) {
             // --flat-document-root: used directly as the web root.
-            $raw_local_document_root = trim_right_slash($flat_document_root, native_path_format());
+            $raw_local_document_root = Utils::trim_right_slash($flat_document_root, Utils::native_path_format());
         } else {
             // --fs-root: the raw download directory. The remote site's
             // document_root tells us where the web root lived on the
@@ -5254,17 +5243,7 @@ class ImportClient
             $abs_output_dir = realpath($abs_output_dir);
         }
 
-        $excluded_plugins = ( $options['include_host_plugins'] ?? false ) ? [] : excluded_plugins($preflight_data);
-        $excluded_local_paths = array_column($excluded_plugins, 'local_path');
-        if ($excluded_local_paths !== []) {
-            $push_state_directory = wp_join_unix_paths(dirname($this->pull_state_directory), 'push');
-            if (is_file(wp_join_unix_paths($push_state_directory, 'sender.json'))) {
-                throw new RuntimeException('Finish the interrupted files-push before applying local runtime cleanup.');
-            }
-            if (is_file($this->pull_index_wal_path)) {
-                throw new RuntimeException('Finish or abort the interrupted files-pull before applying local runtime cleanup.');
-            }
-        }
+        $excluded_local_paths = ( $options['include_host_plugins'] ?? false ) ? [] : $this->get_local_hosting_plugin_paths_to_remove();
 
         // Step 1: Build the runtime manifest from preflight data.
         $manifest = runtime_manifest_for($preflight_data);
@@ -5311,6 +5290,8 @@ class ImportClient
 
         $this->audit_log("APPLY-RUNTIME | analyzed preflight (source={$manifest->source}, webhost={$webhost})");
 
+        $multisite_target = $this->get_multisite_target();
+
         // Resolve host and port for the target server. If not provided on
         // the CLI, derive from the first URL rewrite target (saved by
         // db-apply). This way the dev server listens on the same address
@@ -5319,7 +5300,9 @@ class ImportClient
         $port = $options["port"] ?? null;
         if ($host === null || $port === null) {
             $rewrite_map = $this->get_state()->apply->rewrite_url ?? [];
-            $first_target = !empty($rewrite_map) ? reset($rewrite_map) : null;
+            $first_target = $multisite_target !== null
+                ? $multisite_target->get_site_url()
+                : ( !empty($rewrite_map) ? reset($rewrite_map) : null );
             if (is_string($first_target)) {
                 $parsed = parse_url($first_target);
                 if ($host === null) {
@@ -5348,6 +5331,23 @@ class ImportClient
             ) ?: '';
         } else {
             $wordpress_index_php = wp_join_unix_paths($local_document_root, 'index.php');
+        }
+
+        if ($multisite_target !== null) {
+            if ($wordpress_index_php === '') {
+                throw new InvalidArgumentException('The selected multisite runtime requires its imported WordPress files.');
+            }
+            // flat-docroot links core files to the raw download. Without an
+            // explicit ABSPATH, wp-load.php looks beside that link's target,
+            // where the source wp-config.php was deliberately not copied.
+            $manifest->constants['ABSPATH'] = dirname($wordpress_index_php) . '/';
+            $config_path = dirname($wordpress_index_php) . '/wp-config.php';
+            $config = $multisite_target->get_wp_config($target);
+            if (file_put_contents($config_path . '.reprint-tmp', $config) !== strlen($config)
+                || !rename($config_path . '.reprint-tmp', $config_path)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
+                throw new RuntimeException('Could not write the target single-site configuration: ' . $config_path);
+            }
         }
 
         // Step 2: Runtime applier writes server-specific config files.
@@ -5386,26 +5386,7 @@ class ImportClient
             $summary[] = "Copied sqlite-database-integration to {$abs_output_dir}/sqlite-database-integration";
         }
 
-        // A previous import or pre-existing local tree may already contain an
-        // excluded plugin. File download filtering cannot remove that copy.
-        // Save exclusions before the first removal: a stopped setup must not
-        // turn its completed removals into source-host deletions on the next push.
-        // A later opt-out does not restore files removed by an earlier setup.
-        $this->get_state()->apply->remote_paths_removed_from_local_site = array_values(array_unique(array_merge(
-            $this->get_state()->apply->remote_paths_removed_from_local_site,
-            $excluded_local_paths
-        )));
-        $this->save_state();
-        foreach ($excluded_local_paths as $rel_path) {
-            $full_path = wp_join_unix_paths($local_document_root, $rel_path);
-            if (!file_exists($full_path) && !is_link($full_path)) {
-                continue;
-            }
-            if (is_dir($full_path) && !is_link($full_path)) {
-                self::rmdir_recursive($full_path);
-            } else {
-                unlink($full_path);
-            }
+        foreach ($this->record_push_exclusions_and_remove_local_paths($excluded_local_paths, $local_document_root) as $rel_path) {
             $summary[] = "Removed source-host path: {$rel_path}";
             $this->audit_log("APPLY-RUNTIME | removed {$rel_path} (source-host)");
         }
@@ -5447,6 +5428,137 @@ class ImportClient
             $human_summary .= "{$line}\n";
         }
         $this->progress->show_lifecycle_line($human_summary);
+    }
+
+    /**
+     * Remove local hosting-plugin files using saved preflight, without loading WordPress.
+     * The caller holds the state directory's ReprintProcessLock for this task.
+     *
+     * @param string $local_document_root Local site root with the standard wp-content layout.
+     * @return string[] Paths removed, relative to the local site root.
+     */
+    public function remove_local_hosting_plugin_files(string $local_document_root): array
+    {
+        $this->state = $this->load_state();
+        $removed_paths = $this->record_push_exclusions_and_remove_local_paths($this->get_local_hosting_plugin_paths_to_remove(), $local_document_root);
+        foreach ($removed_paths as $path) {
+            $this->audit_log("POST-PROCESS | removed {$path} (source-host)");
+        }
+        return $removed_paths;
+    }
+
+    /**
+     * Remove the migrated Reprint plugin and its imported connection state.
+     * The caller holds the state directory's ReprintProcessLock for this task.
+     *
+     * @param string $local_document_root Local site root with the standard wp-content layout.
+     * @return string[] Removed paths, relative to the local site root.
+     */
+    public function remove_imported_reprint_plugin_files_and_data(string $local_document_root): array
+    {
+        $this->state = $this->load_state();
+        $this->require_preflight();
+        $preflight = $this->get_state()->preflight_record()['data'];
+        if (!array_key_exists('reprint_plugin', $preflight)) {
+            throw new RuntimeException('The source did not report its Reprint plugin. Update the source Reprint Server and rerun preflight before remove-reprint.');
+        }
+        if ($preflight['reprint_plugin'] === null) {
+            return [];
+        }
+        $encoded_basename = $preflight['reprint_plugin']['basename_b64'] ?? null;
+        $plugin_basename = is_string($encoded_basename) ? base64_decode($encoded_basename, true) : false;
+        if ($plugin_basename === false || strpos($plugin_basename, '/') === false
+            || preg_match('~[\\\\\x00]|(^|/)(\.{0,2})(/|$)~', $plugin_basename)) {
+            throw new RuntimeException('remove-reprint requires a relative Reprint plugin basename with a plugin directory and no empty, dot, or parent components.');
+        }
+        $this->assert_no_unfinished_files_push_or_files_pull();
+        $checkpoint = $this->get_state()->active_resumable_command;
+        $pipeline = $this->get_state()->pull_pipeline;
+        if (( $checkpoint->command_name !== null && $checkpoint->completion_state !== 'complete' )
+            || ( $pipeline->started_by_command !== null && $pipeline->stage_sequence !== []
+                && $pipeline->last_completed_stage !== end($pipeline->stage_sequence) )) {
+            throw new RuntimeException('Finish the current pull before remove-reprint so later import stages cannot restore its credentials or activation entries.');
+        }
+        $target = $this->get_local_site_database_target();
+        if ($target['engine'] === null) {
+            throw new RuntimeException('remove-reprint requires the target database settings saved by db-apply or apply-runtime.');
+        }
+        // Keep cleanup inside this site. A link to a shared plugin outside the
+        // site is unlinked, not followed; an in-site copy is removed as well.
+        $relative_paths = ['wp-content/plugins/' . dirname($plugin_basename)];
+        $plugin_path = wp_join_unix_paths($local_document_root, $relative_paths[0]);
+        $plugin_parent = realpath(dirname($plugin_path));
+        if ($plugin_parent !== false && Utils::relative_path_under($plugin_parent, $local_document_root) === null) {
+            throw new RuntimeException('remove-reprint requires wp-content/plugins inside --fs-root. Refusing to remove files through an outside parent directory.');
+        }
+        $physical_path = realpath($plugin_path);
+        if ($physical_path !== false) {
+            $physical_relative_path = Utils::relative_path_under($physical_path, $local_document_root);
+            if ($physical_relative_path === '' || ( $plugin_parent !== false && Utils::relative_path_under($plugin_parent, $physical_path) !== null )) {
+                throw new RuntimeException('The Reprint plugin path resolves to a parent directory. Refusing to remove it.');
+            }
+            if ($physical_relative_path !== null) {
+                array_unshift($relative_paths, $physical_relative_path);
+            }
+        }
+        $relative_paths = array_values(array_unique($relative_paths));
+        [$database] = $this->create_target_database_connection($target, false);
+        try {
+            PostProcess::remove_reprint_plugin_data_from_the_imported_database($database, $target['engine'], $plugin_basename, $preflight['database']['wp']);
+        } finally {
+            if ($database->inTransaction()) {
+                $database->rollBack();
+            }
+            $database->close();
+        }
+        // Save the same push exclusions as hosting cleanup before any deletion.
+        // A failed removal can repeat without restoring already-cleared options.
+        return $this->record_push_exclusions_and_remove_local_paths($relative_paths, $local_document_root);
+    }
+
+    /** @return string[] Hosting-plugin paths relative to the local site root. */
+    private function get_local_hosting_plugin_paths_to_remove(): array
+    {
+        $this->require_preflight();
+        $paths = array_column(excluded_plugins($this->get_state()->preflight_record()['data']), 'local_path');
+        if ($paths !== []) {
+            $this->assert_no_unfinished_files_push_or_files_pull();
+        }
+        return $paths;
+    }
+
+    /** Do not change push exclusions or remove local files during unfinished files-push or files-pull. */
+    private function assert_no_unfinished_files_push_or_files_pull(): void
+    {
+        $push_state_directory = wp_join_unix_paths(dirname($this->pull_state_directory), 'push');
+        if (is_file(wp_join_unix_paths($push_state_directory, 'sender.json'))) {
+            throw new RuntimeException('Finish the interrupted files-push before applying local runtime cleanup.');
+        }
+        if (is_file($this->pull_index_wal_path)) {
+            throw new RuntimeException('Finish or abort the interrupted files-pull before applying local runtime cleanup.');
+        }
+    }
+
+    /**
+     * Record push exclusions before removing local files and directories.
+     *
+     * @param string[] $excluded_local_paths Paths relative to the local site root.
+     * @param string   $local_document_root  Local site root with the standard wp-content layout.
+     * @return string[] Paths removed, relative to the local site root.
+     */
+    private function record_push_exclusions_and_remove_local_paths(array $excluded_local_paths, string $local_document_root): array
+    {
+        // A previous import or pre-existing local tree may already contain an
+        // excluded plugin. File download filtering cannot remove that copy.
+        // Save exclusions before the first removal: a stopped setup must not
+        // turn its completed removals into source-host deletions on the next push.
+        // A later opt-out does not restore files removed by an earlier setup.
+        $this->get_state()->apply->remote_paths_removed_from_local_site = array_values(array_unique(array_merge(
+            $this->get_state()->apply->remote_paths_removed_from_local_site,
+            $excluded_local_paths
+        )));
+        $this->save_state();
+        return Utils::remove_local_files_and_directories($excluded_local_paths, $local_document_root);
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
@@ -5642,7 +5754,7 @@ class ImportClient
             realpath($this->pull_state_directory)
             ?: $this->pull_state_directory;
         $manifest->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
-            trim_right_slash($pull_state_directory, native_path_format()),
+            Utils::trim_right_slash($pull_state_directory, Utils::native_path_format()),
             "state.json"
         );
         $manifest->routes[] = [
@@ -5714,9 +5826,9 @@ class ImportClient
             );
         }
         // Keep a lexical absolute path because --from may not exist yet.
-        $from = trim_right_slash($from, native_path_format());
+        $from = Utils::trim_right_slash($from, Utils::native_path_format());
         if (strpos($from, "/") !== 0) {
-            $from = normalize_path(wp_join_unix_paths(getcwd(), $from), native_path_format());
+            $from = Utils::normalize_path(wp_join_unix_paths(getcwd(), $from), Utils::native_path_format());
         }
         // A WordPress root passed by mistake would move wp-admin, wp-includes
         // and wp-config.php into the pulled wp-content.
@@ -5826,11 +5938,11 @@ class ImportClient
         string $source_wp_content,
         string $destination
     ): void {
-        $resolved_source = realpath_with_missing_tail($source_wp_content);
-        $resolved_destination = realpath_with_missing_tail($destination);
+        $resolved_source = Utils::realpath_with_missing_tail($source_wp_content);
+        $resolved_destination = Utils::realpath_with_missing_tail($destination);
         if (
-            !path_is_same_as_or_descendant_of($resolved_source, $resolved_destination)
-            && !path_is_same_as_or_descendant_of($resolved_destination, $resolved_source)
+            !Utils::path_is_same_as_or_descendant_of($resolved_source, $resolved_destination)
+            && !Utils::path_is_same_as_or_descendant_of($resolved_destination, $resolved_source)
         ) {
             return;
         }
@@ -5869,7 +5981,7 @@ class ImportClient
             );
         }
 
-        $flatten_to = trim_right_slash($flatten_to, native_path_format());
+        $flatten_to = Utils::trim_right_slash($flatten_to, Utils::native_path_format());
         $force = $options["force"] ?? false;
 
         // Ensure the filesystem root exists
@@ -5945,16 +6057,16 @@ class ImportClient
         $wp_includes_detached = $wp_includes_path !== null
             && $wp_includes_path !== wp_join_unix_paths($abspath, "wp-includes");
         $content_detached = $content_dir !== null
-            && !path_is_descendant_of($content_dir, $abspath);
+            && !Utils::path_is_descendant_of($content_dir, $abspath);
         $plugins_detached = $plugins_dir !== null
             && $content_dir !== null
-            && !path_is_descendant_of($plugins_dir, $content_dir);
+            && !Utils::path_is_descendant_of($plugins_dir, $content_dir);
         $mu_plugins_detached = $mu_plugins_dir !== null
             && $content_dir !== null
-            && !path_is_descendant_of($mu_plugins_dir, $content_dir);
+            && !Utils::path_is_descendant_of($mu_plugins_dir, $content_dir);
         $uploads_detached = $uploads_basedir !== null
             && $content_dir !== null
-            && !path_is_descendant_of($uploads_basedir, $content_dir);
+            && !Utils::path_is_descendant_of($uploads_basedir, $content_dir);
 
         // If any sub-component is detached from content_dir, we need to
         // "explode" wp-content into a real directory with individual symlinks
@@ -6235,7 +6347,7 @@ class ImportClient
         if (!is_string($value) || trim($value) === "") {
             return null;
         }
-        return trim_right_slash($value, $this->get_state()->remote_path_format());
+        return Utils::trim_right_slash($value, $this->get_state()->remote_path_format());
     }
 
     /**
@@ -6690,18 +6802,46 @@ class ImportClient
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
-     * If --new-site-url is set, derive the source origin from the export URL
-     * and append implicit --rewrite-url mappings for both HTTP and HTTPS
-     * variants. The new URL is used verbatim.
+     * Check any saved preflight report, then expand --new-site-url mappings.
+     *
+     * A selected network site uses its reported home and asset bases, with its
+     * home first so relative HTML links resolve against the selected site.
+     * Single-site exports append HTTP and HTTPS mappings for the API origin
+     * and use the new URL verbatim.
+     *
+     * @param array $options {
+     *     CLI options, updated in place; unrelated keys are left alone.
+     *     @type string  $new_site_url Optional destination URL.
+     *     @type array[] $rewrite_url  Optional [source URL, target URL] pairs.
+     * }
      */
     private function resolve_new_site_url_option(array &$options): void
     {
-        // Local SQL commands can run without preflight, but cannot use a
-        // rejected saved report even when URL mappings were given explicitly.
+        // Local SQL commands also support offline files without preflight.
+        // If a report exists, reject its saved error before using source data,
+        // even when the caller supplies --rewrite-url instead of --new-site-url.
         if ($this->get_state()->preflight_record() !== null) {
             $this->require_preflight();
         }
-        if (empty($options["new_site_url"])) {
+        if (!array_key_exists('new_site_url', $options)) {
+            return;
+        }
+
+        $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
+        if (is_array($selection)) {
+            $options['new_site_url'] = $this->parse_multisite_target_url($options['new_site_url'], '--new-site-url');
+            $target = new MultisiteTarget(
+                $selection,
+                $options['new_site_url']
+            );
+            // The first source base resolves relative HTML links. Keep the
+            // selected home first: an extra CDN rule must not make about/page
+            // relative to that CDN. Generated rules still win duplicate keys.
+            $mapping = $target->get_url_mapping() + array_column($options['rewrite_url'] ?? [], 1, 0);
+            $options['rewrite_url'] = [];
+            foreach ($mapping as $source_url => $target_url) {
+                $options['rewrite_url'][] = [$source_url, $target_url];
+            }
             return;
         }
 
@@ -6733,6 +6873,27 @@ class ImportClient
         $new_url = $options["new_site_url"];
         $options["rewrite_url"][] = ['https://' . $host_with_port, $new_url];
         $options["rewrite_url"][] = ['http://' . $host_with_port, $new_url];
+    }
+
+    /**
+     * Parse a user-supplied destination before building mappings or saving apply
+     * choices. Use the same toolkit parser as structured URL rewriting: 127.1,
+     * 2130706433 and 0x7f000001 all name 127.0.0.1, and IDNs become ASCII hosts.
+     *
+     * @param mixed  $value Raw command-option value.
+     * @param string $option CLI option to name in an error.
+     * @return string HTTP(S) origin used by both WordPress and the URL mappings.
+     */
+    private function parse_multisite_target_url($value, string $option): string
+    {
+        $url = is_string($value) ? WPURL::parse($value) : false;
+        if (!$url || !in_array($url->protocol, ['http:', 'https:'], true)
+            || $url->username !== '' || $url->password !== '' || $url->pathname !== '/'
+            || strpbrk($url->href, '?#') !== false || $url->port === '0') {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option error, not HTML.
+            throw new InvalidArgumentException($option . ' requires an HTTP(S) origin without credentials, a path, query or fragment, and a port from 1 to 65535; received ' . json_encode($value) . '.');
+        }
+        return $url->origin;
     }
 
     private function escape_pdo_dsn_value(string $value): string
@@ -6890,7 +7051,12 @@ class ImportClient
             }
             $database = new PdoDatabaseConnection($pdo, $sqlite_pdo);
             if ($import_command !== null) {
-                $this->create_database_import_position_table($database);
+                $database->lock_sqlite_database();
+                // Selected-site imports check for an empty target before adding
+                // their progress table. Ordinary imports may replace tables.
+                if (!is_array($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null)) {
+                    $this->create_database_import_position_table($database);
+                }
             }
 
             return [
@@ -6962,7 +7128,9 @@ class ImportClient
         $database = new MysqliDatabaseConnection($mysqli);
         if ($import_command !== null) {
             $this->lock_database_import_target($database, $target_db, $import_command);
-            $this->create_database_import_position_table($database);
+            if (!is_array($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null)) {
+                $this->create_database_import_position_table($database);
+            }
         }
 
         return [
@@ -7034,7 +7202,7 @@ class ImportClient
             $has_unfinished_apply
             && !in_array(
                 $current_stage,
-                ["database-start", "sql", "database-cleanup"],
+                ["database-start", "database-initialize", "sql", "database-cleanup"],
                 true,
             )
         ) {
@@ -7053,12 +7221,39 @@ class ImportClient
 
         $apply_state = $this->get_state()->apply;
         $is_resume = $has_unfinished_apply
-            && in_array($current_stage, ["sql", "database-cleanup"], true);
+            && in_array($current_stage, ["database-initialize", "sql", "database-cleanup"], true);
 
         // A resumed apply keeps its URL replacements when the CLI omits them.
         // A fresh apply must not inherit replacements from an older lifecycle.
         if ($is_resume && empty($url_mapping) && !empty($apply_state->rewrite_url)) {
             $url_mapping = $apply_state->rewrite_url;
+        }
+
+        $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
+        $site_admin = $options['site_admin'] ?? ( $has_unfinished_apply ? $apply_state->site_admin : null );
+        if (is_array($selection)) {
+            if (!is_string($site_admin) || $site_admin === '') {
+                throw new InvalidArgumentException('A multisite pull requires --site-admin=LOGIN naming an imported user; received ' . json_encode($site_admin) . '.');
+            }
+            $home_url = rtrim($selection['home_url'], '/');
+            $url_mapping[$home_url] = $this->parse_multisite_target_url($url_mapping[$home_url] ?? '', '--rewrite-url');
+            if ($is_resume && $site_admin !== $apply_state->site_admin) {
+                throw new InvalidArgumentException('Cannot change --site-admin while resuming db-apply.');
+            }
+            if ($is_resume) {
+                // The saved empty-database check applies only to this target.
+                $target_fields = $target['engine'] === 'sqlite'
+                    ? ['engine', 'db', 'sqlite_path'] : ['engine', 'host', 'port', 'db'];
+                foreach ($target_fields as $field) {
+                    if ($target[$field] !== $apply_state->{'target_' . $field}) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option values, not HTML.
+                        throw new InvalidArgumentException('Cannot change --target-' . str_replace('_', '-', $field) . ' while resuming a selected multisite apply; requested ' . $target[$field] . '.');
+                    }
+                }
+                if ($url_mapping !== $apply_state->rewrite_url) {
+                    throw new InvalidArgumentException('Cannot change URL replacements while resuming a selected multisite apply.');
+                }
+            }
         }
 
         if ($is_resume) {
@@ -7083,6 +7278,7 @@ class ImportClient
             $this->get_state()->active_resumable_command->remote_cursor = null;
             $this->get_state()->apply = new DatabaseApplyCommandState();
             $this->get_state()->apply->remote_paths_removed_from_local_site = $apply_state->remote_paths_removed_from_local_site;
+            $this->get_state()->apply->site_admin = $site_admin;
             $this->get_state()->apply->nested_site_paths_file = $this->get_state()->preflight_record()['nested_site_paths_file'] ?? null;
             if (!empty($url_mapping)) {
                 $this->get_state()->apply->rewrite_url = $url_mapping;
@@ -7114,7 +7310,6 @@ class ImportClient
         // Set up SQL statement rewriter if we have URL mappings
         $stmt_rewriter = null;
         if (!empty($url_mapping)) {
-            $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
             $table_prefix = $this->get_state()->get('preflight.database.wp.table_prefix');
             $stmt_rewriter = new SqlStatementRewriter(
                 new StructuredDataUrlRewriter(
@@ -7185,6 +7380,7 @@ class ImportClient
             "db.sql\n" . $this->remote_reprint_api_url . "\n" . $encoded_url_mapping,
         );
 
+        $multisite_target = $this->get_multisite_target();
         $target_engine = $target["engine"];
         [$connection, $connection_label] = $this->create_target_database_connection(
             $target,
@@ -7216,6 +7412,20 @@ class ImportClient
         $byte_offset = 0;
         $statements_executed = 0;
         try {
+            if ($multisite_target !== null) {
+                if (!$is_resume) {
+                    $multisite_target->assert_empty_database($connection);
+                    // Save the empty-target check before CREATE TABLE. A process
+                    // dying after creation must not reject its own progress table.
+                    $this->get_state()->active_resumable_command->current_stage = 'database-initialize';
+                    $this->save_state();
+                } elseif ($this->get_state()->active_resumable_command->current_stage === 'database-initialize') {
+                    // Other applications may have filled the target while this
+                    // process was stopped. Only our empty progress table may exist.
+                    $multisite_target->assert_empty_database($connection, self::DATABASE_IMPORT_POSITION_TABLE);
+                }
+                $this->create_database_import_position_table($connection);
+            }
             if (
                 $is_resume
                 && $this->get_state()->active_resumable_command->current_stage === "database-cleanup"
@@ -7224,9 +7434,9 @@ class ImportClient
                 return;
             }
 
-            if (!$is_resume) {
-                // Keep database-start until the old target cursor is gone. A new
-                // process which stops here repeats this reset before any SQL.
+            if (!$is_resume || $this->get_state()->active_resumable_command->current_stage === 'database-initialize') {
+                // Keep the initialization stage until the old target cursor is
+                // gone. A process which stops here repeats this reset before SQL.
                 $this->reset_database_import_position($connection);
                 $this->get_state()->active_resumable_command->current_stage = "sql";
                 $this->get_state()->active_resumable_command->remote_cursor = null;
@@ -7258,6 +7468,11 @@ class ImportClient
                             "db-apply",
                         );
                     }
+                } elseif ($multisite_target !== null) {
+                    // The first SQL group only sets connection options. Without
+                    // its target cursor, this apply has not created application
+                    // tables, even if the local state already says "sql".
+                    $multisite_target->assert_empty_database($connection, self::DATABASE_IMPORT_POSITION_TABLE);
                 }
             }
 
@@ -7396,6 +7611,13 @@ class ImportClient
         DatabaseConnection $connection,
         array $options
     ): void {
+        // Network activations must enter active_plugins before host exclusions
+        // are applied, including when cleanup resumes after process death.
+        $multisite_target = $this->get_multisite_target();
+        if ($multisite_target !== null) {
+            $multisite_target->configure_database($connection, $this->get_state()->apply->site_admin);
+        }
+
         // Remove excluded regular plugins from active_plugins now, while the
         // database connection is still open. Their files are omitted from the
         // download, and any older local copy is removed during apply-runtime.
@@ -7470,6 +7692,20 @@ class ImportClient
         return json_decode($json, true, 512, JSON_THROW_ON_ERROR);
     }
 
+    /** Reconstructs the target from persisted apply choices, including cleanup resumes. */
+    private function get_multisite_target(): ?MultisiteTarget
+    {
+        $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
+        if (!is_array($selection)) {
+            return null;
+        }
+        $apply = $this->get_state()->apply;
+        return new MultisiteTarget(
+            $selection,
+            $apply->rewrite_url[rtrim($selection['home_url'], '/')]
+        );
+    }
+
     /** Returns progress-screen counters for the SQL apply phase. */
     private function database_apply_progress_details(
         int $statements_executed,
@@ -7510,6 +7746,7 @@ class ImportClient
             $connection
         );
         if ($target_engine === 'mysql') {
+            $myisam_auto_increment_rewriter = new MyIsamAutoIncrementStatementRewriter($connection);
             $query_stream = new \WP_MySQL_FastQueryStream();
             $query_stream->append_sql($sql);
             $query_stream->mark_input_complete();
@@ -7520,6 +7757,21 @@ class ImportClient
                     $spatial_srid_guard->assert_statement_supported($query);
                 }
                 $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
+                $rewritten = $myisam_auto_increment_rewriter->rewrite($query);
+                if ($rewritten !== null) {
+                    $query = $rewritten['sql'];
+                    $this->audit_log($rewritten['message'], false);
+                    $this->output_progress([
+                        'type' => 'warning',
+                        'phase' => 'sql',
+                        'reason' => 'auto_increment_index_added',
+                        'table' => $rewritten['table'],
+                        'column' => $rewritten['column'],
+                        'message' => $rewritten['message'],
+                    ], true);
+                    $this->progress->clear_progress_line();
+                    $this->progress->print_line($rewritten['message'] . "\n");
+                }
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
                 }
@@ -7675,6 +7927,13 @@ class ImportClient
             $executed_query = $stmt_rewriter->rewrite($query);
         }
 
+        // Discovery-only exporter groups contain DO 0 so their cursors can be
+        // committed without changing target rows. SQLite's translator rejects
+        // DO; SELECT evaluates the same expression and exec discards its result.
+        $lexer = new \WP_MySQL_Lexer($executed_query);
+        if ($lexer->next_token() && $lexer->get_token()->id === \WP_MySQL_Lexer::DO_SYMBOL) {
+            $executed_query = substr_replace($executed_query, 'SELECT', $lexer->get_token()->start, 2);
+        }
         $connection->exec($executed_query);
     }
 
@@ -7815,7 +8074,7 @@ class ImportClient
         $retained_plugins = [];
         while ($processor->next_value()) {
             $basename = $processor->get_value();
-            $is_match = path_is_descendant_of($basename, $plugin_dirs);
+            $is_match = Utils::path_is_descendant_of($basename, $plugin_dirs);
             if ($is_match) {
                 $deactivated_plugins[] = $basename;
             } else {
@@ -8416,7 +8675,7 @@ class ImportClient
                             "Invalid index batch item: path base64 decode failed",
                         );
                     }
-                    assert_valid_path(
+                    Utils::assert_valid_path(
                         $path,
                         $this->get_state()->remote_path_format(),
                         "index batch path",
@@ -8425,7 +8684,7 @@ class ImportClient
                         $excluded_source_path = $excluded_plugin['source_path'];
                         if (
                             $excluded_source_path !== null
-                            && path_is_same_as_or_descendant_of($path, $excluded_source_path)
+                            && Utils::path_is_same_as_or_descendant_of($path, $excluded_source_path)
                         ) {
                             continue 2;
                         }
@@ -9190,7 +9449,7 @@ class ImportClient
         // Stopping the rest early would leave a deleted target tree half removed,
         // its emptied directories still on disk.
         $stop_at_export_directory = $export_directories !== []
-            && path_is_same_as_or_descendant_of($missing_remote_path, $export_directories);
+            && Utils::path_is_same_as_or_descendant_of($missing_remote_path, $export_directories);
         // Find the shallowest parent absent from both neighboring entries.
         for ($component_index = 0; $component_index < $remote_parent_component_count; ++$component_index) {
             $remote_parent_components[] = $missing_remote_path_components[$component_index];
@@ -9199,16 +9458,16 @@ class ImportClient
             // index never covered it, so its absence does not confirm deletion.
             if (
                 $stop_at_export_directory
-                && !path_is_same_as_or_descendant_of($path_prefix, $export_directories)
+                && !Utils::path_is_same_as_or_descendant_of($path_prefix, $export_directories)
             ) {
                 continue;
             }
             if (
-                !path_is_same_as_or_descendant_of(
+                !Utils::path_is_same_as_or_descendant_of(
                     $nearest_existing_path_before,
                     $path_prefix,
                 )
-                && !path_is_same_as_or_descendant_of(
+                && !Utils::path_is_same_as_or_descendant_of(
                     $nearest_existing_path_after,
                     $path_prefix,
                 )
@@ -10324,15 +10583,15 @@ class ImportClient
         string $target,
         string $root
     ): void {
-        if (str_starts_with($target, "/")) {
+        if (Utils::str_starts_with($target, "/")) {
             // Absolute target: must be under root
-            $resolved = normalize_path($target, native_path_format());
+            $resolved = Utils::normalize_path($target, Utils::native_path_format());
         } else {
             // Relative target: resolve against the symlink's parent directory
-            $resolved = normalize_path(wp_join_unix_paths($symlink_parent_dir, $target), native_path_format());
+            $resolved = Utils::normalize_path(wp_join_unix_paths($symlink_parent_dir, $target), Utils::native_path_format());
         }
 
-        if (!path_is_same_as_or_descendant_of($resolved, $root)) {
+        if (!Utils::path_is_same_as_or_descendant_of($resolved, $root)) {
             throw new RuntimeException(
                 "Security: symlink target escapes filesystem root: {$target} " .
                 "(resolves to {$resolved}, root is {$root})"
@@ -10381,7 +10640,7 @@ class ImportClient
     ): string {
         // Resolve to a remote absolute path (relative targets are based on
         // the source symlink's remote directory).
-        $remote_absolute_target = resolve_symlink_target_path($remote_absolute_path, $target, $this->get_state()->remote_path_format());
+        $remote_absolute_target = Utils::resolve_symlink_target_path($remote_absolute_path, $target, $this->get_state()->remote_path_format());
 
         // Only rewrite a target whose subtree was actually followed and indexed;
         // everything else keeps its original (portable) spelling.
@@ -10417,7 +10676,7 @@ class ImportClient
     private function next_remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
     ): bool {
-        $remote_absolute_path = normalize_path($remote_absolute_path, $this->get_state()->remote_path_format());
+        $remote_absolute_path = Utils::normalize_path($remote_absolute_path, $this->get_state()->remote_path_format());
 
         if (isset($this->next_remote_index_prefix_cache[$remote_absolute_path])) {
             return $this->next_remote_index_prefix_cache[$remote_absolute_path];
@@ -10445,7 +10704,7 @@ class ImportClient
                 break;
             }
             $next_remote_index_entry_path = $next_remote_index_entry["path"];
-            if (path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)) {
+            if (Utils::path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)) {
                 $path_prefix_found = true;
                 break;
             }
@@ -10605,9 +10864,9 @@ class ImportClient
     private function resolve_local_followed_symlinks_root(string $raw): string
     {
         $filesystem_root = $this->filesystem_root;
-        $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root], native_path_format());
+        $directory = $this->resolve_token_path($raw, ["fs-root" => $filesystem_root], Utils::native_path_format());
 
-        if (!path_is_same_as_or_descendant_of($directory, $filesystem_root)) {
+        if (!Utils::path_is_same_as_or_descendant_of($directory, $filesystem_root)) {
             throw new InvalidArgumentException(
                 "--follow-symlinks local followed symlinks root \"{$directory}\" resolves outside --fs-root ({$filesystem_root}); " .
                     "it must stay within the destination root",
@@ -10639,9 +10898,9 @@ class ImportClient
         $wp_content_target = null;
         foreach ($remap_raw as [$source_raw, $target_raw]) {
             $source = $this->resolve_token_path($source_raw, $source_tokens, $this->get_state()->remote_path_format());
-            $target = $this->resolve_token_path($target_raw, $target_tokens, native_path_format());
+            $target = $this->resolve_token_path($target_raw, $target_tokens, Utils::native_path_format());
 
-            if (!path_is_same_as_or_descendant_of($target, $filesystem_root)) {
+            if (!Utils::path_is_same_as_or_descendant_of($target, $filesystem_root)) {
                 throw new InvalidArgumentException(
                     "--remap target \"{$target}\" resolves outside --fs-root ({$filesystem_root}); " .
                         "targets must stay within the destination root",
@@ -10692,7 +10951,7 @@ class ImportClient
         $directories = [];
         foreach (["wp-plugins" => "plugins", "wp-mu-plugins" => "mu-plugins", "wp-uploads" => "uploads"] as $token => $name) {
             $source = $source_tokens[$token];
-            if ($source !== null && !path_is_same_as_or_descendant_of($source, $content)) {
+            if ($source !== null && !Utils::path_is_same_as_or_descendant_of($source, $content)) {
                 $directories[$name] = $source;
             }
         }
@@ -10751,7 +11010,7 @@ class ImportClient
             $covered = false;
 
             foreach ($sources as $other) {
-                if (path_is_descendant_of($path, $other)) {
+                if (Utils::path_is_descendant_of($path, $other)) {
                     $covered = true;
                     break;
                 }
@@ -10816,7 +11075,7 @@ class ImportClient
                 // entry, so an exact match would never track a selected directory
                 // and its later deletion would be rejected instead of synced.
                 foreach (array_keys($remaining) as $selected_root) {
-                    if (path_is_same_as_or_descendant_of($path, $selected_root)) {
+                    if (Utils::path_is_same_as_or_descendant_of($path, $selected_root)) {
                         unset($remaining[$selected_root]);
                     }
                 }
@@ -10869,7 +11128,7 @@ class ImportClient
             $selected = empty($included_path_prefixes);
 
             foreach ($included_path_prefixes as $included_path_prefix) {
-                $remainder = path_remainder_under(
+                $remainder = Utils::path_remainder_under(
                     $path,
                     $included_path_prefix
                 );
@@ -10893,7 +11152,7 @@ class ImportClient
 
         foreach ($excluded_path_prefixes as $excluded_path_prefix) {
             if (
-                path_remainder_under($path, $excluded_path_prefix)
+                Utils::path_remainder_under($path, $excluded_path_prefix)
                 !== null
             ) {
                 return false;
@@ -10986,9 +11245,9 @@ class ImportClient
         }
 
         if ($resolved !== "") {
-            $resolved = trim_right_slash($resolved, $path_format);
+            $resolved = Utils::trim_right_slash($resolved, $path_format);
         }
-        assert_valid_path($resolved, $path_format, "path \"{$raw}\"");
+        Utils::assert_valid_path($resolved, $path_format, "path \"{$raw}\"");
 
         return $resolved;
     }
@@ -11391,7 +11650,7 @@ class ImportClient
     private function path_traverses_symlink(string $path): bool
     {
         $root = $this->filesystem_root;
-        $relative = relative_path_under($path, $root);
+        $relative = Utils::relative_path_under($path, $root);
         if ($relative === null || $relative === "") {
             return false;
         }
@@ -11424,8 +11683,8 @@ class ImportClient
         $real_filesystem_root = $this->filesystem_root;
 
         // Resolve the nearest existing ancestor while retaining any missing tail.
-        $resolved_directory = realpath_with_missing_tail($dir);
-        if (!path_is_same_as_or_descendant_of($resolved_directory, $real_filesystem_root)) {
+        $resolved_directory = Utils::realpath_with_missing_tail($dir);
+        if (!Utils::path_is_same_as_or_descendant_of($resolved_directory, $real_filesystem_root)) {
             // In preserve-local mode, a path that resolves outside the
             // filesystem root is expected when a directory like wp-content/plugins
             // is symlinked to a shared hosting location.  Skip gracefully
@@ -11449,7 +11708,7 @@ class ImportClient
             return;
         }
 
-        $relative = relative_path_under($dir, $real_filesystem_root);
+        $relative = Utils::relative_path_under($dir, $real_filesystem_root);
         if ($relative === null) {
             throw new RuntimeException(
                 "Security: Refusing to create directory outside filesystem root: {$dir}",
@@ -11524,7 +11783,7 @@ class ImportClient
             }
 
             $resolved = realpath($current);
-            if ($resolved === false || !path_is_same_as_or_descendant_of($resolved, $real_filesystem_root)) {
+            if ($resolved === false || !Utils::path_is_same_as_or_descendant_of($resolved, $real_filesystem_root)) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem root: {$current}",
                 );
@@ -11914,6 +12173,9 @@ class ImportClient
                 }
             }
         }
+        // Keep the source export protocol value accepted by existing servers.
+        // It selects one source site; the target boots as single-site WordPress.
+        $params["multisite_mode"] = "one-site-network-v1";
         if ($cursor !== null) {
             // Include the cursor in the body when hosts strip custom headers.
             $params["cursor"] = $cursor;
@@ -11993,7 +12255,7 @@ class ImportClient
         ];
 
         if ($this->extra_directory !== null && $this->extra_directory !== "") {
-            $extra_paths["extra_directory"] = trim_right_slash($this->extra_directory, $this->get_state()->remote_path_format());
+            $extra_paths["extra_directory"] = Utils::trim_right_slash($this->extra_directory, $this->get_state()->remote_path_format());
         }
 
         // Ensure every --remap source is enumerated — including plugins or
@@ -12011,11 +12273,11 @@ class ImportClient
         $ini_all = $state->get('preflight.runtime.ini_get_all');
         foreach (["auto_prepend_file", "auto_append_file"] as $ini_key) {
             $ini_path = $ini_all[$ini_key] ?? "";
-            if (is_string($ini_path) && is_absolute_path($ini_path, $state->remote_path_format())) {
+            if (is_string($ini_path) && Utils::is_absolute_path($ini_path, $state->remote_path_format())) {
                 // dirname() runs on the client. Convert source separators first
                 // so D:\scripts\env.php yields D:/scripts on a Unix client.
-                $ini_path = normalize_path_separators($ini_path, $state->remote_path_format());
-                $ini_dir = trim_right_slash(dirname($ini_path) . '/', $state->remote_path_format());
+                $ini_path = Utils::normalize_path_separators($ini_path, $state->remote_path_format());
+                $ini_dir = Utils::trim_right_slash(dirname($ini_path) . '/', $state->remote_path_format());
                 if ($ini_dir !== "/") {
                     $extra_paths[$ini_key] = $ini_dir;
                 }
@@ -12027,7 +12289,7 @@ class ImportClient
                 continue;
             }
             // Check if this path is already covered by an existing dir.
-            if (!path_is_same_as_or_descendant_of($path, $dirs)) {
+            if (!Utils::path_is_same_as_or_descendant_of($path, $dirs)) {
                 $dirs[] = $path;
                 $this->audit_log(
                     "DIRECTORY AUTO-DETECT | adding {$label} outside roots: " .
@@ -12241,7 +12503,7 @@ class ImportClient
         }
         // Runtime-file requests also come from the source's preflight response,
         // so matching a request does not replace path validation.
-        assert_valid_path($path, $this->get_state()->remote_path_format(), $label);
+        Utils::assert_valid_path($path, $this->get_state()->remote_path_format(), $label);
     }
 
     /**
@@ -12426,7 +12688,7 @@ class ImportClient
         $looks_like_html = !is_array($decoded) && $body !== '' && (
             stripos($body, '<html') !== false ||
             stripos($body, '<!doctype') !== false ||
-            str_starts_with($body, '<')
+            Utils::str_starts_with($body, '<')
         );
         $looks_like_wordfence_block_page = $looks_like_html &&
             stripos($body, 'Your access to this site has been limited') !== false &&
@@ -12476,7 +12738,7 @@ class ImportClient
             // The server tells us exactly what went wrong. Map each known
             // HMAC error to a targeted message.
 
-            if (str_contains($server_msg, 'HMAC signature verification failed')) {
+            if (Utils::str_contains($server_msg, 'HMAC signature verification failed')) {
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
@@ -12485,7 +12747,7 @@ class ImportClient
                 ];
             }
 
-            if (str_contains($server_msg, 'timestamp expired')) {
+            if (Utils::str_contains($server_msg, 'timestamp expired')) {
                 return [
                     'code' => 'AUTH_CLOCK_SKEW',
                     'message' =>
@@ -12495,7 +12757,7 @@ class ImportClient
                 ];
             }
 
-            if (str_contains($server_msg, 'Content hash mismatch')) {
+            if (Utils::str_contains($server_msg, 'Content hash mismatch')) {
                 return [
                     'code' => 'AUTH_CONTENT_TAMPERED',
                     'message' =>
@@ -12505,7 +12767,7 @@ class ImportClient
                 ];
             }
 
-            if (str_contains($server_msg, 'Missing X-Auth-')) {
+            if (Utils::str_contains($server_msg, 'Missing X-Auth-')) {
                 return [
                     'code' => 'AUTH_HEADERS_STRIPPED',
                     'message' =>
@@ -12672,7 +12934,6 @@ class ImportClient
         try {
             $this->check_curl_error($ch);
         } catch (RuntimeException $e) {
-            @curl_close($ch);
             return [
                 "ok" => false,
                 "http_code" => 0,
@@ -12688,7 +12949,6 @@ class ImportClient
 
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
-        @curl_close($ch);
 
         if ($http_code !== 200) {
             $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
@@ -13066,27 +13326,23 @@ class ImportClient
         );
 
         try {
-            try {
-                $this->check_curl_error($ch);
-            } catch (RuntimeException $curl_error) {
-                $this->last_http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-                if ($endpoint !== null) {
-                    $this->handle_tuner_error($endpoint, [
-                        "http_code" => 0,
-                        "timeout" => $this->last_curl_timeout,
-                        "curl_errno" => $this->last_curl_errno,
-                    ]);
-                }
-                throw $curl_error;
+            $this->check_curl_error($ch);
+        } catch (RuntimeException $curl_error) {
+            $this->last_http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            if ($endpoint !== null) {
+                $this->handle_tuner_error($endpoint, [
+                    "http_code" => 0,
+                    "timeout" => $this->last_curl_timeout,
+                    "curl_errno" => $this->last_curl_errno,
+                ]);
             }
-
-            $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
-            $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
-            $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
-        } finally {
-            @curl_close($ch);
+            throw $curl_error;
         }
+
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
+        $ttfb = (float) curl_getinfo($ch, CURLINFO_STARTTRANSFER_TIME);
+        $total_time = (float) curl_getinfo($ch, CURLINFO_TOTAL_TIME);
 
         if (!isset($context->response_stats) || !is_array($context->response_stats)) {
             $context->response_stats = [];
@@ -13226,6 +13482,13 @@ class ImportClient
         $state["db_index"]["file"] = $this->encode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
+        // Host-plugin paths were plain UTF-8 strings. Renamed Reprint plugins
+        // can have other filename bytes; tag those without changing old records.
+        foreach ($state['apply']['remote_paths_removed_from_local_site'] ?? [] as $index => $path) {
+            if (preg_match('//u', $path) !== 1) {
+                $state['apply']['remote_paths_removed_from_local_site'][$index] = ['path_b64' => base64_encode($path)];
+            }
+        }
 
         if (
             isset($state["preflight"]) &&
@@ -13255,6 +13518,15 @@ class ImportClient
         $state["db_index"]["file"] = $this->decode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
+        foreach ($state['apply']['remote_paths_removed_from_local_site'] ?? [] as $index => $path) {
+            if (is_array($path)) {
+                $decoded = is_string($path['path_b64'] ?? null) ? base64_decode($path['path_b64'], true) : false;
+                if ($decoded === false) {
+                    throw new UnexpectedValueException('A saved runtime cleanup path contains invalid base64.');
+                }
+                $state['apply']['remote_paths_removed_from_local_site'][$index] = $decoded;
+            }
+        }
 
         if (
             isset($state["preflight"]) &&
@@ -13423,7 +13695,7 @@ class ImportClient
         if (!is_string($value) || $value === "") {
             return $value;
         }
-        if (!str_starts_with($value, self::STATE_PATH_ENCODING_PREFIX)) {
+        if (!Utils::str_starts_with($value, self::STATE_PATH_ENCODING_PREFIX)) {
             throw new UnexpectedValueException(
                 "Pull state path is missing the base64: encoding prefix."
             );
@@ -13712,6 +13984,12 @@ class ImportClient
         $this->progress_reporter->update($context, $data);
         $this->progress_reporter->write_file();
 
+        if (( $data['status'] ?? null ) === 'error') {
+            $this->command_report_details = array_intersect_key($data, array_flip([
+                'error', 'error_code', 'failed_stage', 'http_code', 'curl_errno',
+                'consecutive_failures_without_progress',
+            ]));
+        }
         // The non-verbose terminal presentation uses show_progress_line() instead.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             return;
@@ -13792,6 +14070,64 @@ class ImportClient
 // ============================================================================
 // CLI Entry Point
 // ============================================================================
+
+/**
+ * Append the invocation result in JSONL and compact output, never for an inner stage.
+ *
+ * A missing client means construction or lock acquisition failed. Reports do
+ * not rely on shutdown callbacks: a killed process cannot promise a result.
+ *
+ * @param string            $command   Invoked command.
+ * @param int               $exit_code Actual process exit code.
+ * @param array             $options { Parsed CLI options.
+ *     @type string $progress   Progress output mode; auto detects the progress stream.
+ *     @type bool   $abort      Whether this invocation clears saved work.
+ *     @type string $sql_output SQL destination; stdout reserves that stream for SQL.
+ * }
+ * @param ImportClient|null $client    Command client, when construction succeeded.
+ * @param Throwable|null    $exception Unhandled command failure, when present.
+ */
+function reprint_write_command_report(
+    string $command,
+    int $exit_code,
+    array $options,
+    ?ImportClient $client,
+    ?Throwable $exception = null
+): void {
+    $stream = !in_array($command, ['files-push', 'files-diff'], true)
+        && ( $options['sql_output'] ?? ( $client === null ? null : $client->get_state()->sql_output ) ) === 'stdout'
+        ? STDERR : STDOUT;
+    $progress_output_mode = $options['progress'] ?? 'auto';
+    if ($progress_output_mode === 'tty'
+        || ( $progress_output_mode === 'auto' && function_exists('posix_isatty') && posix_isatty($stream) )
+    ) {
+        return;
+    }
+    $details = $client === null ? [] : $client->command_report_details;
+    $status = $details['status'] ?? ( $exit_code === 0 ? 'complete' : ( $exit_code === 2 ? 'partial' : 'error' ) );
+    if ($exit_code === 0 && !empty($options['abort'])) {
+        $status = 'aborted';
+    }
+    $error = null;
+    $error_code = null;
+    if ($exit_code !== 0 && $exit_code !== 2) {
+        $error = $exception === null ? ( $details['error'] ?? null ) : $exception->getMessage();
+        $error_code = $details['error_code'] ?? ( $client === null ? null : $client->last_error_code );
+    }
+    $report = [
+        'type' => 'reprint_report',
+        'schema_version' => 1,
+        'command' => $command,
+        'status' => $status,
+        'exit_code' => $exit_code,
+        'failed_stage' => $details['failed_stage'] ?? null,
+        'error' => $error,
+        'error_code' => $error_code,
+    ] + $details;
+    // Error messages may contain arbitrary source bytes. Keep the record valid
+    // JSON; path fields in structured details use the protocol's base64 form.
+    fwrite($stream, json_encode($report, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES) . "\n");
+}
 
 // Returns the importer version string. Inside the phar, reads the baked-in
 // VERSION file. In development, falls back to `git describe`.
@@ -13880,8 +14216,17 @@ if (
             'placeholder' => 'DIR',
             'help' => 'Local directory read from or written to for site files',
             'help_section' => 'required',
-            'commands' => ['apply-runtime'],
+            'commands' => ['apply-runtime', 'recover', 'post-process'],
             'aliases' => ['docroot'],
+        ],
+
+        [
+            'name' => 'tasks',
+            'type' => 'value',
+            'target' => 'tasks',
+            'placeholder' => 'TASKS',
+            'help' => 'Comma-separated task names, or all (default: all)',
+            'commands' => ['post-process'],
         ],
 
         // ── Global options ───────────────────────────────────────
@@ -13901,14 +14246,14 @@ if (
             'aliases' => ['force-http'],
             'help' => 'Allow a trusted plain-HTTP target; anyone able to observe or alter the connection can read or modify transferred content',
             'help_section' => 'global',
-            'commands' => ImportClient::COMMANDS,
+            'commands' => array_merge(ImportClient::COMMANDS, ['post-process']),
         ],
         [
             'name' => 'progress',
             'type' => 'value',
             'target' => 'progress',
             'placeholder' => 'MODE',
-            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, 30-second counter updates, results, warnings, and errors.',
+            'help' => 'Progress output: auto, tty, jsonl, or compact (default: auto). Compact keeps stage changes, 30-second counter updates, results, warnings, and errors. JSONL and compact append a final command report.',
             'help_section' => 'global',
             'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
@@ -14175,6 +14520,14 @@ if (
             'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
             'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
+        ],
+        [
+            'name' => 'site-admin',
+            'type' => 'value-or-next',
+            'target' => 'site_admin',
+            'placeholder' => 'LOGIN',
+            'help' => 'Imported user who will administer the new single site',
+            'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [
             'name' => 'new-site-url',
@@ -14446,7 +14799,7 @@ if (
         switch ($cast) {
             case 'int':   return (int) $raw;
             case 'float': return (float) $raw;
-            case 'size':  return parse_size($raw);
+            case 'size':  return Utils::parse_size($raw);
             default:      return $raw;
         }
     }
@@ -14596,7 +14949,7 @@ if (
     function _cli_render_install_server(): void
     {
         $version = get_importer_version();
-        $is_dev = str_contains($version, '-trunk') || $version === 'v0.0.0';
+        $is_dev = Utils::str_contains($version, '-trunk') || $version === 'v0.0.0';
         $is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
         $bold  = $is_tty ? "\033[1m" : "";
         $dim   = $is_tty ? "\033[2m" : "";
@@ -14715,6 +15068,49 @@ if (
     // commands expose focused workflows useful for scripting and hosting
     // platform integrations; pull composes the relevant pull-side commands.
     $command_info = [
+        "post-process" => [
+            "level" => "high",
+            "short" => "Run selected post-migration tasks on the local site",
+            "usage" => "reprint post-process [<remote-reprint-api-url>] --fs-root=WORDPRESS_ROOT [--state-dir=DIR] [--tasks=TASKS]",
+            "description" =>
+                "Runs all tasks by default. --tasks selects only the named tasks.\n" .
+                "Tasks always run in this order, stopping at the first failure:\n\n" .
+                "  disable-hosting-plugins: Remove known source-host plugin, MU-plugin,\n" .
+                "    and drop-in files using the same rules as apply-runtime. Requires\n" .
+                "    --state-dir with successful saved preflight. Does not load WordPress\n" .
+                "    or edit active_plugins. Uses wp-content under --fs-root.\n" .
+                "  remove-reprint: Remove the migrated Reprint plugin files, activation\n" .
+                "    entries, and current and legacy connection options. Requires saved\n" .
+                "    preflight from an updated source and target database settings saved\n" .
+                "    by db-apply or apply-runtime. Does not load WordPress or edit dumps.\n" .
+                "    Uses wp-content/plugins under --fs-root.\n" .
+                "  disable-failing-plugins: Require wp-load.php in fresh PHP processes.\n" .
+                "    Deactivate an active regular plugin when its file causes a fatal,\n" .
+                "    then try again. Keeps files and data; skips deactivation hooks.\n" .
+                "    Stops on other failures. Does not deactivate multisite plugins.\n\n" .
+                "--fs-root is the ready-to-run WordPress root containing wp-load.php,\n" .
+                "not the raw download directory. The positional URL selects saved state\n" .
+                "when --state-dir contains multiple remotes. No source API requests\n" .
+                "are made. An explicit HTTP source URL requires --allow-unsafe-http.\n" .
+                "Failing-plugin recovery alone needs no migration state.\n\n" .
+                "Prints JSON with per-task results. Exit 0 means all selected tasks\n" .
+                "completed; exit 1 means processing stopped. Uses Reprint's PHP binary.\n" .
+                "Does not check page rendering or the web server.\n",
+        ],
+        "recover" => [
+            "level" => "high",
+            "short" => "Load WordPress, deactivating plugins that cause fatal errors",
+            "usage" => "reprint recover --fs-root=WORDPRESS_ROOT",
+            "description" =>
+                "Requires wp-load.php in a separate PHP process. If a fatal error points\n" .
+                "to one active regular plugin, deactivates it and tries again. Plugin\n" .
+                "files and data are kept; deactivation hooks are not run. Stops on\n" .
+                "other failures. Does not deactivate plugins on multisite.\n\n" .
+                "Uses the same PHP binary as Reprint. Checks startup only, not pages\n" .
+                "or the web server. No remote URL, connection token, or state directory\n" .
+                "is needed. Prints a JSON result with disabled_plugins and their errors.\n" .
+                "Exits 0 when wp-load.php loads, or 1 when it cannot complete.\n",
+        ],
         "pull" => [
             "level" => "high",
             "short" => "Clone a remote site (preflight + files + database + apply)",
@@ -14923,6 +15319,7 @@ if (
                 "  tty    Force the single interactive progress bar\n" .
                 "  jsonl  Force one JSON object per line\n" .
                 "  compact  Print stage changes, 30-second counter updates, results, warnings, and errors\n" .
+                "JSONL and compact output end with one final command report.\n" .
                 "Explicit tty, jsonl, and compact modes cannot be combined with --verbose.\n" .
                 "\n" .
                 "Exit outcomes:\n" .
@@ -15207,6 +15604,48 @@ if (
         exit(0);
     }
 
+    if ($command === 'post-process') {
+        $reprint_post_process_source = $argv[2] ?? '';
+        $reprint_post_process_has_source = $reprint_post_process_source !== '' && strpos($reprint_post_process_source, '-') !== 0;
+        [$reprint_post_process_state, $reprint_post_process_root, $reprint_post_process_options] = _cli_parse_options(
+            $argv,
+            $argument_count,
+            $reprint_post_process_has_source ? 3 : 2,
+            array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks', 'allow-unsafe-http'], true))
+        );
+        $reprint_post_process_result = PostProcess::run_selected_tasks(
+            $reprint_post_process_root ? ( realpath($reprint_post_process_root) ?: $reprint_post_process_root ) : '',
+            $reprint_post_process_options['tasks'] ?? 'all',
+            $reprint_post_process_state,
+            $reprint_post_process_has_source ? $reprint_post_process_source : null,
+            $reprint_post_process_options['allow_http'] ?? false
+        );
+        echo json_encode($reprint_post_process_result, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+        exit($reprint_post_process_result['status'] === 'complete' ? 0 : 1);
+    }
+
+    if ($command === 'recover') {
+        [, $reprint_recover_wordpress_root] = _cli_parse_options(
+            $argv,
+            $argument_count,
+            2,
+            array_filter($option_defs, static fn($definition) => $definition['name'] === 'fs-root')
+        );
+        if (!$reprint_recover_wordpress_root) {
+            fwrite(STDERR, "Error: recover requires --fs-root=WORDPRESS_ROOT containing wp-load.php.\n");
+            exit(1);
+        }
+        try {
+            $reprint_recover_result = PostProcess::disable_plugins_that_prevent_wordpress_from_loading(
+                realpath($reprint_recover_wordpress_root) ?: $reprint_recover_wordpress_root
+            );
+        } catch (\Throwable $error) {
+            $reprint_recover_result = ['status' => 'failed', 'message' => $error->getMessage()];
+        }
+        echo json_encode($reprint_recover_result, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
+        exit($reprint_recover_result['status'] === 'complete' ? 0 : 1);
+    }
+
     // Most commands name the remote Reprint API URL whose state they use.
     // db-rewrite-urls can select the only saved remote or use command-local state.
     $reprint_remote_reprint_api_url_argument = $argv[2] ?? null;
@@ -15395,6 +15834,7 @@ if (
         // channel to surface as ndjson events. Stash the exit code on
         // a global so the embedder can read it.
         $GLOBALS['REPRINT_PULL_EXIT_CODE'] = (int) $client->exit_code;
+        reprint_write_command_report($command, (int) $client->exit_code, $options, $client);
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit($client->exit_code);
         }
@@ -15425,6 +15865,7 @@ if (
         }
         $reprint_exit_code = $e instanceof RetryLaterException ? 3 : 1;
         $GLOBALS['REPRINT_PULL_EXIT_CODE'] = $reprint_exit_code;
+        reprint_write_command_report($command, (int) $GLOBALS['REPRINT_PULL_EXIT_CODE'], $options, $client ?? null, $e);
         if (!defined('EXIT_AFTER_PULL') || EXIT_AFTER_PULL) {
             exit( (int) $reprint_exit_code );
         }

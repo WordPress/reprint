@@ -193,6 +193,9 @@
       "port": 8137,
       "noPdoMysql": true
     },
+    "multisite": {
+      "port": 8147
+    },
     "empty-geometry-cross-engine": {
       "port": 8141
     },
@@ -217,6 +220,9 @@
     "multisite-files": {
       "port": 8145
     },
+    "multisite-target": {
+      "port": 8146
+    },
     "multisite-query-budget": {
       "port": 8148
     },
@@ -228,6 +234,12 @@
     },
     "multisite-paths-mysql": {
       "port": 8180
+    },
+    "multisite-plugin-tables": {
+      "port": 8181
+    },
+    "recover": {
+      "port": 8182
     }
   }
 }

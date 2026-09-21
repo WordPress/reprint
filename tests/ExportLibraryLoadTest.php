@@ -13,6 +13,7 @@ use PHPUnit\Framework\TestCase;
  */
 final class ExportLibraryLoadTest extends TestCase {
     private const EXPORT_PATH = __DIR__ . '/../packages/reprint-server/src/export.php';
+    private const AUTOLOAD_PATH = __DIR__ . '/../vendor/autoload.php';
 
     public function testRequiringExportPhpDoesNotRejectMissingSecretKey(): void
     {
@@ -39,7 +40,8 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertNotFalse($export_path, 'export.php must exist');
 
         $result = $this->runPhpCode(
-            "<?php\nrequire " . var_export($export_path, true) . ";\n"
+            "<?php\nrequire " . var_export(realpath(self::AUTOLOAD_PATH), true) . ";\n"
+            . "require " . var_export($export_path, true) . ";\n"
             . "echo json_encode(normalize_path_list(['/']), JSON_UNESCAPED_SLASHES);\n"
         );
 
@@ -273,6 +275,7 @@ final class ExportLibraryLoadTest extends TestCase {
         try {
             $php_code = '<?php' . "\n"
                 . 'putenv(\'REPRINT_SERVER_TEST_MODE=1\');' . "\n"
+                . 'require base64_decode(\'' . base64_encode(realpath(self::AUTOLOAD_PATH)) . '\', true);' . "\n"
                 . 'require base64_decode(\'' . base64_encode($export_path) . '\', true);' . "\n"
                 . '_e2e_load_test_hooks_if_needed([\'directory\' => base64_decode(\''
                 . base64_encode($tmp_dir) . '\', true)]);' . "\n"
@@ -289,12 +292,15 @@ final class ExportLibraryLoadTest extends TestCase {
 
     private function runExportWith(string $setup_script): array
     {
+        $autoload_path = realpath(self::AUTOLOAD_PATH);
+        $this->assertNotFalse($autoload_path, 'Composer autoloader must exist');
         $export_path = realpath(self::EXPORT_PATH);
         $this->assertNotFalse($export_path, 'export.php must exist');
 
         $php_code = <<<PHP
         <?php
         {$setup_script}
+        require '{$autoload_path}';
         require '{$export_path}';
         // If we got here, require() completed without die()ing.
         // Print a marker indicating endpoint functions are defined.

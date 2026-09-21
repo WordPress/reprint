@@ -2,10 +2,8 @@
 
 namespace WordPress\Reprint\Server;
 
-require_once __DIR__ . '/utils.php';
-
 /**
- * Selects the WordPress tables and shared rows to export for one network site.
+ * Selects site tables and shared WordPress rows to export for one network site.
  *
  * For site 7 with base prefix `network_`, keep core tables such as
  * `network_7_posts`. Use `network_7_reprint_users` to store user IDs found in
@@ -31,6 +29,8 @@ class MultisiteDatabaseSelection {
     private $db;
     /** @var string|null MySQL named lock held for this site's saved user table until close(). */
     private $lock_name;
+    /** @var resource|null SQLite site lock; its file also stores the current export token. */
+    private $lock_handle;
     /**
      * Random token set when this site's saved user table is created.
      * Stored in the table comment and export cursor. A new export replaces the
@@ -86,7 +86,7 @@ class MultisiteDatabaseSelection {
      */
     public function get_identity(): string
     {
-        return 'core-v5:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
+        return 'site-tables-v1:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
     }
 
     /**
@@ -96,51 +96,99 @@ class MultisiteDatabaseSelection {
      * lock for this request; compare the saved generation on the next request.
      * A fresh export replaces a paused one rather than retaining several sets.
      *
-     * @param mixed $db Dedicated PDO MySQL connection from the SQL endpoint.
+     * @param mixed $db Dedicated PDO MySQL connection or the active SQLite adapter.
      * @param string|null $generation Saved cursor generation, or null for a fresh export.
      */
     public function open_user_set($db, ?string $generation): void
     {
-        // wpdb may route reads and writes to different connections or retain
-        // a plugin's transaction. Neither can protect these source-side writes
-        // with one named lock and commit them before an export cursor leaves.
-        if (!$db instanceof \PDO || $db->getAttribute(\PDO::ATTR_DRIVER_NAME) !== 'mysql') {
-            throw new \RuntimeException('Selected-site SQL export requires a direct PDO MySQL connection. Enable pdo_mysql and allow direct access using the source WordPress database credentials.');
-        }
-        if ($db->inTransaction() || (string) $db->query('SELECT @@autocommit')->fetchColumn() !== '1') {
-            throw new \RuntimeException('Selected-site SQL export requires an autocommit connection without an open transaction. End the source transaction before starting the export.');
+        if ($db instanceof SqliteDriverPDO) {
+            $sqlite = $db->get_sqlite_pdo();
+            if ($sqlite->inTransaction()) {
+                throw new \RuntimeException('Selected-site SQL export requires an autocommit connection without an open transaction. End the source transaction before starting the export.');
+            }
+            $database_file = $sqlite->query('PRAGMA database_list')->fetch(\PDO::FETCH_ASSOC)['file'];
+            if ($database_file === '') {
+                throw new \RuntimeException('Selected-site SQL export requires a persistent SQLite database file; an in-memory database cannot resume across requests.');
+            }
+            // SQLite's translator implements GET_LOCK as a no-op. A separate
+            // file lock protects site 7's set across commits without holding a
+            // write transaction that would block WordPress and other sites.
+            // Keep the file after close: unlinking it could split waiters across
+            // two inodes. The OS releases the handle when the process dies.
+            $lock_path = $database_file . '.' . $this->get_user_table_name() . '.lock';
+            $handle = fopen($lock_path, 'c+');
+            if ($handle === false) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain source-side JSON error, never HTML.
+                throw new \RuntimeException('Cannot open the SQLite selected-site export lock: ' . $lock_path);
+            }
+            if (!flock($handle, LOCK_EX | LOCK_NB)) {
+                fclose($handle);
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain source-side JSON error, never HTML.
+                throw new \RuntimeException("Another SQL export request is using the saved users for site {$this->site_id}; try again after it finishes.");
+            }
+            $this->lock_handle = $handle;
+        } else {
+            // wpdb may route reads and writes to different connections or retain
+            // a plugin's transaction. Neither can protect these source-side writes
+            // with one named lock and commit them before an export cursor leaves.
+            if (!$db instanceof \PDO || $db->getAttribute(\PDO::ATTR_DRIVER_NAME) !== 'mysql') {
+                throw new \RuntimeException('Selected-site SQL export requires a direct PDO MySQL connection. Enable pdo_mysql and allow direct access using the source WordPress database credentials.');
+            }
+            if ($db->inTransaction() || (string) $db->query('SELECT @@autocommit')->fetchColumn() !== '1') {
+                throw new \RuntimeException('Selected-site SQL export requires an autocommit connection without an open transaction. End the source transaction before starting the export.');
+            }
+            $database = $db->query('SELECT DATABASE()')->fetchColumn();
+            // Named locks are server-wide and limited to 64 bytes. Include the
+            // database as well as the site table. Fold case for servers with
+            // case-insensitive table names. Locks survive commits, not connection death.
+            $lock_name = 'reprint-users:' . sha1(strtolower($database . '.' . $this->get_user_table_name()));
+            $result = $db->query("SELECT GET_LOCK('{$lock_name}', 0)")->fetchColumn();
+            if ( (string) $result !== '1') {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain source-side JSON error, never HTML.
+                throw new \RuntimeException("Another SQL export request is using the saved users for site {$this->site_id}; try again after it finishes.");
+            }
+            $this->lock_name = $lock_name;
         }
         $this->db = $db;
-        $database = $db->query('SELECT DATABASE()')->fetchColumn();
-        // Named locks are server-wide and limited to 64 bytes. Include the
-        // database as well as the site table. Fold case for servers with
-        // case-insensitive table names. Locks survive commits, not connection death.
-        $lock_name = 'reprint-users:' . sha1(strtolower($database . '.' . $this->get_user_table_name()));
-        $result = $db->query("SELECT GET_LOCK('{$lock_name}', 0)")->fetchColumn();
-        if ( (string) $result !== '1') {
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Plain source-side JSON error, never HTML.
-            throw new \RuntimeException("Another SQL export request is using the saved users for site {$this->site_id}; try again after it finishes.");
-        }
-        $this->lock_name = $lock_name;
         try {
             $table = $this->get_user_table_name();
-            $comment = $db->query("SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{$table}'")->fetchColumn();
+            if ($db instanceof SqliteDriverPDO) {
+                // SQLite 2.x discards table comments. Keep this site's generation
+                // in its already-locked file instead; read only the fixed marker.
+                $exists = $db->get_sqlite_pdo()->query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = '{$table}'")->fetchColumn();
+                $schema_marker = $exists ? (string) fgets($this->lock_handle, 64) : false;
+            } else {
+                $schema_marker = $db->query("SELECT TABLE_COMMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{$table}'")->fetchColumn();
+            }
             if ($generation !== null) {
-                if (!preg_match('/^[a-f0-9]{32}$/D', $generation) || $comment !== 'reprint-users-v1:' . $generation) {
+                if (!preg_match('/^[a-f0-9]{32}$/D', $generation) || $schema_marker !== 'reprint-users-v1:' . $generation) {
                     throw new \RuntimeException("The saved users for site {$this->site_id} were replaced or are missing. Run db-pull --abort and start again.");
                 }
                 $this->generation = $generation;
                 return;
             }
-            if ($comment !== false && !preg_match('/^reprint-users-v1:[a-f0-9]{32}$/D', $comment)) {
+            if ($schema_marker !== false && !preg_match('/^reprint-users-v1:[a-f0-9]{32}$/D', $schema_marker)) {
                 throw new \RuntimeException("Cannot create the saved user set: table {$table} already exists without Reprint's schema marker.");
             }
             // Starting again replaces one site's set, including abandoned work.
             // Do not delete it at completion: the last HTTP response may be lost
             // and the importer may still need to replay an earlier cursor.
-            $this->generation = bin2hex(generate_random_bytes(16));
+            $this->generation = bin2hex(Utils::generate_random_bytes(16));
+            $table_comment = " COMMENT='reprint-users-v1:{$this->generation}'";
+            if ($db instanceof SqliteDriverPDO) {
+                // Invalidate old cursors BEFORE replacing their rows. If this
+                // process dies after DROP or CREATE, no caller has the new token
+                // yet. A fresh export can replace the unfinished set safely.
+                $marker = 'reprint-users-v1:' . $this->generation;
+                rewind($this->lock_handle);
+                if (fwrite($this->lock_handle, $marker) !== strlen($marker)
+                    || !ftruncate($this->lock_handle, strlen($marker)) || !fflush($this->lock_handle)) {
+                    throw new \RuntimeException('Cannot save the SQLite export generation in the selected-site lock file. Check free disk space and filesystem permissions.');
+                }
+                $table_comment = '';
+            }
             $db->exec("DROP TABLE IF EXISTS `{$table}`");
-            $db->exec("CREATE TABLE `{$table}` (user_id bigint unsigned NOT NULL PRIMARY KEY, reference_kind tinyint unsigned NOT NULL, reference_id bigint unsigned NOT NULL) ENGINE=InnoDB COMMENT='reprint-users-v1:{$this->generation}'");
+            $db->exec("CREATE TABLE `{$table}` (user_id bigint unsigned NOT NULL PRIMARY KEY, reference_kind tinyint unsigned NOT NULL, reference_id bigint unsigned NOT NULL) ENGINE=InnoDB" . $table_comment);
         } catch (\Throwable $error) {
             $this->close();
             throw $error;
@@ -154,6 +202,11 @@ class MultisiteDatabaseSelection {
             $lock_name = $this->lock_name;
             $this->lock_name = null;
             $this->db->query("SELECT RELEASE_LOCK('{$lock_name}')")->fetchColumn();
+        }
+        if ($this->lock_handle !== null) {
+            flock($this->lock_handle, LOCK_UN);
+            fclose($this->lock_handle);
+            $this->lock_handle = null;
         }
         $this->db = null;
     }
@@ -302,7 +355,7 @@ class MultisiteDatabaseSelection {
     }
 
     /**
-     * Whether this table has a defined core selection rule.
+     * Whether this table has a defined selection rule.
      *
      * '1=0' keeps a known table's schema without rows. '0=1' marks a table
      * without a rule for this selection, so the reader skips the whole table.
@@ -321,8 +374,8 @@ class MultisiteDatabaseSelection {
      */
     public function get_row_condition(string $table): string
     {
-        // These exact core tables contain only the selected site's records.
-        // A prefix match alone cannot establish what a plugin table contains.
+        // Apply exact core rules first, especially the options and shared-user
+        // filters. The numbered plugin-table prefix rule comes after them.
         $site_tables = [
             'posts', 'postmeta', 'comments', 'commentmeta', 'terms',
             'termmeta', 'term_taxonomy', 'term_relationships', 'links',
@@ -402,6 +455,17 @@ class MultisiteDatabaseSelection {
             // Pending registrations and registration history describe the
             // network, not this site's content. Retain empty core tables only.
             return '1=0';
+        }
+        // Plugins using $wpdb->prefix store site 7's data in network_7_*.
+        // Keep these names: the standalone target adopts that same prefix.
+        // Include the final underscore so site 70 cannot match site 7.
+        // This is a storage convention for network-authorized exports, not a
+        // guarantee that arbitrary plugin data is safe for site-only admins.
+        // Site 1 has no numbered prefix: network_orders could contain main-site
+        // or network-wide orders, so it still needs an explicit migration rule.
+        if ($this->site_id !== 1 && strpos($table, $this->site_prefix) === 0
+            && !self::is_internal_table($table)) {
+            return '1=1';
         }
         return '0=1';
     }

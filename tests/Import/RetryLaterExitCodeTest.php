@@ -180,6 +180,9 @@ final class RetryLaterExitCodeTest extends TestCase {
             $record = json_decode($line, true);
             $this->assertIsArray($record, $line);
             $this->assertArrayNotHasKey('retry_after_seconds', $record);
+            if (( $record['type'] ?? null ) === 'reprint_report') {
+                continue;
+            }
             if (( $record['status'] ?? null ) !== 'error' && !isset($record['exception'])) {
                 continue;
             }

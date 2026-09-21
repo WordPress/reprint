@@ -118,7 +118,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.client_php }}
-          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3, gd
           coverage: none
 
       # PHP comes from the runner's pre-cached toolcache via this
@@ -127,7 +127,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.server_php }}
-          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3, gd
           coverage: none
 
       - name: Setup infrastructure
@@ -142,7 +142,7 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.client_php }}
-          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3, gd
           coverage: none
 
       - name: Setup test sites
@@ -326,8 +326,8 @@ jobs:
             exit "$files_pull_status"
           fi
 
-      - name: Run full pull from PHP 5.6 site
-        if: matrix.server_php == '5.6'
+      - name: Run full pulls from older PHP servers
+        if: matrix.server_php == '5.6' || matrix.server_php == '7.2'
         env:
           E2E_EXPECTED_SERVER_PHP_VERSION: ${{ matrix.server_php }}
           E2E_WORDPRESS_VERSION: ${{ matrix.wordpress_version }}
@@ -335,7 +335,7 @@ jobs:
           CLIENT_PATH: ${{ github.workspace }}/reprint.phar
           PHP_BINARY: php${{ matrix.client_php }}
         working-directory: tests/e2e
-        run: npx vitest run tests/import-46-pull-basic.test.js --test-timeout=180000
+        run: npx vitest run tests/import-46-pull-basic.test.js tests/import-66-multisite.test.js --test-timeout=180000
 
       - name: Run E2E tests
         if: matrix.server_php != '5.6' && matrix.server_php != '7.2'

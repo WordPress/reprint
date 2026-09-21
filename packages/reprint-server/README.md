@@ -13,8 +13,10 @@ installed side by side. Consumers should require
 Composer's classmap covers every canonical class in `src/`, so classes
 resolve after requiring `vendor/autoload.php`.
 
-Reprint's entry points load their utility functions internally. `src/utils.php`
-is an internal implementation file and is not a public autoload entry point.
+Shared helpers are static methods on `WordPress\Reprint\Server\Utils`, which
+the classmap covers like any other class. Every server file, `src/export.php`
+included, expects that autoloader to be registered before it is required;
+nothing loads `class-utils.php` by path.
 
 The Reprint Server plugin loads `src/compat.php` when it opens the server
 runtime so that released `Site_Export_*` server names continue to resolve

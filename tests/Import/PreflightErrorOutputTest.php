@@ -329,12 +329,15 @@ final class PreflightErrorOutputTest extends TestCase {
             }
         }
         $this->assertSame($exit_code, $actual_exit_code, $stdout . $stderr);
-        if ($stdout === '' && !$allow_http) {
-            return json_decode(trim($stderr), true, 512, JSON_THROW_ON_ERROR);
-        }
         $records = array_map(static function (string $line): array {
             return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
         }, array_filter(explode("\n", trim($stdout))));
+        $records = array_values(array_filter($records, static function (array $record): bool {
+            return ( $record['type'] ?? null ) !== 'reprint_report';
+        }));
+        if ($records === [] && !$allow_http) {
+            return json_decode(trim($stderr), true, 512, JSON_THROW_ON_ERROR);
+        }
         $this->assertNotEmpty($records, $stderr);
         return end($records);
     }

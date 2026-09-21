@@ -69,8 +69,9 @@ function get_multisite_export_context(): array {
         throw new \RuntimeException('Custom multisite uploads are not supported; observed directory: ' . $uploads['basedir']);
     }
 
-    // Use the exporter's rules, not $wpdb->tables: plugins can append their
-    // own tables there. A registered plugin table still needs a migration rule.
+    // Use the exporter's rules, not $wpdb->tables: registering a shared plugin
+    // table must not authorize copying all its rows. Numbered plugin tables
+    // have a site-prefix rule; unknown unnumbered tables still need their own.
     // This runs for each multisite API request, including file requests.
     // get_col() holds the whole database table-name list in memory; this setup
     // cost grows with the number of tables, despite cheap per-path file filters.

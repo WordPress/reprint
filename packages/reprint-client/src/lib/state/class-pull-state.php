@@ -1,8 +1,7 @@
 <?php
 declare(strict_types=1);
 
-use function WordPress\Reprint\Server\preflight_path_format;
-
+use WordPress\Reprint\Server\Utils;
 use Reprint\Importer\State\AdaptiveTuningState;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
@@ -240,7 +239,7 @@ class PullState
      */
     public function remote_path_format(): string
     {
-        return preflight_path_format($this->preflight['data'] ?? []);
+        return Utils::preflight_path_format($this->preflight['data'] ?? []);
     }
 
     /**

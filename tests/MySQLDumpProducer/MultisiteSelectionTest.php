@@ -8,6 +8,71 @@ use WordPress\Reprint\Server\MultisiteDatabaseSelection;
 /** Exercises site selection against MySQL, including resumable oversized reads. */
 class MultisiteSelectionTest extends MySQLDumpProducerTestBase
 {
+    /** Numbered site tables travel without widening the shared core row rules. */
+    public function test_plugin_table_selection_respects_site_prefix_boundaries(): void
+    {
+        $selection = new MultisiteDatabaseSelection('network_', 7, 1);
+        // A cursor from the core-only selection may already have skipped
+        // plugin tables. It must not resume under the expanded table rules.
+        $this->assertNotSame('core-v5:network_:1:7', $selection->get_identity());
+        foreach (['network_7_orders', 'network_7_quote`table', 'network_7_雪'] as $table) {
+            $this->assertSame('1=1', $selection->get_row_condition($table), $table);
+        }
+        foreach (['network_8_orders', 'network_70_orders', 'network_07_orders', 'network_orders', 'network_7_reprint_users'] as $table) {
+            $this->assertFalse($selection->includes_table($table), $table);
+        }
+        $this->assertNotSame('1=1', $selection->get_row_condition('network_users'));
+        $this->assertNotSame('1=1', $selection->get_row_condition('network_usermeta'));
+        $this->assertNotSame('1=1', $selection->get_row_condition('network_7_options'));
+        // An unnumbered plugin table may hold the main site's data or shared
+        // network data. This change must not guess which one it contains.
+        $main_site = new MultisiteDatabaseSelection('network_', 1, 1);
+        $this->assertFalse($main_site->includes_table('network_orders'));
+        $this->assertFalse($main_site->includes_table('network_7_orders'));
+    }
+
+    /** Reopening the producer at each fragment must retain every plugin row and BLOB byte. */
+    public function test_plugin_tables_resume_without_losing_composite_keys_or_large_values(): void
+    {
+        $this->create_network();
+        $this->pdo->exec('CREATE TABLE network_7_plugin_records (record_id bigint unsigned, part int, payload longblob, PRIMARY KEY (record_id, part))');
+        $this->pdo->exec('CREATE TABLE network_70_plugin_records (secret text)');
+        $this->pdo->exec("INSERT INTO network_70_plugin_records VALUES ('sibling-private')");
+        $payload = str_repeat("\x00\xff'\\", 1500);
+        $insert = $this->pdo->prepare('INSERT INTO network_7_plugin_records VALUES (9007199254740993, ?, ?)');
+        foreach ([1, 2, 3] as $part) {
+            $insert->execute([$part, $payload . $part]);
+        }
+        $options = [
+            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
+            'batch_size' => 2, 'max_statement_size' => 2048,
+        ];
+        $sql = '';
+        $plugin_updates = 0;
+        $steps = 0;
+        $producer = $this->createProducer($options);
+        while ($producer->next_sql_fragment()) {
+            $fragment = $producer->get_sql_fragment();
+            $sql .= $fragment . "\n";
+            if (strpos($fragment, 'UPDATE `network_7_plugin_records`') === 0) {
+                ++$plugin_updates;
+            }
+            $options['cursor'] = $producer->get_reentrancy_cursor();
+            $producer->close();
+            $producer = $this->createProducer($options);
+            $this->assertLessThan(500, ++$steps);
+        }
+        $producer->close();
+        $target = $this->executeDumpInNewDatabase($sql);
+        $this->assertContains('network_7_plugin_records', $target->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertNotContains('network_70_plugin_records', $target->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertGreaterThan(3, $plugin_updates, 'The plugin BLOBs must cross several resumable fragments.');
+        $this->assertSame(
+            $this->pdo->query('SELECT CAST(record_id AS CHAR) AS record_id, part, HEX(payload) AS payload FROM network_7_plugin_records ORDER BY part')->fetchAll(),
+            $target->query('SELECT CAST(record_id AS CHAR) AS record_id, part, HEX(payload) AS payload FROM network_7_plugin_records ORDER BY part')->fetchAll()
+        );
+    }
+
     /** Only selected content, related users, and permitted shared settings travel. */
     public function test_selected_site_dump_excludes_sibling_data(): void
     {

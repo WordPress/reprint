@@ -24,7 +24,7 @@ if (is_file('response.json')) {
 // Leave the real endpoint without database credentials, regardless of the
 // developer's or CI worker's database settings.
 putenv('DB_PASSWORD');
-require_once __DIR__ . '/../../../packages/reprint-server/src/class-http-server.php';
+require_once __DIR__ . '/../../../vendor/autoload.php';
 \WordPress\Reprint\Server\HTTPServer::serve([
     'default_directory' => getcwd() . '/remote',
 ]);

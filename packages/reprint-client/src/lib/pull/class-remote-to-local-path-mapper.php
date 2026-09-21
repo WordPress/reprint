@@ -1,11 +1,7 @@
 <?php
 
-use function WordPress\Reprint\Server\assert_valid_path_format;
+use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Reprint\Server\assert_valid_path;
-use function WordPress\Reprint\Server\normalize_path_separators;
-use function WordPress\Reprint\Server\path_is_same_as_or_descendant_of;
-use function WordPress\Reprint\Server\path_remainder_under;
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Filesystem paths are CLI values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
@@ -69,7 +65,7 @@ final class RemoteToLocalPathMapper
         ?string $local_followed_symlinks_root = null
     ) {
         $this->filesystem_root = $filesystem_root;
-        assert_valid_path_format($remote_path_format);
+        Utils::assert_valid_path_format($remote_path_format);
         $this->remote_path_format = $remote_path_format;
         $this->original_remote_absolute_path_roots = $original_remote_absolute_path_roots;
         $this->resolved_path_mappings = $resolved_path_mappings;
@@ -84,12 +80,12 @@ final class RemoteToLocalPathMapper
      */
     public function remote_path_to_local_path(string $remote_absolute_path): string
     {
-        assert_valid_path($remote_absolute_path, $this->remote_path_format, "remote absolute path");
-        $remote_absolute_path = normalize_path_separators($remote_absolute_path, $this->remote_path_format);
+        Utils::assert_valid_path($remote_absolute_path, $this->remote_path_format, "remote absolute path");
+        $remote_absolute_path = Utils::normalize_path_separators($remote_absolute_path, $this->remote_path_format);
         $local_absolute_path = null;
         $longest_remote_prefix_length = -1;
         foreach ($this->resolved_path_mappings as $remote_prefix => $local_prefix) {
-            $remainder = path_remainder_under(
+            $remainder = Utils::path_remainder_under(
                 $remote_absolute_path,
                 $remote_prefix
             );
@@ -115,7 +111,7 @@ final class RemoteToLocalPathMapper
 
         if (
             $this->local_followed_symlinks_root !== null
-            && !path_is_same_as_or_descendant_of(
+            && !Utils::path_is_same_as_or_descendant_of(
                 $remote_absolute_path,
                 $this->original_remote_absolute_path_roots
             )
@@ -160,7 +156,7 @@ final class RemoteToLocalPathMapper
                 as $mapped_remote_absolute_path_prefix => $mapped_local_absolute_path_prefix
             ) {
                 if (
-                    path_remainder_under(
+                    Utils::path_remainder_under(
                         $mapped_remote_absolute_path_prefix,
                         $remote_absolute_path_prefix
                     ) !== null

@@ -58,3 +58,34 @@ jobs:
           MARIADB_SOURCE_PORT: 3307
           MARIADB_SOURCE_USER: root
           MARIADB_SOURCE_PASS: my-secret-pw
+
+  mariadb-auto-increment:
+    name: MyISAM import into enforced InnoDB
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: my-secret-pw
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: pdo, pdo_mysql, mysqli, json, hash, zlib, mbstring
+      - run: composer install --no-interaction --prefer-dist
+      - name: Force InnoDB in the disposable test server
+        run: |
+          php -r '$db = new PDO("mysql:host=127.0.0.1", "root", "my-secret-pw"); $db->exec("SET GLOBAL enforce_storage_engine=InnoDB");'
+      - name: Run schema conversion tests
+        working-directory: tests
+        run: ../vendor/bin/phpunit Import/MysqlAutoIncrementImportTest.php

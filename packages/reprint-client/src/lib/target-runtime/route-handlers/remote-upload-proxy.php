@@ -162,11 +162,9 @@ function remote_upload_proxy_code(): string
 			header('Content-Type: text/plain; charset=UTF-8');
 		}
 		echo "Remote upload proxy failed.";
-		curl_close($curl);
 		exit;
 	}
 
-	curl_close($curl);
 	$send_headers();
 	exit;
 })();

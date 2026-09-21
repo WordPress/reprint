@@ -58,6 +58,158 @@ class NewSiteUrlTest extends TestCase
         return $options;
     }
 
+    /** A selected subsite moves without rewriting the old network's home page. */
+    public function testMultisiteUsesSelectedSiteAndAssetUrls(): void
+    {
+        $client = $this->multisiteClient();
+        $options = $this->callResolve($client, ['new_site_url' => 'http://localhost:9000', 'site_admin' => 'chosen']);
+        $mapping = array_column($options['rewrite_url'], 1, 0);
+        $this->assertSame('https://network.test', $mapping['https://network.test']);
+        $this->assertSame('http://localhost:9000', $mapping['https://network.test/shop']);
+    }
+
+    /** Extra CLI rules must not change the base used to resolve relative site links. */
+    public function testCustomMappingKeepsSelectedHomeAsTheRelativeLinkBase(): void
+    {
+        $options = $this->callResolve($this->multisiteClient(), [
+            'new_site_url' => 'https://target.test',
+            'rewrite_url' => [
+                ['https://cdn.example/assets', 'https://new-cdn.example/assets'],
+                ['https://network.test/shop', 'https://wrong.test'],
+            ],
+        ]);
+        $mapping = array_column($options['rewrite_url'], 1, 0);
+        $rewriter = new \StructuredDataUrlRewriter($mapping, ['https://network.test' => ['/shop/news/']]);
+        foreach ([
+            'about/article' => '/about/article',
+            'news/article' => 'https://network.test/shop/news/article',
+            '/sibling/article' => 'https://network.test/sibling/article',
+            'https://cdn.example/assets/photo.jpg' => 'https://new-cdn.example/assets/photo.jpg',
+        ] as $input => $expected) {
+            $this->assertSame('<a href="' . $expected . '">link</a>', $rewriter->rewrite(
+                '<a href="' . $input . '">link</a>', \StructuredDataUrlRewriter::BLOCK_MARKUP
+            ));
+        }
+        $this->assertSame('https://target.test', $mapping['https://network.test/shop']);
+    }
+
+    /** HTTP schemes, IDNs and default ports use the toolkit parser's spelling.
+     * @dataProvider supportedMultisiteTargetUrls
+     */
+    public function testMultisiteTargetUrlIsNormalized(string $input, string $expected): void
+    {
+        $options = $this->callResolve($this->multisiteClient(), ['new_site_url' => $input]);
+        $mapping = array_column($options['rewrite_url'], 1, 0);
+        $this->assertSame($expected, $options['new_site_url']);
+        $this->assertSame($expected, $mapping['https://network.test/shop']);
+    }
+
+    /** User URL spellings accepted after parsing, not after a character allowlist. */
+    public static function supportedMultisiteTargetUrls(): array
+    {
+        return [
+            ['HTTPS://TARGET.TEST:443/', 'https://target.test'],
+            ['https://café.test/', 'https://xn--caf-dma.test'],
+            ['http://localhost:9000/', 'http://localhost:9000'],
+            ['http://127.1', 'http://127.0.0.1'],
+            ['http://2130706433', 'http://127.0.0.1'],
+            ['http://0x7f000001', 'http://127.0.0.1'],
+            ['http://0177.0.0.1', 'http://127.0.0.1'],
+            ['http://[::1]', 'http://[::1]'],
+            ['http://[::ffff:127.0.0.1]', 'http://[::ffff:7f00:1]'],
+            ['https://target.test.', 'https://target.test.'],
+            ['https://target_test', 'https://target_test'],
+            ['https://a"b.test', 'https://a"b.test'],
+            ['https://a..b', 'https://a..b'],
+            ['https://a.-b', 'https://a.-b'],
+            ['https://' . str_repeat('a', 64) . '.test', 'https://' . str_repeat('a', 64) . '.test'],
+        ];
+    }
+
+    /** Both CLI URL options reject unsupported destinations before opening MySQL.
+     * @dataProvider unsupportedMultisiteTargetUrls
+     */
+    public function testMultisiteTargetUrlIsRejectedAtTheCommandBoundary(string $url, string $option): void
+    {
+        $client = $this->multisiteClient();
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage($option);
+        if ($option === '--new-site-url') {
+            $this->callResolve($client, ['new_site_url' => $url, 'site_admin' => 'chosen']);
+        } else {
+            file_put_contents($this->tempDir . '/db.sql', '');
+            $client->run_db_apply([
+                'target_engine' => 'mysql', 'target_user' => 'unused', 'target_db' => 'unused',
+                'rewrite_url' => [['https://network.test/shop', $url]], 'site_admin' => 'chosen',
+            ]);
+        }
+    }
+
+    /** Reject invalid URLs and destinations which cannot serve as the site origin. */
+    public static function unsupportedMultisiteTargetUrls(): array
+    {
+        $cases = [];
+        foreach (['http://256.1.1.1', 'https://target.test:65536', 'https://target.test:0',
+            'https://target.test/shop', 'https://user:pass@target.test', 'https://target.test/?',
+            'https://target.test/#', 'ftp://target.test', 'not a URL', ''] as $url) {
+            foreach (['--new-site-url', '--rewrite-url'] as $option) {
+                $cases[$option . '=' . $url] = [$url, $option];
+            }
+        }
+        return $cases;
+    }
+
+    /** A mapping is also used by db-rewrite-urls, which does not grant a user any role. */
+    public function testBuildingMultisiteUrlMappingsDoesNotRequireAnAdministrator(): void
+    {
+        $options = $this->callResolve($this->multisiteClient(), ['new_site_url' => 'http://localhost:9000']);
+        $this->assertNotEmpty($options['rewrite_url']);
+    }
+
+    /** The apply command requires a login before any target connection or state change. */
+    public function testMultisiteApplyRequiresAnAdministrator(): void
+    {
+        $client = $this->multisiteClient();
+        file_put_contents($this->tempDir . '/db.sql', '');
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('--site-admin');
+        $client->run_db_apply([
+            'target_engine' => 'mysql', 'target_user' => 'unused', 'target_db' => 'unused',
+            'new_site_url' => 'https://target.test',
+        ]);
+    }
+
+    /** A standalone runtime command reports missing apply choices before creating files. */
+    public function testMultisiteRuntimeRequiresPriorApplyChoices(): void
+    {
+        $client = $this->multisiteClient();
+        $output = $this->tempDir . '/runtime';
+        try {
+            $client->run_apply_runtime(['runtime' => 'php-builtin', 'output_dir' => $output]);
+            $this->fail('Accepted a runtime command without a selected-site target URL.');
+        } catch (\InvalidArgumentException $error) {
+            $this->assertStringContainsString('Run db-apply', $error->getMessage());
+            $this->assertDirectoryDoesNotExist($output);
+        }
+    }
+
+    /** Use the metadata produced by the selected-site preflight response. */
+    private function multisiteClient(): \ImportClient
+    {
+        $client = new \ImportClient('https://network.test/shop/?reprint-api', $this->tempDir, $this->tempDir . '/fs-root');
+        $client->get_state()->set_preflight_record(['data' => ['database' => ['wp' => ['multisite' => [
+            'enabled' => true,
+            'selection' => [
+                'site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_',
+                'home_url' => 'https://network.test/shop', 'site_url' => 'https://network.test/shop',
+                'content_url' => 'https://network.test/wp-content',
+                'network_content_url' => 'https://network.test/wp-content',
+                'uploads_url' => 'https://network.test/wp-content/uploads/sites/7',
+            ],
+        ]]]]]);
+        return $client;
+    }
+
     public function testDerivesHttpAndHttpsFromHttpsUrl(): void
     {
         $client = new \ImportClient(

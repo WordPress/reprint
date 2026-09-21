@@ -129,22 +129,19 @@ describe('Import: Runtime file download', () => {
         );
     });
 
-    it('preflight stdout is single-line JSON (not pretty-printed)', () => {
-        const lines = preflightResult.stdout.trim().split('\n');
-        const lastLine = lines[lines.length - 1];
-        let parsed;
-        try {
-            parsed = JSON.parse(lastLine);
-        } catch {
-            assert.fail(
-                `Last stdout line is not valid JSON: ${lastLine.substring(0, 200)}`,
-            );
-        }
-        assert.ok(parsed.timestamp, 'Parsed result should have a timestamp field');
-        assert.ok(
-            !lastLine.includes('\n'),
-            'Preflight result must be a single line so last-line trackers can capture it',
-        );
+    it('preflight prints its data and final report as separate JSON lines', () => {
+        const records = preflightResult.stdout.trim().split('\n').map(line => JSON.parse(line));
+        // Downloading runtime files can emit progress before the preflight data.
+        const preflightRecords = records.filter(record => record.data !== undefined);
+        const reports = records.filter(record => record.type === 'reprint_report');
+        assert.equal(preflightRecords.length, 1, 'Preflight data should appear once');
+        assert.ok(preflightRecords[0].timestamp, 'Preflight data should retain its timestamp');
+        assert.ok(preflightRecords[0].data, 'Preflight data should remain available');
+        assert.equal(reports.length, 1, 'Preflight should emit exactly one final report');
+        assert.equal(reports[0], records.at(-1), 'The command report should be the last record');
+        assert.equal(reports[0].command, 'preflight');
+        assert.equal(reports[0].status, 'complete');
+        assert.equal(reports[0].exit_code, preflightResult.exitCode);
     });
 
     it('audit log does NOT contain "Fetch failed"', () => {

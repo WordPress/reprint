@@ -140,6 +140,7 @@ final class RequestUrlPathEncodingTest extends TestCase
         $this->assertSame([
             'endpoint' => 'file_index',
             'directory' => [base64_encode('/srv/body-directory')],
+            'multisite_mode' => 'one-site-network-v1',
         ], $request['params']);
     }
 
@@ -233,7 +234,10 @@ final class RequestUrlPathEncodingTest extends TestCase
         );
 
         $this->assertSame('https://example.com/?site-export-api&route=export', $request['url']);
-        $this->assertSame(['endpoint' => 'sql_chunk'] + $params + ['cursor' => $cursor], $request['params']);
+        $this->assertSame(['endpoint' => 'sql_chunk'] + $params + [
+            'multisite_mode' => 'one-site-network-v1',
+            'cursor' => $cursor,
+        ], $request['params']);
     }
 
     private function remove_tree(string $path): void

@@ -911,6 +911,14 @@ class DatabaseRowsReader {
                     // values and cursor comparisons numeric without a PHP cast
                     // that could lose the upper half of BIT(64)'s range.
                     $select_parts[] = "CAST({$quoted_column} AS UNSIGNED) AS {$quoted_column}";
+                } elseif ($this->db instanceof SqliteDriverPDO && PHP_VERSION_ID < 80100
+                    && !$this->is_numeric_type($column_info["data_type"])) {
+                    // Before PHP 8.1, PDO SQLite returns an empty BLOB as NULL.
+                    // For example, CAST(permalink_structure AS BINARY) loses an
+                    // empty option value. Return SQL text '' for zero bytes, but
+                    // keep real NULLs and non-empty binary bytes unchanged.
+                    $select_parts[] = "CASE WHEN LENGTH(CAST({$quoted_column} AS BINARY)) = 0 THEN '' " .
+                        "ELSE CAST({$quoted_column} AS BINARY) END AS {$quoted_column}";
                 } elseif (
                     $this->is_numeric_type($column_info["data_type"]) ||
                     $this->is_binary_type($column_info["data_type"])

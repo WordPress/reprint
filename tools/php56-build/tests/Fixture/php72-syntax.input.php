@@ -4,6 +4,8 @@ use Throwable as FixtureThrowable;
 
 $fixture_calls = 0;
 $fixture_map_calls = 0;
+$fixture_static_calls = 0;
+$fixture_method_calls = 0;
 
 function fixture_nullable_value(): ?string
 {
@@ -28,6 +30,18 @@ final class Php72SyntaxFixture extends Php56ParentFixture
 
     private $optional;
 
+    public static function nullableStatic(): ?string
+    {
+        ++$GLOBALS['fixture_static_calls'];
+        return null;
+    }
+
+    public function nullableMethod(): ?string
+    {
+        ++$GLOBALS['fixture_method_calls'];
+        return null;
+    }
+
     /** Kept on the generated method. */
     public function render(?string $value, array $options = []): string
     {
@@ -42,8 +56,10 @@ final class Php72SyntaxFixture extends Php56ParentFixture
         $secret = fixture_nullable_value() ?? 'secret-default';
         $user = fixture_map()['user'] ?? 'map-default';
         $nested = ($options['nested'] ?? null) ?? 'nested-default';
+        $static = self::nullableStatic() ?? 'static-default';
+        $method = $this->nullableMethod() ?? 'method-default';
 
-        return implode('|', [$value, $host, $optional, $address, $port, $name, $enabled, $secret, $user, $nested]);
+        return implode('|', [$value, $host, $optional, $address, $port, $name, $enabled, $secret, $user, $nested, $static, $method]);
     }
 
     public function preservedHints(
@@ -65,4 +81,6 @@ echo json_encode([
     ]),
     $fixture_calls,
     $fixture_map_calls,
+    $fixture_static_calls,
+    $fixture_method_calls,
 ]);

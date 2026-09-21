@@ -4,8 +4,6 @@ namespace WordPress\Reprint\Server;
 
 use InvalidArgumentException;
 
-require_once __DIR__ . '/utils.php';
-
 if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
     require_once __DIR__ . '/class-resource-budget.php';
 }
@@ -250,7 +248,7 @@ final class HTTPServer {
                     // Do not decode first: PHP accepts a raw path such as /tmp
                     // as strict base64 and turns it into unrelated bytes. Check
                     // for an absolute root in this source host's format before decoding.
-                    if (is_string($path_value) && is_absolute_path($path_value, native_path_format())) {
+                    if (is_string($path_value) && Utils::is_absolute_path($path_value, Utils::native_path_format())) {
                         $decoded_path = $path_value;
                     } else {
                         $decoded_path = is_string($path_value)
@@ -259,7 +257,7 @@ final class HTTPServer {
                     }
                     if (
                         $decoded_path === false
-                        || !is_absolute_path($decoded_path, native_path_format())
+                        || !Utils::is_absolute_path($decoded_path, Utils::native_path_format())
                     ) {
                         $entry = is_array($value) ? ' entry ' . $path_key : '';
                         $observed = is_string($path_value)
@@ -292,9 +290,11 @@ final class HTTPServer {
     public function normalize_config(array $config, array $server = []): array {
         unset($config['_multisite']);
         if ($this->multisite !== null) {
+            // This existing wire value names the selected-site export format.
+            // It does not require the client to create a multisite target.
             if (( $config['multisite_mode'] ?? null ) !== 'one-site-network-v1') {
                 throw new InvalidArgumentException(
-                    'This source requires a Reprint client that supports pulling one site into a one-site network. Update the client.'
+                    'This source requires a Reprint client that supports exporting one selected network site. Update the client.'
                 );
             }
             if (!in_array($config['endpoint'] ?? '', ['preflight', 'sql_chunk', 'file_index', 'file_fetch'], true)) {
@@ -461,7 +461,7 @@ final class HTTPServer {
         );
 
         $memory_limit = ini_get('memory_limit');
-        $max_memory = $memory_limit === '-1' ? PHP_INT_MAX : parse_size((string) $memory_limit);
+        $max_memory = $memory_limit === '-1' ? PHP_INT_MAX : Utils::parse_size((string) $memory_limit);
 
         return new ResourceBudget(
             microtime(true),

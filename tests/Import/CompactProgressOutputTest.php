@@ -54,8 +54,8 @@ final class CompactProgressOutputTest extends TestCase {
         $plain = $this->run_command('preflight');
         $compact = $this->run_command('preflight', ['--progress=compact']);
         $this->assertSame(0, $compact['exit_code'], $compact['stderr']);
-        $plain_record = json_decode($plain['stdout'], true);
-        $compact_record = json_decode($compact['stdout'], true);
+        $plain_record = json_decode(explode("\n", $plain['stdout'])[0], true);
+        $compact_record = json_decode(explode("\n", $compact['stdout'])[0], true);
         $this->assertSame(array_keys($plain_record), array_keys($compact_record));
         $this->assertSame($plain_record['data'], $compact_record['data']);
         $this->assertFileDoesNotExist($this->root . '/state/progress.jsonl');
@@ -80,10 +80,10 @@ final class CompactProgressOutputTest extends TestCase {
         $this->assertStringContainsString('files-pull complete:', file_get_contents($this->root . '/state/audit.log'));
         $this->assertStringNotContainsString('"type":"skip"', $result['stdout']);
         $this->assertStringNotContainsString('"type":"file_progress"', $result['stdout']);
-        $this->assertStringNotContainsString('reprint_report', $result['stdout']);
         $records = array_map(static function (string $line): array {
             return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
         }, explode("\n", trim($result['stdout'])));
+        $this->assertSame('reprint_report', $records[count($records) - 1]['type']);
         $this->assertSame(['starting', 'stage', 'stage', 'complete'], array_column($records, 'event'));
         $this->assertSame(['diff', 'fetch'], array_column($records, 'stage'));
         $this->assertSame('local', file_get_contents($local_directory . '/file-0'));
