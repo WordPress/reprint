@@ -711,18 +711,13 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     // ── OpenSSL host (the test runtime's real state) ──
 
-    /**
-     * The host rule is read before any credential: a token request never
-     * reaches the enrolled-key check, so a token-only site still answers
-     * requires_key_auth. not_configured is the answer to a key request.
-     */
-    public function testKeyHostWithOnlyATokenRequiresKeyAuth(): void
+    public function testKeyHostWithOnlyATokenIsNotConfigured(): void
     {
         update_option(CONNECTION_TOKEN_OPTION, 'token');
         $client = new Site_Export_HMAC_Client('token');
         $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
-        $this->assertSame(403, $response['status']);
-        $this->assertSame('requires_key_auth', $response['body']['reason']);
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
     }
 
     public function testKeyHostWithOnlyATokenIsNotConfiguredForAKeyRequest(): void

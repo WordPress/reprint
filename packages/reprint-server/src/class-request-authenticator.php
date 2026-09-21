@@ -106,11 +106,14 @@ final class RequestAuthenticator {
             return null;
         }
 
-        if (!$has_key_id) {
-            return $this->fail(self::REASON_REQUIRES_KEY_AUTH, 'This host requires key authentication; connection tokens are not accepted');
-        }
+        // No keys enrolled answers first: a site that upgraded with only a
+        // token stored tells its existing token clients to enroll a key
+        // rather than reporting a scheme mismatch they cannot act on.
         if (empty($this->public_keys_by_id)) {
             return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: this host requires key authentication and no keys are enrolled');
+        }
+        if (!$has_key_id) {
+            return $this->fail(self::REASON_REQUIRES_KEY_AUTH, 'This host requires key authentication; connection tokens are not accepted');
         }
         $public_key_server = new PublicKeyServer($this->public_keys_by_id, $this->timestamp_tolerance, $this->cursor_header_name, true);
         $error = $public_key_server->verify($headers, $method, $request_target, $body, $files, $cursor, $is_push_endpoint, $now);
@@ -126,13 +129,11 @@ final class RequestAuthenticator {
      * query-string endpoint, exactly as HTTPServer::handle_request() makes it:
      * every push_-prefixed endpoint, known or not, uses the push request
      * contract, so an unknown one answers "Invalid endpoint" after
-     * authenticating instead of failing its envelope signature.
+     * authenticating instead of failing its envelope signature. Push
+     * endpoints leave the body unread because the envelope contract signs
+     * method and target only; the endpoint streams php://input itself.
      */
     public function verify_globals(?float $now = null): ?string {
-        $body = file_get_contents('php://input');
-        if ($body === false) {
-            $body = '';
-        }
         // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Exact request-line values are covered by the signature.
         $method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
@@ -142,6 +143,13 @@ final class RequestAuthenticator {
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
 
         $is_push_endpoint = strpos($endpoint, 'push_') === 0;
+        $body = null;
+        if (!$is_push_endpoint) {
+            $body = file_get_contents('php://input');
+            if ($body === false) {
+                $body = '';
+            }
+        }
 
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Request headers are covered by the signature, not a nonce field.
         return $this->verify($_SERVER, $method, $request_target, $body, $_FILES, $cursor, $is_push_endpoint, $now);

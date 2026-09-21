@@ -123,6 +123,21 @@ final class RequestAuthenticatorTest extends TestCase
         $this->assertSame(RequestAuthenticator::REASON_REQUIRES_KEY_AUTH, $authenticator->last_error_reason());
     }
 
+    /**
+     * A site that upgraded with only a token stored answers not_configured to
+     * its existing token clients until a key is enrolled; the scheme mismatch
+     * is reported only once a key exists.
+     */
+    public function testKeyHostWithNoKeysIsNotConfiguredForATokenRequest(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_auth_headers('');
+        $authenticator = new RequestAuthenticator(self::SECRET, [], 300, true);
+
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
+    }
+
     public function testKeyHostWithNoKeysIsNotConfiguredRegardlessOfToken(): void
     {
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');

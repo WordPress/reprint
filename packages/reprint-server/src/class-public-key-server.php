@@ -69,7 +69,8 @@ final class PublicKeyServer {
      * @param string|null $body                   Raw body, or null when unavailable.
      * @param array       $files                  $_FILES-style uploads; hashed instead of $body when non-empty.
      * @param string|null $cursor                 Cursor header value, or null.
-     * @param bool        $allow_unsigned_payload True only for push endpoints.
+     * @param bool        $allow_unsigned_payload True only for push endpoints, whose body is never
+     *                                            read here: they must send the UNSIGNED-PAYLOAD literal.
      * @param float|null  $now                    Current time; tests pass a fixed value.
      */
     public function verify(
@@ -133,6 +134,10 @@ final class PublicKeyServer {
             if (!$allow_unsigned_payload) {
                 return $this->fail(self::REASON_AUTH_FAILED, 'Unsigned payloads are accepted only for push endpoints');
             }
+        } elseif ($allow_unsigned_payload) {
+            // Mirrors HMACServer::verify_envelope(): the push body is streamed
+            // by the endpoint and was never read, so there is nothing to hash.
+            return $this->fail(self::REASON_AUTH_FAILED, 'Push endpoints require the literal UNSIGNED-PAYLOAD content hash');
         } else {
             try {
                 $actual_content_hash = $this->compute_received_content_hash($body, $files);
@@ -171,13 +176,11 @@ final class PublicKeyServer {
      * from $_FILES, the cursor from the configured header, and the push
      * decision from the query-string endpoint, the same way
      * HTTPServer::handle_request() makes it: every push_-prefixed endpoint,
-     * known or not, uses the push request contract.
+     * known or not, uses the push request contract. Push endpoints leave the
+     * body unread because the envelope contract signs method and target
+     * only; the endpoint streams php://input itself.
      */
     public function verify_globals(?float $now = null): ?string {
-        $body = file_get_contents('php://input');
-        if ($body === false) {
-            $body = '';
-        }
         // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Exact request-line values are covered by the signature.
         $method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
@@ -186,6 +189,13 @@ final class PublicKeyServer {
         $endpoint = isset($_GET['endpoint']) && is_string($_GET['endpoint']) ? $_GET['endpoint'] : '';
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
         $allow_unsigned_payload = strpos($endpoint, 'push_') === 0;
+        $body = null;
+        if (!$allow_unsigned_payload) {
+            $body = file_get_contents('php://input');
+            if ($body === false) {
+                $body = '';
+            }
+        }
 
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Request headers are covered by the signature, not a nonce field.
         return $this->verify($_SERVER, $method, $request_target, $body, $_FILES, $cursor, $allow_unsigned_payload, $now);

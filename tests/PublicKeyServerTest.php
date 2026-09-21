@@ -189,6 +189,23 @@ final class PublicKeyServerTest extends TestCase
         $this->assertSame('Unsigned payloads are accepted only for push endpoints', $server->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed bytes', [], null, false, $this->now($headers)));
     }
 
+    /**
+     * Push bodies are streamed by the endpoint and never read during
+     * authentication, so a body-hashed signature cannot be checked there.
+     */
+    public function testPushEndpointRejectsABodyHashedSignature(): void
+    {
+        $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload', 'streamed bytes');
+        $server = $this->server();
+
+        $this->assertSame(
+            'Push endpoints require the literal UNSIGNED-PAYLOAD content hash',
+            $server->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', null, [], null, true, $this->now($headers))
+        );
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertNull($server->authenticated_key_id());
+    }
+
     public function testMultipartUploadsAreHashedFromTmpFiles(): void
     {
         $temporary_upload_path = tempnam(sys_get_temp_dir(), 'pk');
@@ -222,6 +239,43 @@ final class PublicKeyServerTest extends TestCase
         $_GET = [];
 
         $this->assertNull($this->server()->verify_globals($this->now($headers)));
+    }
+
+    /**
+     * A push request verifies from superglobals through the envelope alone.
+     * php://input is empty under CLI PHPUnit, so the proof is structural: the
+     * declared body length plays no part, and a body-hashed signature for the
+     * same request is refused before any body would be hashed.
+     */
+    public function testVerifyGlobalsLeavesAPushBodyUnread(): void
+    {
+        $headers = self::$client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
+        $_SERVER = [
+            'REQUEST_METHOD' => 'POST',
+            'REQUEST_URI' => '/?reprint-api&endpoint=push_upload',
+            'CONTENT_LENGTH' => '4194304',
+            'CONTENT_TYPE' => 'application/octet-stream',
+            'HTTP_X_AUTH_KEY_ID' => $headers['X-Auth-Key-Id'],
+            'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
+            'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
+            'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
+            'HTTP_X_AUTH_CONTENT_HASH' => $headers['X-Auth-Content-Hash'],
+        ];
+        $_FILES = [];
+        $_GET = ['reprint-api' => '', 'endpoint' => 'push_upload'];
+
+        $this->assertNull($this->server()->verify_globals($this->now($headers)));
+
+        $body_hashed_headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload', '');
+        $_SERVER['HTTP_X_AUTH_SIGNATURE'] = $body_hashed_headers['X-Auth-Signature'];
+        $_SERVER['HTTP_X_AUTH_NONCE'] = $body_hashed_headers['X-Auth-Nonce'];
+        $_SERVER['HTTP_X_AUTH_TIMESTAMP'] = $body_hashed_headers['X-Auth-Timestamp'];
+        $_SERVER['HTTP_X_AUTH_CONTENT_HASH'] = $body_hashed_headers['X-Auth-Content-Hash'];
+
+        $this->assertSame(
+            'Push endpoints require the literal UNSIGNED-PAYLOAD content hash',
+            $this->server()->verify_globals($this->now($body_hashed_headers))
+        );
     }
 
     public function testRequestedKeyIdReadsEitherHeaderConvention(): void
