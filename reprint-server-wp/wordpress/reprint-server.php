@@ -24,6 +24,10 @@ class SettingsPage {
         add_action('admin_post_reprint_server_save_network_token', [$this, 'handle_network_token_save']);
         add_action('admin_init', [$this, 'register_settings_fields']);
         add_action('admin_post_reprint_server_save_push_access', [$this, 'handle_push_access_save']);
+        add_action('admin_post_reprint_server_enroll_public_key', [$this, 'handle_public_key_enroll']);
+        add_action('admin_post_reprint_server_remove_public_key', [$this, 'handle_public_key_remove']);
+        add_action('admin_post_reprint_server_save_key_push_access', [$this, 'handle_key_push_access_save']);
+        add_action('admin_post_reprint_server_remove_connection_token', [$this, 'handle_connection_token_remove']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
         add_filter(
             'plugin_action_links_' . plugin_basename(PLUGIN_DIR . 'index.php'),
@@ -67,13 +71,19 @@ class SettingsPage {
             'This network token can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
             'reprint'
         ) . '</p>';
-        $this->render_configuration_status(get_configuration_state());
+        $configuration = get_configuration_state();
+        $this->render_push_access_notice();
+        $this->render_configuration_status($configuration);
+        $this->render_scheme_status($configuration);
         echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
         echo '<input type="hidden" name="action" value="reprint_server_save_network_token" />';
         wp_nonce_field('reprint_server_save_network_token');
         $this->render_connection_token_field();
         submit_button();
-        echo '</form></div>';
+        echo '</form>';
+        echo '<hr /><h2>' . esc_html__('Public keys', 'reprint') . '</h2>';
+        $this->render_public_keys_section($configuration);
+        echo '</div>';
     }
 
     /** Validate network capability and nonce before updating the network token. */
@@ -186,6 +196,80 @@ class SettingsPage {
         exit;
     }
 
+    /** Validate capability and nonce, then enroll one pasted public key. */
+    public function handle_public_key_enroll(): void {
+        $this->require_manage_capability();
+        check_admin_referer('reprint_server_enroll_public_key');
+        // The textarea sanitizer keeps the PEM line breaks; assert_valid_public_key() parses the result.
+        $pasted_key = isset($_POST['reprint_server_public_key']) && is_string($_POST['reprint_server_public_key'])
+            ? sanitize_textarea_field(wp_unslash($_POST['reprint_server_public_key']))
+            : '';
+        $label = isset($_POST['reprint_server_key_label']) && is_string($_POST['reprint_server_key_label'])
+            ? sanitize_text_field(wp_unslash($_POST['reprint_server_key_label']))
+            : '';
+        $result = enroll_public_key($pasted_key, $label);
+        $query = ['reprint_server_notice' => $result === 'saved' ? 'enrolled' : 'enroll_' . $result];
+        if ($result === 'saved') {
+            $query['reprint_server_key_id'] = (string) get_last_enrolled_key_id();
+        }
+        $this->redirect_to_page($query);
+    }
+
+    /** Validate capability and nonce, then remove one enrolled key. */
+    public function handle_public_key_remove(): void {
+        $this->require_manage_capability();
+        check_admin_referer('reprint_server_remove_public_key');
+        $key_id = isset($_POST['reprint_server_key_id']) && is_string($_POST['reprint_server_key_id'])
+            ? sanitize_key(wp_unslash($_POST['reprint_server_key_id']))
+            : '';
+        $result = remove_public_key($key_id);
+        $this->redirect_to_page(['reprint_server_notice' => $result === 'saved' ? 'key_removed' : 'remove_' . $result]);
+    }
+
+    /** Validate capability and nonce, then grant or revoke push for one key. */
+    public function handle_key_push_access_save(): void {
+        $this->require_manage_capability();
+        check_admin_referer('reprint_server_save_key_push_access');
+        $key_id = isset($_POST['reprint_server_key_id']) && is_string($_POST['reprint_server_key_id'])
+            ? sanitize_key(wp_unslash($_POST['reprint_server_key_id']))
+            : '';
+        $enabled = isset($_POST['reprint_server_key_push_enabled']);
+        $result = change_key_push_access($key_id, $enabled);
+        $this->redirect_to_page(['reprint_server_notice' => $result === 'saved' ? 'key_push_saved' : 'key_push_' . $result]);
+    }
+
+    /**
+     * Validate capability and nonce, then clear the option-backed connection token.
+     *
+     * Offered on a key host, where a stored token is never accepted; the plugin
+     * does not delete a credential the administrator set without being asked.
+     */
+    public function handle_connection_token_remove(): void {
+        $this->require_manage_capability();
+        check_admin_referer('reprint_server_remove_connection_token');
+        $result = change_connection_token('');
+        $this->redirect_to_page([
+            'reprint_server_notice' => $result === 'storage_failure' ? 'token_remove_storage_failure' : 'token_removed',
+        ]);
+    }
+
+    /** Stop with wp_die() unless the current user may manage this site's, or on multisite the network's, options. */
+    private function require_manage_capability(): void {
+        $capability = is_multisite() ? 'manage_network_options' : 'manage_options';
+        if (!current_user_can($capability)) {
+            wp_die(esc_html__('You are not allowed to manage Reprint Server.', 'reprint'));
+        }
+    }
+
+    /** @param array<string,string> $query */
+    private function redirect_to_page(array $query): void {
+        $base = is_multisite()
+            ? network_admin_url('settings.php?page=reprint-server')
+            : admin_url('tools.php?page=reprint-server');
+        wp_safe_redirect(add_query_arg($query, $base));
+        exit;
+    }
+
     /** Render the bundled Tools page. */
     public function render_admin_page(): void {
         if (is_multisite()) {
@@ -213,12 +297,37 @@ class SettingsPage {
             <?php $this->render_settings_notices(); ?>
             <?php $this->render_push_access_notice(); ?>
             <?php $this->render_configuration_status($configuration); ?>
+            <?php $this->render_scheme_status($configuration); ?>
 
-            <form method="post" action="options.php">
-                <?php settings_fields('reprint_server'); ?>
-                <?php do_settings_sections('reprint-server'); ?>
-                <?php submit_button(); ?>
-            </form>
+            <?php if ($configuration['required_scheme'] === 'hmac'): ?>
+                <form method="post" action="options.php">
+                    <?php settings_fields('reprint_server'); ?>
+                    <?php do_settings_sections('reprint-server'); ?>
+                    <?php submit_button(); ?>
+                </form>
+            <?php elseif ($configuration['stored_connection_token'] !== '' || $configuration['has_connection_token_file']): ?>
+                <h2><?php echo esc_html__('Connection token', 'reprint'); ?></h2>
+                <p class="description">
+                <?php
+                echo esc_html(
+                    $configuration['has_connection_token_file']
+                        ? __('secret.php is present but not accepted on this host. Remove it.', 'reprint')
+                        : __('A connection token is stored but not accepted on this host. It is safe to remove.', 'reprint')
+                );
+                ?>
+                </p>
+                <?php if ($configuration['stored_connection_token'] !== '' && !$configuration['has_connection_token_file']): ?>
+                    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                        <input type="hidden" name="action" value="reprint_server_remove_connection_token" />
+                        <?php wp_nonce_field('reprint_server_remove_connection_token'); ?>
+                        <?php submit_button(__('Remove connection token', 'reprint'), 'secondary', 'submit', false); ?>
+                    </form>
+                <?php endif; ?>
+            <?php endif; ?>
+
+            <hr />
+            <h2><?php echo esc_html__('Public keys', 'reprint'); ?></h2>
+            <?php $this->render_public_keys_section($configuration); ?>
 
             <?php if ($configuration['is_configured']): ?>
                 <hr />
@@ -300,6 +409,104 @@ class SettingsPage {
         $this->render_notice('info', $message);
     }
 
+    /**
+     * One sentence saying which scheme this host accepts. Nothing on the page changes it.
+     *
+     * @param array $configuration Configuration returned by get_configuration_state().
+     */
+    private function render_scheme_status(array $configuration): void {
+        $message = $configuration['required_scheme'] === 'key'
+            ? esc_html__('This host has OpenSSL. Clients authenticate with public keys; connection tokens are not accepted.', 'reprint')
+            : esc_html__('This host has no OpenSSL. Clients authenticate with a connection token; public keys are enrolled but not in use on this host.', 'reprint');
+        $this->render_notice('info', '<strong>' . $message . '</strong>');
+    }
+
+    /**
+     * Enrollment form and the enrolled-key table.
+     *
+     * @param array $configuration Configuration returned by get_configuration_state().
+     */
+    private function render_public_keys_section(array $configuration): void {
+        $file_override = $configuration['has_public_keys_file'];
+        $post_url = admin_url('admin-post.php');
+        if ($file_override) {
+            $this->render_notice('warning', '<strong><code>public-keys.php</code> '
+                . esc_html__('override is active.', 'reprint') . '</strong> '
+                . esc_html__('Keys come from that file; this page cannot change them.', 'reprint'));
+        }
+        if ($configuration['required_scheme'] === 'key' && $configuration['enrolled_keys'] === []) {
+            $this->render_notice('warning', esc_html__('No client can connect until a key is enrolled.', 'reprint'));
+        }
+        ?>
+        <form method="post" action="<?php echo esc_url($post_url); ?>">
+            <input type="hidden" name="action" value="reprint_server_enroll_public_key" />
+            <?php wp_nonce_field('reprint_server_enroll_public_key'); ?>
+            <p>
+                <label for="reprint_server_public_key"><?php echo esc_html__('Public key', 'reprint'); ?></label><br />
+                <textarea id="reprint_server_public_key" name="reprint_server_public_key" rows="4" class="large-text code"<?php disabled($file_override); ?>></textarea>
+            </p>
+            <p class="description">
+            <?php
+            echo esc_html__(
+                'Paste the public key printed by "reprint keygen" or by "reprint pull". A PEM block or the single line are both accepted.',
+                'reprint'
+            );
+            ?>
+            </p>
+            <p>
+                <label for="reprint_server_key_label"><?php echo esc_html__('Label', 'reprint'); ?></label><br />
+                <input type="text" id="reprint_server_key_label" name="reprint_server_key_label" class="regular-text"<?php disabled($file_override); ?> />
+            </p>
+            <?php submit_button(__('Enroll key', 'reprint'), 'secondary', 'submit', false, $file_override ? ['disabled' => 'disabled'] : []); ?>
+        </form>
+
+        <?php if ($configuration['enrolled_keys'] !== []): ?>
+        <table class="widefat striped">
+            <thead>
+                <tr>
+                    <th><?php echo esc_html__('Key id', 'reprint'); ?></th>
+                    <th><?php echo esc_html__('Label', 'reprint'); ?></th>
+                    <th><?php echo esc_html__('Added', 'reprint'); ?></th>
+                    <th><?php echo esc_html__('May push', 'reprint'); ?></th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($configuration['enrolled_keys'] as $entry): ?>
+                <tr>
+                    <td><code><?php echo esc_html($entry['key_id']); ?></code></td>
+                    <td><?php echo esc_html($entry['label']); ?></td>
+                    <td><?php echo esc_html($entry['added_at'] > 0 ? gmdate('Y-m-d', $entry['added_at']) : '—'); ?></td>
+                    <td>
+                        <form method="post" action="<?php echo esc_url($post_url); ?>" style="display:inline">
+                            <input type="hidden" name="action" value="reprint_server_save_key_push_access" />
+                            <input type="hidden" name="reprint_server_key_id" value="<?php echo esc_attr($entry['key_id']); ?>" />
+                            <?php wp_nonce_field('reprint_server_save_key_push_access'); ?>
+                            <label>
+                                <input type="checkbox" name="reprint_server_key_push_enabled" value="1"
+                                    <?php checked($entry['push']); ?>
+                                    <?php disabled(!$configuration['push_supported'] || $configuration['managed_push_enabled'] !== null || $file_override); ?>
+                                    onchange="this.form.submit()" />
+                                <?php echo esc_html__('Allow push', 'reprint'); ?>
+                            </label>
+                        </form>
+                    </td>
+                    <td>
+                        <form method="post" action="<?php echo esc_url($post_url); ?>" style="display:inline">
+                            <input type="hidden" name="action" value="reprint_server_remove_public_key" />
+                            <input type="hidden" name="reprint_server_key_id" value="<?php echo esc_attr($entry['key_id']); ?>" />
+                            <?php wp_nonce_field('reprint_server_remove_public_key'); ?>
+                            <?php submit_button(__('Remove', 'reprint'), 'link-delete', 'submit', false, $file_override ? ['disabled' => 'disabled'] : []); ?>
+                        </form>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php endif; ?>
+        <?php
+    }
+
     /** Render the push-access form or its read-only state. */
     private function render_push_access_form(array $configuration): void {
         if (!$configuration['push_supported']) {
@@ -367,7 +574,7 @@ class SettingsPage {
         <?php
     }
 
-    /** Render a fixed native notice for the admin-post result. */
+    /** Render a fixed native notice for the admin-post result: push access, key enrollment, or token removal. */
     private function render_push_access_notice(): void {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- A newer Settings API result supersedes the stale push result.
         if (isset($_GET['settings-updated'])) {
@@ -388,14 +595,44 @@ class SettingsPage {
             'managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
             'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
             'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
+            'enrolled' => ['success', __('Public key enrolled.', 'reprint')],
+            'enroll_invalid' => ['error', __('That is not a usable public key. Paste an RSA public key of at least 2048 bits, as a PEM block or one line.', 'reprint')],
+            'enroll_duplicate' => ['info', __('That public key is already enrolled.', 'reprint')],
+            'enroll_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
+            'enroll_storage_failure' => ['error', __('Failed to save the public key.', 'reprint')],
+            'key_removed' => ['success', __('Public key removed.', 'reprint')],
+            'remove_unknown' => ['error', __('That key is not enrolled.', 'reprint')],
+            'remove_last_key' => ['error', __('This host requires key authentication, so the last key cannot be removed. Enroll another key first.', 'reprint')],
+            'remove_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
+            'remove_storage_failure' => ['error', __('Failed to remove the public key.', 'reprint')],
+            'key_push_saved' => ['success', __('Push access for the key updated.', 'reprint')],
+            'key_push_unchanged' => ['success', __('Push access for the key was already up to date.', 'reprint')],
+            'key_push_unknown' => ['error', __('That key is not enrolled.', 'reprint')],
+            'key_push_unsupported' => ['error', __('Push access requires PHP 7.2 or newer.', 'reprint')],
+            'key_push_managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
+            'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided keys.', 'reprint')],
+            'key_push_storage_failure' => ['error', __('Failed to save push access for the key.', 'reprint')],
+            'token_removed' => ['success', __('Connection token removed.', 'reprint')],
+            'token_remove_storage_failure' => ['error', __('Failed to remove the connection token.', 'reprint')],
         ];
         if (!isset($notices[$result])) {
             return;
         }
 
+        $message = esc_html($notices[$result][1]);
+        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The key id only labels a read-only notice.
+        if ($result === 'enrolled' && isset($_GET['reprint_server_key_id']) && is_string($_GET['reprint_server_key_id'])) {
+            $message .= ' ' . sprintf(
+                /* translators: %s: Key id of the public key that was just enrolled. */
+                esc_html__('Key id: %s', 'reprint'),
+                // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The key id only labels a read-only notice.
+                '<code>' . esc_html(sanitize_key(wp_unslash($_GET['reprint_server_key_id']))) . '</code>'
+            );
+        }
+
         $this->render_notice(
             $notices[$result][0],
-            esc_html($notices[$result][1]),
+            $message,
             true
         );
     }
