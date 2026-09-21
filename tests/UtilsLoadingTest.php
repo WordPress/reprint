@@ -3,10 +3,10 @@
 use PHPUnit\Framework\TestCase;
 
 /**
- * Guards the loading contract of the shared utility class.
+ * Guards lazy loading of shared utilities and explicit loading of client tasks.
  *
  * WordPress\Reprint\Server\Utils resolves through Composer's classmap. Nothing
- * may require a utility file by path, and the server package must not add an
+ * may require a utility file by path, and neither package may add an
  * autoload.files entry, because Composer executes every such entry on each
  * consumer request.
  */
@@ -22,19 +22,105 @@ final class UtilsLoadingTest extends TestCase
 
     public function testComposerDoesNotEagerLoadAnyFile(): void
     {
-        $composer_path = __DIR__ . '/../packages/reprint-server/composer.json';
-        $composer_json = file_get_contents($composer_path);
-        $this->assertNotFalse($composer_json, 'reprint-server composer.json must be readable.');
+        foreach (['reprint-server', 'reprint-client'] as $package) {
+            $composer_path = __DIR__ . '/../packages/' . $package . '/composer.json';
+            $composer_json = file_get_contents($composer_path);
+            $this->assertNotFalse($composer_json, $package . ' composer.json must be readable.');
 
-        $composer = json_decode($composer_json, true);
-        $this->assertIsArray($composer, 'reprint-server composer.json must contain valid JSON.');
+            $composer = json_decode($composer_json, true);
+            $this->assertIsArray($composer, $package . ' composer.json must contain valid JSON.');
 
-        $this->assertSame(
-            [],
-            $composer['autoload']['files'] ?? [],
-            'Composer executes every autoload.files entry on each consumer request. '
-            . 'Utility consumers must call the autoloaded Utils class instead.'
+            $this->assertSame(
+                [],
+                $composer['autoload']['files'] ?? [],
+                'Composer executes every autoload.files entry on each consumer request. '
+                . 'Shared utilities must autoload; client classes must load through the client entry point.'
+            );
+        }
+    }
+
+    /** The test bootstrap loads Utils, so check lazy loading in a fresh process. */
+    public function testFileRemovalHelpersAutoloadWithoutLoadingTheClient(): void
+    {
+        $directory = sys_get_temp_dir() . '/reprint-utils-' . bin2hex(random_bytes(6));
+        mkdir($directory . '/plugin', 0700, true);
+        file_put_contents($directory . '/plugin/index.php', '<?php');
+        $code = <<<'PHP'
+        use WordPress\Reprint\Server\Utils;
+        require $argv[1];
+        $already_loaded = class_exists(Utils::class, false);
+        $removed = Utils::remove_local_files_and_directories(['plugin', 'absent'], $argv[2]);
+        Utils::remove_directory_and_its_contents($argv[2]);
+        echo json_encode([$already_loaded, $removed]);
+        PHP;
+
+        try {
+            $process = proc_open(
+                [PHP_BINARY, '-r', $code, __DIR__ . '/../vendor/autoload.php', $directory],
+                [1 => ['pipe', 'w'], 2 => ['redirect', 1]],
+                $pipes
+            );
+            $this->assertIsResource($process);
+            $output = stream_get_contents($pipes[1]);
+            fclose($pipes[1]);
+            $this->assertSame(0, proc_close($process), $output);
+            $this->assertSame([false, ['plugin']], json_decode($output, true));
+            $this->assertDirectoryDoesNotExist($directory);
+        } finally {
+            if (is_file($directory . '/plugin/index.php')) {
+                unlink($directory . '/plugin/index.php');
+            }
+            if (is_dir($directory . '/plugin')) {
+                rmdir($directory . '/plugin');
+            }
+            if (is_dir($directory)) {
+                rmdir($directory);
+            }
+        }
+    }
+
+    /** Explicit class loading must not run CLI setup or the recovery child's WordPress load. */
+    public function testPostProcessLoadsExplicitlyWithoutStartingTheClientOrWordPress(): void
+    {
+        $code = <<<'PHP'
+        $loader = require $argv[1];
+        $files_before = get_included_files();
+        $functions_before = get_defined_functions()['user'];
+        $constants_before = get_defined_constants(true)['user'] ?? [];
+        $class = 'Reprint\\Importer\\PostProcess';
+        $already_loaded = class_exists($class, false);
+        $autoloaded = class_exists($class);
+        require_once $argv[2];
+        echo json_encode([
+            'already_loaded' => $already_loaded,
+            'autoloaded' => $autoloaded,
+            'explicitly_loaded' => class_exists($class, false),
+            'new_files' => array_values(array_map('basename', array_diff(get_included_files(), $files_before))),
+            'new_functions' => array_values(array_diff(get_defined_functions()['user'], $functions_before)),
+            'new_constants' => array_keys(array_diff_key(get_defined_constants(true)['user'] ?? [], $constants_before)),
+            'client_registered' => isset($loader->getClassMap()['ImportClient']),
+            'client_loaded' => class_exists('ImportClient', false),
+        ]);
+        PHP;
+        $process = proc_open(
+            [PHP_BINARY, '-r', $code, __DIR__ . '/../vendor/autoload.php', __DIR__ . '/../packages/reprint-client/src/lib/post-process/class-post-process.php'],
+            [1 => ['pipe', 'w'], 2 => ['redirect', 1]],
+            $pipes
         );
+        $this->assertIsResource($process);
+        $output = stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+        $this->assertSame(0, proc_close($process), $output);
+        $this->assertSame([
+            'already_loaded' => false,
+            'autoloaded' => false,
+            'explicitly_loaded' => true,
+            'new_files' => ['class-post-process.php'],
+            'new_functions' => [],
+            'new_constants' => [],
+            'client_registered' => false,
+            'client_loaded' => false,
+        ], json_decode($output, true));
     }
 
     public function testNoFileRequiresTheRemovedUtilityFile(): void
