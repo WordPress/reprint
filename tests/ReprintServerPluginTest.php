@@ -896,4 +896,84 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
             \WordPress\Reprint\Server\Plugin\get_push_authorization_error('0000000000000000')
         );
     }
+
+    public function testEnrollStoresNormalizedKeyAndReportsItsId(): void
+    {
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $pem = \WordPress\Reprint\Server\Utils::public_key_to_pem($public_key);
+
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\enroll_public_key($pem, 'laptop'));
+        $expected_id = \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key);
+        $this->assertSame($expected_id, \WordPress\Reprint\Server\Plugin\get_last_enrolled_key_id());
+
+        $enrolled = get_enrolled_public_keys();
+        $this->assertCount(1, $enrolled);
+        $this->assertSame($public_key, $enrolled[0]['public_key']);
+        $this->assertSame('laptop', $enrolled[0]['label']);
+        $this->assertFalse($enrolled[0]['push']);
+        $this->assertGreaterThan(0, $enrolled[0]['added_at']);
+    }
+
+    public function testEnrollRejectsInvalidAndDuplicateKeys(): void
+    {
+        $this->assertSame('invalid', \WordPress\Reprint\Server\Plugin\enroll_public_key('garbage', ''));
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key, 'a');
+        $this->assertSame('duplicate', \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key, 'b'));
+        $this->assertCount(1, get_enrolled_public_keys());
+    }
+
+    public function testEnrollRefusesWhenTheFileOverrideIsActive(): void
+    {
+        file_put_contents(PUBLIC_KEYS_FILE, "<?php return [];\n");
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $this->assertSame('file_override', \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key, ''));
+        unlink(PUBLIC_KEYS_FILE);
+    }
+
+    public function testRemoveAndPushAccessOperations(): void
+    {
+        $first = $this->sampleKeyEntry('first');
+        $second = $this->sampleKeyEntry('second');
+        update_option_public_keys([$first, $second]);
+
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\change_key_push_access($first['key_id'], true));
+        $this->assertSame('unchanged', \WordPress\Reprint\Server\Plugin\change_key_push_access($first['key_id'], true));
+        $this->assertSame('unknown', \WordPress\Reprint\Server\Plugin\change_key_push_access('0000000000000000', true));
+        $this->assertTrue(get_enrolled_public_keys()[0]['push']);
+
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\remove_public_key($second['key_id']));
+        $this->assertSame('unknown', \WordPress\Reprint\Server\Plugin\remove_public_key($second['key_id']));
+        $this->assertCount(1, get_enrolled_public_keys());
+        // The test runtime has OpenSSL, so the last key cannot be removed.
+        $this->assertSame('last_key', \WordPress\Reprint\Server\Plugin\remove_public_key($first['key_id']));
+        $this->assertCount(1, get_enrolled_public_keys());
+
+        // On an HMAC-only host the keys are inert, so removing the last one is fine.
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\remove_public_key($first['key_id']));
+        $this->assertSame([], get_enrolled_public_keys());
+    }
+
+    public function testConfigurationStateReportsSchemeAndKeys(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        update_option_public_keys([$entry]);
+        $state = \WordPress\Reprint\Server\Plugin\get_configuration_state();
+
+        $this->assertSame('key', $state['required_scheme']);
+        $this->assertSame([$entry], $state['enrolled_keys']);
+        $this->assertFalse($state['has_public_keys_file']);
+
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $this->assertSame('hmac', \WordPress\Reprint\Server\Plugin\get_configuration_state()['required_scheme']);
+    }
+
+    public function testPublicKeysOptionIsNotExposedThroughRest(): void
+    {
+        \WordPress\Reprint\Server\Plugin\register_public_keys_setting();
+        $registered = $GLOBALS['reprint_server_registered_settings'][PUBLIC_KEYS_OPTION] ?? null;
+        $this->assertNotNull($registered);
+        $this->assertArrayNotHasKey('show_in_rest', $registered['args']);
+    }
 }
