@@ -13,7 +13,7 @@ import { once } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { ensureSite } from '../lib/site-setup.js';
 import {
-    runImporter, createTempDir, cleanupTempDir, fsRootDir, getSiteDir, getSiteUrl, getSiteSecret,
+    runImporter, createTempDir, cleanupTempDir, fsRootDir, getSiteDir, getSiteUrl, getSiteSecret, getHarnessKey,
     pullStateDirectory, writeTestHooks, removeTestHooks, writeHookState, readHookState, clearHookState,
 } from '../lib/test-helpers.js';
 
@@ -149,7 +149,7 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         writeHookState(site, { action: 'pause', fired: false, release: false });
         child = spawn(phpBinary, [clientPath, 'files-pull', importUrl,
             `--state-dir=${temporaryDirectory}`, `--fs-root=${fsRootDir(temporaryDirectory)}`,
-            `--secret=${getSiteSecret(site)}`, ...downloadArguments(),
+            `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`, ...downloadArguments(),
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
         let output = '';
         child.stdout.on('data', bytes => { output += bytes; });

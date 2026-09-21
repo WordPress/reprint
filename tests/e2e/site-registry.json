@@ -237,6 +237,34 @@
     },
     "multisite-plugin-tables": {
       "port": 8181
+    },
+    "hmac-only-host": {
+      "port": 8154,
+      "hmacOnly": true
+    },
+    "keygen-command": {
+      "port": 8155
+    },
+    "pull-generates-key": {
+      "port": 8156
+    },
+    "granular-refuse": {
+      "port": 8157
+    },
+    "public-key-pull": {
+      "port": 8158
+    },
+    "token-only-openssl": {
+      "port": 8159
+    },
+    "keyed-openssl": {
+      "port": 8160
+    },
+    "private-key-override": {
+      "port": 8161
+    },
+    "unknown-key": {
+      "port": 8162
     }
   }
 }

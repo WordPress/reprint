@@ -65,7 +65,7 @@ describe('Import: Invalid API Parameters', () => {
     it('wrong HMAC secret returns 403', async () => {
         const requestBody = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) });
         const wrongClient = createHmacClient('wrong-secret-value');
-        const headers = wrongClient.getAuthHeaders(requestBody);
+        const headers = wrongClient.getAuthHeaders(requestBody, { url: getSiteUrl(site) });
         headers['Accept-Encoding'] = 'gzip';
         headers['Content-Type'] = 'application/json';
 

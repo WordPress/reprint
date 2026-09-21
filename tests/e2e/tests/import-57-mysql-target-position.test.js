@@ -10,7 +10,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-    runImporter, createTempDir, cleanupTempDir,
+    runImporter, createTempDir, cleanupTempDir, getHarnessKey,
     getSiteUrl, getSiteSecret, getSiteDir, getDbName,
     createMysqlConnection, fsRootDir,
     writeTestHooks, removeTestHooks,
@@ -70,7 +70,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             importUrl(),
             `--state-dir=${tempDir}`,
             `--fs-root=${fsRootDir(tempDir)}`,
-            `--secret=${getSiteSecret(site)}`,
+            `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
             ...mysqlArguments(),
         ], {
             env: { ...process.env },
