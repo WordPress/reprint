@@ -798,6 +798,86 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertArrayNotHasKey('reason', $response['body']);
     }
 
+    public function testEmptySecretFileAnswersNotConfiguredBeforeAnyCredentialIsRead(): void
+    {
+        $this->forceHmacHost();
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        file_put_contents(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE, "<?php return '';\n");
+        $client = new Site_Export_HMAC_Client('token');
+
+        $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
+
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
+        $this->assertSame(
+            'Invalid secret.php configuration. Remove it or replace it with a valid connection token.',
+            $response['body']['error']
+        );
+        $this->assertArrayNotHasKey('status', $response['body'], 'a pull endpoint keeps the pull error shape');
+    }
+
+    /**
+     * An exit callable that returns must not hand control back to the
+     * dispatcher: the process still ends, so nothing after the error body
+     * is written. Proven in a subprocess because a real exit would end
+     * PHPUnit itself.
+     */
+    public function testAnExitCallableThatReturnsStillEndsTheRequest(): void
+    {
+        $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
+        $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
+        $this->assertNotFalse($lib_path);
+        $this->assertNotFalse($autoload_path);
+        $plugin_directory_encoded = base64_encode(dirname($lib_path) . '/');
+        $lib_path_encoded = base64_encode($lib_path);
+        $autoload_path_encoded = base64_encode($autoload_path);
+        $php_code = <<<PHP
+        <?php
+        function plugin_dir_path(string \$file): string {
+            return base64_decode('{$plugin_directory_encoded}', true);
+        }
+        define('ABSPATH', __DIR__ . '/');
+        require base64_decode('{$autoload_path_encoded}', true);
+        \\WordPress\\Reprint\\Server\\Utils::override_key_auth_required_for_tests(false);
+        require base64_decode('{$lib_path_encoded}', true);
+        \$_SERVER = ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/?reprint-api'];
+        \\WordPress\\Reprint\\Server\\Plugin\\handle_api_request(['exit' => static function (): void {
+            echo "\\nEXIT-CALLABLE-RAN";
+        }]);
+        echo "\\nDISPATCH-CONTINUED";
+        PHP;
+
+        $run_directory = sys_get_temp_dir() . '/reprint-server-exit-test-' . uniqid('', true);
+        mkdir($run_directory, 0755, true);
+        try {
+            file_put_contents($run_directory . '/run.php', $php_code);
+            $process = proc_open(
+                [PHP_BINARY, $run_directory . '/run.php'],
+                [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes,
+                $run_directory
+            );
+            $this->assertIsResource($process);
+            fclose($pipes[0]);
+            $stdout = (string) stream_get_contents($pipes[1]);
+            $stderr = (string) stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($process);
+        } finally {
+            array_map('unlink', glob($run_directory . '/*') ?: []);
+            rmdir($run_directory);
+        }
+
+        $this->assertSame('', $stderr);
+        $lines = explode("\n", $stdout);
+        $this->assertCount(2, $lines, $stdout);
+        $error_body = json_decode($lines[0], true);
+        $this->assertSame('not_configured', $error_body['reason'] ?? null, $stdout);
+        $this->assertSame('EXIT-CALLABLE-RAN', $lines[1]);
+        $this->assertStringNotContainsString('DISPATCH-CONTINUED', $stdout);
+    }
+
     public function testPushGateHonoursThePerKeyFlag(): void
     {
         $entry = $this->sampleKeyEntry();

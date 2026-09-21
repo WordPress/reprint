@@ -77,14 +77,15 @@ function error(int $code, string $message, ?string $reason = null): void {
 }
 
 /**
- * Ends the request. Tests replace the exit through handle_api_request()'s
- * 'exit' option so they can read what the dispatcher wrote.
+ * Ends the request. The 'exit' option of handle_api_request() is invoked
+ * first, before the process exits; a caller that wants control back, such
+ * as a test reading what the dispatcher wrote, throws from it. A callable
+ * that returns cannot let the dispatcher continue past an error.
  */
 function terminate(): void {
     $exit = $GLOBALS['reprint_server_exit'] ?? null;
     if (is_callable($exit)) {
         $exit();
-        return;
     }
     exit;
 }
@@ -562,9 +563,10 @@ function default_authenticate(): void {
  *                                  owns the whole decision. Defaults to
  *                                  RequestAuthenticator with the stored
  *                                  connection token and enrolled keys.
- *     @type callable $exit Optional. Invoked instead of exit by error() and
- *                          push_error(). Tests use it to regain control after
- *                          the dispatcher writes its response.
+ *     @type callable $exit Optional. Invoked by error() and push_error()
+ *                          before the process exits. A caller that wants
+ *                          control back, such as a test reading the
+ *                          response, throws from it; returning still exits.
  *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
@@ -678,10 +680,18 @@ function handle_api_request(array $options = []): void {
             load_server_runtime();
         }
         if (!class_exists(RequestAuthenticator::class)) {
-            push_error(500, 'filesystem_error', 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.');
+            $runtime_message = 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.';
+            if (is_push_endpoint($endpoint)) {
+                push_error(500, 'filesystem_error', $runtime_message);
+            }
+            error(500, $runtime_message);
         }
         if (has_connection_token_file() && empty(get_file_connection_token())) {
-            error(503, 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.', 'not_configured');
+            $secret_file_message = 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.';
+            if (is_push_endpoint($endpoint)) {
+                push_error(503, 'not_configured', $secret_file_message);
+            }
+            error(503, $secret_file_message, 'not_configured');
         }
         $authenticator = new RequestAuthenticator(
             get_connection_token(),
