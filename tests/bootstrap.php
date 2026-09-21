@@ -33,6 +33,10 @@ if (!class_exists('WordPress\\Reprint\\Server\\Utils', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-utils.php';
 }
 
+if (!interface_exists('WordPress\\Reprint\\Server\\EnvelopeSigner', false)) {
+    require_once __DIR__ . '/../packages/reprint-server/src/class-envelope-signer.php';
+}
+
 if (!class_exists('Site_Export_HMAC_Client', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-hmac-client.php';
 }

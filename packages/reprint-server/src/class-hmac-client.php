@@ -1,5 +1,6 @@
 <?php
 
+use WordPress\Reprint\Server\EnvelopeSigner;
 use WordPress\Reprint\Server\Utils;
 
 /**
@@ -15,7 +16,7 @@ use WordPress\Reprint\Server\Utils;
  *   // Add $headers to your HTTP request
  *
  */
-class Site_Export_HMAC_Client {
+class Site_Export_HMAC_Client implements EnvelopeSigner {
 
     /**
      * Value of the X-Auth-Content-Hash header when the request body is

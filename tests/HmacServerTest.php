@@ -255,6 +255,12 @@ final class HmacServerTest extends TestCase
         $this->assertSame('/', Site_Export_HMAC_Client::request_target('https://example.com'));
     }
 
+    public function testHmacClientIsAnEnvelopeSigner(): void
+    {
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $this->assertInstanceOf(\WordPress\Reprint\Server\EnvelopeSigner::class, $client);
+    }
+
     private function buildHeadersForBody(
         string $body,
         string $timestamp = '1700000000.000000',
