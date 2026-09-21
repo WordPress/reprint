@@ -74,8 +74,8 @@ class MultipartPushStreamClient
     /** @var array<string,string> Request-context headers shared by pull and push. */
     private array $request_context_headers;
 
-    /** @var Site_Export_HMAC_Client Signs the exact method and URL before transfer. */
-    private Site_Export_HMAC_Client $hmac_client;
+    /** @var \WordPress\Reprint\Server\EnvelopeSigner Signs the exact method and URL before transfer. */
+    private \WordPress\Reprint\Server\EnvelopeSigner $hmac_client;
 
     /** @var PushRequestSizer Learns the decoded entity-body budget across requests. */
     private PushRequestSizer $request_sizer;
@@ -178,7 +178,7 @@ class MultipartPushStreamClient
      *         unless `allow_http` is true.
      *     @type array<string,string> $request_context_headers Required non-empty
      *         header-name-to-value map selected by ImportClient.
-     *     @type Site_Export_HMAC_Client $hmac_client Required signer for the
+     *     @type \WordPress\Reprint\Server\EnvelopeSigner $hmac_client Required signer for the
      *         exact method and request URL.
      *     @type bool $allow_http Whether to permit an explicit HTTP remote Reprint API URL.
      *         Default false.
@@ -220,8 +220,8 @@ class MultipartPushStreamClient
             );
         }
         $hmac_client = $options['hmac_client'] ?? null;
-        if (!$hmac_client instanceof Site_Export_HMAC_Client) {
-            throw new InvalidArgumentException('MultipartPushStreamClient requires a Site_Export_HMAC_Client.');
+        if (!$hmac_client instanceof \WordPress\Reprint\Server\EnvelopeSigner) {
+            throw new InvalidArgumentException('MultipartPushStreamClient requires an envelope signer.');
         }
         $request_context_headers = $options['request_context_headers'] ?? null;
         if (!is_array($request_context_headers) || $request_context_headers === []) {

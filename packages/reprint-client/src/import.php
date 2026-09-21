@@ -185,6 +185,14 @@ class ImportClient
         "apply-runtime",
     ];
 
+    /** Commands that authenticate to the remote site and therefore need a credential. */
+    public const REMOTE_COMMANDS = [
+        'pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight',
+    ];
+
+    /** Private key file name inside the remote state directory. */
+    public const KEY_FILE_NAME = 'key.pem';
+
     /** Progress output modes accepted by every command. */
     public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl', 'compact'];
 
@@ -426,6 +434,15 @@ class ImportClient
     /** @var Site_Export_HMAC_Client|null Signs requests when HMAC auth is configured. */
     private $hmac_client = null;
 
+    /** @var \WordPress\Reprint\Server\PublicKeyClient|null */
+    private $public_key_client = null;
+
+    /** @var array Resolved credential: scheme plus its material. See resolve_credential(). */
+    private $credential = ['scheme' => null];
+
+    /** @var string `<state-dir>/remotes/<md5>` for this remote. */
+    private $remote_state_directory = '';
+
     /**
      * @var int|null Target max_allowed_packet ceiling sent to the exporter.
      * Passed to the server so it can split SQL statements to fit within this limit.
@@ -553,6 +570,7 @@ class ImportClient
                 $this->state_dir
             )
             : Utils::trim_right_slash($selected_remote_state_directory, Utils::native_path_format());
+        $this->remote_state_directory = $remote_state_directory;
         $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
         $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
@@ -1277,19 +1295,7 @@ class ImportClient
         }
 
         $this->initialize_tuner($options);
-
-        // Initialize HMAC authentication if a connection token was provided.
-        // When set, every outgoing HTTP request will include X-Auth-Signature,
-        // X-Auth-Nonce, and X-Auth-Timestamp headers so the export API can verify
-        // the caller without a SECRET_KEY in the URL.
-        if (!empty($options["secret"])) {
-            if (!class_exists('Site_Export_HMAC_Client')) {
-                throw new RuntimeException(
-                    'Streaming exporter runtime not found. Run composer install before using --secret.'
-                );
-            }
-            $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
-        }
+        $this->initialize_credential($options);
 
         // Pull-like commands orchestrate preflight and lower-level stages
         // internally, so they run before the normal command dispatch.
@@ -1805,7 +1811,7 @@ class ImportClient
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'request_context_headers' => $this->request_context_headers,
-            'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
+            'hmac_client' => self::build_envelope_signer($options, $this->remote_state_directory),
             'allow_http' => $options['force_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
             'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
@@ -2265,9 +2271,14 @@ class ImportClient
         string $filesystem_root,
         array $options
     ): array {
-        $secret = $options['secret'] ?? null;
-        if (!is_string($secret) || $secret === '') {
-            throw new InvalidArgumentException('files-push requires --secret=TOKEN.');
+        $credential = self::resolve_credential(
+            $options,
+            self::remote_state_directory_path($remote_reprint_api_url, $state_dir)
+        );
+        if ($credential['scheme'] === null) {
+            throw new InvalidArgumentException(
+                'files-push requires a credential: --secret=TOKEN, --private-key=PATH, or a key generated with `reprint keygen`.'
+            );
         }
         if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
             throw new InvalidArgumentException(
@@ -2374,7 +2385,7 @@ class ImportClient
     }
 
     /** Returns `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`. */
-    private static function remote_state_directory_path(
+    public static function remote_state_directory_path(
         string $remote_reprint_api_url,
         string $state_dir
     ): string {
@@ -2383,6 +2394,82 @@ class ImportClient
             'remotes',
             md5(rtrim($remote_reprint_api_url, '?&'))
         );
+    }
+
+    /** Returns `<remote state dir>/key.pem` for a remote. */
+    public static function key_file_path(string $remote_reprint_api_url, string $state_dir): string
+    {
+        return wp_join_unix_paths(self::remote_state_directory_path($remote_reprint_api_url, $state_dir), self::KEY_FILE_NAME);
+    }
+
+    /**
+     * Resolves which credential a command uses. First match wins:
+     *   1. --secret        → HMAC
+     *   2. --private-key   → key from that file
+     *   3. key.pem in the remote state directory → key from there
+     *   4. nothing
+     *
+     * @param array<string,mixed> $options                Parsed CLI options.
+     * @param string              $remote_state_directory `<state-dir>/remotes/<md5>`.
+     * @return array{scheme:string|null,secret?:string,private_key_pem?:string,path?:string,source?:string}
+     * @throws InvalidArgumentException On conflicting flags or an unusable key file.
+     */
+    public static function resolve_credential(array $options, string $remote_state_directory): array
+    {
+        $secret = isset($options['secret']) && is_string($options['secret']) && $options['secret'] !== '' ? $options['secret'] : null;
+        $flag_path = isset($options['private_key']) && is_string($options['private_key']) && $options['private_key'] !== '' ? $options['private_key'] : null;
+        if ($secret !== null && $flag_path !== null) {
+            throw new InvalidArgumentException('--secret and --private-key cannot be combined. Pass one credential.');
+        }
+        if ($secret !== null) {
+            return ['scheme' => 'hmac', 'secret' => $secret];
+        }
+        if ($flag_path !== null) {
+            return ['scheme' => 'key', 'private_key_pem' => self::read_private_key_file($flag_path), 'path' => $flag_path, 'source' => 'flag'];
+        }
+        $state_path = wp_join_unix_paths($remote_state_directory, self::KEY_FILE_NAME);
+        if (is_file($state_path)) {
+            return ['scheme' => 'key', 'private_key_pem' => self::read_private_key_file($state_path), 'path' => $state_path, 'source' => 'state'];
+        }
+        return ['scheme' => null];
+    }
+
+    /**
+     * Reads a private key file, refusing one other users could read.
+     *
+     * @throws InvalidArgumentException When unreadable or too permissive.
+     */
+    private static function read_private_key_file(string $path): string
+    {
+        if (!is_file($path) || !is_readable($path)) {
+            throw new InvalidArgumentException("The private key at {$path} could not be read.");
+        }
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $permissions = fileperms($path);
+            if ($permissions !== false && ( $permissions & 0077 ) !== 0) {
+                throw new InvalidArgumentException(
+                    "The private key at {$path} is readable by other users. Run: chmod 600 " . escapeshellarg($path)
+                );
+            }
+        }
+        $contents = file_get_contents($path);
+        if ($contents === false || trim($contents) === '') {
+            throw new InvalidArgumentException("The private key at {$path} is empty.");
+        }
+        return $contents;
+    }
+
+    /** Builds the signer files-push hands to its stream client, from the same resolution every command uses. */
+    private static function build_envelope_signer(array $options, string $remote_state_directory): \WordPress\Reprint\Server\EnvelopeSigner
+    {
+        $credential = self::resolve_credential($options, $remote_state_directory);
+        if ($credential['scheme'] === 'hmac') {
+            return new \Site_Export_HMAC_Client($credential['secret']);
+        }
+        if ($credential['scheme'] === 'key') {
+            return new \WordPress\Reprint\Server\PublicKeyClient($credential['private_key_pem']);
+        }
+        throw new InvalidArgumentException('files-push requires a credential: --secret=TOKEN, --private-key=PATH, or a key generated with `reprint keygen`.');
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -2661,6 +2748,32 @@ class ImportClient
             "TUNER CONFIG | " . json_encode($this->get_state()->tuning->config),
             false,
         );
+    }
+
+    /**
+     * Resolve the credential once and build the one client that signs every request.
+     *
+     * @param array $options Parsed CLI options; reads `secret` and `private_key`.
+     */
+    private function initialize_credential(array $options): void
+    {
+        // Resolve the credential once: --secret, then --private-key, then
+        // key.pem in the remote state directory. Every request signs with
+        // whichever client this produced; nothing later re-decides.
+        $this->hmac_client = null;
+        $this->public_key_client = null;
+        $this->credential = self::resolve_credential($options, $this->remote_state_directory);
+        if ($this->credential['scheme'] === 'hmac') {
+            if (!class_exists('Site_Export_HMAC_Client')) {
+                throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --secret.');
+            }
+            $this->hmac_client = new \Site_Export_HMAC_Client($this->credential['secret']);
+        } elseif ($this->credential['scheme'] === 'key') {
+            if (!class_exists(\WordPress\Reprint\Server\PublicKeyClient::class)) {
+                throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --private-key.');
+            }
+            $this->public_key_client = new \WordPress\Reprint\Server\PublicKeyClient($this->credential['private_key_pem']);
+        }
     }
 
     /**
@@ -12196,22 +12309,23 @@ class ImportClient
     }
 
     /**
-     * Return HMAC authentication headers formatted for curl ("Name: value"),
-     * or an empty array if no secret was configured.
+     * Authentication headers for curl ("Name: value"), or [] with no credential.
      *
-     * @param string $body The request body content whose SHA-256 hash will
-     *                     be included in the HMAC signature.  For CURLFile
-     *                     uploads, pass the raw file content (not the
-     *                     multipart envelope); for form-encoded POST, pass
-     *                     the http_build_query() output; for GET, omit or
-     *                     pass empty string.
+     * @param string      $method HTTP method of the request being built.
+     * @param string      $url    Full request URL.
+     * @param string      $body   Raw content to hash: file contents for uploads,
+     *                            http_build_query() output for forms, '' otherwise.
+     * @param string|null $cursor The X-Export-Cursor value being sent, or null.
      */
-    private function get_hmac_headers(string $body = ''): array
+    private function get_auth_headers(string $method, string $url, string $body = '', ?string $cursor = null): array
     {
-        if ($this->hmac_client === null) {
-            return [];
+        if ($this->public_key_client !== null) {
+            return $this->public_key_client->get_curl_headers($method, $url, $body, $cursor);
         }
-        return $this->hmac_client->get_curl_headers($body);
+        if ($this->hmac_client !== null) {
+            return $this->hmac_client->get_curl_headers($body);
+        }
+        return [];
     }
 
     /**
@@ -12781,7 +12895,7 @@ class ImportClient
 
         $headers = [
             ...$this->get_base_headers("application/json"),
-            ...($this->get_hmac_headers($body)),
+            ...($this->get_auth_headers('POST', $url, $body)),
         ];
 
         curl_setopt_array($ch, [
@@ -12984,8 +13098,8 @@ class ImportClient
             curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
         }
 
-        // Append HMAC auth headers now that we know the body content
-        array_push($headers, ...($this->get_hmac_headers($body_for_signing)));
+        // Append auth headers now that we know the body content
+        array_push($headers, ...($this->get_auth_headers('POST', $url, $body_for_signing, $cursor ?: null)));
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
@@ -14090,6 +14204,15 @@ if (
             'target' => 'secret',
             'placeholder' => 'TOKEN',
             'help' => 'HMAC connection token for export API authentication',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+        ],
+        [
+            'name' => 'private-key',
+            'type' => 'value',
+            'target' => 'private_key',
+            'placeholder' => 'PATH',
+            'help' => 'RSA private key file for export API authentication; overrides the key stored in the state directory',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
@@ -15446,6 +15569,7 @@ if (
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
                 || strpos($reprint_files_push_command_argument, '--secret=') === 0
+                || strpos($reprint_files_push_command_argument, '--private-key=') === 0
                 || strpos($reprint_files_push_command_argument, '--progress=') === 0;
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
