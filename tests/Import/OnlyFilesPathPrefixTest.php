@@ -162,7 +162,7 @@ class OnlyFilesPathPrefixTest extends TestCase
 
         try {
             $c->run(array_merge(
-                array('command' => 'files-pull'),
+                array('command' => 'files-pull', 'secret' => 'test-secret'),
                 $fileSelectionOptions
             ));
         } finally {

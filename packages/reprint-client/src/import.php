@@ -191,6 +191,9 @@ class ImportClient
         'pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight',
     ];
 
+    /** pull generated a key and stopped so it can be enrolled; not a failure, not a success. */
+    public const EXIT_CODE_ENROLLMENT_NEEDED = 4;
+
     /** Private key file name inside the remote state directory. */
     public const KEY_FILE_NAME = 'key.pem';
 
@@ -1296,7 +1299,36 @@ class ImportClient
         }
 
         $this->initialize_tuner($options);
-        $this->initialize_credential($options);
+        // --abort clears local state and never signs a request.
+        $signs_remote_requests = !$abort && in_array($command, self::REMOTE_COMMANDS, true);
+        $this->initialize_credential($signs_remote_requests, $options);
+
+        // A remote command with no credential never sends a request. pull is
+        // the one-stop command and generates a key so the user can enroll it;
+        // every other command is a precise tool and says what to run instead.
+        if ($signs_remote_requests && $this->credential['scheme'] === null) {
+            if ($command === 'pull') {
+                $generated = self::generate_key_file(
+                    self::key_file_path($this->remote_reprint_api_url, $this->state_dir),
+                    false
+                );
+                fwrite(STDOUT, self::format_enrollment_instructions($generated, true, true));
+                // The command report would otherwise call this stop an error with no message.
+                $this->command_report_details = [
+                    'status' => 'enrollment_needed',
+                    'key_id' => $generated['key_id'],
+                    'key_path' => $generated['path'],
+                    'public_key' => $generated['public_key'],
+                ];
+                $this->exit_code = self::EXIT_CODE_ENROLLMENT_NEEDED;
+                return;
+            }
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI guidance with local paths, never HTML.
+                "No credential for this site. Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` "
+                . "and enroll the printed key, or pass --secret=TOKEN."
+            );
+        }
 
         // Pull-like commands orchestrate preflight and lower-level stages
         // internally, so they run before the normal command dispatch.
@@ -1333,6 +1365,15 @@ class ImportClient
                 ]);
                 $this->write_progress_file($e->getMessage());
                 throw $e;
+            }
+            if ($command === 'pull' && $this->credential['scheme'] === 'key' && ( $this->credential['source'] ?? '' ) === 'state') {
+                $key_message =
+                    "Key for this site: {$this->credential['path']}\n"
+                    . "Deleting the state directory revokes it; the enrolled public key on the site cannot be used without it.";
+                // The plain terminal presentation drops JSONL records, so it
+                // gets the same text once, below the pull summary.
+                $this->progress->print_line("\033[2m{$key_message}\033[0m\n");
+                $this->output_progress(['status' => 'info', 'message' => $key_message], true);
             }
             return;
         }
@@ -2546,7 +2587,13 @@ class ImportClient
             return new \Site_Export_HMAC_Client($credential['secret']);
         }
         if ($credential['scheme'] === 'key') {
-            return new \WordPress\Reprint\Server\PublicKeyClient($credential['private_key_pem']);
+            try {
+                return new \WordPress\Reprint\Server\PublicKeyClient($credential['private_key_pem']);
+            } catch (InvalidArgumentException $exception) {
+                throw new InvalidArgumentException(
+                    "The private key at {$credential['path']} could not be used: " . $exception->getMessage()
+                );
+            }
         }
         throw new InvalidArgumentException('files-push requires a credential: --secret=TOKEN, --private-key=PATH, or a key generated with `reprint keygen`.');
     }
@@ -2832,15 +2879,23 @@ class ImportClient
     /**
      * Resolve the credential once and build the one client that signs every request.
      *
-     * @param array $options Parsed CLI options; reads `secret` and `private_key`.
+     * An invocation that never signs a request leaves the credential
+     * unresolved: a key file it would never use must not stop it.
+     *
+     * @param bool  $signs_remote_requests Whether this invocation sends signed requests.
+     * @param array $options               Parsed CLI options; reads `secret` and `private_key`.
      */
-    private function initialize_credential(array $options): void
+    private function initialize_credential(bool $signs_remote_requests, array $options): void
     {
         // Resolve the credential once: --secret, then --private-key, then
         // key.pem in the remote state directory. Every request signs with
         // whichever client this produced; nothing later re-decides.
         $this->hmac_client = null;
         $this->public_key_client = null;
+        $this->credential = ['scheme' => null];
+        if (!$signs_remote_requests) {
+            return;
+        }
         $this->credential = self::resolve_credential($options, $this->remote_state_directory);
         if ($this->credential['scheme'] === 'hmac') {
             if (!class_exists('Site_Export_HMAC_Client')) {
@@ -2851,7 +2906,14 @@ class ImportClient
             if (!class_exists(\WordPress\Reprint\Server\PublicKeyClient::class)) {
                 throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --private-key.');
             }
-            $this->public_key_client = new \WordPress\Reprint\Server\PublicKeyClient($this->credential['private_key_pem']);
+            try {
+                $this->public_key_client = new \WordPress\Reprint\Server\PublicKeyClient($this->credential['private_key_pem']);
+            } catch (InvalidArgumentException $exception) {
+                throw new InvalidArgumentException(
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error naming a local file, never HTML.
+                    "The private key at {$this->credential['path']} could not be used: " . $exception->getMessage()
+                );
+            }
         }
     }
 

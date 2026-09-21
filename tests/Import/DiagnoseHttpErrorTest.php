@@ -330,7 +330,7 @@ class DiagnoseHttpErrorTest extends TestCase
                 sys_get_temp_dir(),
             );
             $reflection = new \ReflectionClass(\ImportClient::class);
-            $reflection->getMethod('initialize_credential')->invoke($client, ['private_key' => $key_path]);
+            $reflection->getMethod('initialize_credential')->invoke($client, true, ['private_key' => $key_path]);
             $this->assertNull($reflection->getProperty('hmac_client')->getValue($client));
             $this->assertInstanceOf(
                 \WordPress\Reprint\Server\PublicKeyClient::class,

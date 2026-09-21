@@ -101,4 +101,92 @@ final class KeygenCommandTest extends TestCase
         $this->assertStringContainsString('--out=PATH', $result['output']);
         $this->assertStringContainsString('--force', $result['output']);
     }
+
+    public function testPullWithNoCredentialGeneratesAKeyAndStopsWithExitFour(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        $result = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root]);
+
+        $this->assertSame(4, $result['exit_code'], $result['output']);
+        $this->assertFileExists(ImportClient::key_file_path($url, $this->state_dir));
+        $this->assertStringContainsString('No credential found for this site', $result['output']);
+        $this->assertStringContainsString('run the same command again', $result['output']);
+        $this->assertMatchesRegularExpression('/^\s+MII[A-Za-z0-9+\/]+=*$/m', $result['output']);
+    }
+
+    public function testPullEnrollmentStopReportsItsStatusInTheCommandReport(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        $result = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--progress=jsonl']);
+
+        $this->assertSame(4, $result['exit_code'], $result['output']);
+        $output_lines = explode("\n", $result['output']);
+        $report = json_decode((string) end($output_lines), true);
+        $this->assertIsArray($report, 'the last line is the command report');
+        $this->assertSame('reprint_report', $report['type']);
+        $this->assertSame('enrollment_needed', $report['status']);
+        $this->assertSame(4, $report['exit_code']);
+        $this->assertNull($report['error']);
+        $this->assertSame(ImportClient::key_file_path($url, $this->state_dir), $report['key_path']);
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $report['key_id']);
+        $this->assertStringStartsWith('MII', $report['public_key']);
+    }
+
+    public function testPreflightWithNoCredentialRefusesAndNamesKeygen(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        $result = $this->runCli(['preflight', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root]);
+
+        $this->assertNotSame(0, $result['exit_code']);
+        $this->assertNotSame(4, $result['exit_code']);
+        $this->assertStringContainsString('reprint keygen', $result['output']);
+        $this->assertFileDoesNotExist(ImportClient::key_file_path($url, $this->state_dir), 'granular commands never generate');
+    }
+
+    public function testAbortNeedsNoCredentialAndGeneratesNoKey(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+
+        // --abort clears local state without a request, so neither the
+        // one-stop command nor a granular one may stop at the credential gate.
+        $pull = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--abort']);
+        $this->assertSame(0, $pull['exit_code'], $pull['output']);
+        $this->assertStringNotContainsString('No credential', $pull['output']);
+        $this->assertFileDoesNotExist(ImportClient::key_file_path($url, $this->state_dir));
+
+        // files-pull --abort asks for a saved preflight after the credential
+        // gate, so reaching that message shows the gate let it through.
+        $files_pull = $this->runCli(['files-pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--abort']);
+        $this->assertStringNotContainsString('No credential', $files_pull['output']);
+        $this->assertStringContainsString('No preflight data found', $files_pull['output']);
+    }
+
+    public function testLocalOnlyCommandIgnoresAGroupReadableKeyFile(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('File mode checks do not apply on Windows.');
+        }
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        $key_path = ImportClient::key_file_path($url, $this->state_dir);
+        ImportClient::generate_key_file($key_path, false);
+        chmod($key_path, 0640);
+
+        // preflight-assert reads only the saved preflight report. It must reach
+        // its own "run preflight first" result, not the key-file check that
+        // remote commands perform on this key.
+        $result = $this->runCli(['preflight-assert', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root]);
+
+        $this->assertStringNotContainsString('readable by other users', $result['output']);
+        $this->assertStringContainsString('No preflight data found', $result['output']);
+    }
 }

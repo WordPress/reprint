@@ -251,6 +251,7 @@ class PullFilterOptionTest extends TestCase
             ob_start();
             $client->run([
                 "command" => "pull",
+                "secret" => "test-secret",
                 "filter" => "skipped-earlier",
                 "runtime" => "none",
             ]);
@@ -275,6 +276,7 @@ class PullFilterOptionTest extends TestCase
             ob_start();
             $client->run([
                 "command" => "pull",
+                "secret" => "test-secret",
                 "runtime" => "none",
             ]);
             $this->fail('Expected pull to stop on failed preflight');
@@ -323,6 +325,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "runtime" => "none",
         ]);
         ob_end_clean();
@@ -354,6 +357,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "runtime" => "none",
         ]);
         ob_end_clean();
@@ -386,6 +390,7 @@ class PullFilterOptionTest extends TestCase
             ob_start();
             $client->run([
                 "command" => "pull",
+                "secret" => "test-secret",
                 "runtime" => "none",
             ]);
             $this->fail('Expected pull to refuse a different unfinished pipeline');
@@ -413,6 +418,7 @@ class PullFilterOptionTest extends TestCase
             ob_start();
             $client->run([
                 "command" => "pull",
+                "secret" => "test-secret",
                 "runtime" => "not-a-runtime",
             ]);
             $this->fail('Expected pull to reject an invalid runtime');
@@ -432,6 +438,7 @@ class PullFilterOptionTest extends TestCase
 
         $client->run([
             "command" => "pull-files",
+            "secret" => "test-secret",
             "progress" => "tty",
         ]);
 
@@ -448,6 +455,7 @@ class PullFilterOptionTest extends TestCase
 
         $client->run([
             "command" => "pull-files",
+            "secret" => "test-secret",
             "progress" => "tty",
             "only" => ["/var/www/html/wp-content/uploads/reprint-demo"],
         ]);
@@ -465,6 +473,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull-files",
+            "secret" => "test-secret",
             "filter" => "essential-files",
         ]);
         ob_end_clean();
@@ -486,6 +495,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull-files",
+            "secret" => "test-secret",
             "files_pull_mode" => "mirror",
         ]);
         ob_end_clean();
@@ -506,6 +516,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "files_pull_mode" => "mirror",
             "runtime" => "none",
         ]);
@@ -526,7 +537,7 @@ class PullFilterOptionTest extends TestCase
 
         try {
             ob_start();
-            $client->run(["command" => "pull-files"]);
+            $client->run(["command" => "pull-files", "secret" => "test-secret"]);
             $this->fail('Expected pull-files to stop on failed preflight');
         } catch (\RuntimeException $e) {
             $this->assertStringContainsString('Exporter unavailable', $e->getMessage());
@@ -567,7 +578,7 @@ class PullFilterOptionTest extends TestCase
         $client = $this->makeClient();
 
         ob_start();
-        $client->run(["command" => "pull-files"]);
+        $client->run(["command" => "pull-files", "secret" => "test-secret"]);
         ob_end_clean();
 
         $state = $this->readState();
@@ -590,7 +601,7 @@ class PullFilterOptionTest extends TestCase
         $client = $this->makeClient();
 
         ob_start();
-        $client->run(["command" => "pull-files"]);
+        $client->run(["command" => "pull-files", "secret" => "test-secret"]);
         ob_end_clean();
 
         $state = $this->readState();
@@ -621,6 +632,7 @@ class PullFilterOptionTest extends TestCase
             ob_start();
             $client->run([
                 "command" => "pull",
+                "secret" => "test-secret",
                 "runtime" => "none",
             ]);
             $this->fail('Expected pull to reject an in-progress pull-files pipeline');
@@ -639,8 +651,8 @@ class PullFilterOptionTest extends TestCase
         $client = $this->makeClient();
 
         ob_start();
-        $client->run(["command" => "pull-files"]);
-        $client->run(["command" => "pull-files"]);
+        $client->run(["command" => "pull-files", "secret" => "test-secret"]);
+        $client->run(["command" => "pull-files", "secret" => "test-secret"]);
         ob_end_clean();
 
         $state = $this->readState();
@@ -654,9 +666,10 @@ class PullFilterOptionTest extends TestCase
         $client = $this->makeClient();
 
         ob_start();
-        $client->run(["command" => "pull-files"]);
+        $client->run(["command" => "pull-files", "secret" => "test-secret"]);
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "runtime" => "none",
         ]);
         ob_end_clean();
@@ -675,6 +688,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull-db",
+            "secret" => "test-secret",
             "target_engine" => "sqlite",
         ]);
         ob_end_clean();
@@ -712,6 +726,7 @@ class PullFilterOptionTest extends TestCase
             ob_start();
             $client->run([
                 "command" => "pull-db",
+                "secret" => "test-secret",
                 "target_engine" => "sqlite",
             ]);
             $this->fail('Expected pull-db to reject an in-progress pull-files command');
@@ -747,6 +762,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull-db",
+            "secret" => "test-secret",
             "target_engine" => "sqlite",
         ]);
         ob_end_clean();
@@ -775,6 +791,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull-db",
+            "secret" => "test-secret",
             "target_engine" => "sqlite",
         ]);
         ob_end_clean();
@@ -795,6 +812,7 @@ class PullFilterOptionTest extends TestCase
             ob_start();
             $client->run([
                 "command" => "pull-db",
+                "secret" => "test-secret",
                 "target_engine" => "not-a-database",
             ]);
             $this->fail('Expected pull-db to reject an invalid target engine');
@@ -814,6 +832,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "filter" => "essential-files",
             "runtime" => "none",
         ]);
@@ -834,6 +853,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "runtime" => "none",
         ]);
         ob_end_clean();
@@ -853,11 +873,13 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "filter" => "essential-files",
             "runtime" => "none",
         ]);
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "filter" => "none",
             "runtime" => "none",
         ]);
@@ -879,6 +901,7 @@ class PullFilterOptionTest extends TestCase
         ob_start();
         $client->run([
             "command" => "pull",
+            "secret" => "test-secret",
             "filter" => "essential-files",
             "flatten_to" => $flatten_to,
             "runtime" => "playground-cli",
