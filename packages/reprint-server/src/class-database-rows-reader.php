@@ -16,6 +16,9 @@ class DatabaseRowsReader {
     /** @var mixed PDO or a PDO-compatible adapter. */
     private $db;
 
+    /** @var bool|null Whether source comparisons can decode base64, checked on first use. */
+    private $supports_from_base64 = null;
+
     /** @var array|null */
     private $current_pk_columns = null;
 
@@ -1044,9 +1047,9 @@ class DatabaseRowsReader {
                 continue;
             }
             $quoted_column = $this->quote_identifier($column);
-            $encoded_value = base64_encode($rule["value"]);
+            $literal = $this->format_source_binary_literal($rule["value"]);
             // NULL <> value is UNKNOWN, so preserve NULL explicitly.
-            $conditions[] = "({$quoted_column} IS NULL OR {$quoted_column} <> FROM_BASE64('{$encoded_value}'))";
+            $conditions[] = "({$quoted_column} IS NULL OR {$quoted_column} <> {$literal})";
         }
         return $conditions;
     }
@@ -1090,7 +1093,16 @@ class DatabaseRowsReader {
         return "(" . implode(" OR ", $conditions) . ")";
     }
 
-    public function build_comparison($column, $value, $operator)
+    /**
+     * Builds a typed primary-key comparison for a source read or destination SQL.
+     *
+     * @param string $column Column name.
+     * @param mixed  $value Raw key value.
+     * @param string $operator Comparison operator.
+     * @param bool   $source_query Whether to use the source server's supported encoding.
+     * @return string
+     */
+    public function build_comparison($column, $value, $operator, bool $source_query = true)
     {
         $column_expression = $this->build_primary_key_column_expression($column);
         if ($value === null) {
@@ -1104,14 +1116,35 @@ class DatabaseRowsReader {
             }
             return "{$column_expression} {$operator} {$value}";
         }
-        return "{$column_expression} {$operator} FROM_BASE64('" . base64_encode($value) . "')";
+        $literal = $source_query
+            ? $this->format_source_binary_literal($value)
+            : "FROM_BASE64('" . base64_encode($value) . "')";
+        return "{$column_expression} {$operator} {$literal}";
+    }
+
+    /**
+     * Quotes raw source bytes without relying on the connection character set.
+     * Destination SQL keeps its separate base64 format, including on old sources.
+     */
+    private function format_source_binary_literal(string $value): string
+    {
+        if ($this->supports_from_base64 === null) {
+            $version = $this->db->query('SELECT VERSION()')->fetchColumn();
+            // MariaDB may report a 5.5.5 compatibility prefix even on modern servers.
+            $this->supports_from_base64 = stripos($version, 'MariaDB') !== false
+                || version_compare($version, '5.6.1', '>=');
+        }
+        if ($this->supports_from_base64) {
+            return "FROM_BASE64('" . base64_encode($value) . "')";
+        }
+        return "UNHEX('" . bin2hex($value) . "')";
     }
 
     /**
      * Builds the column expression shared by primary-key comparison and order.
      *
      * Character columns retain their declared collation and remain bare so the
-     * database can use a primary-key range scan. FROM_BASE64() has higher
+     * database can use a primary-key range scan. FROM_BASE64() and UNHEX() have higher
      * coercibility than the column, so MySQL applies the column's character set
      * and collation without reading cursor bytes through the connection
      * character set. ENUM and SET use a binary cast because their index

@@ -137,6 +137,10 @@ jobs:
         if: matrix.server_php == '8.2'
         run: tests/e2e/ci/start-mysql8-target.sh
 
+      - name: Start MySQL 5.5 for legacy source imports
+        if: matrix.server_php == '5.6' || matrix.server_php == '8.2'
+        run: tests/e2e/ci/start-mysql55-source.sh
+
       - name: Restore client PHP and Composer for CLI tools
         if: matrix.server_php == '5.6'
         uses: shivammathur/setup-php@v2
