@@ -78,7 +78,7 @@ jobs:
         run: npm install
 
       - name: Install Playground CLI
-        run: npm install -g @wp-playground/cli@latest
+        run: npm install -g @wp-playground/cli@3.1.54
 
       - name: Verify Playground CLI PHP works
         run: |
