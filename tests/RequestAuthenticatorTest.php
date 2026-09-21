@@ -151,6 +151,30 @@ final class RequestAuthenticatorTest extends TestCase
         $this->assertSame(RequestAuthenticator::REASON_AUTH_FAILED, $authenticator->last_error_reason());
     }
 
+    /**
+     * The reference plugin promises that a push_-prefixed endpoint it does not
+     * know authenticates with the envelope and then gets the push error
+     * contract, so a newer client can tell an old server from a wrong secret.
+     */
+    public function testVerifyGlobalsUsesEnvelopeVerificationForAnUnknownPushPrefixedEndpoint(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_future_operation');
+        $_SERVER = [
+            'REQUEST_METHOD' => 'POST',
+            'REQUEST_URI' => '/?reprint-api&endpoint=push_future_operation',
+            'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
+            'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
+            'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
+            'HTTP_X_AUTH_CONTENT_HASH' => $headers['X-Auth-Content-Hash'],
+        ];
+        $_GET = ['reprint-api' => '', 'endpoint' => 'push_future_operation'];
+        $_FILES = [];
+        $authenticator = new RequestAuthenticator(self::SECRET, [], 300, false);
+
+        $this->assertNull($authenticator->verify_globals($this->now($headers)));
+    }
+
     public function testVerifyGlobalsDerivesThePushDecisionFromTheQueryEndpoint(): void
     {
         $headers = self::$key_client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_status');

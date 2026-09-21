@@ -169,7 +169,9 @@ final class PublicKeyServer {
      *
      * Method and target come from $_SERVER, the body from php://input, uploads
      * from $_FILES, the cursor from the configured header, and the push
-     * decision from the query-string endpoint, the same way HTTPServer makes it.
+     * decision from the query-string endpoint, the same way
+     * HTTPServer::handle_request() makes it: every push_-prefixed endpoint,
+     * known or not, uses the push request contract.
      */
     public function verify_globals(?float $now = null): ?string {
         $body = file_get_contents('php://input');
@@ -183,7 +185,7 @@ final class PublicKeyServer {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Routing only; the signature is the check.
         $endpoint = isset($_GET['endpoint']) && is_string($_GET['endpoint']) ? $_GET['endpoint'] : '';
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
-        $allow_unsigned_payload = HTTPServer::is_push_endpoint($endpoint);
+        $allow_unsigned_payload = strpos($endpoint, 'push_') === 0;
 
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Request headers are covered by the signature, not a nonce field.
         return $this->verify($_SERVER, $method, $request_target, $body, $_FILES, $cursor, $allow_unsigned_payload, $now);

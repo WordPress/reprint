@@ -143,6 +143,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testPluginHmacVerifierDelegatesToPackageServer(): void
     {
+        $this->forceHmacHost();
         $connection_token = 'delegated-token';
         $nonce = '0123456789abcdef0123456789abcdef';
         $client = new Site_Export_HMAC_Client($connection_token);
@@ -649,5 +650,175 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
         $GLOBALS['reprint_server_test_options'][PUBLIC_KEYS_OPTION] = [['key_id' => 'x']];
         $this->assertSame([], get_enrolled_public_keys(), 'entries missing public_key are dropped');
+    }
+
+    /**
+     * Runs handle_api_request() with an exit callable that throws, so the
+     * test regains control and can read the JSON the dispatcher wrote.
+     *
+     * The dispatcher closes every open output buffer, including PHPUnit's,
+     * and installs error and exception handlers that call exit(1). Both are
+     * put back afterwards so the next test still runs under PHPUnit's own
+     * handlers and buffer level.
+     *
+     * @return array {
+     *     Decoded response.
+     *
+     *     @type int   $status HTTP status the dispatcher set; 200 when it set none.
+     *     @type array $body   Decoded JSON body, empty when the output was not JSON.
+     * }
+     */
+    private function dispatchAndCapture(array $server, array $get = []): array
+    {
+        $_SERVER = $server;
+        $_GET = $get;
+        $captured = ['status' => 200, 'body' => []];
+        $output_buffer_level_before = ob_get_level();
+        http_response_code(200);
+        $output = '';
+        try {
+            \WordPress\Reprint\Server\Plugin\handle_api_request(['exit' => static function () {
+                throw new \RuntimeException('exit');
+            }]);
+        } catch (\RuntimeException $exception) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The dispatcher's exit() is replaced by a throw so the test regains control.
+        } finally {
+            restore_exception_handler();
+            restore_error_handler();
+            $output = (string) ob_get_clean();
+            while (ob_get_level() < $output_buffer_level_before) {
+                ob_start();
+            }
+        }
+        $captured['status'] = http_response_code();
+        $captured['body'] = json_decode($output, true) ?? [];
+        return $captured;
+    }
+
+    /** @param array<string,string> $auth_headers Name => value, converted to $_SERVER keys. */
+    private function serverWithAuth(array $auth_headers): array
+    {
+        $server = ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/?reprint-api'];
+        foreach ($auth_headers as $name => $value) {
+            $server['HTTP_' . strtoupper(str_replace('-', '_', $name))] = $value;
+        }
+        return $server;
+    }
+
+    private function forceHmacHost(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+    }
+
+    // ── OpenSSL host (the test runtime's real state) ──
+
+    /**
+     * The host rule is read before any credential: a token request never
+     * reaches the enrolled-key check, so a token-only site still answers
+     * requires_key_auth. not_configured is the answer to a key request.
+     */
+    public function testKeyHostWithOnlyATokenRequiresKeyAuth(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        $client = new Site_Export_HMAC_Client('token');
+        $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('requires_key_auth', $response['body']['reason']);
+    }
+
+    public function testKeyHostWithOnlyATokenIsNotConfiguredForAKeyRequest(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        [$private_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $key_client = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
+        $response = $this->dispatchAndCapture($this->serverWithAuth($key_client->get_auth_headers('GET', 'https://s.test/?reprint-api')));
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
+    }
+
+    public function testKeyHostRejectsAValidTokenWhenAKeyIsEnrolled(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        update_option_public_keys([$this->sampleKeyEntry()]);
+        $client = new Site_Export_HMAC_Client('token');
+        $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('requires_key_auth', $response['body']['reason']);
+    }
+
+    public function testKeyHostAcceptsAValidKeySignature(): void
+    {
+        [$private_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $key_client = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
+        update_option_public_keys([[
+            'key_id' => $key_client->get_key_id(), 'public_key' => $public_key,
+            'label' => '', 'added_at' => 1, 'push' => false,
+        ]]);
+        $headers = $key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        // Every authentication failure answers 403 or 503 with a reason. Past
+        // the auth block the dispatcher fails on the missing server runtime
+        // under the test PLUGIN_DIR, which is enough to prove auth passed.
+        $response = $this->dispatchAndCapture($this->serverWithAuth($headers));
+        $this->assertNotSame(403, $response['status']);
+        $this->assertNotSame(503, $response['status']);
+        $this->assertArrayNotHasKey('reason', $response['body']);
+    }
+
+    public function testKeyHostReportsUnknownKey(): void
+    {
+        update_option_public_keys([$this->sampleKeyEntry()]);
+        [$private_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $stranger = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
+        $response = $this->dispatchAndCapture($this->serverWithAuth($stranger->get_auth_headers('GET', 'https://s.test/?reprint-api')));
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('unknown_key', $response['body']['reason']);
+    }
+
+    // ── HMAC-only host (forced through the Utils override) ──
+
+    public function testHmacHostReturnsNotConfiguredWhenNoTokenIsStored(): void
+    {
+        $this->forceHmacHost();
+        $response = $this->dispatchAndCapture(['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/?reprint-api']);
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
+    }
+
+    public function testHmacHostRejectsAKeyIdHeaderWithRequiresTokenAuth(): void
+    {
+        $this->forceHmacHost();
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        $response = $this->dispatchAndCapture($this->serverWithAuth(['X-Auth-Key-Id' => '0123456789abcdef']));
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('requires_token_auth', $response['body']['reason']);
+    }
+
+    public function testHmacHostAcceptsAValidTokenSignature(): void
+    {
+        $this->forceHmacHost();
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        $client = new Site_Export_HMAC_Client('token');
+        $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
+        $this->assertNotSame(403, $response['status']);
+        $this->assertNotSame(503, $response['status']);
+        $this->assertArrayNotHasKey('reason', $response['body']);
+    }
+
+    public function testPushGateHonoursThePerKeyFlag(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = true;
+        update_option_public_keys([$entry]);
+
+        $this->assertNull(\WordPress\Reprint\Server\Plugin\get_push_authorization_error($entry['key_id']));
+        $entry['push'] = false;
+        update_option_public_keys([$entry]);
+        $this->assertSame(
+            'Push access is disabled for the current key.',
+            \WordPress\Reprint\Server\Plugin\get_push_authorization_error($entry['key_id'])
+        );
+        $this->assertSame(
+            'Push access is disabled for the current key.',
+            \WordPress\Reprint\Server\Plugin\get_push_authorization_error('0000000000000000')
+        );
     }
 }

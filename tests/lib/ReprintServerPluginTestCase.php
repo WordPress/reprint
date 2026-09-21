@@ -539,6 +539,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         }
 
         $GLOBALS['reprint_server_test_multisite'] = false;
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(null);
         parent::tearDown();
     }
 

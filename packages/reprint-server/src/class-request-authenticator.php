@@ -123,7 +123,10 @@ final class RequestAuthenticator {
 
     /**
      * Verifies the current PHP request. The push decision comes from the
-     * query-string endpoint, exactly as HTTPServer::handle_request() makes it.
+     * query-string endpoint, exactly as HTTPServer::handle_request() makes it:
+     * every push_-prefixed endpoint, known or not, uses the push request
+     * contract, so an unknown one answers "Invalid endpoint" after
+     * authenticating instead of failing its envelope signature.
      */
     public function verify_globals(?float $now = null): ?string {
         $body = file_get_contents('php://input');
@@ -138,8 +141,10 @@ final class RequestAuthenticator {
         $endpoint = isset($_GET['endpoint']) && is_string($_GET['endpoint']) ? $_GET['endpoint'] : '';
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
 
+        $is_push_endpoint = strpos($endpoint, 'push_') === 0;
+
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Request headers are covered by the signature, not a nonce field.
-        return $this->verify($_SERVER, $method, $request_target, $body, $_FILES, $cursor, HTTPServer::is_push_endpoint($endpoint), $now);
+        return $this->verify($_SERVER, $method, $request_target, $body, $_FILES, $cursor, $is_push_endpoint, $now);
     }
 
     public function last_error_reason(): ?string {
