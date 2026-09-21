@@ -317,6 +317,46 @@ class DiagnoseHttpErrorTest extends TestCase
         ));
     }
 
+    public function testUnmarked403AfterAKeySignedRequestIsPotentiallyTransient()
+    {
+        $key_path = tempnam(sys_get_temp_dir(), 'reprint-key-');
+        [$private_key_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        file_put_contents($key_path, $private_key_pem);
+        chmod($key_path, 0600);
+        try {
+            $client = new \ImportClient(
+                'http://example.com',
+                sys_get_temp_dir(),
+                sys_get_temp_dir(),
+            );
+            $reflection = new \ReflectionClass(\ImportClient::class);
+            $reflection->getMethod('initialize_credential')->invoke($client, ['private_key' => $key_path]);
+            $this->assertNull($reflection->getProperty('hmac_client')->getValue($client));
+            $this->assertInstanceOf(
+                \WordPress\Reprint\Server\PublicKeyClient::class,
+                $reflection->getProperty('public_key_client')->getValue($client),
+            );
+
+            $classify = $reflection->getMethod('is_potentially_transient_http_error');
+            $this->assertTrue($classify->invoke(
+                $client,
+                403,
+                '<!doctype html><title>Temporary firewall response</title>',
+            ));
+            $this->assertTrue($classify->invoke($client, 401, ''));
+            $this->assertFalse($classify->invoke(
+                $client,
+                403,
+                '{"error":"Invalid timestamp format","code":403}',
+            ));
+
+            $diagnosis = $reflection->getMethod('diagnose_http_error')->invoke($client, 403, null, null);
+            $this->assertNotSame('AUTH_NO_SECRET', $diagnosis['code']);
+        } finally {
+            unlink($key_path);
+        }
+    }
+
     public function testPullJsonRequestReportsHttp415AsPossibleFirewallGreylist()
     {
         if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {

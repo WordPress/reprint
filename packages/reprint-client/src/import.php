@@ -1795,7 +1795,7 @@ class ImportClient
 
         if (!class_exists('Site_Export_HMAC_Client')) {
             throw new RuntimeException(
-                'Streaming exporter runtime not found. Run composer install before using --secret.'
+                'Streaming exporter runtime not found. Run composer install before using --secret or --private-key.'
             );
         }
 
@@ -12705,7 +12705,7 @@ class ImportClient
 
         // ── Authentication / authorization ───────────────────────
         if ($http_code === 401 || $http_code === 403) {
-            if ($this->hmac_client === null) {
+            if ($this->hmac_client === null && $this->public_key_client === null) {
                 return [
                     'code' => 'AUTH_NO_SECRET',
                     'message' =>
@@ -13431,7 +13431,7 @@ class ImportClient
         // An unmarked 401 or 403 after a signed request can be a temporary
         // firewall response produced before the request reaches Reprint.
         return ($http_code === 401 || $http_code === 403)
-            && $this->hmac_client !== null;
+            && ( $this->hmac_client !== null || $this->public_key_client !== null );
     }
 
     /**
@@ -15234,7 +15234,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--force-http] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [--force-http] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
