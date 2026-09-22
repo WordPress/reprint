@@ -67,7 +67,7 @@ describe('Import: public-key pull', { timeout: 180000 }, () => {
         )));
 
         assert.match(result.stdout, /Key for this site:/);
-        assert.match(result.stdout, /Deleting the state directory revokes it/);
+        assert.match(result.stdout, /remove the enrolled key under Tools > Reprint Server/);
         assert.ok(existsSync(exportedKeyPath(importUrl(), stateDir)), 'the key stays where pull found it');
     });
 });
