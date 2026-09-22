@@ -30,6 +30,7 @@ if ($staging_root === realpath($project_root)) {
 $paths = [
     $staging_root . '/packages/reprint-server/src',
     $staging_root . '/reprint-server-wp/index.php',
+    $staging_root . '/reprint-server-wp/uninstall.php',
     $staging_root . '/reprint-server-wp/lib.php',
     $staging_root . '/reprint-server-wp/compat.php',
     $staging_root . '/reprint-server-wp/wordpress',
