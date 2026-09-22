@@ -3335,7 +3335,7 @@ class ImportClient
              * The protocol is intentionally data-shaped instead of exporter-defined
              * tokens: table_name_without_prefix is resolved against the remote site's table prefix,
              * column is matched against the source table metadata, and value_base64 lets
-             * the exporter compare with FROM_BASE64(...) without interpolating the raw
+             * the exporter compare binary bytes without interpolating the raw
              * value into SQL. _edit_lock is ephemeral editor session state and would
              * otherwise create stale "being edited" notices in the pulled site.
              */

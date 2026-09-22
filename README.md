@@ -12,6 +12,12 @@ php reprint.phar install-server
 
 This prints the download URL and step-by-step instructions for installing the WordPress plugin on the site you want to clone. The plugin exposes the HTTP API that reprint connects to.
 
+MySQL 5.5 sources are supported. Source row filters and resume queries use `UNHEX()`
+on these servers and keep `FROM_BASE64()` on newer MySQL. The downloaded SQL still
+uses base64 for destination imports and URL rewriting; this does not add MySQL 5.5
+destination support. Update the source site's Reprint Server plugin to get this
+compatibility change.
+
 ### 2. Pull the site
 
 ```bash

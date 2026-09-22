@@ -1765,7 +1765,7 @@ class MySQLDumpProducer
 
         $size = 0;
         foreach ($this->oversized_pk_values as $col => $value) {
-            $size += strlen($this->row_reader->build_comparison($col, $value, "="));
+            $size += strlen($this->row_reader->build_comparison($col, $value, "=", false));
             $size += 5; // AND
         }
 
@@ -1867,9 +1867,10 @@ class MySQLDumpProducer
 
         // The target row is already selected. Its membership records may not
         // have been imported yet, so only its primary key belongs in this UPDATE.
+        // Keep destination keys in base64 so URL rewriting also reaches these comparisons.
         $where_parts = [];
         foreach ($this->oversized_pk_values as $pk_col => $pk_value) {
-            $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=");
+            $where_parts[] = $this->row_reader->build_comparison($pk_col, $pk_value, "=", false);
         }
         $where_clause = implode(" AND ", $where_parts);
 
