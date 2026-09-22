@@ -2819,7 +2819,7 @@ final class PushEndpointsTest extends TestCase {
                 'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'response_timeout' => 2,
         ]);
@@ -3767,7 +3767,7 @@ final class PushEndpointsTest extends TestCase {
                 'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4 * 1024 * 1024,
         ];
     }
@@ -4026,7 +4026,7 @@ final class PushEndpointsTest extends TestCase {
                 'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 64,
             'request_sizer_options' => [
                 'floor_bytes' => 2048,
@@ -4316,7 +4316,7 @@ final class PushEndpointsTest extends TestCase {
                 'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client($secret),
+            'envelope_signer' => new Site_Export_HMAC_Client($secret),
             'chunk_bytes' => 4,
             'connect_timeout' => 3,
             'stall_timeout' => 3,

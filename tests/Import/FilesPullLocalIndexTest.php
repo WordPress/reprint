@@ -277,7 +277,7 @@ final class FilesPullLocalIndexTest extends TestCase
                     'Accept-Language' => 'en-US,en;q=0.9',
                     'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
                 ],
-                'hmac_client' => new \Site_Export_HMAC_Client('secret'),
+                'envelope_signer' => new \Site_Export_HMAC_Client('secret'),
                 'allow_http' => true,
             ], $processLock);
             $sender->close();

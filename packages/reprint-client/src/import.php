@@ -1861,7 +1861,7 @@ class ImportClient
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'request_context_headers' => $this->request_context_headers,
-            'hmac_client' => self::build_envelope_signer(
+            'envelope_signer' => self::build_envelope_signer(
                 $options,
                 $this->remote_reprint_api_url,
                 $this->state_dir,
