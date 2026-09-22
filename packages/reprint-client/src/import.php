@@ -15242,15 +15242,21 @@ if (
         echo "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
         echo "  3. Upload reprint-exporter-wp.zip and activate Reprint Server\n";
         echo "\n";
-        echo "{$bold}Step 3: Configure the connection token{$reset}\n";
+        echo "{$bold}Step 3: Enroll a key{$reset}\n";
         echo "\n";
-        echo "  1. In wp-admin, go to Tools → Reprint Server\n";
-        echo "  2. Enter a connection token and save\n";
-        echo "  3. Pass the same token to reprint with --secret:\n";
+        echo "  1. Run reprint against the site; with no credential it generates a key,\n";
+        echo "     prints the public half, and stops with exit code 4:\n";
         echo "\n";
-        echo "     {$dim}php reprint.phar preflight https://your-site.com \\\n";
-        echo "       --secret=YOUR_SECRET \\\n";
+        echo "     {$dim}php reprint.phar pull https://your-site.com \\\n";
         echo "       --state-dir=./state --fs-root=./files{$reset}\n";
+        echo "\n";
+        echo "     (reprint keygen https://your-site.com --state-dir=./state does the same\n";
+        echo "     without starting a pull)\n";
+        echo "  2. In wp-admin, go to Tools → Reprint Server and enroll the printed key\n";
+        echo "  3. Run the same command again; the key is found in --state-dir\n";
+        echo "\n";
+        echo "  Only a host without OpenSSL uses a connection token instead: enter one\n";
+        echo "  under Tools → Reprint Server and pass it with --secret=YOUR_SECRET.\n";
         echo "\n";
     }
 
@@ -15346,27 +15352,33 @@ if (
                 "so you can pass just the site URL.\n",
             "extra" =>
                 "Examples:\n" .
-                "  # Download files and database without applying SQL:\n" .
+                "  # Download files and database without applying SQL. The first run\n" .
+                "  # with no credential generates a key, prints it for enrollment under\n" .
+                "  # Tools → Reprint Server, and exits 4; the second run uses that key:\n" .
                 "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
+                "    --state-dir=./state --fs-root=./files\n" .
                 "\n" .
                 "  # Full clone with MySQL database apply and URL rewriting:\n" .
                 "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_local \\\n" .
                 "    --new-site-url=http://localhost:8881\n" .
                 "\n" .
                 "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
                 "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite \\\n" .
                 "    --new-site-url=http://localhost:8881 \\\n" .
                 "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n" .
                 "\n" .
                 "  # Prepare a Playground runtime but let another process start it:\n" .
                 "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
-                "    --runtime=playground-cli --start-runtime=none --output-dir=./runtime\n",
+                "    --state-dir=./state --fs-root=./files \\\n" .
+                "    --runtime=playground-cli --start-runtime=none --output-dir=./runtime\n" .
+                "\n" .
+                "  # Host without OpenSSL: pass the connection token instead of a key:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n",
         ],
         "pull-files" => [
             "level" => "high",
