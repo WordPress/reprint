@@ -28,6 +28,33 @@ final class PublicKeyClientTest extends TestCase
         $this->assertSame(self::$public_key_one_line, Utils::normalize_public_key($details['key']));
     }
 
+    public function testGeneratesAKeypairWhenTheDefaultOpensslConfigIsMissing(): void
+    {
+        // PHP resolves OPENSSL_CONF when the extension initialises, so the
+        // missing-config host has to be a fresh process.
+        $php_code = 'require ' . var_export(__DIR__ . '/../vendor/autoload.php', true) . ';'
+            . '[$private_key_pem, $public_key] = \\WordPress\\Reprint\\Server\\PublicKeyClient::generate_keypair();'
+            . 'echo json_encode([openssl_pkey_get_details(openssl_pkey_get_private($private_key_pem))["bits"], $public_key]);';
+        $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $environment = array_merge(getenv(), ['OPENSSL_CONF' => sys_get_temp_dir() . '/reprint-missing-openssl.cnf']);
+        $process = proc_open([PHP_BINARY, '-d', 'display_errors=1', '-r', $php_code], $descriptors, $pipes, null, $environment);
+        $this->assertIsResource($process);
+        fclose($pipes[0]);
+        $stdout = stream_get_contents($pipes[1]);
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $status = proc_close($process);
+
+        $this->assertSame(0, $status, $stdout . $stderr);
+        $this->assertSame('', $stderr);
+        $decoded = json_decode($stdout, true);
+        $this->assertIsArray($decoded, $stdout);
+        $this->assertSame(2048, $decoded[0]);
+        $this->assertSame($decoded[1], Utils::normalize_public_key(Utils::public_key_to_pem($decoded[1])));
+        $this->assertSame([], glob(sys_get_temp_dir() . '/reprint-openssl-*') ?: []);
+    }
+
     public function testKeyIdMatchesTheFingerprintOfThePublicKey(): void
     {
         $client = new PublicKeyClient(self::$private_key_pem);

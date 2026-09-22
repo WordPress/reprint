@@ -58,18 +58,38 @@ final class PublicKeyClient implements EnvelopeSigner {
      */
     public static function generate_keypair(): array {
         self::require_openssl();
-        $keypair = openssl_pkey_new([
+        $configargs = [
             'private_key_bits' => 2048,
             'private_key_type' => OPENSSL_KEYTYPE_RSA,
-        ]);
-        if ($keypair === false) {
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- OpenSSL error text, never HTML output.
-            throw new RuntimeException('Key generation failed: ' . (string) openssl_error_string());
-        }
-        $private_key_pem = '';
-        if (!openssl_pkey_export($keypair, $private_key_pem)) {
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- OpenSSL error text, never HTML output.
-            throw new RuntimeException('Could not export the private key: ' . (string) openssl_error_string());
+        ];
+        $keypair = @openssl_pkey_new($configargs);
+        $temporary_config_path = null;
+        try {
+            if ($keypair === false) {
+                // PHP reads openssl.cnf (OPENSSL_CONF or <OPENSSLDIR>/openssl.cnf)
+                // before generating or exporting and refuses when the file is
+                // missing, as on Windows and some CI PHP builds. Every setting is
+                // passed explicitly, so an empty file stands in for it.
+                $temporary_config_path = tempnam(sys_get_temp_dir(), 'reprint-openssl-');
+                if ($temporary_config_path === false) {
+                    throw new RuntimeException('Key generation failed: cannot create a temporary OpenSSL config.');
+                }
+                $configargs['config'] = $temporary_config_path;
+                $keypair = openssl_pkey_new($configargs);
+            }
+            if ($keypair === false) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- OpenSSL error text, never HTML output.
+                throw new RuntimeException('Key generation failed: ' . (string) openssl_error_string());
+            }
+            $private_key_pem = '';
+            if (!openssl_pkey_export($keypair, $private_key_pem, null, $configargs)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- OpenSSL error text, never HTML output.
+                throw new RuntimeException('Could not export the private key: ' . (string) openssl_error_string());
+            }
+        } finally {
+            if ($temporary_config_path !== null) {
+                @unlink($temporary_config_path);
+            }
         }
         $details = openssl_pkey_get_details($keypair);
         $public_key_pem = (string) $details['key'];
