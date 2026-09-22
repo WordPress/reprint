@@ -59,6 +59,9 @@ jobs:
           MARIADB_SOURCE_USER: root
           MARIADB_SOURCE_PASS: my-secret-pw
 
+      - name: Test administrator JavaScript
+        run: node --test tests/reprint-server-admin.test.cjs
+
   mariadb-auto-increment:
     name: MyISAM import into enforced InnoDB
     runs-on: ubuntu-latest
