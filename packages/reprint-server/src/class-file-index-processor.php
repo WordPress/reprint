@@ -605,6 +605,17 @@ final class FileIndexProcessor {
     /**
      * Reports whether a path belongs to the established default skip set.
      *
+     * Keep node_modules: Weglot's Composer autoloader loads WeglotLanguages\Languages
+     * from vendor/weglot/weglot-php/node_modules/@weglot/languages/dist/Languages.php
+     * inside the plugin. Omitting that PHP file makes site requests fail with a
+     * missing-class fatal error. Copying bundled runtime files is safer than
+     * breaking the site to save transfer time and space.
+     *
+     * This does not make development dependencies portable. Native binaries may
+     * require a different OS or CPU; those projects still need dependency
+     * installation or rebuilding on the target after Reprint runs. Automating
+     * that step is separate work, not a reason to omit portable runtime files.
+     *
      * @param string $path         Filesystem path to classify.
      * @param bool   $path_is_file Whether the path is a regular file.
      * @return bool Whether the path should be omitted.
