@@ -18,6 +18,9 @@
     "basic": {
       "port": 8081
     },
+    "basic-file-sync": {
+      "port": 8183
+    },
     "symlinks-outside": {
       "port": 8082
     },

@@ -15241,7 +15241,7 @@ if (
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
                 "default-skipped paths include generated wp-content caches, version-\n" .
-                "control data, node_modules, package-manager caches, OS metadata, and\n" .
+                "control data, package-manager caches, OS metadata, and\n" .
                 "editor scratch files.\n" .
                 "With --progress=auto (the default), a terminal gets red status lines\n" .
                 "that label paths to push as modified and paths to delete as deleted;\n" .

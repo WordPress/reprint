@@ -151,12 +151,18 @@ final class FileIndexSkipDefaultsTest extends TestCase
             '.gitmodules at root'         => ['/srv/htdocs/.gitmodules', false],
 
             // -------- dev tooling --------
-            'node_modules'                => ['/srv/htdocs/wp-content/themes/foo/node_modules/react/index.js', true],
             '.idea'                       => ['/srv/htdocs/.idea/workspace.xml', true],
             '.vscode'                     => ['/srv/htdocs/.vscode/settings.json', true],
             '.cache anywhere'             => ['/srv/htdocs/wp-content/plugins/foo/.cache/parcel/x.json', true],
             '.npm in home'                => ['/srv/htdocs/.npm/_logs/run.log', true],
             '.yarn'                       => ['/srv/htdocs/.yarn/install-state.gz', true],
+
+            // Runtime dependencies may be bundled in node_modules at any depth.
+            'node_modules at root'        => ['/srv/htdocs/node_modules', false],
+            'node_modules at path start'  => ['node_modules/package/index.js', false],
+            'theme node_modules'          => ['/srv/htdocs/wp-content/themes/foo/node_modules/react/index.js', false],
+            'Weglot PHP dependency'       => ['/srv/htdocs/wp-content/plugins/weglot/vendor/weglot/weglot-php/node_modules/@weglot/languages/dist/Languages.php', false],
+            'WPBakery browser dependency' => ['/srv/htdocs/wp-content/plugins/js_composer/assets/lib/vendor/node_modules/animate.css/animate.min.css', false],
 
             // Negative: similar names that ARE legitimate user content.
             'directory with hyphen suffix' => ['/srv/htdocs/wp-content/themes/foo/node_modules-archive/x.js', false],
@@ -206,7 +212,7 @@ final class FileIndexSkipDefaultsTest extends TestCase
             // -------- composite path traversals --------
             'cache-then-uploads (under cache)' => ['/srv/htdocs/wp-content/cache/uploads/photo.jpg', true],
             'uploads-then-cache-named-file'    => ['/srv/htdocs/wp-content/uploads/some-cache.zip', false],
-            'theme + node_modules deep'        => ['/srv/htdocs/wp-content/themes/foo/build/node_modules/x.js', true],
+            'theme + node_modules deep'        => ['/srv/htdocs/wp-content/themes/foo/build/node_modules/x.js', false],
         ];
     }
 
@@ -226,6 +232,10 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertContains('.htaccess', $rel);
         $this->assertContains('.well-known/acme/abc', $rel);
         $this->assertContains('wp-content/themes/foo/style.css', $rel);
+        $this->assertContains('node_modules/package/index.js', $rel);
+        $this->assertContains('wp-content/themes/foo/node_modules/react.js', $rel);
+        $this->assertContains('wp-content/plugins/weglot/vendor/weglot/weglot-php/node_modules/@weglot/languages/dist/Languages.php', $rel);
+        $this->assertContains('wp-content/plugins/js_composer/assets/lib/vendor/node_modules/animate.css/animate.min.css', $rel);
         $this->assertContains('wp-content/uploads/2024/01/photo.jpg', $rel);
         $this->assertContains('wp-content/uploads/some-cache.zip', $rel);
         $this->assertContains('wp-content/plugins/cache-control/admin.css', $rel);
@@ -249,7 +259,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
         $this->assertNotContains('wp-content/uploads/wc-logs/checkout.log', $rel);
         $this->assertNotContains('wp-content/plugins/all-in-one-wp-migration/storage/job.tmp', $rel);
         $this->assertNotContains('.git/HEAD', $rel);
-        $this->assertNotContains('wp-content/themes/foo/node_modules/react.js', $rel);
         $this->assertNotContains('.DS_Store', $rel);
         $this->assertNotContains('wp-content/uploads/Thumbs.db', $rel);
         $this->assertNotContains('wp-content/themes/foo/style.css~', $rel);
@@ -407,6 +416,10 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'wp-content/uploads/2024/01/photo.jpg' => "fakejpg",
             'wp-content/uploads/some-cache.zip' => "userdata", // user-named, not in cache/
             'wp-content/plugins/cache-control/admin.css' => ".x{}\n", // plugin name contains "cache"
+            'node_modules/package/index.js' => "// dependency",
+            'wp-content/themes/foo/node_modules/react.js' => "// react",
+            'wp-content/plugins/weglot/vendor/weglot/weglot-php/node_modules/@weglot/languages/dist/Languages.php' => "<?php namespace WeglotLanguages; class Languages {}",
+            'wp-content/plugins/js_composer/assets/lib/vendor/node_modules/animate.css/animate.min.css' => ".animated{}",
 
             // generated/junk (must be filtered)
             'wp-content/cache/page.html' => "cached",
@@ -426,7 +439,6 @@ final class FileIndexSkipDefaultsTest extends TestCase
             'wp-content/plugins/all-in-one-wp-migration/storage/job.tmp' => "temporary",
             '.git/HEAD' => "ref: refs/heads/main\n",
             '.git/objects/12/abcdef' => "object",
-            'wp-content/themes/foo/node_modules/react.js' => "// react",
             '.DS_Store' => "macos",
             'wp-content/uploads/Thumbs.db' => "win",
             'wp-content/themes/foo/style.css~' => ".old{}\n",

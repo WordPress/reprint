@@ -446,9 +446,13 @@ also keeps pre-existing local paths which were not recorded by the first pull.
 
 File pulls always omit paths matched by the built-in default skip rules. These
 rules cover known generated backup archives, cache, log, upgrade, and temporary
-paths, plus version-control metadata, `node_modules`, IDE and package-manager
+paths, plus version-control metadata, IDE and package-manager
 caches, operating-system metadata, and editor scratch files. `--include`,
 `--exclude`, `--filter`, and `--remap` cannot override these omissions.
+
+`node_modules` directories are included by default because plugins and themes
+may bundle runtime PHP, JavaScript, and CSS dependencies there. Use `--exclude`
+to omit a specific directory when you know the site does not need it.
 
 **Host platform plugins**
 
