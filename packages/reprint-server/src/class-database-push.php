@@ -98,7 +98,8 @@ final class DatabasePush {
         }
         $next_offset = ftell($input);
         if (isset($record['foreign_key'])) {
-            $incoming = $state['tables'][$record['table']] ?? null;
+            $table = $record['table'];
+            $incoming = $state['tables'][$table] ?? null;
             if ($incoming === null || strpos($record['foreign_key'], $incoming . '_fk_') !== 0) {
                 throw new RuntimeException('Foreign key record must name an incoming table and its private constraint.');
             }
