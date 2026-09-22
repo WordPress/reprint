@@ -25,7 +25,7 @@ class PullMetadataTest extends TestCase
         $this->pullStateDirectory =
             $this->stateDir
             . '/remotes/'
-            . md5('http://example.invalid')
+            . md5('https://example.invalid')
             . '/pull';
         mkdir($this->stateDir, 0755, true);
         mkdir($this->fsRoot, 0755, true);
@@ -69,7 +69,7 @@ class PullMetadataTest extends TestCase
      */
     private function writeState(
         array $state,
-        string $remoteReprintApiUrl = 'http://example.invalid'
+        string $remoteReprintApiUrl = 'https://example.invalid'
     ): void
     {
         \write_current_pull_state(
@@ -83,7 +83,7 @@ class PullMetadataTest extends TestCase
      */
     private function readMetadata(
         string $command = 'pull-metadata',
-        string $remoteReprintApiUrl = 'http://example.invalid'
+        string $remoteReprintApiUrl = 'https://example.invalid'
     ): array
     {
         $client = new \ImportClient($remoteReprintApiUrl, $this->stateDir, $this->fsRoot);

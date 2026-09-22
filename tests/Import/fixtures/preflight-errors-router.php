@@ -1,5 +1,7 @@
 <?php
 
+file_put_contents('requests.log', "request\n", FILE_APPEND);
+
 // Model gateway failures and preflight responses from other server versions
 // over HTTP. Without a response fixture, exercise the real preflight endpoint.
 if (is_file('response.json')) {

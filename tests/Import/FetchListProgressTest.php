@@ -23,7 +23,7 @@ class FetchListProgressTest extends TestCase
         $this->tempDir = sys_get_temp_dir() . '/fetch-list-progress-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
         $this->pullStateDirectory =
-            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
+            $this->stateDir . '/remotes/' . md5('https://fake.url') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->stateDir, 0755, true);
         mkdir($this->pullStateDirectory, 0755, true);
@@ -59,7 +59,7 @@ class FetchListProgressTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
+        return new \ImportClient('https://fake.url', $this->stateDir, $this->filesystem_root);
     }
 
     /**

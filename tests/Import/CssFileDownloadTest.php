@@ -95,7 +95,7 @@ class CssFileDownloadTest extends TestCase {
             . '.other{src:url(https://old.example.org/a),url(https://old.example:8080/a),url(../a),url(data:image/png;base64,AAAB),url(https://user@old.example/a)}';
         file_put_contents($this->source . $relative, $css);
         file_put_contents($this->source . '/unchanged.txt', $css);
-        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files');
+        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         \write_current_pull_state($client, [
             'preflight' => ['http_code' => 200, 'data' => [
                 'ok' => true,
@@ -118,7 +118,7 @@ class InterruptedCssDownload extends ImportClient {
         }
     }
 }
-$client = new InterruptedCssDownload($argv[1], $argv[2] . '/state', $argv[2] . '/files');
+$client = new InterruptedCssDownload($argv[1], $argv[2] . '/state', $argv[2] . '/files', ['allow_http' => true]);
 $client->run([
     'command' => $argv[3],
     'rewrite_url' => [

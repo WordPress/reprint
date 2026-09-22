@@ -267,6 +267,26 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         assert.equal(existsSync(join(pluginsDirectory, 'hostinger')), false);
     });
 
+    it.each(['--allow-unsafe-http', '--force-http'])('requires explicit HTTP source permission through %s', (httpOption) => {
+        const httpSourceUrl = sourceUrl.replace('https:', 'http:');
+        const stateFile = savePreflightFixture(httpSourceUrl);
+        const savedState = readFileSync(stateFile, 'utf8');
+        writePluginFile('hostinger/main.php', '');
+        const arguments_ = [httpSourceUrl, `--state-dir=${stateDirectory}`, '--tasks=disable-hosting-plugins'];
+
+        const rejected = runPostProcessCommand(arguments_);
+        assert.equal(rejected.exitCode, 1);
+        assert.match(rejected.report.message, /--allow-unsafe-http/);
+        assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
+        assert.equal(readFileSync(stateFile, 'utf8'), savedState);
+
+        const allowed = runPostProcessCommand([...arguments_, httpOption]);
+        assert.equal(allowed.exitCode, 0, JSON.stringify(allowed.report));
+        assert.equal(allowed.report.status, 'complete');
+        assert.deepEqual(allowed.report.results[0].removed_paths, ['wp-content/plugins/hostinger']);
+        assert.equal(existsSync(join(pluginsDirectory, 'hostinger')), false);
+    });
+
     it('retains completed task results when WordPress cannot be recovered', () => {
         savePreflightFixture();
         writePluginFile('hostinger/main.php', '');
@@ -339,7 +359,7 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
     function savePreflightFixture(url = sourceUrl, documentRoot = '/nas/content/live/source') {
         execFileSync('php', ['-r', `
             require $argv[1];
-            $client = new ImportClient($argv[2], $argv[3], $argv[4]);
+            $client = new ImportClient($argv[2], $argv[3], $argv[4], ['allow_http' => true]);
             $client->get_state()->set_preflight_record(['http_code' => 200, 'data' => [
                 'reprint_plugin' => null,
                 'runtime' => ['document_root' => $argv[5]],

@@ -307,7 +307,7 @@ class ProgressScreenTest extends TestCase {
     private function make_client(): \ImportClient
     {
         return new \ImportClient(
-            'http://fake.url',
+            'https://fake.url',
             $this->state_directory,
             $this->filesystem_root
         );

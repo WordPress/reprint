@@ -30,7 +30,7 @@ class FileBodyStreamingTest extends TestCase
     public function testFilePartBodiesAreWrittenIncrementally(): void
     {
         $client = new \ImportClient(
-            'http://fake.url',
+            'https://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root',
         );
@@ -101,7 +101,7 @@ class FileBodyStreamingTest extends TestCase
     public function testMidFileResumeAppendsRemainingBytesWithoutDuplication(): void
     {
         $client = new \ImportClient(
-            'http://fake.url',
+            'https://fake.url',
             $this->tempDir . '/state',
             $this->tempDir . '/fs-root',
         );
@@ -284,7 +284,8 @@ class FileBodyStreamingTest extends TestCase
         $client = new \ImportClient(
             'http://' . $address,
             $this->tempDir . '/state',
-            $this->tempDir . '/fs-root'
+            $this->tempDir . '/fs-root',
+            ['allow_http' => true]
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $reflection->getProperty('is_tty')->setValue($client, $progressStreamIsTty);

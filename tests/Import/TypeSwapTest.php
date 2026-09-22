@@ -62,7 +62,7 @@ class TypeSwapTest extends TestCase
      */
     public function testEnsureDirectoryPathRemovesBlockingSymlink()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $reflection = new \ReflectionClass($client);
         $method = $reflection->getMethod('create_directory_if_missing');
@@ -91,7 +91,7 @@ class TypeSwapTest extends TestCase
      */
     public function testEnsureDirectoryPathRejectsExternalSymlink(): void
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
         $fsRoot = realpath($this->tempDir . '/fs-root');
         $this->assertIsString($fsRoot);
 
@@ -116,7 +116,7 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkReplacesSymlinkToDirectory()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -160,7 +160,7 @@ class TypeSwapTest extends TestCase
      */
     public function testDirectoryChunkReplacesSymlinkToFile()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -196,7 +196,7 @@ class TypeSwapTest extends TestCase
      */
     public function testFileChunkUnderFormerSymlink()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         $fsRoot = $this->tempDir . '/fs-root';
 
@@ -249,7 +249,7 @@ class TypeSwapTest extends TestCase
      */
     public function testNestedFileUnderExistingSymlinkViaEnsureDirectory()
     {
-        $client = new \ImportClient('http://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
+        $client = new \ImportClient('https://fake.url', $this->tempDir, $this->tempDir . '/fs-root');
 
         // Resolve the fs-root path so it matches the realpath() check
         // inside create_directory_if_missing (on macOS, /var -> /private/var).

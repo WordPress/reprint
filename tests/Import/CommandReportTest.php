@@ -282,7 +282,7 @@ final class CommandReportTest extends TestCase {
         $process = proc_open(
             array_merge([
                 PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
-                $command, $this->remote_url, '--secret=preflight-test-secret',
+                $command, $this->remote_url, '--secret=preflight-test-secret', '--allow-unsafe-http',
                 '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
             ], $options),
             [

@@ -63,6 +63,7 @@ final class RuntimeFilesRootPathTest extends TestCase
             $this->target_url,
             $this->state_directory,
             $this->filesystem_root,
+            ['allow_http' => true],
         );
         $download_directory = $this->state_directory . '/runtime-files';
         $reflection = new \ReflectionClass($client);
@@ -105,6 +106,7 @@ final class RuntimeFilesRootPathTest extends TestCase
             ]),
             $this->state_directory,
             $this->filesystem_root,
+            ['allow_http' => true],
         );
 
         try {
@@ -153,6 +155,7 @@ final class RuntimeFilesRootPathTest extends TestCase
             ]),
             $this->state_directory,
             $this->filesystem_root,
+            ['allow_http' => true],
         );
 
         $client->run_preflight();
@@ -183,6 +186,7 @@ final class RuntimeFilesRootPathTest extends TestCase
             ]),
             $this->state_directory,
             $this->filesystem_root,
+            ['allow_http' => true],
         );
 
         try {

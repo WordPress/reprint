@@ -59,7 +59,7 @@ final class MultipartRequestParametersTest extends TestCase {
     /** @dataProvider query_separators */
     public function testMultipartFieldsAndFileUploadDoNotDependOnQuerySeparator(string $separator): void
     {
-        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local');
+        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
         ( new \ReflectionProperty($client, 'hmac_client') )->setValue(
             $client, new \Site_Export_HMAC_Client('multipart-test-secret')
         );

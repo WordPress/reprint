@@ -28,7 +28,7 @@ class FilesPullStateTest extends TestCase
         $this->tempDir = sys_get_temp_dir() . '/import-state-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
         $this->pullStateDirectory =
-            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
+            $this->stateDir . '/remotes/' . md5('https://fake.url') . '/pull';
         $this->filesystem_root = $this->tempDir . '/fs-root';
         mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->filesystem_root, 0755, true);
@@ -63,7 +63,7 @@ class FilesPullStateTest extends TestCase
 
     private function makeClient(): \ImportClient
     {
-        return new \ImportClient('http://fake.url', $this->stateDir, $this->filesystem_root);
+        return new \ImportClient('https://fake.url', $this->stateDir, $this->filesystem_root);
     }
 
     /**
@@ -188,7 +188,7 @@ class FilesPullStateTest extends TestCase
     {
         $client = $this->getMockBuilder(\ImportClient::class)
             ->setConstructorArgs([
-                'http://fake.url',
+                'https://fake.url',
                 $this->stateDir,
                 $this->filesystem_root,
             ])

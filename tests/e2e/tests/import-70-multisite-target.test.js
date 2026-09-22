@@ -402,7 +402,7 @@ describe('Pull a selected site into a fresh single site', () => {
             await connection.query(`CREATE DATABASE \`${database}\``);
             const [[held]] = await connection.query('SELECT GET_LOCK(?, 0) AS acquired', [lock]);
             assert.equal(Number(held.acquired), 1);
-            clientProcess = startClient([clientPath, 'db-apply', url, `--state-dir=${directory}`, `--fs-root=${join(directory, 'fs-root')}`,
+            clientProcess = startClient([clientPath, 'db-apply', url, '--allow-unsafe-http', `--state-dir=${directory}`, `--fs-root=${join(directory, 'fs-root')}`,
                 ...targetArgs(database)]);
             let waiting = false;
             for (let attempt = 0; attempt < 600; ++attempt) {
