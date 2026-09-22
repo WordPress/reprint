@@ -22,14 +22,19 @@ final class KeygenCommandTest extends TestCase
         exec('rm -rf ' . escapeshellarg($this->state_dir));
     }
 
-    private function runCli(array $arguments): array
+    /**
+     * @param string[] $arguments      CLI arguments after the entry script.
+     * @param bool     $stdout_only    Drop stderr so every returned line came from stdout.
+     * @return array{output:string,exit_code:int}
+     */
+    private function runCli(array $arguments, bool $stdout_only = false): array
     {
         $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
         $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry);
         foreach ($arguments as $argument) {
             $command .= ' ' . escapeshellarg($argument);
         }
-        exec($command . ' 2>&1', $output_lines, $exit_code);
+        exec($command . ( $stdout_only ? ' 2>/dev/null' : ' 2>&1' ), $output_lines, $exit_code);
         return ['output' => implode("\n", $output_lines), 'exit_code' => $exit_code];
     }
 
@@ -126,7 +131,9 @@ final class KeygenCommandTest extends TestCase
         $url = 'https://example.test/?reprint-api';
         $fs_root = $this->state_dir . '/site';
         mkdir($fs_root);
-        $result = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root]);
+        // exec() gives the process no TTY, so --progress=auto would select
+        // JSONL; the human text appears only under the terminal presentation.
+        $result = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--progress=tty']);
 
         $this->assertSame(4, $result['exit_code'], $result['output']);
         $this->assertFileExists(ImportClient::key_file_path($url, $this->state_dir));
@@ -140,10 +147,13 @@ final class KeygenCommandTest extends TestCase
         $url = 'https://example.test/?reprint-api';
         $fs_root = $this->state_dir . '/site';
         mkdir($fs_root);
-        $result = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--progress=jsonl']);
+        $result = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--progress=jsonl'], true);
 
         $this->assertSame(4, $result['exit_code'], $result['output']);
         $output_lines = explode("\n", $result['output']);
+        foreach ($output_lines as $output_line) {
+            $this->assertIsArray(json_decode($output_line, true), "every stdout line is JSON: {$output_line}");
+        }
         $report = json_decode((string) end($output_lines), true);
         $this->assertIsArray($report, 'the last line is the command report');
         $this->assertSame('reprint_report', $report['type']);
@@ -153,6 +163,8 @@ final class KeygenCommandTest extends TestCase
         $this->assertSame(ImportClient::key_file_path($url, $this->state_dir), $report['key_path']);
         $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $report['key_id']);
         $this->assertStringStartsWith('MII', $report['public_key']);
+        $this->assertStringContainsString('No credential found for this site', $report['message']);
+        $this->assertStringContainsString($report['public_key'], $report['message']);
     }
 
     public function testPreflightWithNoCredentialRefusesAndNamesKeygen(): void

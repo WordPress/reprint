@@ -20,7 +20,7 @@ final class PublicKeyClient implements EnvelopeSigner {
     /** Must match PublicKeyServer::UNSIGNED_PAYLOAD and Site_Export_HMAC_Client::UNSIGNED_PAYLOAD. */
     public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
-    /** @var resource|\OpenSSLAsymmetricKey */
+    /** @var resource|object Private key handle: openssl_pkey_get_private() returns a resource on PHP 7 and an OpenSSLAsymmetricKey object on PHP 8. */
     private $private_key;
 
     /** @var string One-line base64 public key. */

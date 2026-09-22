@@ -65,6 +65,31 @@ final class AuthErrorDiagnosisTest extends TestCase
         $this->assertStringContainsString($public_key, $result['message']);
     }
 
+    public function testNotConfiguredOnKeyHostWithATokenNamesKeygenNotTheTokenForm(): void
+    {
+        $result = $this->diagnose(
+            $this->clientWith(['secret' => 'x']),
+            503,
+            ['error' => 'Export not configured: this host requires key authentication and no keys are enrolled', 'reason' => 'not_configured']
+        );
+        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
+        $this->assertStringContainsString('the connection token you passed is not accepted there', $result['message']);
+        $this->assertStringContainsString('reprint keygen https://example.test/?reprint-api --state-dir=' . $this->state_dir, $result['message']);
+        $this->assertStringNotContainsString('Set one under', $result['message']);
+    }
+
+    public function testNotConfiguredOnTokenHostAsksForAToken(): void
+    {
+        $result = $this->diagnose(
+            $this->clientWith(['secret' => 'x']),
+            503,
+            ['error' => 'Export not configured: no connection token is stored', 'reason' => 'not_configured']
+        );
+        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
+        $this->assertStringContainsString('no connection token configured', $result['message']);
+        $this->assertStringNotContainsString('reprint keygen', $result['message']);
+    }
+
     public function testUnknownKeyReprintsThePublicKeyAndId(): void
     {
         [$private_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();

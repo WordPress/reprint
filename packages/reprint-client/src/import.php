@@ -1312,10 +1312,19 @@ class ImportClient
                     self::key_file_path($this->remote_reprint_api_url, $this->state_dir),
                     false
                 );
-                fwrite(STDOUT, self::format_enrollment_instructions($generated, true, true));
+                $enrollment_instructions = self::format_enrollment_instructions($generated, true, true);
+                // Only the terminal presentation prints the text. JSONL and
+                // compact output stay parseable: the command report below
+                // carries the key and the same text in its message field.
+                $this->progress->print_line($enrollment_instructions);
+                if ($this->verbose_mode) {
+                    // Verbose terminal output shows JSONL records and no command report.
+                    $this->output_progress(['status' => 'enrollment_needed', 'message' => $enrollment_instructions], true);
+                }
                 // The command report would otherwise call this stop an error with no message.
                 $this->command_report_details = [
                     'status' => 'enrollment_needed',
+                    'message' => $enrollment_instructions,
                     'key_id' => $generated['key_id'],
                     'key_path' => $generated['path'],
                     'public_key' => $generated['public_key'],
@@ -12911,14 +12920,24 @@ class ImportClient
                 ];
             }
             if ($server_reason === 'not_configured') {
-                return [
-                    'code' => 'AUTH_NOT_CONFIGURED',
-                    'message' => $using_key
-                        ? "This site requires key authentication but has no keys enrolled. " .
-                          "Enroll this public key under Tools > Reprint Server." . $key_hint
-                        : "This site has no connection token configured. " .
-                          "Set one under Tools > Reprint Server, or enroll a key if the host supports it.",
-                ];
+                if ($using_key) {
+                    $not_configured_message =
+                        "This site requires key authentication but has no keys enrolled. " .
+                        "Enroll this public key under Tools > Reprint Server." . $key_hint;
+                } elseif (is_string($server_msg) && strpos($server_msg, 'requires key authentication') !== false) {
+                    // A key host keeps a stored token but never accepts it, so
+                    // setting a token there would change nothing.
+                    $not_configured_message =
+                        "This site's host requires key authentication and has no keys enrolled; " .
+                        "the connection token you passed is not accepted there.\n\n" .
+                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` " .
+                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server.";
+                } else {
+                    $not_configured_message =
+                        "This site has no connection token configured. " .
+                        "Set one under Tools > Reprint Server, or enroll a key if the host supports it.";
+                }
+                return ['code' => 'AUTH_NOT_CONFIGURED', 'message' => $not_configured_message];
             }
             if ($server_reason === 'unknown_key') {
                 return [
@@ -13287,8 +13306,9 @@ class ImportClient
         // For form-encoded requests the signed content hash covers that body
         // cursor. A multipart file_fetch request hashes only the uploaded
         // file contents, so its form fields, cursor included, stay unsigned
-        // exactly as they always have on the HMAC path; closing that is the
-        // scope of docs/superpowers/specs/2026-09-21-multipart-signing-gap.md.
+        // exactly as they always have on the HMAC path. Closing that gap for
+        // multipart requests is tracked separately: it needs a signed message
+        // that covers the form fields on both sides.
         // Sending the cursor again as a header would let a proxy that strips
         // custom headers silently drop the value the signature was computed
         // over, breaking verification behind exactly the hosts this is meant
