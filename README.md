@@ -12,6 +12,12 @@ php reprint.phar install-server
 
 This prints the download URL and step-by-step instructions for installing the WordPress plugin on the site you want to clone. The plugin exposes the HTTP API that reprint connects to.
 
+MySQL 5.5 sources are supported. Source row filters and resume queries use `UNHEX()`
+on these servers and keep `FROM_BASE64()` on newer MySQL. The downloaded SQL still
+uses base64 for destination imports and URL rewriting; this does not add MySQL 5.5
+destination support. Update the source site's Reprint Server plugin to get this
+compatibility change.
+
 ### 2. Pull the site
 
 ```bash
@@ -922,6 +928,93 @@ load the `.so`: `tests/e2e/ci/verify-wp-mysql-parser.php` asserts that
 `WP_MySQL_Lexer` resolves to the native lexer and that the SQLite driver creates
 a native-backed parser before benchmarking Playground `db-pull` and `db-apply`.
 That path requires Node.js with JSPI support; CI uses Node 24.
+
+#### Post-migration tasks
+
+Once the destination has its files, database, and working `wp-config.php`, run
+all post-migration tasks with:
+
+```sh
+reprint post-process --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state
+```
+
+Run only selected tasks with `--tasks`:
+
+```sh
+reprint post-process --fs-root=/path/to/wordpress --tasks=disable-failing-plugins
+reprint post-process --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state \
+  --tasks=disable-hosting-plugins
+reprint post-process --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state \
+  --tasks=remove-reprint
+```
+
+Omitting `--tasks`, or passing `--tasks=all`, runs all three. A comma-separated
+list selects only those tasks. Hosting cleanup runs first, Reprint removal
+runs second, and startup recovery runs last, regardless of the list's order.
+Processing stops at the first failure. A theme or must-use plugin fatal during
+startup therefore cannot prevent Reprint's earlier removal.
+
+`disable-hosting-plugins` removes known source-host plugin, MU-plugin, and
+drop-in files using the same rules as `apply-runtime`. It reads the saved
+preflight from `--state-dir`; it does not contact the source, load WordPress,
+change `active_plugins`, or generate runtime files. Like runtime cleanup, it
+records removed paths for later pushes without changing the saved pull selection.
+Generic cache drop-ins are removed only when the saved source-host data calls
+for that. Finish an interrupted files-push, or finish or abort an interrupted
+files-pull, before running this task.
+
+Use the ready-to-run WordPress root containing `wp-load.php` as `--fs-root`,
+not the raw download directory. Hosting cleanup uses the standard `wp-content`
+layout under that root. If the state directory contains several remotes, pass
+the original source URL to select one:
+
+```sh
+reprint post-process https://source.example/?reprint-api \
+  --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state
+```
+
+`remove-reprint` removes the migrated Reprint plugin, including `secret.php`,
+its site and selected-network activation entries, and its four current and
+legacy connection options. It uses the exact plugin basename from saved
+preflight, so renamed installations work. Update the source Reprint Server and
+rerun preflight if the saved report lacks this metadata. The task connects to
+the destination database recorded by `db-apply` or `apply-runtime`; those saved
+settings must still point to this destination. Finish the pull before running
+it. It does not load WordPress or run deactivation or uninstall hooks.
+
+Reprint removal uses `wp-content/plugins` under `--fs-root`, records removed
+paths for later pushes, and can be repeated after a failed run. It removes an
+in-site symlink target as well as the plugin link. A link to a shared installation
+outside this site is only unlinked; the shared files remain. The downloaded SQL
+is not changed and still contains the source credentials. No import-time
+exclusion flags are added. Direct database cleanup does not flush a persistent
+WordPress object cache; flush that destination cache separately if enabled.
+
+`disable-failing-plugins` performs the startup recovery described below. It
+does not need migration state when run alone. JSON output has `status` and a
+`results` list with each attempted task's name, status, and removed paths or
+disabled plugins. Earlier results remain in the report if a later task fails.
+Exit code 0 means all selected tasks completed; exit code 1 means processing
+stopped. These tasks do not check page rendering or the web server.
+
+#### Recover WordPress startup
+
+Once the destination has its files, database, and working `wp-config.php`, run:
+
+```sh
+reprint recover --fs-root=/path/to/wordpress
+```
+
+`reprint recover` requires `wp-load.php` in a fresh PHP process. If a fatal
+error's file belongs to one active regular plugin, it deactivates that plugin
+and tries again. It keeps the plugin's files and data and skips its deactivation hooks.
+Other failures stop the command. Multisite plugins are not deactivated.
+
+The JSON result lists the disabled plugins and their errors. Exit code 0 means
+`wp-load.php` loaded; exit code 1 means the check could not complete. The command
+uses the same PHP binary as Reprint. It does not check page rendering or the
+web server, and disabling a plugin may remove features from the site.
+No remote URL, connection token, or state directory is required.
 
 #### Shoehorning the site onto your platform
 

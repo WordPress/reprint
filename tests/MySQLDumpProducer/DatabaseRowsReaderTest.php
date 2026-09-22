@@ -187,4 +187,38 @@ class DatabaseRowsReaderTest extends MySQLDumpProducerTestBase {
         );
         $resumed->restore_cursor_state($cursor);
     }
+
+    public function testStringComparisonsKeepBytesAndTheColumnCollationAcrossResume(): void
+    {
+        $this->pdo->exec("CREATE TABLE legacy_keys (
+            name VARCHAR(30) CHARACTER SET latin1 COLLATE latin1_swedish_ci NOT NULL,
+            suffix VARBINARY(10) NOT NULL, PRIMARY KEY (name, suffix))");
+        $insert = $this->pdo->prepare('INSERT INTO legacy_keys VALUES (UNHEX(?), UNHEX(?))');
+        foreach ([['Z', "\x00\xFF"], ['a', "'\\"], ["\xE9", "\x00"]] as $row) {
+            $insert->execute(array_map('bin2hex', $row));
+        }
+        $expected = $this->pdo->query(
+            'SELECT CAST(name AS BINARY) AS name, suffix FROM legacy_keys ORDER BY legacy_keys.name, suffix'
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $options = ['tables_to_process' => ['legacy_keys'], 'batch_size' => 1];
+        $reader = new DatabaseRowsReader($this->pdo, $options);
+        $this->assertTrue($reader->move_to_next_table());
+        $actual = [];
+        while ($reader->next_record()) {
+            $actual[] = $reader->get_current_record();
+            $cursor = $reader->get_cursor_state();
+            $reader->close();
+            $reader = new DatabaseRowsReader($this->pdo, $options);
+            $this->assertTrue($reader->restore_cursor_state($cursor));
+        }
+        $this->assertSame($expected, $actual);
+        $version = $this->pdo->query('SELECT VERSION()')->fetchColumn();
+        $literal = strpos($version, '5.5.') === 0 && stripos($version, 'MariaDB') === false
+            ? "UNHEX('00ff')" : "FROM_BASE64('AP8=')";
+        $this->assertSame('`legacy_keys`.`suffix` = ' . $literal,
+            $reader->build_comparison('suffix', "\x00\xFF", '='));
+        $this->assertSame("`legacy_keys`.`suffix` = FROM_BASE64('AP8=')",
+            $reader->build_comparison('suffix', "\x00\xFF", '=', false));
+        $reader->close();
+    }
 }

@@ -5,6 +5,13 @@
   "dbHost": "127.0.0.1",
   "wpVersion": "6.7",
   "sites": {
+    "mysql55-source-no-pdo-mysql": {
+      "port": 8196,
+      "noPdoMysql": true
+    },
+    "mysql55-source": {
+      "port": 8195
+    },
     "post-requests": {
       "port": 8153
     },
@@ -266,6 +273,9 @@
     },
     "unknown-key": {
       "port": 8162
+    },
+    "recover": {
+      "port": 8182
     }
   }
 }
