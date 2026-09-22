@@ -169,7 +169,7 @@ class SettingsPage {
                 class="button reprint-server-generate-token"
                 aria-controls="reprint_server_connection_token"
                 data-generated-message="<?php echo esc_attr__('Random connection token generated. Save Changes to apply it.', 'reprint'); ?>">
-            <?php echo esc_html__('Generate random token', 'reprint'); ?>
+            <?php echo esc_html__('Generate new token', 'reprint'); ?>
         </button>
         <?php
     }

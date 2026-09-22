@@ -408,7 +408,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $button = $buttons->item(0);
         $this->assertSame('button', $button->getAttribute('type'));
         $this->assertSame('reprint_server_connection_token', $button->getAttribute('aria-controls'));
-        $this->assertSame('Generate random token', trim($button->textContent));
+        $this->assertSame('Generate new token', trim($button->textContent));
         $this->assertSame('current-token', get_connection_token());
     }
 
