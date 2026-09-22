@@ -50,13 +50,112 @@ class DatabasePushTest extends MySQLDumpProducerTestBase {
         fclose($archive);
     }
 
+    public function testForeignKeyReplayAfterProgressWriteTimesOut(): void {
+        $prefix = '__reprint_db_' . $this->push_session_id . '_';
+        $archive = tmpfile();
+        foreach ([
+            ['table' => 'wp_parent', 'ddl' => 'CREATE TABLE `wp_parent` (`id` int PRIMARY KEY) ENGINE=InnoDB'],
+            ['values' => ['id' => base64_encode('1')]],
+            ['table' => 'wp_child', 'ddl' => 'CREATE TABLE `wp_child` (`id` int PRIMARY KEY, parent_id int) ENGINE=InnoDB'],
+            ['values' => ['id' => base64_encode('2'), 'parent_id' => base64_encode('1')]],
+            ['table' => 'wp_child', 'foreign_key' => $prefix . 't1_fk_1', 'definition' => 'FOREIGN KEY (parent_id) REFERENCES `' . $prefix . 't0` (id)'],
+            ['end' => true],
+        ] as $record) {
+            fwrite($archive, json_encode($record) . "\n");
+        }
+        $local_absolute_path = stream_get_meta_data($archive)['uri'];
+        $blocker = new PDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName, getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $push = new DatabasePush($this->pdo, 'wp_', $this->push_session_id);
+        try {
+            $push->start();
+            for ($record = 0; $record < 4; ++$record) {
+                $push->import_next_record($local_absolute_path);
+            }
+            $confirmed_offset = $push->get_status()['offset'];
+            // Inject a real SQL lock timeout in the progress write, after
+            // ALTER has committed. This does not modify private state.
+            $blocker->beginTransaction();
+            $blocker->query('SELECT state FROM `' . $prefix . 'state` WHERE id=1 FOR UPDATE')->fetchColumn();
+            $this->pdo->exec('SET SESSION innodb_lock_wait_timeout=1');
+            try {
+                $push->import_next_record($local_absolute_path);
+                self::fail('The progress write must time out behind the held row lock.');
+            } catch (PDOException $exception) {
+                self::assertSame(1205, $exception->errorInfo[1]);
+            }
+            $push->close();
+            $blocker->rollBack();
+            $constraint_count = "SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='" . $prefix . "t1_fk_1'";
+            self::assertSame(1, (int) $this->pdo->query($constraint_count)->fetchColumn());
+            $push = new DatabasePush($this->pdo, 'wp_', $this->push_session_id);
+            self::assertSame($confirmed_offset, $push->get_status()['offset']);
+            $push->import_next_record($local_absolute_path);
+            self::assertGreaterThan($confirmed_offset, $push->get_status()['offset']);
+            self::assertSame(1, (int) $this->pdo->query($constraint_count)->fetchColumn());
+            $push->import_next_record($local_absolute_path);
+            self::assertSame('ready', $push->get_status()['phase']);
+            $push->commit();
+            self::assertSame('wp_parent', $this->pdo->query("SELECT REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='wp_child' AND REFERENCED_TABLE_NAME IS NOT NULL")->fetchColumn());
+        } finally {
+            if ($blocker->inTransaction()) {
+                $blocker->rollBack();
+            }
+            $push->close();
+            fclose($archive);
+        }
+    }
+
+    public function testLongTableNamesKeepCheckAndSelfReferencingForeignKeyConstraints(): void {
+        require_once __DIR__ . '/../../packages/reprint-client/src/lib/database-push/class-database-push-archive.php';
+        $table = 'wp_' . str_repeat('x', 61);
+        $this->pdo->exec('CREATE TABLE `' . $table . '` (id int PRIMARY KEY, parent_id int NULL, CONSTRAINT named_fk FOREIGN KEY(parent_id) REFERENCES `' . $table . '`(id), CONSTRAINT named_check CHECK (id > 0)) ENGINE=InnoDB');
+        $this->pdo->exec('INSERT INTO `' . $table . '` VALUES (1, NULL), (2, 1)');
+        $local_absolute_path = sys_get_temp_dir() . '/db-archive-' . bin2hex(random_bytes(8));
+        $source = new PDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName, getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $source->exec('SET SESSION sql_quote_show_create=0');
+        $archive = new DatabasePushArchive($source, $local_absolute_path, 'wp_', [], $this->push_session_id);
+        $push = null;
+        try {
+            while ($archive->next_step()) {
+                self::assertFileDoesNotExist($local_absolute_path);
+            }
+            $archive->close();
+            $push = new DatabasePush($this->pdo, 'wp_', $this->push_session_id);
+            $push->start();
+            while ($push->get_status()['phase'] !== 'ready') {
+                $push->import_next_record($local_absolute_path);
+            }
+            $push->commit();
+            while ($push->get_status()['phase'] !== 'complete') {
+                $push->cleanup_next_table();
+            }
+            self::assertSame(2, (int) $this->pdo->query('SELECT COUNT(*) FROM `' . $table . '`')->fetchColumn());
+            $constraints = $this->pdo->query("SELECT CONSTRAINT_NAME, CONSTRAINT_TYPE FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME='" . $table . "' AND CONSTRAINT_TYPE IN ('CHECK', 'FOREIGN KEY')")->fetchAll(PDO::FETCH_ASSOC);
+            self::assertCount(2, $constraints);
+            foreach ($constraints as $constraint) {
+                self::assertLessThanOrEqual(64, strlen($constraint['CONSTRAINT_NAME']));
+            }
+            self::assertSame($table, $this->pdo->query("SELECT REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='" . $table . "' AND REFERENCED_TABLE_NAME IS NOT NULL")->fetchColumn());
+        } finally {
+            $archive->close();
+            if ($push !== null) {
+                $push->close();
+            }
+            foreach ([$local_absolute_path, $local_absolute_path . '.building'] as $file) {
+                if (is_file($file)) {
+                    unlink($file);
+                }
+            }
+        }
+    }
+
     public function testSourceSnapshotIsStableAndSourceRowsRemainUntouched(): void {
         require_once __DIR__ . '/../../packages/reprint-client/src/lib/database-push/class-database-push-archive.php';
         $this->pdo->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longtext) ENGINE=InnoDB');
         $this->pdo->exec("INSERT INTO wp_options VALUES (1, 'https://local.test/old')");
         $source = new PDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName . ';charset=utf8mb4', getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
         $local_absolute_path = sys_get_temp_dir() . '/db-archive-' . bin2hex(random_bytes(8));
-        $archive = new DatabasePushArchive($source, $local_absolute_path, 'wp_', ['https://local.test' => 'https://production.test']);
+        $archive = new DatabasePushArchive($source, $local_absolute_path, 'wp_', ['https://local.test' => 'https://production.test'], $this->push_session_id);
         try {
             $this->pdo->exec("UPDATE wp_options SET value='https://local.test/new' WHERE id=1");
             while ($archive->next_step()) {

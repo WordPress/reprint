@@ -144,7 +144,7 @@ class DatabasePushProcessor {
                     if ($this->archive === null) {
                         $database = new PDO($this->source['dsn'], $this->source['user'], $this->source['pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
                         $database->exec('SET NAMES utf8mb4');
-                        $this->archive = new DatabasePushArchive($database, $this->state_dir . '/database.jsonl', $this->table_prefix, $this->url_mapping);
+                        $this->archive = new DatabasePushArchive($database, $this->state_dir . '/database.jsonl', $this->table_prefix, $this->url_mapping, $this->state['push_session_id']);
                         return true;
                     }
                     if (!$this->archive->next_step()) {

@@ -11,9 +11,10 @@ use RuntimeException;
 /**
  * Imports one archive record per call, then exchanges all site tables together.
  *
- * Data and the archive cursor commit in the same InnoDB transaction. DDL is
- * replayable CREATE TABLE IF NOT EXISTS against private names. The progress
- * table itself participates in cutover, so a lost response cannot repeat it.
+ * Rows and the archive cursor commit in the same InnoDB transaction. CREATE
+ * TABLE uses IF NOT EXISTS; foreign-key ALTER checks the constraint name before
+ * replay. The progress table participates in cutover, so a lost response cannot
+ * repeat it.
  * Callers must keep application requests and all other writers stopped during
  * commit, inspection, and cache clearing. This class cannot stop those actors.
  */
@@ -56,7 +57,7 @@ final class DatabasePush {
         }
         // Do not inherit exporter AUTOCOMMIT=0 or a permissive SQL mode.
         // Host engine overrides must not replace InnoDB progress with MyISAM.
-        $database->exec("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION', autocommit=1, lock_wait_timeout=5, time_zone='+00:00'");
+        $database->exec("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION', autocommit=1, foreign_key_checks=1, lock_wait_timeout=5, time_zone='+00:00'");
     }
 
     public function start(): void {
@@ -96,7 +97,21 @@ final class DatabasePush {
             throw new RuntimeException('Database archive record is not a JSON object.');
         }
         $next_offset = ftell($input);
-        if (isset($record['table'])) {
+        if (isset($record['foreign_key'])) {
+            $incoming = $state['tables'][$record['table']] ?? null;
+            if ($incoming === null || strpos($record['foreign_key'], $incoming . '_fk_') !== 0) {
+                throw new RuntimeException('Foreign key record must name an incoming table and its private constraint.');
+            }
+            // ALTER commits implicitly. A new request checks the constraint
+            // before replaying a record whose cursor was not saved yet.
+            $statement = $this->database->prepare("SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS WHERE CONSTRAINT_SCHEMA=DATABASE() AND TABLE_NAME=? AND CONSTRAINT_NAME=? AND CONSTRAINT_TYPE='FOREIGN KEY'");
+            $statement->execute([$incoming, $record['foreign_key']]);
+            if ( (int) $statement->fetchColumn() === 0) {
+                // TODO: validate client-prepared DDL with a server-side parser.
+                // The opt-in host route currently trusts the authenticated client.
+                $this->database->exec('ALTER TABLE ' . self::identifier($incoming) . ' ADD CONSTRAINT ' . self::identifier($record['foreign_key']) . ' ' . $record['definition']);
+            }
+        } elseif (isset($record['table'])) {
             $table = $record['table'];
             self::identifier($table);
             if (strpos($table, $this->table_prefix) !== 0 || isset($state['tables'][$table]) || count($state['tables']) >= self::MAX_TABLES) {
@@ -104,7 +119,12 @@ final class DatabasePush {
             }
             $incoming = $this->private_prefix . 't' . count($state['tables']);
             $ddl = $record['ddl'] ?? '';
-            self::assert_supported_ddl($ddl, $table);
+            $head = 'CREATE TABLE ' . self::identifier($table) . ' (';
+            if (strpos($ddl, $head) !== 0) {
+                throw new RuntimeException('Archive table definition must begin with ' . $head);
+            }
+            // TODO: validate client-prepared DDL with a server-side parser.
+            // Keyword matching cannot distinguish SQL from names or literals.
             $tail = substr($ddl, strlen('CREATE TABLE ' . self::identifier($table)));
             $this->database->exec('CREATE TABLE IF NOT EXISTS ' . self::identifier($incoming) . $tail);
             $statement = $this->database->prepare('SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=?');
@@ -117,9 +137,22 @@ final class DatabasePush {
         } elseif (isset($record['values']) && is_array($record['values']) && $state['current_table'] !== null) {
             $columns = [];
             $values = [];
+            $expressions = [];
             $enum_zero_warnings = [];
             foreach ($record['values'] as $column => $encoded) {
                 $columns[] = self::identifier($column);
+                if (is_array($encoded)) {
+                    $value = base64_decode($encoded['wkb'] ?? '', true);
+                    if ($value === false || !isset($encoded['srid']) || !is_int($encoded['srid']) || $encoded['srid'] < 0 || $encoded['srid'] > 4294967295) {
+                        throw new RuntimeException('Archive spatial column ' . $column . ' requires base64 WKB and an unsigned 32-bit SRID.');
+                    }
+                    // MariaDB rejects text-typed WKB parameters even when their bytes are valid.
+                    $expressions[] = 'ST_GeomFromWKB(CAST(? AS BINARY),?)';
+                    $values[] = $value;
+                    $values[] = (string) $encoded['srid'];
+                    continue;
+                }
+                $expressions[] = '?';
                 $value = $encoded === null || $encoded === 0 ? $encoded : base64_decode($encoded, true);
                 if ($value === false) {
                     throw new RuntimeException('Archive column ' . $column . ' is not valid base64.');
@@ -129,16 +162,13 @@ final class DatabasePush {
                     $enum_zero_warnings[] = "Data truncated for column '" . $column . "' at row 1";
                 }
             }
-            if ($columns === []) {
-                throw new RuntimeException('Database archive row has no columns.');
-            }
             $this->database->beginTransaction();
             try {
                 // IGNORE is needed only to restore legacy ENUM index zero.
                 // Accept exactly its named warnings, never other truncation,
                 // skipped duplicates, or an incomplete server warning list.
                 $insert = $enum_zero_warnings === [] ? 'INSERT INTO ' : 'INSERT IGNORE INTO ';
-                $statement = $this->database->prepare($insert . self::identifier($state['current_table']) . ' (' . implode(',', $columns) . ') VALUES (' . implode(',', array_fill(0, count($values), '?')) . ')');
+                $statement = $this->database->prepare($insert . self::identifier($state['current_table']) . ' (' . implode(',', $columns) . ') VALUES (' . implode(',', $expressions) . ')');
                 foreach ($values as $position => $value) {
                     // Integer zero restores ENUM index zero even if "0" is
                     // itself a declared label. All other values remain bytes.
@@ -228,7 +258,7 @@ final class DatabasePush {
             $state['phase'] = 'discarding';
         } elseif ($state['discard_tables'] !== []) {
             $table = array_shift($state['discard_tables']);
-            $this->database->exec('DROP TABLE IF EXISTS ' . self::identifier($table));
+            $this->drop_private_table($table);
         } else {
             $state['phase'] = 'discarded';
         }
@@ -247,7 +277,7 @@ final class DatabasePush {
         if ($state['old_tables'] !== []) {
             $table = array_shift($state['old_tables']);
             // Replaying a DROP after process death is harmless.
-            $this->database->exec('DROP TABLE IF EXISTS ' . self::identifier($table));
+            $this->drop_private_table($table);
         } else {
             $state['phase'] = 'complete';
         }
@@ -287,18 +317,6 @@ final class DatabasePush {
         }
     }
 
-    /**
-     * Reject schema features whose dependencies are not moved by this protocol.
-     * Both the client and receiver check DDL before creating an incoming table.
-     */
-    public static function assert_supported_ddl(string $ddl, string $table): void {
-        $head = 'CREATE TABLE ' . self::identifier($table) . ' (';
-        if (strpos($ddl, $head) !== 0 || !preg_match('/\bENGINE=InnoDB\b/i', $ddl)
-            || preg_match('/;|\b(REFERENCES|FOREIGN|CONSTRAINT|GENERATED|PARTITION|TABLESPACE|CONNECTION|SELECT|TRIGGER|SPATIAL|GEOMETRY|GEOMETRYCOLLECTION|MULTIPOINT|MULTIPOLYGON|MULTILINESTRING|POINT|POLYGON|LINESTRING)\b|\b(DATA|INDEX) DIRECTORY/i', $ddl)) {
-            throw new RuntimeException('Database push requires ordinary InnoDB tables without foreign keys, named constraints, generated/spatial columns, partitions, or external storage: ' . $table . '.');
-        }
-    }
-
     public static function identifier(string $name): string {
         if (!preg_match('/^[a-zA-Z0-9_]{1,64}$/D', $name)) {
             throw new InvalidArgumentException('Database push SQL identifier must contain 1–64 letters, digits, or underscores: ' . $name . '.');
@@ -327,12 +345,12 @@ final class DatabasePush {
                 throw new RuntimeException('Database push requires InnoDB base tables; observed ' . $table['TABLE_NAME'] . '.');
             }
             $name = $table['TABLE_NAME'];
-            self::assert_supported_ddl($this->database->query('SHOW CREATE TABLE ' . self::identifier($name))->fetch(PDO::FETCH_NUM)[1], $name);
+            self::identifier($name);
             $names[] = $name;
         }
         // A foreign key in another prefix/schema can still point into this site.
-        $statement = $this->database->prepare('SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA=DATABASE() AND BINARY LEFT(REFERENCED_TABLE_NAME, ?) = ?');
-        $statement->execute([strlen($this->table_prefix), $this->table_prefix]);
+        $statement = $this->database->prepare('SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA=DATABASE() AND BINARY LEFT(REFERENCED_TABLE_NAME, ?) = ? AND NOT (TABLE_SCHEMA=DATABASE() AND BINARY LEFT(TABLE_NAME, ?) = ?)');
+        $statement->execute([strlen($this->table_prefix), $this->table_prefix, strlen($this->table_prefix), $this->table_prefix]);
         if ( (int) $statement->fetchColumn() !== 0) {
             throw new RuntimeException('Another table has a foreign key referencing this site; database push cannot exchange it.');
         }
@@ -347,6 +365,18 @@ final class DatabasePush {
             }
         }
         return $names;
+    }
+
+    private function drop_private_table(string $table): void {
+        // Old and incoming tables may reference each other in either order,
+        // including cycles. External inbound references were rejected before
+        // staging and commit. Limit disabled checks to this private DROP.
+        $this->database->exec('SET SESSION foreign_key_checks=0');
+        try {
+            $this->database->exec('DROP TABLE IF EXISTS ' . self::identifier($table));
+        } finally {
+            $this->database->exec('SET SESSION foreign_key_checks=1');
+        }
     }
 
     private function assert_open(): void {

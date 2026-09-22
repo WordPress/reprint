@@ -25,11 +25,15 @@ This first implementation is deliberately opt-in and limited:
 - Between 1 and 256 source tables, 128 columns per table, and 1 MiB of values per row, before
   and after URL rewriting. The client asks MySQL to withhold larger rows and
   rejects them before upload. Archive records are limited to 2 MiB.
-- Identifiers contain only ASCII letters, digits, and underscores. Foreign
-  keys, triggers, named constraints, generated or spatial columns,
-  partitions, external storage, events, and routines are not supported.
-  The DDL check is conservative: a reserved schema keyword inside a comment
-  or default value can also cause rejection.
+- Table and column identifiers contain only ASCII letters, digits, and
+  underscores. Foreign keys between selected tables, CHECK constraints,
+  generated columns, spatial columns/indexes, and partitions are supported.
+  Constraint names become bounded, push-specific names so incoming and live
+  tables can coexist. Their definitions and enforcement settings are preserved.
+- Source storage placement (`DATA DIRECTORY`, `INDEX DIRECTORY`, `TABLESPACE`,
+  and `CONNECTION`) is omitted by the client. The target chooses its own
+  storage. References to tables outside the push, triggers, events, and
+  routines remain unsupported.
 - SQLite sources, table-prefix conversion, automatic writer shutdown, cache
   clearing, health checks, and automatic rollback are not implemented.
 
@@ -63,6 +67,12 @@ require $plugin_directory . 'lib.php';
     'database_push' => true,
 ]);
 ```
+
+The server currently trusts DDL prepared by the authenticated client. It does
+not parse SQL or guarantee that arbitrary client SQL stays within the selected
+tables. A server-side parser remains a TODO; a keyword blacklist is not a SQL
+validator. Enable this route only for trusted deployment clients, not as a
+restricted SQL API for untrusted callers.
 
 The token file returns the shared secret as a PHP string. This is host-level
 permission for destructive pushes, not a setting to expose to visitors.
@@ -146,11 +156,30 @@ parts per request. Database archives use a separate private store and cannot
 be published by a file-push commit. Resume asks the target for its confirmed
 byte offset. A failed request ends the current run; no automatic retry occurs.
 
-Each import step applies one table definition, one row, or the end record.
-The row and its archive byte offset commit in the same InnoDB transaction.
-Private table creation and removal can be replayed after interruption. The
-server needs no URL rewriter, HTML processor, SQLite translator, or SQL dump
-parser: it reads bounded records, creates incoming tables, and binds row data.
+The client parses each `SHOW CREATE TABLE` result with its existing SQL parser.
+It preserves expressions, quoted names, comments, defaults, indexes, and
+partitioning while removing source storage placement. It gives CHECK and
+foreign key constraints new names that do not collide with the live schema.
+Generated columns are omitted from row inserts so the target computes them
+from rewritten input values. Spatial values travel as WKB bytes plus their
+SRID, without URL rewriting.
+
+Foreign key clauses are written to a local temporary stream and appended after
+all tables and rows. References point to incoming tables, not live tables.
+Each `ALTER TABLE ADD CONSTRAINT` validates the imported rows with foreign key
+checks enabled, including cycles and self-references. A failed validation
+leaves production unchanged and prevents the ready state. Validation can take
+longer than the HTTP step budget on large tables; a later request checks
+whether the constraint exists before replaying an unconfirmed ALTER.
+
+Each import step applies one table definition, one row, one foreign key, or
+the end record. The row and its archive byte offset commit in the same InnoDB
+transaction. Private table creation and removal can be replayed after
+interruption. Cleanup and discard disable foreign key checks only around each
+private-table DROP so cycles do not prevent removal. Foreign keys from tables
+outside the selected site are rejected before staging and again before commit.
+The server needs no URL rewriter, HTML processor, SQLite translator, or SQL
+parser: it applies client-prepared DDL and binds row data.
 
 Commit includes the progress table in the same multi-table rename as the
 site tables. Its new name identifies a completed swap even if the client
@@ -168,8 +197,11 @@ HTTP dispatcher. They cover staging without live changes, cancellation,
 process death with an open request after a confirmed request, a discarded
 commit response, stale review tokens, failed unique-value imports, discard,
 cleanup, client-side serialization rewriting, row-size rejection, exact
-binary/decimal/BIT/NULL values, and zero auto-increment IDs. They do not
-simulate database-server power loss or claim automatic writer draining.
+binary/decimal/BIT/NULL values, and zero auto-increment IDs. Schema tests cover
+keyword-like literals, generated values, spatial bytes and SRIDs, partitions,
+source storage placement, cyclic/self-referencing foreign keys, constraint
+validation failures, long names, and replay after an ALTER commits but its
+progress write times out. They do not simulate database-server power loss or claim automatic writer draining.
 
 The WordPress E2E suite shares pull datasets for SQL edge values, structured
 URL rewriting, binary/composite keys, legacy ENUM values, 200 × 80 KiB payloads,

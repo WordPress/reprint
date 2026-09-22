@@ -225,6 +225,182 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
     }
 
+    public function testGeneratedSpatialPartitionedTablesAndSqlKeywordsRoundTrip(): void {
+        $this->pdo->exec("CREATE TABLE wp_features (id int PRIMARY KEY, url varchar(255), generated_url varchar(255) GENERATED ALWAYS AS (concat(url, '/generated')) STORED, point POINT NOT NULL, area GEOMETRY NULL, label varchar(255) DEFAULT 'SELECT; FOREIGN KEY REFERENCES POINT', CONSTRAINT named_check CHECK (id > 0), SPATIAL INDEX (point)) ENGINE=InnoDB COMMENT='CONSTRAINT; DATA DIRECTORY; TRIGGER'");
+        $this->pdo->exec("INSERT INTO wp_features (id, url, point, area) VALUES (1, 'https://local.test', ST_GeomFromText('POINT(1 2)', 4326), ST_GeomFromText('LINESTRING(0 0,1 1)', 4326)), (2, 'https://local.test/two', ST_GeomFromText('POINT(3 4)', 0), NULL)");
+        $this->pdo->exec('CREATE TABLE wp_partitioned (id int PRIMARY KEY, value text) ENGINE=InnoDB PARTITION BY HASH(id) PARTITIONS 2');
+        $this->pdo->exec("INSERT INTO wp_partitioned VALUES (1, 'one'), (2, 'two')");
+        // Named CHECK constraints must also coexist with the old live schema.
+        $this->receiver->exec('CREATE TABLE wp_features (id int PRIMARY KEY, CONSTRAINT named_check CHECK (id > 0)) ENGINE=InnoDB');
+        $client = $this->client();
+        $processor = $this->processor($client);
+        try {
+            while ($processor->next_step()) {
+                self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+            }
+            $status = $processor->get_status();
+            self::assertSame('ready', $status['phase']);
+            self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+            $parameters = ['push_session_id' => $status['push_session_id'], 'review' => $status['review'], 'writers_stopped' => 'yes'];
+            $result = $client->send_push_request('POST', 'push_db_commit', $parameters, ['accepted']);
+            self::assertSame('complete', $result['status'], json_encode($result));
+            $rows = $this->receiver->query('SELECT id, generated_url, ST_AsText(point) AS point, ST_SRID(point) AS srid, ST_AsText(area) AS area, label FROM wp_features ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+            self::assertSame('https://production.example.com/generated', $rows[0]['generated_url']);
+            self::assertSame('POINT(1 2)', $rows[0]['point']);
+            self::assertSame(4326, (int) $rows[0]['srid']);
+            self::assertSame('LINESTRING(0 0,1 1)', $rows[0]['area']);
+            self::assertNull($rows[1]['area']);
+            self::assertSame('SELECT; FOREIGN KEY REFERENCES POINT', $rows[0]['label']);
+            self::assertSame(2, (int) $this->receiver->query("SELECT COUNT(*) FROM information_schema.PARTITIONS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='wp_partitioned'")->fetchColumn());
+            self::assertSame('one,two', $this->receiver->query('SELECT GROUP_CONCAT(value ORDER BY id) FROM wp_partitioned')->fetchColumn());
+            try {
+                $this->receiver->exec("INSERT INTO wp_features (id, point) VALUES (-1, ST_GeomFromText('POINT(0 0)'))");
+                self::fail('The named CHECK constraint must remain enforced after commit.');
+            } catch (PDOException $exception) {
+                self::assertStringContainsString('constraint', strtolower($exception->getMessage()));
+            }
+            do {
+                $result = $client->send_push_request('POST', 'push_db_cleanup', $parameters, ['accepted']);
+                self::assertSame('complete', $result['status'], json_encode($result));
+            } while ($result['response']['phase'] !== 'complete');
+            self::assertSame('https://local.test/generated', $this->pdo->query('SELECT generated_url FROM wp_features WHERE id=1')->fetchColumn());
+        } finally {
+            $processor->close();
+            $client->close();
+        }
+    }
+
+    /** @dataProvider foreignKeyOutcomes */
+    public function testCyclicForeignKeysFollowIncomingTablesThroughCommitOrDiscard(bool $commit): void {
+        foreach ([$this->pdo, $this->receiver] as $database) {
+            $database->exec('CREATE TABLE wp_parent (id int PRIMARY KEY, child_id int NULL) ENGINE=InnoDB');
+            $database->exec('CREATE TABLE wp_child (id int PRIMARY KEY, parent_id int, CONSTRAINT child_parent FOREIGN KEY (parent_id) REFERENCES wp_parent(id) ON DELETE CASCADE) ENGINE=InnoDB');
+            $database->exec('ALTER TABLE wp_parent ADD CONSTRAINT parent_child FOREIGN KEY (child_id) REFERENCES wp_child(id)');
+            $database->exec('INSERT INTO wp_parent VALUES (1, NULL)');
+            $database->exec('INSERT INTO wp_child VALUES (2, 1)');
+            $database->exec('UPDATE wp_parent SET child_id=2');
+        }
+        $this->pdo->exec('INSERT INTO wp_parent VALUES (3, NULL)');
+        $client = $this->client();
+        $processor = $this->processor($client);
+        try {
+            while ($processor->next_step()) {
+                self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+            }
+            $status = $processor->get_status();
+            self::assertSame('ready', $status['phase']);
+            self::assertSame(1, (int) $this->receiver->query('SELECT COUNT(*) FROM wp_parent')->fetchColumn());
+            $references = $this->receiver->query("SELECT TABLE_NAME, REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND LEFT(TABLE_NAME,13)='__reprint_db_' AND REFERENCED_TABLE_NAME IS NOT NULL")->fetchAll(PDO::FETCH_ASSOC);
+            self::assertCount(2, $references);
+            foreach ($references as $reference) {
+                self::assertStringStartsWith('__reprint_db_', $reference['REFERENCED_TABLE_NAME']);
+            }
+            $parameters = ['push_session_id' => $status['push_session_id'], 'review' => $status['review'], 'writers_stopped' => 'yes'];
+            if (!$commit) {
+                do {
+                    $result = $client->send_push_request('POST', 'push_db_discard', $parameters, ['accepted']);
+                    self::assertSame('complete', $result['status'], json_encode($result));
+                } while ($result['response']['phase'] !== 'discarded');
+                self::assertSame(1, (int) $this->receiver->query('SELECT COUNT(*) FROM wp_parent')->fetchColumn());
+                self::assertSame(1, (int) $this->receiver->query('SELECT COUNT(*) FROM wp_child')->fetchColumn());
+                self::assertCount(5, $this->receiver->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+                return;
+            }
+            $result = $client->send_push_request('POST', 'push_db_commit', $parameters, ['accepted']);
+            self::assertSame('complete', $result['status'], json_encode($result));
+            do {
+                $result = $client->send_push_request('POST', 'push_db_cleanup', $parameters, ['accepted']);
+                self::assertSame('complete', $result['status'], json_encode($result));
+            } while ($result['response']['phase'] !== 'complete');
+            self::assertSame(2, (int) $this->receiver->query('SELECT COUNT(*) FROM wp_parent')->fetchColumn());
+            self::assertSame('wp_parent', $this->receiver->query("SELECT REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='wp_child' AND REFERENCED_TABLE_NAME IS NOT NULL")->fetchColumn());
+            $this->receiver->exec('UPDATE wp_parent SET child_id=NULL WHERE id=1');
+            $this->receiver->exec('DELETE FROM wp_parent WHERE id=1');
+            self::assertSame(0, (int) $this->receiver->query('SELECT COUNT(*) FROM wp_child')->fetchColumn());
+        } finally {
+            $processor->close();
+            $client->close();
+        }
+    }
+
+    public static function foreignKeyOutcomes(): array {
+        return ['commit and cleanup' => [true], 'discard' => [false]];
+    }
+
+    public function testForeignKeyValidationRejectsLegacyOrphansWithoutChangingLiveTables(): void {
+        $this->pdo->exec('CREATE TABLE wp_parent (id int PRIMARY KEY) ENGINE=InnoDB');
+        $this->pdo->exec('CREATE TABLE wp_child (id int PRIMARY KEY, parent_id int, CONSTRAINT child_parent FOREIGN KEY (parent_id) REFERENCES wp_parent(id)) ENGINE=InnoDB');
+        // An earlier import with checks disabled can leave valid table
+        // definitions with rows that fail a later foreign key validation.
+        $this->pdo->exec('SET SESSION foreign_key_checks=0');
+        $this->pdo->exec('INSERT INTO wp_child VALUES (1, 999)');
+        $this->pdo->exec('SET SESSION foreign_key_checks=1');
+        $client = $this->client();
+        $processor = $this->processor($client);
+        try {
+            try {
+                while ($processor->next_step()) {
+                    self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+                }
+                self::fail('The imported foreign key must validate every incoming row before ready.');
+            } catch (RuntimeException $exception) {
+                self::assertStringContainsString('foreign key constraint', strtolower($exception->getMessage()));
+            }
+            $parameters = ['push_session_id' => $processor->get_status()['push_session_id']];
+            $before = $client->send_push_request('GET', 'push_db_status', $parameters, ['accepted']);
+            self::assertSame('importing', $before['response']['phase']);
+            $retry = $client->send_push_request('POST', 'push_db_import', $parameters, ['accepted']);
+            self::assertSame('failed', $retry['status']);
+            $after = $client->send_push_request('GET', 'push_db_status', $parameters, ['accepted']);
+            self::assertSame($before['response']['offset'], $after['response']['offset']);
+            do {
+                $result = $client->send_push_request('POST', 'push_db_discard', $parameters, ['accepted']);
+                self::assertSame('complete', $result['status'], json_encode($result));
+            } while ($result['response']['phase'] !== 'discarded');
+            self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+            self::assertCount(3, $this->receiver->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN));
+        } finally {
+            $processor->close();
+            $client->close();
+        }
+    }
+
+    public function testSourceStoragePlacementIsNotCopiedToTheTarget(): void {
+        $tablespace = null;
+        $placement = "DATA DIRECTORY='/tmp'";
+        $option = 'DATA DIRECTORY';
+        if (stripos($this->pdo->query('SELECT VERSION()')->fetchColumn(), 'MariaDB') === false) {
+            $tablespace = 'push_storage_' . bin2hex(random_bytes(6));
+            $this->pdo->exec("CREATE TABLESPACE `{$tablespace}` ADD DATAFILE '{$tablespace}.ibd' ENGINE=InnoDB");
+            $placement = 'TABLESPACE `' . $tablespace . '`';
+            $option = 'TABLESPACE';
+        }
+        $this->pdo->exec('CREATE TABLE wp_storage (id int PRIMARY KEY, value text) ENGINE=InnoDB ' . $placement);
+        $this->pdo->exec("INSERT INTO wp_storage VALUES (1, 'https://local.test/file')");
+        $source_definition = $this->pdo->query('SHOW CREATE TABLE wp_storage')->fetch(PDO::FETCH_NUM)[1];
+        self::assertStringContainsString($option, $source_definition);
+        $client = $this->client();
+        $processor = $this->processor($client);
+        try {
+            while ($processor->next_step()) {
+                self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+            }
+            $status = $processor->get_status();
+            $result = $client->send_push_request('POST', 'push_db_commit', ['push_session_id' => $status['push_session_id'], 'review' => $status['review'], 'writers_stopped' => 'yes'], ['accepted']);
+            self::assertSame('complete', $result['status'], json_encode($result));
+            self::assertStringNotContainsString($option, $this->receiver->query('SHOW CREATE TABLE wp_storage')->fetch(PDO::FETCH_NUM)[1]);
+            self::assertSame('https://production.example.com/file', $this->receiver->query('SELECT value FROM wp_storage')->fetchColumn());
+            self::assertSame($source_definition, $this->pdo->query('SHOW CREATE TABLE wp_storage')->fetch(PDO::FETCH_NUM)[1]);
+        } finally {
+            $processor->close();
+            $client->close();
+            if ($tablespace !== null) {
+                $this->pdo->exec('DROP TABLE wp_storage');
+                $this->pdo->exec('DROP TABLESPACE `' . $tablespace . '` ENGINE=InnoDB');
+            }
+        }
+    }
+
     /** @param list<string> $arguments Real CLI arguments. @return array<string,mixed> */
     private function runCli(array $arguments): array {
         $arguments[] = '--progress=jsonl';

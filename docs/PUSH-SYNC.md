@@ -732,7 +732,9 @@ Files first, followed by full database overwrite and then selective database cha
 9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
 10. **Full database overwrite, then selective changes** — `db-push` first
     prepares and rewrites a local snapshot, stages incoming tables, and
-    exchanges them only after explicit review. The later selective mode
+    exchanges them only after explicit review. The client prepares table DDL,
+    row inserts for generated/spatial columns, and deferred foreign keys. The
+    opt-in server currently trusts that SQL without a parser. The later selective mode
     retains a baseline and pull selection, requests candidate production
     rows, and applies only approved changes with a final conflict check.
 11. **`reprint files-push`** — the low-level, files-only caller that retains
