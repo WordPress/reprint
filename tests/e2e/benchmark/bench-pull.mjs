@@ -24,10 +24,9 @@ import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { createConnection } from 'mysql2/promise';
 import { ensureSite } from '../lib/site-setup.js';
-import { HmacClient } from '../lib/hmac-client.js';
 import { runUrlRewriteBenchmarks } from './bench-url-rewrite.mjs';
 import {
-    getSiteUrl, getSiteSecret, getSiteDir, fsRootDir,
+    getSiteUrl, getSiteSecret, getSiteDir, fsRootDir, getHarnessKey, createHmacClient,
 } from '../lib/test-helpers.js';
 
 const SITE = 'large-directory';
@@ -146,7 +145,7 @@ function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env
         url,
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--secret=${getSiteSecret(SITE)}`,
+        `--private-key=${getHarnessKey(getSiteSecret(SITE)).privateKeyPath}`,
         ...extraArgs,
     ];
 
@@ -406,8 +405,8 @@ async function runFileFetchScenario({ stage, site, filePath, params = {}, detail
         url.searchParams.set(key, String(value));
     }
 
-    const client = new HmacClient(getSiteSecret(site));
-    const headers = client.getAuthHeaders(fileListJson);
+    const client = createHmacClient(site);
+    const headers = client.getAuthHeaders(fileListJson, { method: 'POST', url: url.toString() });
 
     const start = performance.now();
     const response = await fetch(url.toString(), {
@@ -458,7 +457,7 @@ register_shutdown_function(function () {
         url,
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--secret=${getSiteSecret(site)}`,
+        `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
         `--file-chunk-start=${FILE_BENCH_TUNED_CHUNK_SIZE}`,
         `--file-chunk-max=${FILE_BENCH_TUNED_CHUNK_SIZE}`,
         '--duty=1',
@@ -536,7 +535,7 @@ function runPreflightForSite(site, stateDir) {
         url,
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--secret=${getSiteSecret(site)}`,
+        `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
     ];
     let lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {

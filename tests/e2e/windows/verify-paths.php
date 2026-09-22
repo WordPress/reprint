@@ -13,7 +13,7 @@ foreach ($manifest['path_cases'] as $name => $case) {
         // prints the failing selection instead of losing logs at the job timeout.
         $command = [
             'timeout', '--kill-after=5s', '90s', PHP_BINARY, 'packages/reprint-client/src/import.php', 'pull-files', $source['home'] . '/?reprint-api',
-            '--secret=windows-migration-secret', '--state-dir=' . $root . '/state', '--fs-root=' . $root . '/files',
+            '--private-key=/root/migration/key.pem', '--state-dir=' . $root . '/state', '--fs-root=' . $root . '/files',
             '--progress=jsonl',
         ];
         foreach ((array) $case['source'] as $selection) {

@@ -112,13 +112,19 @@ jobs:
 
           # Provision the "basic" site
           node --input-type=module <<'NODESCRIPT'
+          import { writeFileSync } from "node:fs";
           import { ensureSite } from "./lib/site-setup.js";
+          import { getHarnessKey, getSiteSecret } from "./lib/test-helpers.js";
           await ensureSite("basic");
+          // ensureSite enrolled the harness key on the site; the shell steps
+          // below sign with its private half. The path is written to a file
+          // rather than printed because ensureSite logs to stdout as well.
+          writeFileSync("/tmp/e2e-basic-private-key-path", getHarnessKey(getSiteSecret("basic")).privateKeyPath);
           console.log("Basic site provisioned");
           NODESCRIPT
 
           # Quick smoke test: use the Playground CLI PHP to run the client
-          SECRET="test-secret-basic"
+          PRIVATE_KEY="$(cat /tmp/e2e-basic-private-key-path)"
           BASE="http://127.0.0.1:8081/?reprint-api"
           DIR="/srv/e2e-sites/basic"
 
@@ -142,7 +148,7 @@ jobs:
           fi
 
           echo "=== Playground CLI client preflight ==="
-          timeout 120 "$PHP_BINARY" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --secret="${SECRET}" 2>&1 | head -50 || echo "EXIT: $?"
+          timeout 120 "$PHP_BINARY" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --private-key="${PRIVATE_KEY}" 2>&1 | head -50 || echo "EXIT: $?"
 
       - name: Run E2E tests
         env:
