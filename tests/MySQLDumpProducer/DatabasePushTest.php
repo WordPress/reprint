@@ -221,9 +221,11 @@ class DatabasePushTest extends MySQLDumpProducerTestBase {
 
     public function testSourceSnapshotIsStableAndSourceRowsRemainUntouched(): void {
         require_once __DIR__ . '/../../packages/reprint-client/src/lib/database-push/class-database-push-archive.php';
-        $this->pdo->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longtext) ENGINE=InnoDB');
-        $this->pdo->exec("INSERT INTO wp_options VALUES (1, 'https://local.test/old')");
+        $this->pdo->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longtext, stamp timestamp) ENGINE=InnoDB');
+        $this->pdo->exec("SET SESSION time_zone='+00:00'");
+        $this->pdo->exec("INSERT INTO wp_options VALUES (1, 'https://local.test/old', '2024-01-02 00:04:05')");
         $source = new PDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName . ';charset=utf8mb4', getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $source->exec("SET SESSION time_zone='+03:00', sql_mode='ANSI_QUOTES,NO_BACKSLASH_ESCAPES'");
         $local_absolute_path = sys_get_temp_dir() . '/db-archive-' . bin2hex(random_bytes(8));
         $archive = new DatabasePushArchive($source, $local_absolute_path, 'wp_', ['https://local.test' => 'https://production.test'], $this->push_session_id);
         try {
@@ -232,6 +234,7 @@ class DatabasePushTest extends MySQLDumpProducerTestBase {
             }
             $records = array_map(static fn ($line) => json_decode($line, true), file($local_absolute_path));
             self::assertSame('https://production.test/old', base64_decode($records[1]['values']['value']));
+            self::assertSame('2024-01-02 00:04:05', base64_decode($records[1]['values']['stamp']));
             self::assertSame('https://local.test/new', $this->pdo->query('SELECT value FROM wp_options')->fetchColumn());
         } finally {
             $archive->close();

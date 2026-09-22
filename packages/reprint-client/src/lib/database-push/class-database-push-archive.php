@@ -70,6 +70,11 @@ class DatabasePushArchive {
             throw new RuntimeException('A sealed database push archive already exists: ' . $local_absolute_path);
         }
         $this->database = $database;
+        if (!$this->sqlite_source) {
+            // TIMESTAMP text must use the target's UTC session. The escaped
+            // prefix and the SHOW CREATE parser require default SQL quoting.
+            $database->exec("SET SESSION time_zone='+00:00', sql_mode=''");
+        }
         $this->database_name = $database->query('SELECT DATABASE()')->fetchColumn();
         $this->spatial_function_prefix = version_compare($database->query('SELECT VERSION()')->fetchColumn(), '5.6', '<') ? '' : 'ST_';
         $this->local_absolute_path = $local_absolute_path;
@@ -406,7 +411,7 @@ class DatabasePushArchive {
      *     @type string $ddl Client-prepared CREATE TABLE statement, accompanying table.
      *     @type string $foreign_key Private constraint name for a deferred foreign key.
      *     @type string $definition FOREIGN KEY clause with incoming table references.
-     *     @type array $values Column names mapped to base64, SQL NULL, ENUM zero, or WKB/SRID pairs.
+     *     @type array $values Column names mapped to base64, SQL NULL, ENUM zero, unsigned decimal values, or WKB/SRID pairs.
      *     @type bool $end True only for the final record.
      * }
      * @param resource $output Main archive or deferred foreign key stream.

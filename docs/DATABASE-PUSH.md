@@ -156,7 +156,8 @@ Double any semicolon inside a DSN value. MySQL credentials are not used for SQLi
 ## Preparation and recovery
 
 The client takes one consistent read snapshot and writes a private archive.
-InnoDB and SQLite use a read transaction. When any selected MySQL table uses
+MySQL source connections use UTC so TIMESTAMP values keep their meaning on
+the target. InnoDB and SQLite use a read transaction. When any selected MySQL table uses
 another engine, all selected tables stay read-locked until preparation ends;
 local writes wait during that time. Nontransactional sources therefore need
 `LOCK TABLES` permission. SQLite sources are opened read-only, using the
