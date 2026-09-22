@@ -92,10 +92,17 @@ function sanitize_public_keys_option($value): array {
         if ($entry === null) {
             continue;
         }
-        try {
-            $entry['public_key'] = \WordPress\Reprint\Server\PublicKeyServer::assert_valid_public_key($entry['public_key']);
-        } catch (\InvalidArgumentException $exception) {
-            continue;
+        // assert_valid_public_key() throws for every key on a host without
+        // OpenSSL. Keys are inert there but the settings page still lets the
+        // administrator remove one or change its push grant, and dropping the
+        // rest on that write would leave the site not_configured once it moves
+        // back to an OpenSSL host. The normalized entry is already strict base64.
+        if (function_exists('openssl_pkey_get_public')) {
+            try {
+                $entry['public_key'] = \WordPress\Reprint\Server\PublicKeyServer::assert_valid_public_key($entry['public_key']);
+            } catch (\InvalidArgumentException $exception) {
+                continue;
+            }
         }
         $entries[] = $entry;
     }

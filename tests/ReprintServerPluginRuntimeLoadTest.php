@@ -49,9 +49,52 @@ final class ReprintServerPluginRuntimeLoadTest extends TestCase {
     }
 
     /**
+     * A host without OpenSSL cannot parse keys, so the sanitizer must not drop
+     * enrolled entries when the settings page writes the option there.
+     * The in-process harness cannot remove a PHP function, so the plugin is
+     * booted in a subprocess with openssl_pkey_get_public disabled.
+     */
+    public function testSanitizerKeepsEnrolledKeysOnAHostWithoutOpenssl(): void
+    {
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $entry = [
+            'key_id' => \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key),
+            'public_key' => $public_key,
+            'label' => 'laptop',
+            'added_at' => 1700000000,
+            'push' => true,
+        ];
+        $result = $this->runPluginWithoutAutoloader(
+            <<<'PHP'
+if (function_exists('openssl_pkey_get_public')) {
+    fwrite(STDERR, "openssl_pkey_get_public is still callable\n");
+    exit(2);
+}
+$entry = json_decode((string) getenv('REPRINT_TEST_KEY_ENTRY'), true);
+echo json_encode([
+    'sanitized' => WordPress\Reprint\Server\Plugin\sanitize_public_keys_option([$entry, 'not an entry']),
+]);
+PHP,
+            ['disable_functions=openssl_pkey_get_public'],
+            ['REPRINT_TEST_KEY_ENTRY' => json_encode($entry)]
+        );
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $report = json_decode($result['output'], true);
+        $this->assertIsArray($report, $result['output']);
+        $this->assertSame([$entry], $report['sanitized'], 'the valid entry survives unchanged and the garbage one is dropped');
+    }
+
+    /**
+     * Boots the plugin in a fresh PHP process without vendor/autoload.php and
+     * runs $php_body after lib.php and wordpress/configuration.php are loaded.
+     *
+     * @param string|null          $php_body        Code to run after the plugin boots; the default exercises the settings-page operations.
+     * @param string[]             $ini_directives  Extra `-d` settings for the subprocess.
+     * @param array<string,string> $environment     Extra environment variables for the subprocess.
      * @return array{output:string,status:int}
      */
-    private function runPluginWithoutAutoloader(): array
+    private function runPluginWithoutAutoloader(?string $php_body = null, array $ini_directives = [], array $environment = []): array
     {
         $state_directory = sys_get_temp_dir() . '/reprint-server-runtime-load-' . uniqid();
         mkdir($state_directory, 0755, true);
@@ -78,6 +121,8 @@ if (class_exists('WordPress\Reprint\Server\Utils', false)) {
     fwrite(STDERR, "Utils was loaded before the settings page asked for it\n");
     exit(2);
 }
+PHP;
+        $php_code .= "\n" . ( $php_body ?? <<<'PHP'
 $before = WordPress\Reprint\Server\Plugin\get_configuration_state();
 $private_key = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
 $public_key_pem = openssl_pkey_get_details($private_key)['key'];
@@ -96,7 +141,8 @@ echo json_encode([
     'removal' => $removal,
     'enrolled_keys_after_removal' => WordPress\Reprint\Server\Plugin\get_enrolled_public_keys(),
 ]);
-PHP;
+PHP
+        );
 
         $descriptors = [
             0 => ['pipe', 'r'],
@@ -108,12 +154,17 @@ PHP;
             '-d', 'display_errors=1',
             '-d', 'error_reporting=' . E_ALL,
             '-d', 'auto_prepend_file=',
-            '-r', $php_code,
         ];
+        foreach ($ini_directives as $ini_directive) {
+            $command[] = '-d';
+            $command[] = $ini_directive;
+        }
+        $command[] = '-r';
+        $command[] = $php_code;
         $environment = array_merge(getenv(), [
             'REPRINT_TEST_PLUGIN_DIRECTORY' => realpath(self::PLUGIN_DIRECTORY) . '/',
             'REPRINT_TEST_STATE_DIRECTORY' => $state_directory . '/',
-        ]);
+        ], $environment);
 
         try {
             $process = proc_open($command, $descriptors, $pipes, $state_directory, $environment);
