@@ -286,9 +286,9 @@ against that site finds the key in the state directory, so no credential flag is
 credential does the same generation itself, prints the key, and exits with code 4: enrollment is needed, nothing
 failed, and running the same command again after enrolling continues. Every other remote command refuses with a
 message naming `reprint keygen` and `--secret`. `--private-key=PATH` uses a key stored elsewhere (`keygen --out=PATH`
-writes one there) instead of the state directory. Access is revoked on the site: the plugin's key table has a Remove
-button for each key. Deleting the state directory only discards the private half. A site that only has a connection
-token answers `not_configured` (HTTP 503) on an OpenSSL host until a key is enrolled.
+writes one there) instead of the state directory. Deleting the state directory destroys the private half, so the
+enrolled public key stops working; the plugin's key table also has a Remove button for each key. A site that only has
+a connection token answers `not_configured` (HTTP 503) on an OpenSSL host until a key is enrolled.
 
 Instead of enrolling keys on the settings page, the plugin can be pre-packaged with a
 `./reprint-exporter-wp/public-keys.php` file returning a list of PEM or one-line public keys. When that file exists

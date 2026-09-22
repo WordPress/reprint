@@ -1380,7 +1380,7 @@ class ImportClient
             if ($command === 'pull' && $this->credential['scheme'] === 'key' && ( $this->credential['source'] ?? '' ) === 'state') {
                 $key_message =
                     "Key for this site: {$this->credential['path']}\n"
-                    . "To revoke it, remove the enrolled key under Tools > Reprint Server; deleting the state directory only discards this private half.";
+                    . "Deleting the state directory destroys it, so the enrolled public key stops working; Tools > Reprint Server can also remove that key.";
                 // The plain terminal presentation drops JSONL records, so it
                 // gets the same text once, below the pull summary.
                 $this->progress->print_line("\033[2m{$key_message}\033[0m\n");
@@ -15602,8 +15602,9 @@ if (
                 "finds it there; no --private-key flag is needed.\n" .
                 "\n" .
                 "Prints the public key as one line. Paste it into the site under\n" .
-                "Tools > Reprint Server. Removing it there revokes access; deleting\n" .
-                "the state directory only discards the private half.\n" .
+                "Tools > Reprint Server. Deleting the state directory destroys the\n" .
+                "private half, so the enrolled key stops working; the settings page\n" .
+                "can also remove it.\n" .
                 "\n" .
                 "`reprint pull` generates a key itself when none exists, so this\n" .
                 "command is for scripts that want a deterministic first run.\n",
