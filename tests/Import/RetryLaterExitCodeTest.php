@@ -217,7 +217,7 @@ final class RetryLaterExitCodeTest extends TestCase {
     {
         $process = proc_open(
             [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
-                $command, $this->remote_reprint_api_url,
+                $command, $this->remote_reprint_api_url, '--allow-unsafe-http',
                 '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
                 '--progress=jsonl', '--index-batch-start=100', '--index-batch-min=100', '--secret=test-secret'],
             [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/client.log', 'w'], 2 => ['redirect', 1]],

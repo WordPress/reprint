@@ -122,6 +122,30 @@ final class PreflightErrorOutputTest extends TestCase {
         $this->assert_error_output($pull);
     }
 
+    public function testHttpIsRejectedBeforeRequestsAndAllowUnsafeHttpReachesTheEndpoint(): void
+    {
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => 200,
+            'body' => json_encode(['ok' => true, 'protocol_version' => PULL_PROTOCOL_VERSION]),
+        ]));
+
+        $preflight = $this->run_command('preflight', 1, false);
+        $this->assertStringContainsString('The remote Reprint API URL you provided uses HTTP.', $preflight['error']);
+        $this->assertStringContainsString(
+            'HTTP is unencrypted, so transferring a site over it can expose its data, including passwords, to eavesdropping.',
+            $preflight['error']
+        );
+        $this->assertStringContainsString('Provide an HTTPS URL, or pass --allow-unsafe-http to accept this risk.', $preflight['error']);
+        $this->assertFileDoesNotExist($this->root . '/requests.log');
+        $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
+
+        $preflight = $this->run_command('preflight', 0, true);
+        $this->assertSame('complete', $preflight['status']);
+        $this->assertSame(200, $preflight['http_code']);
+        $this->assertNull($preflight['error']);
+        $this->assertSame("request\n", file_get_contents($this->root . '/requests.log'));
+    }
+
     /** @dataProvider download_commands */
     public function testDownloadFailuresUseTheSameErrorFields(string $command, bool $connection_failure): void
     {
@@ -185,7 +209,7 @@ final class PreflightErrorOutputTest extends TestCase {
             'body' => '{"ok":false,"filesystem":{"ok":true},"database":{"connected":false,"error":"Access denied."}}',
         ]));
         $this->run_command('preflight', 1);
-        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         $reflection = new \ReflectionClass($client);
         $reflection->getProperty('state')->setValue($client, $reflection->getMethod('load_state')->invoke($client));
         $reflection->getMethod('require_preflight')->invoke($client);
@@ -195,7 +219,7 @@ final class PreflightErrorOutputTest extends TestCase {
 
     public function testAssertionReadsAnOlderSavedHttpFailureWithoutAnErrorCode(): void
     {
-        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files');
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         \write_current_pull_state($client, [
             'preflight' => [
                 'http_code' => 520,
@@ -276,16 +300,20 @@ final class PreflightErrorOutputTest extends TestCase {
         $this->assertSame($result['error_code'], $progress['error_code']);
     }
 
-    private function run_command(string $command, int $exit_code): array
+    private function run_command(string $command, int $exit_code, bool $allow_http = true): array
     {
+        $arguments = [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
+            $command, $this->remote_url, '--secret=preflight-test-secret',
+            '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
+            '--progress=jsonl'];
+        if ($allow_http) {
+            $arguments[] = '--allow-unsafe-http';
+        }
         // Continue healthy partial work according to the exit-code-2 contract.
         // Request failures return to the caller without retrying here.
         for ($attempt = 0; $attempt < 3; $attempt++) {
             $process = proc_open(
-                [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
-                    $command, $this->remote_url, '--secret=preflight-test-secret',
-                    '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
-                    '--progress=jsonl'],
+                $arguments,
                 [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
                 $pipes
             );
@@ -307,6 +335,9 @@ final class PreflightErrorOutputTest extends TestCase {
         $records = array_values(array_filter($records, static function (array $record): bool {
             return ( $record['type'] ?? null ) !== 'reprint_report';
         }));
+        if ($records === [] && !$allow_http) {
+            return json_decode(trim($stderr), true, 512, JSON_THROW_ON_ERROR);
+        }
         $this->assertNotEmpty($records, $stderr);
         return end($records);
     }

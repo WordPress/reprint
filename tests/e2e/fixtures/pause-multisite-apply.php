@@ -22,7 +22,7 @@ class ReprintMultisiteApplyPause extends ImportClient {
     }
 }
 
-$reprint_client = new ReprintMultisiteApplyPause($argv[2], $argv[3], $argv[3] . '/fs-root');
+$reprint_client = new ReprintMultisiteApplyPause($argv[2], $argv[3], $argv[3] . '/fs-root', ['allow_http' => true]);
 $reprint_client->run([
     'command' => 'db-apply',
     'include_host_plugins' => false,

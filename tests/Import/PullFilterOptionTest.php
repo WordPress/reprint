@@ -21,7 +21,7 @@ class PullFilterFakeClient extends \ImportClient
 
     public function __construct(string $state_dir, string $filesystem_root)
     {
-        parent::__construct('http://fake.invalid', $state_dir, $filesystem_root);
+        parent::__construct('https://fake.invalid', $state_dir, $filesystem_root);
     }
 
     public function audit_log(string $message, bool $to_console = true): void
@@ -187,7 +187,7 @@ class PullFilterOptionTest extends TestCase
         parent::setUp();
         $this->tempDir = sys_get_temp_dir() . '/pull-filter-test-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
-        $remoteReprintApiUrl = 'http://fake.invalid';
+        $remoteReprintApiUrl = 'https://fake.invalid';
         $this->pullStateDirectory =
             $this->stateDir
             . '/remotes/'

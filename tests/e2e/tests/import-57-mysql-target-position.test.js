@@ -68,6 +68,7 @@ describeWithHostPhpProcess('Import: source position saved in MySQL target', { ti
             clientPath,
             'db-pull',
             importUrl(),
+            '--allow-unsafe-http',
             `--state-dir=${tempDir}`,
             `--fs-root=${fsRootDir(tempDir)}`,
             `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,

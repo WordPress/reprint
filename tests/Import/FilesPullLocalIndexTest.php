@@ -204,12 +204,13 @@ final class FilesPullLocalIndexTest extends TestCase
         ]], $this->filesDiffRecords($diff['stdout']));
     }
 
-    public function testPullDoesNotAddDefaultSkippedPathsToTheLocalIndex(): void
+    public function testPullRecordsNodeModulesButNotDefaultSkippedPathsInTheLocalIndex(): void
     {
         $backupPath = 'wp-content/updraft/backup_site-uploads.zip';
         $this->writeRemoteOverrides([
             'added_files' => [
                 'node_modules/pulled-package.js' => 'pulled dependency',
+                '.npm/cached-package.js' => 'pulled cache',
                 $backupPath => 'pulled backup',
             ],
         ]);
@@ -231,8 +232,12 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->localIndexEntryPath('node_modules'),
             $index
         );
-        $this->assertArrayNotHasKey(
+        $this->assertArrayHasKey(
             $this->localIndexEntryPath('node_modules/pulled-package.js'),
+            $index
+        );
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('.npm/cached-package.js'),
             $index
         );
         $this->assertArrayNotHasKey(
@@ -1037,7 +1042,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             $this->stateDirectory,
             $this->rawFileRoot,
-            'files-pull'
+            ['signal_handling_command' => 'files-pull', 'allow_http' => true]
         );
         $client->throw_before_fetch_stage_save = true;
         $processLock = new \ReprintProcessLock($this->stateDirectory);
@@ -1114,7 +1119,7 @@ final class FilesPullLocalIndexTest extends TestCase
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
             '--secret=secret',
-            '--force-http',
+            '--allow-unsafe-http',
         ]);
         $this->assertSame(1, $blockedPush['exit'], $blockedPush['output']);
         $this->assertStringContainsString(
@@ -1507,6 +1512,7 @@ final class FilesPullLocalIndexTest extends TestCase
      */
     private function startCliProcess(array $arguments): array
     {
+        $arguments[] = '--allow-unsafe-http';
         $process = proc_open(
             array_merge([PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client'], $arguments),
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],

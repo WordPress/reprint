@@ -528,14 +528,41 @@ class ImportClient
      */
     public $exit_code = 0;
 
+    /**
+     * @param array $options { Optional client settings. Unknown keys are ignored.
+     *     @type bool        $allow_http                      Permit an HTTP remote Reprint API URL. Default false.
+     *     @type string|null $signal_handling_command         Command whose signal handlers to register. Default null.
+     *     @type string|null $selected_remote_state_directory Remote state directory override. Default null.
+     * }
+     * @phpstan-param array{
+     *     allow_http?: bool,
+     *     signal_handling_command?: string|null,
+     *     selected_remote_state_directory?: string|null
+     * } $options
+     */
     public function __construct(
         string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
-        ?string $signal_handling_command = null,
-        ?string $selected_remote_state_directory = null
+        array $options = []
     )
     {
+        $allow_http = array_key_exists('allow_http', $options) ? $options['allow_http'] : false;
+        $signal_handling_command = $options['signal_handling_command'] ?? null;
+        $selected_remote_state_directory = $options['selected_remote_state_directory'] ?? null;
+
+        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports CLI/library option types, not HTML.
+        if (!is_bool($allow_http)) {
+            throw new InvalidArgumentException('The allow_http option must be a boolean; received ' . gettype($allow_http) . '.');
+        }
+        if ($signal_handling_command !== null && !is_string($signal_handling_command)) {
+            throw new InvalidArgumentException('The signal_handling_command option must be a string or null; received ' . gettype($signal_handling_command) . '.');
+        }
+        if ($selected_remote_state_directory !== null && !is_string($selected_remote_state_directory)) {
+            throw new InvalidArgumentException('The selected_remote_state_directory option must be a string or null; received ' . gettype($selected_remote_state_directory) . '.');
+        }
+        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
         // Register the command's signal behavior before constructor work can
         // create state or receive a signal under another command's policy.
         if (function_exists("pcntl_signal")) {
@@ -556,6 +583,7 @@ class ImportClient
             }
         }
 
+        self::validate_remote_reprint_api_url_transport($remote_reprint_api_url, $allow_http);
         $this->remote_reprint_api_url = $remote_reprint_api_url;
         // Some WAFs reject automated requests without User-Agent or Referer.
         // Accept-Language supplies the browser-language context managed hosts
@@ -635,6 +663,17 @@ class ImportClient
         );
 
         $this->state = new PullState();
+    }
+
+    public static function validate_remote_reprint_api_url_transport(string $remote_reprint_api_url, bool $allow_http): void
+    {
+        if (!$allow_http && strncasecmp($remote_reprint_api_url, 'http://', 7) === 0) {
+            throw new InvalidArgumentException(
+                'The remote Reprint API URL you provided uses HTTP. '
+                . 'HTTP is unencrypted, so transferring a site over it can expose its data, including passwords, to eavesdropping. '
+                . 'Provide an HTTPS URL, or pass --allow-unsafe-http to accept this risk.'
+            );
+        }
     }
 
     /**
@@ -1815,7 +1854,7 @@ class ImportClient
      *     Parsed files-push options and context.
      *
      *     @type string $secret             HMAC connection token.
-     *     @type bool   $force_http         Whether the operator allowed a plain-HTTP target.
+     *     @type bool   $allow_http         Whether the operator allowed a plain-HTTP target.
      *     @type string $progress           Progress output mode: auto, tty, jsonl, or compact.
      *     @type array  $files_push_context Optional context already validated by the CLI entry point.
      * }
@@ -1870,7 +1909,7 @@ class ImportClient
                 $this->state_dir,
                 $this->remote_state_directory
             ),
-            'allow_http' => $options['force_http'] ?? false,
+            'allow_http' => $options['allow_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
             'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
         ];
@@ -2311,7 +2350,7 @@ class ImportClient
      *     Parsed files-push options.
      *
      *     @type string $secret     HMAC connection token.
-     *     @type bool   $force_http Whether the operator allowed a plain-HTTP target.
+     *     @type bool   $allow_http Whether the operator allowed a plain-HTTP target.
      * }
      * @phpstan-param array<string,mixed> $options
      * @return array {
@@ -2342,6 +2381,10 @@ class ImportClient
             );
         }
 
+        self::validate_remote_reprint_api_url_transport(
+            $remote_reprint_api_url,
+            $options['allow_http'] ?? false
+        );
         $push_state_directory = self::resolve_push_state_directory(
             $remote_reprint_api_url,
             $state_dir,
@@ -2350,12 +2393,12 @@ class ImportClient
         );
         $masked_remote_reprint_api_url =
             self::mask_url_credentials($remote_reprint_api_url);
-        $force_http = $options['force_http'] ?? false;
+        $allow_http = $options['allow_http'] ?? false;
         $scheme = strtolower( (string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME) );
-        if ($scheme !== 'https' && !( $scheme === 'http' && $force_http === true )) {
+        if ($scheme !== 'https' && !( $scheme === 'http' && $allow_http === true )) {
             throw new InvalidArgumentException(
                 'The files-push remote Reprint API URL must use HTTPS: ' . $masked_remote_reprint_api_url
-                . '. Pass --force-http only for a remote Reprint API URL you trust.'
+                . '. Pass --allow-unsafe-http only for a remote Reprint API URL you trust.'
             );
         }
         $resolved_local_filesystem_root = realpath($filesystem_root);
@@ -14609,11 +14652,13 @@ if (
             'commands' => ['keygen'],
         ],
         [
-            'name' => 'force-http',
+            'name' => 'allow-unsafe-http',
             'type' => 'flag',
-            'target' => 'force_http',
+            'target' => 'allow_http',
+            'aliases' => ['force-http'],
             'help' => 'Allow a trusted plain-HTTP target; anyone able to observe or alter the connection can read or modify transferred content',
-            'commands' => ['files-push'],
+            'help_section' => 'global',
+            'commands' => array_merge(ImportClient::COMMANDS, ['post-process']),
         ],
         [
             'name' => 'progress',
@@ -15465,7 +15510,8 @@ if (
                 "--fs-root is the ready-to-run WordPress root containing wp-load.php,\n" .
                 "not the raw download directory. The positional URL selects saved state\n" .
                 "when --state-dir contains multiple remotes. No source API requests\n" .
-                "are made. Failing-plugin recovery alone needs no migration state.\n\n" .
+                "are made. An explicit HTTP source URL requires --allow-unsafe-http.\n" .
+                "Failing-plugin recovery alone needs no migration state.\n\n" .
                 "Prints JSON with per-task results. Exit 0 means all selected tasks\n" .
                 "completed; exit 1 means processing stopped. Uses Reprint's PHP binary.\n" .
                 "Does not check page rendering or the web server.\n",
@@ -15685,7 +15731,7 @@ if (
                 "The output is a local minimized push operation plan before target\n" .
                 "exclusions, not a path-for-path filesystem log. Like files-push, its\n" .
                 "default-skipped paths include generated wp-content caches, version-\n" .
-                "control data, node_modules, package-manager caches, OS metadata, and\n" .
+                "control data, package-manager caches, OS metadata, and\n" .
                 "editor scratch files.\n" .
                 "With --progress=auto (the default), a terminal gets red status lines\n" .
                 "that label paths to push as modified and paths to delete as deleted;\n" .
@@ -15700,7 +15746,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [--force-http] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [--allow-unsafe-http] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -16009,13 +16055,14 @@ if (
             $argv,
             $argument_count,
             $reprint_post_process_has_source ? 3 : 2,
-            array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks'], true))
+            array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks', 'allow-unsafe-http'], true))
         );
         $reprint_post_process_result = PostProcess::run_selected_tasks(
             $reprint_post_process_root ? ( realpath($reprint_post_process_root) ?: $reprint_post_process_root ) : '',
             $reprint_post_process_options['tasks'] ?? 'all',
             $reprint_post_process_state,
-            $reprint_post_process_has_source ? $reprint_post_process_source : null
+            $reprint_post_process_has_source ? $reprint_post_process_source : null,
+            $reprint_post_process_options['allow_http'] ?? false
         );
         echo json_encode($reprint_post_process_result, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE) . "\n";
         exit($reprint_post_process_result['status'] === 'complete' ? 0 : 1);
@@ -16070,7 +16117,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--force-http', '--verbose', '-v'],
+                ['--allow-unsafe-http', '--force-http', '--verbose', '-v'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
@@ -16087,7 +16134,8 @@ if (
     } elseif ($command === 'files-diff') {
         foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
             $reprint_files_diff_option_allowed =
-                strpos($reprint_files_diff_command_argument, '--progress=') === 0
+                in_array($reprint_files_diff_command_argument, ['--allow-unsafe-http', '--force-http'], true)
+                || strpos($reprint_files_diff_command_argument, '--progress=') === 0
                 || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
             if (!$reprint_files_diff_option_allowed) {
@@ -16096,9 +16144,6 @@ if (
                 exit(1);
             }
         }
-    } elseif (!empty($options['force_http'])) {
-        fwrite(STDERR, "Error: --force-http is accepted only by files-push.\n");
-        exit(1);
     }
 
     if (!$state_dir) {
@@ -16176,6 +16221,10 @@ if (
     }
 
     try {
+        ImportClient::validate_remote_reprint_api_url_transport(
+            $remote_reprint_api_url,
+            $options['allow_http'] ?? false
+        );
         // Acquire the lock before local push state setup and audit writes so
         // each command owns every local state transition for its complete invocation.
         $reprint_process_lock = new ReprintProcessLock($state_dir);
@@ -16213,8 +16262,11 @@ if (
             $remote_reprint_api_url,
             $state_dir,
             $filesystem_root,
-            $command,
-            $reprint_selected_remote_state_directory
+            [
+                'signal_handling_command' => $command,
+                'selected_remote_state_directory' => $reprint_selected_remote_state_directory,
+                'allow_http' => $options['allow_http'] ?? false,
+            ]
         );
         $client->audit_log_argv($command, $argv);
         $client->run(

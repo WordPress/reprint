@@ -30,7 +30,7 @@ class FetchRequestBodySizingTest extends TestCase
         $this->tempDir = sys_get_temp_dir() . '/fetch-body-sizing-' . uniqid();
         $this->stateDir = $this->tempDir . '/state';
         $this->pullStateDirectory =
-            $this->stateDir . '/remotes/' . md5('http://fake.url') . '/pull';
+            $this->stateDir . '/remotes/' . md5('https://fake.url') . '/pull';
         $this->filesystemRoot = $this->tempDir . '/fs-root';
         mkdir($this->pullStateDirectory, 0755, true);
         mkdir($this->filesystemRoot, 0755, true);
@@ -111,7 +111,7 @@ class FetchRequestBodySizingTest extends TestCase
     ): array
     {
         $client = new BatchCapturingClient(
-            'http://fake.url',
+            'https://fake.url',
             $this->stateDir,
             $this->filesystemRoot,
         );
@@ -241,7 +241,7 @@ class FetchRequestBodySizingTest extends TestCase
         $initTuner = $reflection->getMethod('initialize_tuner');
         $tunerProperty = $reflection->getProperty('tuner');
 
-        $first = new \ImportClient('http://fake.url', $this->stateDir, $this->filesystemRoot);
+        $first = new \ImportClient('https://fake.url', $this->stateDir, $this->filesystemRoot);
         \write_current_pull_state($first, [
             'preflight' => [
                 // Under the hard cap, so this value is what has to reach the
@@ -270,7 +270,7 @@ class FetchRequestBodySizingTest extends TestCase
         ]);
         $first->save_state();
 
-        $second = new \ImportClient('http://fake.url', $this->stateDir, $this->filesystemRoot);
+        $second = new \ImportClient('https://fake.url', $this->stateDir, $this->filesystemRoot);
         $reflection->getProperty('state')->setValue($second, $loadState->invoke($second));
         $initTuner->invoke($second, [
             'tuning_config' => ['enabled' => false],
@@ -304,7 +304,7 @@ class FetchRequestBodySizingTest extends TestCase
 
         [$url, $pid] = $this->startJsonServer($response);
 
-        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         \write_current_pull_state($client, []);
         $reflection = new \ReflectionClass(\ImportClient::class);
         $reflection->getProperty('state')->setValue(
@@ -364,7 +364,7 @@ class FetchRequestBodySizingTest extends TestCase
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($payload)
             . "\r\nConnection: close\r\n\r\n" . $payload
         );
-        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         \write_current_pull_state($client, []);
         $reflection = new \ReflectionClass(\ImportClient::class);
         $reflection->getProperty('state')->setValue($client, $reflection->getMethod('load_state')->invoke($client));
@@ -385,7 +385,7 @@ class FetchRequestBodySizingTest extends TestCase
             $reflection->getMethod('save_state')->invoke($client);
             $this->assertLessThan(20000, strlen(file_get_contents($directory . '/state.json')));
         }
-        $next = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $next = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         $reflection->getProperty('state')->setValue($next, $reflection->getMethod('load_state')->invoke($next));
         $this->assertSame($paths_by_origin, $reflection->getMethod('load_multisite_nested_site_paths')->invoke($next));
         $this->assertSame($record['nested_site_paths_file'], $next->get_state()->apply->nested_site_paths_file);
@@ -406,7 +406,7 @@ class FetchRequestBodySizingTest extends TestCase
             "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\n"
                 . 'Content-Length: ' . strlen($payload) . "\r\nConnection: close\r\n\r\n" . $payload,
         );
-        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         if ($resume) {
             // A pull-db stopped after downloading SQL. A later standalone
             // preflight must not let its replacement response bypass the check
@@ -484,7 +484,7 @@ class FetchRequestBodySizingTest extends TestCase
 
         [$url, $pid] = $this->startJsonServer($response);
 
-        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         \write_current_pull_state($client, []);
         $reflection = new \ReflectionClass(\ImportClient::class);
         $reflection->getProperty('state')->setValue(
@@ -503,7 +503,7 @@ class FetchRequestBodySizingTest extends TestCase
 
         // A later low-level command reads the saved response without fetching
         // preflight again. It must not accept the response the first run rejected.
-        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         $reflection->getProperty('state')->setValue(
             $next_client,
             $reflection->getMethod('load_state')->invoke($next_client),
@@ -524,7 +524,7 @@ class FetchRequestBodySizingTest extends TestCase
         ]]]);
         [$url, $pid] = $this->startJsonServer("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
             . 'Content-Length: ' . strlen($payload) . "\r\nConnection: close\r\n\r\n" . $payload);
-        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         try {
             $client->run_preflight();
         } finally {
@@ -535,7 +535,7 @@ class FetchRequestBodySizingTest extends TestCase
         $this->assertSame('PREFLIGHT_FAILED', $record['error_code']);
         $this->assertStringContainsString($field, $record['error']);
         // Resume reads the response that this request saved, not a hand-written state file.
-        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         $reflection = new \ReflectionClass($next_client);
         $reflection->getProperty('state')->setValue($next_client, $reflection->getMethod('load_state')->invoke($next_client));
         $this->expectException(\RuntimeException::class);
@@ -561,7 +561,7 @@ class FetchRequestBodySizingTest extends TestCase
         ]]]);
         [$url, $pid] = $this->startJsonServer("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
             . 'Content-Length: ' . strlen($payload) . "\r\nConnection: close\r\n\r\n" . $payload);
-        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         try {
             $client->run_preflight();
         } finally {
@@ -582,7 +582,7 @@ class FetchRequestBodySizingTest extends TestCase
         }
         // The next command loads the state written above. It must stop before
         // opening the unused database or creating runtime configuration files.
-        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $next_client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage($error);
         $next_client->run($options);
@@ -681,7 +681,7 @@ class FetchRequestBodySizingTest extends TestCase
         [$url, $pid] = $this->startJsonServer($response);
 
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot);
+        $client = new \ImportClient($url, $this->stateDir, $this->filesystemRoot, ['allow_http' => true]);
         \write_current_pull_state($client, []);
         $reflection->getProperty('state')->setValue(
             $client,
@@ -711,7 +711,7 @@ class FetchRequestBodySizingTest extends TestCase
         // — on a resumed run, where the shrink came back from state. Raising it
         // to the newly reported bound would resend the body that was refused.
         $reflection = new \ReflectionClass(\ImportClient::class);
-        $client = new \ImportClient('http://fake.url', $this->stateDir, $this->filesystemRoot);
+        $client = new \ImportClient('https://fake.url', $this->stateDir, $this->filesystemRoot);
         \write_current_pull_state($client, [
             'preflight' => [
                 'data' => ['limits' => ['max_request_bytes' => 8388608]],

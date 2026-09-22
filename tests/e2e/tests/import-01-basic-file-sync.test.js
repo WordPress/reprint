@@ -4,8 +4,8 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
@@ -16,11 +16,25 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Basic File Sync', () => {
-    const site = 'basic';
+    // Other suites index the shared basic site in parallel. Keep these extra files separate.
+    const site = 'basic-file-sync';
     let tempDir;
+    const runtimeFiles = {
+        'wp-content/plugins/weglot/vendor/weglot/weglot-php/node_modules/@weglot/languages/dist/Languages.php': '<?php namespace WeglotLanguages; class Languages {}',
+        'wp-content/plugins/js_composer/assets/lib/vendor/node_modules/animate.css/animate.min.css': '.animated{}',
+        'wp-content/themes/example/node_modules/package/index.js': 'window.themeDependency = true;',
+    };
 
     beforeAll(async () => {
-        await ensureSite(site);
+        await ensureSite(site, {
+            afterCreate: async (siteDir) => {
+                for (const [path, contents] of Object.entries(runtimeFiles)) {
+                    const sourcePath = join(siteDir, path);
+                    mkdirSync(dirname(sourcePath), { recursive: true });
+                    writeFileSync(sourcePath, contents);
+                }
+            },
+        });
         tempDir = createTempDir('e2e-import-basic-files');
     });
 
@@ -45,6 +59,36 @@ describe('Import: Basic File Sync', () => {
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assert.equal(state.active_resumable_command.command_name, 'files-pull');
         assert.equal(state.active_resumable_command.completion_state, 'complete');
+    });
+
+    it('pulls runtime files bundled inside node_modules', () => {
+        for (const [path, contents] of Object.entries(runtimeFiles)) {
+            assert.equal(readFileSync(join(fsRootDir(tempDir), getSiteDir(site), path), 'utf8'), contents);
+        }
+    });
+
+    it('allows explicitly excluding a node_modules directory', () => {
+        const excludedTempDir = createTempDir('e2e-excluded-node-modules');
+        const excludedPath = 'wp-content/plugins/js_composer/assets/lib/vendor/node_modules';
+        try {
+            const result = runImporter(importUrl(), excludedTempDir, 'files-pull', {
+                secret: getSiteSecret(site),
+                extraArgs: [
+                    `--include=${join(getSiteDir(site), 'wp-content/plugins')}`,
+                    `--exclude=${join(getSiteDir(site), excludedPath)}`,
+                ],
+            });
+            assert.equal(result.exitCode, 0, result.stderr + result.stdout);
+            const importedRoot = join(fsRootDir(excludedTempDir), getSiteDir(site));
+            assert.ok(!existsSync(join(importedRoot, excludedPath)));
+            for (const [path, contents] of Object.entries(runtimeFiles)) {
+                if (path.startsWith('wp-content/plugins/weglot/')) {
+                    assert.equal(readFileSync(join(importedRoot, path), 'utf8'), contents);
+                }
+            }
+        } finally {
+            cleanupTempDir(excludedTempDir);
+        }
     });
 
     it('fs-root file hashes match source site directory', () => {

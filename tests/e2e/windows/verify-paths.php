@@ -14,7 +14,7 @@ foreach ($manifest['path_cases'] as $name => $case) {
         $command = [
             'timeout', '--kill-after=5s', '90s', PHP_BINARY, 'packages/reprint-client/src/import.php', 'pull-files', $source['home'] . '/?reprint-api',
             '--private-key=/root/migration/key.pem', '--state-dir=' . $root . '/state', '--fs-root=' . $root . '/files',
-            '--progress=jsonl',
+            '--allow-unsafe-http', '--progress=jsonl',
         ];
         foreach ((array) $case['source'] as $selection) {
             $command[] = '--include=' . $selection;

@@ -24,7 +24,12 @@ final class AuthErrorDiagnosisTest extends TestCase
 
     private function clientWith(array $options): ImportClient
     {
-        $client = new ImportClient('https://example.test/?reprint-api', $this->state_dir, $this->state_dir . '/fs', 'preflight');
+        $client = new ImportClient(
+            'https://example.test/?reprint-api',
+            $this->state_dir,
+            $this->state_dir . '/fs',
+            ['signal_handling_command' => 'preflight']
+        );
         // The public constructor takes no options; resolve the credential the
         // way run() does so credential, hmac_client, and public_key_client
         // are all set from $options.

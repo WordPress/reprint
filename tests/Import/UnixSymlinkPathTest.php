@@ -180,14 +180,14 @@ final class UnixSymlinkPathTest extends TestCase {
     {
         $state_directory = $this->root . '/state';
         if (!is_dir($state_directory)) {
-            $client = new \ImportClient($this->url, $state_directory, $this->root . '/files');
+            $client = new \ImportClient($this->url, $state_directory, $this->root . '/files', ['allow_http' => true]);
             \write_current_pull_state($client, [
                 'preflight' => ['data' => ['ok' => true, 'path_format' => 'unix', 'wp_detect' => ['roots' => [['path' => $this->source]]]], 'http_code' => 200],
             ]);
         }
         $command = array_merge([PHP_BINARY, dirname(__DIR__, 2) . '/packages/reprint-client/src/import.php',
             'files-pull', $this->url, '--state-dir=' . $state_directory, '--fs-root=' . $this->root . '/files',
-            '--follow-symlinks', '--progress=jsonl', '--secret=test-secret'], $arguments);
+            '--allow-unsafe-http', '--follow-symlinks', '--progress=jsonl', '--secret=test-secret'], $arguments);
         $process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/pull.log', 'w'],
             2 => ['file', $this->root . '/pull.log', 'a']], $pipes);
         $this->assertIsResource($process);

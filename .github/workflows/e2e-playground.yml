@@ -148,7 +148,7 @@ jobs:
           fi
 
           echo "=== Playground CLI client preflight ==="
-          timeout 120 "$PHP_BINARY" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" /tmp/e2e-smoke --private-key="${PRIVATE_KEY}" 2>&1 | head -50 || echo "EXIT: $?"
+          timeout 120 "$PHP_BINARY" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" --state-dir=/tmp/e2e-smoke-state --fs-root=/tmp/e2e-smoke-fs --private-key="${PRIVATE_KEY}" --allow-unsafe-http 2>&1 | head -50 || echo "EXIT: $?"
 
       - name: Run E2E tests
         env:

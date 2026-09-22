@@ -20,6 +20,7 @@ final class PostProcess {
      * @param string      $tasks                  Comma-separated task names, or all.
      * @param string|null $state_directory        Saved migration state; required for hosting or Reprint cleanup.
      * @param string|null $remote_reprint_api_url Source URL selecting a saved remote, never contacted here.
+     * @param bool        $allow_http             Whether an explicit HTTP source URL is allowed.
      * @return array {
      *     @type string $status  Complete or failed.
      *     @type array  $results Task results in execution order. Each has task and status;
@@ -29,12 +30,13 @@ final class PostProcess {
      *     @type string $message Reason processing stopped, present on failure.
      * }
      */
-    public static function run_selected_tasks( string $wordpress_root, string $tasks = 'all', ?string $state_directory = null, ?string $remote_reprint_api_url = null ): array {
+    public static function run_selected_tasks( string $wordpress_root, string $tasks = 'all', ?string $state_directory = null, ?string $remote_reprint_api_url = null, bool $allow_http = false ): array {
         $results      = array();
         $process_lock = null;
         $current_task = null;
         $client       = null;
         try {
+            ImportClient::validate_remote_reprint_api_url_transport( $remote_reprint_api_url ?? '', $allow_http );
             $selected_tasks = 'all' === $tasks ? self::TASKS : explode( ',', $tasks );
             foreach ( $selected_tasks as $task ) {
                 if ( ! in_array( $task, self::TASKS, true ) ) {
@@ -66,7 +68,16 @@ final class PostProcess {
                 if ( ! is_file( $remote_directory . '/pull/state.json' ) ) {
                     throw new RuntimeException( 'No saved migration state found for the selected source URL.' );
                 }
-                $client = new ImportClient( $remote_reprint_api_url ?? '', $state_directory, $wordpress_root, 'post-process', $remote_directory );
+                $client = new ImportClient(
+                    $remote_reprint_api_url ?? '',
+                    $state_directory,
+                    $wordpress_root,
+                    array(
+                        'allow_http'                      => $allow_http,
+                        'signal_handling_command'         => 'post-process',
+                        'selected_remote_state_directory' => $remote_directory,
+                    )
+                );
             }
             if ( in_array( 'disable-hosting-plugins', $selected_tasks, true ) ) {
                 $current_task = 'disable-hosting-plugins';

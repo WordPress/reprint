@@ -341,6 +341,10 @@ php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
 
+Reprint rejects HTTP remote Reprint API URLs before selecting remote state or making requests unless `--allow-unsafe-http` explicitly allows an unencrypted connection. This applies to every remote command, including local-only commands and local hosts. The supplied URL's scheme is never changed. `--force-http` remains an alias.
+
+To resume state created over HTTP by an older client, keep using the HTTP URL with `--allow-unsafe-http`.
+
 The command's JSON result keeps the response data and HTTP details, and includes
 `status`, `error`, `error_code`, and `message`. On failure, `status` is `error`,
 `error` contains the failure detail, and `message` is the same detail prefixed
@@ -481,9 +485,13 @@ also keeps pre-existing local paths which were not recorded by the first pull.
 
 File pulls always omit paths matched by the built-in default skip rules. These
 rules cover known generated backup archives, cache, log, upgrade, and temporary
-paths, plus version-control metadata, `node_modules`, IDE and package-manager
+paths, plus version-control metadata, IDE and package-manager
 caches, operating-system metadata, and editor scratch files. `--include`,
 `--exclude`, `--filter`, and `--remap` cannot override these omissions.
+
+`node_modules` directories are included by default because plugins and themes
+may bundle runtime PHP, JavaScript, and CSS dependencies there. Use `--exclude`
+to omit a specific directory when you know the site does not need it.
 
 **Host platform plugins**
 

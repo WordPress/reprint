@@ -234,7 +234,7 @@ jobs:
             PUSH_REMOTE_URL="${BASE}&directory=${DIR}&version_gate_probe=${PUSH_PROBE}"
             # Seed the mandatory preflight, then clear that setup request so the
             # access-log assertion below covers only files-push.
-            "$CLIENT_PHP" "$CLIENT_PATH" preflight "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --private-key="${PRIVATE_KEY}" >/dev/null
+            "$CLIENT_PHP" "$CLIENT_PATH" preflight "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --private-key="${PRIVATE_KEY}" --allow-unsafe-http >/dev/null
             sudo truncate -s 0 /var/log/nginx/access.log
             set +e
             files_push_version_output="$("$CLIENT_PHP" "$CLIENT_PATH" files-push "$PUSH_REMOTE_URL" --state-dir="${PUSH_STATE_DIR}" --fs-root="${PUSH_FS_ROOT}" --private-key="${PRIVATE_KEY}" --force-http 2>&1)"
@@ -268,7 +268,7 @@ jobs:
           preflight_attempt=0
           while [ "$preflight_status" -ne 0 ] && [ "$preflight_attempt" -lt 3 ]; do
             preflight_attempt=$((preflight_attempt + 1))
-            preflight_output="$(timeout 45 "$CLIENT_PHP" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --private-key="${PRIVATE_KEY}" 2>&1)" && preflight_status=0 || preflight_status=$?
+            preflight_output="$(timeout 45 "$CLIENT_PHP" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --private-key="${PRIVATE_KEY}" --allow-unsafe-http 2>&1)" && preflight_status=0 || preflight_status=$?
             echo "$preflight_output" | head -50
             if [ "$preflight_status" -ne 0 ]; then
               echo "preflight failed (exit ${preflight_status}); retrying (attempt ${preflight_attempt})"
@@ -286,7 +286,7 @@ jobs:
             PUSH_FS_ROOT="/tmp/e2e-server-push-version-files"
             mkdir -p "$PUSH_FS_ROOT"
             printf 'push must stay disabled on PHP 5.6\n' > "$PUSH_FS_ROOT/probe.txt"
-            "$CLIENT_PHP" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --private-key="$PRIVATE_KEY" >/dev/null
+            "$CLIENT_PHP" "$CLIENT_PATH" preflight "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --private-key="$PRIVATE_KEY" --allow-unsafe-http >/dev/null
             set +e
             server_push_output="$("$CLIENT_PHP" "$CLIENT_PATH" files-push "${BASE}&directory=${DIR}" --state-dir="$PUSH_STATE_DIR" --fs-root="$PUSH_FS_ROOT" --private-key="$PRIVATE_KEY" --force-http 2>&1)"
             server_push_status=$?
@@ -314,7 +314,7 @@ jobs:
           while { [ "$files_pull_status" -eq 2 ] || [ "$files_pull_status" -eq 124 ]; } \
                 && [ "$files_pull_attempt" -lt "$files_pull_max_attempts" ]; do
             files_pull_attempt=$((files_pull_attempt + 1))
-            files_pull_output="$(timeout 60 "$CLIENT_PHP" "$CLIENT_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --private-key="${PRIVATE_KEY}" 2>&1)" && files_pull_status=0 || files_pull_status=$?
+            files_pull_output="$(timeout 60 "$CLIENT_PHP" "$CLIENT_PATH" files-pull "${BASE}&directory=${DIR}" --state-dir="${STATE_DIR}" --fs-root="${FS_ROOT}" --private-key="${PRIVATE_KEY}" --allow-unsafe-http 2>&1)" && files_pull_status=0 || files_pull_status=$?
             echo "$files_pull_output" | head -50
             files_pull_count="$(find "$FS_ROOT" -type f 2>/dev/null | wc -l | tr -d ' ')"
             if [ "$files_pull_status" -eq 2 ]; then

@@ -27,6 +27,62 @@ final class RequestUrlPathEncodingTest extends TestCase
         $this->remove_tree($this->root);
     }
 
+    public function testConstructorPreservesTheSuppliedScheme(): void
+    {
+        foreach ([
+            ['https://example.com/?reprint-api', false],
+            ['https://example.com/?reprint-api', true],
+            ['http://example.com/?reprint-api', true],
+        ] as [$remote_reprint_api_url, $allow_http]) {
+            $client = new \ImportClient(
+                $remote_reprint_api_url,
+                $this->root . '/state',
+                $this->root . '/files',
+                ['allow_http' => $allow_http, 'unrelated_option' => 'ignored']
+            );
+            $this->assertSame($remote_reprint_api_url, $client->remote_reprint_api_url);
+        }
+    }
+
+    public function testConstructorRejectsHttpBeforeCreatingRemoteState(): void
+    {
+        foreach ([
+            'http://example.com/',
+            'http://localhost:8080/',
+            'http://127.0.0.1:8080/',
+            'http://192.168.1.2/',
+            'HTTP://Example.com:8080/path?next=http://other.example/#fragment',
+        ] as $remote_reprint_api_url) {
+            try {
+                new \ImportClient($remote_reprint_api_url, $this->root . '/state', $this->root . '/files');
+                $this->fail('An HTTP remote Reprint API URL requires explicit permission.');
+            } catch (\InvalidArgumentException $error) {
+                $this->assertStringContainsString('The remote Reprint API URL you provided uses HTTP.', $error->getMessage());
+                $this->assertStringContainsString('--allow-unsafe-http', $error->getMessage());
+            }
+            $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
+        }
+    }
+
+    public function testConstructorRejectsInvalidOptionsBeforeCreatingRemoteState(): void
+    {
+        foreach ([
+            [['allow_http' => 'false'], 'allow_http option must be a boolean'],
+            [['allow_http' => 1], 'allow_http option must be a boolean'],
+            [['allow_http' => null], 'allow_http option must be a boolean'],
+            [['signal_handling_command' => false], 'signal_handling_command option must be a string or null'],
+            [['selected_remote_state_directory' => false], 'selected_remote_state_directory option must be a string or null'],
+        ] as [$options, $message]) {
+            try {
+                new \ImportClient('https://example.com/', $this->root . '/state', $this->root . '/files', $options);
+                $this->fail('Invalid constructor options must be rejected.');
+            } catch (\InvalidArgumentException $error) {
+                $this->assertStringContainsString($message, $error->getMessage());
+            }
+            $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
+        }
+    }
+
     public function testPathParametersAreBase64EncodedInPostBody(): void
     {
         $client = new \ImportClient(
@@ -68,7 +124,8 @@ final class RequestUrlPathEncodingTest extends TestCase
         $client = new \ImportClient(
             $remote_api_url,
             $this->root . '/state',
-            $this->root . '/files'
+            $this->root . '/files',
+            ['allow_http' => true]
         );
         $client->get_state()->set_preflight_record([
             'data' => ['capabilities' => ['base64_path_parameters' => true]],

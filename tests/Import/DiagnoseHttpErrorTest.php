@@ -15,7 +15,7 @@ class DiagnoseHttpErrorTest extends TestCase
     private function diagnose(int $http_code, ?string $body = null, ?string $redirect_url = null, bool $has_secret = true): array
     {
         $client = new \ImportClient(
-            'http://example.com',
+            'https://example.com',
             sys_get_temp_dir(),
             sys_get_temp_dir(),
         );
@@ -38,7 +38,7 @@ class DiagnoseHttpErrorTest extends TestCase
         bool $has_secret = true
     ): bool {
         $client = new \ImportClient(
-            'http://example.com',
+            'https://example.com',
             sys_get_temp_dir(),
             sys_get_temp_dir(),
         );
@@ -328,6 +328,7 @@ class DiagnoseHttpErrorTest extends TestCase
                 'http://example.com',
                 sys_get_temp_dir(),
                 sys_get_temp_dir(),
+                ['allow_http' => true],
             );
             $reflection = new \ReflectionClass(\ImportClient::class);
             $reflection->getMethod('initialize_credential')->invoke($client, true, ['private_key' => $key_path]);
@@ -402,6 +403,7 @@ class DiagnoseHttpErrorTest extends TestCase
             'http://' . $address . '/?reprint-api=1',
             sys_get_temp_dir(),
             sys_get_temp_dir(),
+            ['allow_http' => true],
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $method = $reflection->getMethod('fetch_json');
@@ -466,6 +468,7 @@ class DiagnoseHttpErrorTest extends TestCase
             'http://' . $address . '/?reprint-api=1',
             sys_get_temp_dir(),
             sys_get_temp_dir(),
+            ['allow_http' => true],
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $method = $reflection->getMethod('fetch_json');
@@ -546,7 +549,7 @@ class DiagnoseHttpErrorTest extends TestCase
     public function testFormatDiagnosedErrorStoresCodeOnInstance()
     {
         $client = new \ImportClient(
-            'http://example.com',
+            'https://example.com',
             sys_get_temp_dir(),
             sys_get_temp_dir(),
         );
