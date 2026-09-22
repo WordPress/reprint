@@ -208,6 +208,19 @@ function load_server_runtime(): ?string {
     return null;
 }
 
+/**
+ * Loads the server runtime when a caller outside the API path needs its
+ * classes (the settings page reads the host rule and enrolled keys).
+ *
+ * @return bool Whether the Utils class is available afterwards.
+ */
+function require_server_runtime(): bool {
+    if (!class_exists(Utils::class, false)) {
+        load_server_runtime();
+    }
+    return class_exists(Utils::class);
+}
+
 /** Returns whether the legacy secret.php connection-token override exists. */
 function has_connection_token_file(): bool {
     return file_exists(CONNECTION_TOKEN_FILE);
@@ -279,7 +292,8 @@ function has_public_keys_file(): bool {
  *
  * @param mixed $entry Stored value.
  * @return array|null {
- *     Normalized entry, or null when the stored value has no usable public key.
+ *     Normalized entry, or null when the stored value has no usable public key
+ *     or the server runtime is missing.
  *
  *     @type string $key_id     Key id computed from the public key.
  *     @type string $public_key One-line public key.
@@ -289,6 +303,10 @@ function has_public_keys_file(): bool {
  * }
  */
 function normalize_public_key_entry($entry): ?array {
+    if (!require_server_runtime()) {
+        // No key can be normalized or identified without the runtime.
+        return null;
+    }
     if (!is_array($entry) || !isset($entry['public_key']) || !is_string($entry['public_key'])) {
         return null;
     }

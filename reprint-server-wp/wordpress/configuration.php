@@ -83,10 +83,14 @@ function get_last_enrolled_key_id(): ?string {
 /**
  * Validates and stores one pasted public key.
  *
- * @return string saved, invalid, duplicate, file_override, or storage_failure.
+ * @return string saved, invalid, duplicate, file_override, storage_failure, or
+ *                runtime_missing when the server runtime cannot be loaded.
  */
 function enroll_public_key(string $pasted_key, string $label): string {
     $GLOBALS['reprint_server_last_enrolled_key_id'] = null;
+    if (!require_server_runtime()) {
+        return 'runtime_missing';
+    }
     if (has_public_keys_file()) {
         return 'file_override';
     }
@@ -120,9 +124,15 @@ function enroll_public_key(string $pasted_key, string $label): string {
  * Removes one enrolled key. Refuses the last key on a host that requires
  * key auth, since that would lock every client out.
  *
- * @return string saved, unknown, last_key, file_override, or storage_failure.
+ * @return string saved, unknown, last_key, file_override, storage_failure, or
+ *                runtime_missing when the server runtime cannot be loaded.
  */
 function remove_public_key(string $key_id): string {
+    // Reading the entries below already needs the runtime: without it every
+    // stored entry normalizes to null and the key would look unknown.
+    if (!require_server_runtime()) {
+        return 'runtime_missing';
+    }
     if (has_public_keys_file()) {
         return 'file_override';
     }
@@ -148,9 +158,13 @@ function remove_public_key(string $key_id): string {
 /**
  * Grants or revokes push for one key.
  *
- * @return string saved, unchanged, unknown, multisite, unsupported, managed, file_override, or storage_failure.
+ * @return string saved, unchanged, unknown, multisite, unsupported, managed, file_override, storage_failure,
+ *                or runtime_missing when the server runtime cannot be loaded.
  */
 function change_key_push_access(string $key_id, bool $enabled): string {
+    if (!require_server_runtime()) {
+        return 'runtime_missing';
+    }
     // get_push_authorization_error() refuses every push into a network, so a grant could never take effect.
     if (function_exists('is_multisite') && is_multisite()) {
         return 'multisite';
@@ -246,7 +260,16 @@ function revoke_push_authorization_after_connection_token_added(): void {
  * }
  */
 function get_configuration_state(): array {
-    $key_auth_required = \WordPress\Reprint\Server\Utils::key_auth_required();
+    if (require_server_runtime()) {
+        // The normal path: the host rule and its test seam live in the runtime.
+        $key_auth_required = \WordPress\Reprint\Server\Utils::key_auth_required();
+    } else {
+        // Only reached when the Composer runtime is missing, where the API
+        // answers 500 "runtime is incomplete". The page still needs a scheme
+        // to render, so apply the same OpenSSL rule Utils::key_auth_required()
+        // uses.
+        $key_auth_required = function_exists('openssl_verify');
+    }
     $enrolled_keys = get_enrolled_public_keys();
     $effective_connection_token = get_connection_token();
     $push_supported = push_is_supported();

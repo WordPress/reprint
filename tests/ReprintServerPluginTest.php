@@ -584,6 +584,19 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         }
     }
 
+    /** Each key handler reports a missing Composer runtime under its own notice prefix. */
+    public function testAdministratorMapsAMissingRuntimeResultToAnErrorNoticeForEveryKeyHandler(): void
+    {
+        $expected_message = 'The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.';
+        foreach (['enroll_runtime_missing', 'remove_runtime_missing', 'key_push_runtime_missing'] as $result) {
+            $_GET['reprint_server_notice'] = $result;
+            $html = $this->renderAdminPage();
+
+            $this->assertStringContainsString('notice-error is-dismissible inline', $html, $result);
+            $this->assertStringContainsString($expected_message, $html, $result);
+        }
+    }
+
     public function testSettingsSaveSupersedesAStalePushAccessNotice(): void
     {
         \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
