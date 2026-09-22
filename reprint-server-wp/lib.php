@@ -297,7 +297,6 @@ function has_public_keys_file(): bool {
  *
  *     @type string $key_id     Key id computed from the public key.
  *     @type string $public_key One-line public key.
- *     @type string $label      Administrator-facing label, empty when absent.
  *     @type int    $added_at   Unix timestamp of enrollment, 0 when absent.
  *     @type bool   $push       Whether this key may push.
  * }
@@ -318,7 +317,6 @@ function normalize_public_key_entry($entry): ?array {
     return [
         'key_id' => Utils::public_key_fingerprint($public_key),
         'public_key' => $public_key,
-        'label' => isset($entry['label']) && is_string($entry['label']) ? $entry['label'] : '',
         'added_at' => isset($entry['added_at']) ? (int) $entry['added_at'] : 0,
         'push' => !empty($entry['push']),
     ];
@@ -341,7 +339,7 @@ function get_file_public_keys(): array {
     }
     $entries = [];
     foreach ($file_keys as $file_key) {
-        $entry = normalize_public_key_entry(['public_key' => $file_key, 'label' => 'public-keys.php']);
+        $entry = normalize_public_key_entry(['public_key' => $file_key]);
         if ($entry !== null) {
             $entries[] = $entry;
         }

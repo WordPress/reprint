@@ -617,13 +617,12 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringNotContainsString('Push access updated.', $html);
     }
 
-    private function sampleKeyEntry(string $label = 'laptop'): array
+    private function sampleKeyEntry(): array
     {
         [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
         return [
             'key_id' => \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key),
             'public_key' => $public_key,
-            'label' => $label,
             'added_at' => 1700000000,
             'push' => false,
         ];
@@ -669,7 +668,6 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
             $enrolled = get_enrolled_public_keys();
             $this->assertCount(1, $enrolled);
             $this->assertSame($file_public_key, $enrolled[0]['public_key']);
-            $this->assertSame('public-keys.php', $enrolled[0]['label']);
             $this->assertSame(\WordPress\Reprint\Server\Utils::public_key_fingerprint($file_public_key), $enrolled[0]['key_id']);
         } finally {
             unlink(PUBLIC_KEYS_FILE);
@@ -779,7 +777,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $key_client = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
         update_option_public_keys([[
             'key_id' => $key_client->get_key_id(), 'public_key' => $public_key,
-            'label' => '', 'added_at' => 1, 'push' => false,
+            'added_at' => 1, 'push' => false,
         ]]);
         $headers = $key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         // Every authentication failure answers 403 or 503 with a reason. Past
@@ -935,24 +933,23 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
         $pem = \WordPress\Reprint\Server\Utils::public_key_to_pem($public_key);
 
-        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\enroll_public_key($pem, 'laptop'));
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\enroll_public_key($pem));
         $expected_id = \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key);
         $this->assertSame($expected_id, \WordPress\Reprint\Server\Plugin\get_last_enrolled_key_id());
 
         $enrolled = get_enrolled_public_keys();
         $this->assertCount(1, $enrolled);
         $this->assertSame($public_key, $enrolled[0]['public_key']);
-        $this->assertSame('laptop', $enrolled[0]['label']);
         $this->assertFalse($enrolled[0]['push']);
         $this->assertGreaterThan(0, $enrolled[0]['added_at']);
     }
 
     public function testEnrollRejectsInvalidAndDuplicateKeys(): void
     {
-        $this->assertSame('invalid', \WordPress\Reprint\Server\Plugin\enroll_public_key('garbage', ''));
+        $this->assertSame('invalid', \WordPress\Reprint\Server\Plugin\enroll_public_key('garbage'));
         [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
-        \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key, 'a');
-        $this->assertSame('duplicate', \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key, 'b'));
+        \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key);
+        $this->assertSame('duplicate', \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key));
         $this->assertCount(1, get_enrolled_public_keys());
     }
 
@@ -960,7 +957,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
     {
         file_put_contents(PUBLIC_KEYS_FILE, "<?php return [];\n");
         [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
-        $this->assertSame('file_override', \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key, ''));
+        $this->assertSame('file_override', \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key));
         unlink(PUBLIC_KEYS_FILE);
     }
 
@@ -1017,14 +1014,14 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $registered = $GLOBALS['reprint_server_registered_settings'][PUBLIC_KEYS_OPTION];
         $this->assertSame('WordPress\\Reprint\\Server\\Plugin\\sanitize_public_keys_option', $registered['args']['sanitize_callback']);
 
-        $valid_entry = $this->sampleKeyEntry('laptop');
+        $valid_entry = $this->sampleKeyEntry();
         $valid_entry['push'] = true;
         $sanitized = call_user_func($registered['args']['sanitize_callback'], [
             'not an entry',
-            ['key_id' => 'garbage', 'public_key' => 'bm90IGEga2V5', 'label' => 'garbage', 'push' => true],
+            ['key_id' => 'garbage', 'public_key' => 'bm90IGEga2V5', 'push' => true],
             $valid_entry,
         ]);
-        $this->assertSame([$valid_entry], $sanitized, 'only the entry with a parseable RSA key survives; label, added_at and push are kept');
+        $this->assertSame([$valid_entry], $sanitized, 'only the entry with a parseable RSA key survives; added_at and push are kept');
         $this->assertSame([], call_user_func($registered['args']['sanitize_callback'], 'not an array'));
     }
 
@@ -1086,12 +1083,12 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testAdminPageListsEnrolledKeysWithRemoveAndPushControls(): void
     {
-        $entry = $this->sampleKeyEntry('my laptop');
+        $entry = $this->sampleKeyEntry();
         update_option_public_keys([$entry]);
         $html = $this->renderAdminPage();
 
         $this->assertStringContainsString($entry['key_id'], $html);
-        $this->assertStringContainsString('my laptop', $html);
+        $this->assertStringContainsString(gmdate('Y-m-d', $entry['added_at']), $html);
         $this->assertStringContainsString('reprint_server_remove_public_key', $html);
         $this->assertStringContainsString('reprint_server_save_key_push_access', $html);
         $this->assertStringContainsString('reprint_server_key_id', $html);
@@ -1117,7 +1114,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
     public function testEnrollHandlerStoresAndRedirects(): void
     {
         [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
-        $_POST = ['reprint_server_public_key' => $public_key, 'reprint_server_key_label' => 'ci'];
+        $_POST = ['reprint_server_public_key' => $public_key];
         $GLOBALS['reprint_server_test_redirect'] = null;
         try {
             SettingsPage::get_instance()->handle_public_key_enroll();

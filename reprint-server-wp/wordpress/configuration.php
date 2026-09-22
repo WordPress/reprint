@@ -123,7 +123,7 @@ function get_last_enrolled_key_id(): ?string {
  * @return string saved, invalid, duplicate, file_override, storage_failure, or
  *                runtime_missing when the server runtime cannot be loaded.
  */
-function enroll_public_key(string $pasted_key, string $label): string {
+function enroll_public_key(string $pasted_key): string {
     $GLOBALS['reprint_server_last_enrolled_key_id'] = null;
     if (!require_server_runtime()) {
         return 'runtime_missing';
@@ -146,7 +146,6 @@ function enroll_public_key(string $pasted_key, string $label): string {
     $entries[] = [
         'key_id' => $key_id,
         'public_key' => $public_key,
-        'label' => $label,
         'added_at' => time(),
         'push' => false,
     ];
@@ -292,7 +291,7 @@ function revoke_push_authorization_after_connection_token_added(): void {
  *     managed_push_enabled:bool|null,
  *     push_enabled:bool,
  *     required_scheme:'key'|'hmac',
- *     enrolled_keys:array<int,array{key_id:string,public_key:string,label:string,added_at:int,push:bool}>,
+ *     enrolled_keys:array<int,array{key_id:string,public_key:string,added_at:int,push:bool}>,
  *     has_public_keys_file:bool
  * }
  */

@@ -214,10 +214,7 @@ class SettingsPage {
         $pasted_key = isset($_POST['reprint_server_public_key']) && is_string($_POST['reprint_server_public_key'])
             ? sanitize_textarea_field(wp_unslash($_POST['reprint_server_public_key']))
             : '';
-        $label = isset($_POST['reprint_server_key_label']) && is_string($_POST['reprint_server_key_label'])
-            ? sanitize_text_field(wp_unslash($_POST['reprint_server_key_label']))
-            : '';
-        $result = enroll_public_key($pasted_key, $label);
+        $result = enroll_public_key($pasted_key);
         $query = ['reprint_server_notice' => $result === 'saved' ? 'enrolled' : 'enroll_' . $result];
         if ($result === 'saved') {
             $query['reprint_server_key_id'] = (string) get_last_enrolled_key_id();
@@ -496,10 +493,6 @@ class SettingsPage {
             );
             ?>
             </p>
-            <p>
-                <label for="reprint_server_key_label"><?php echo esc_html__('Label', 'reprint'); ?></label><br />
-                <input type="text" id="reprint_server_key_label" name="reprint_server_key_label" class="regular-text"<?php disabled($file_override); ?> />
-            </p>
             <?php submit_button(__('Enroll key', 'reprint'), 'secondary', 'submit', false, $file_override ? ['disabled' => 'disabled'] : []); ?>
         </form>
 
@@ -508,7 +501,6 @@ class SettingsPage {
             <thead>
                 <tr>
                     <th><?php echo esc_html__('Key id', 'reprint'); ?></th>
-                    <th><?php echo esc_html__('Label', 'reprint'); ?></th>
                     <th><?php echo esc_html__('Added', 'reprint'); ?></th>
                     <th><?php echo esc_html__('May push', 'reprint'); ?></th>
                     <th></th>
@@ -518,7 +510,6 @@ class SettingsPage {
             <?php foreach ($configuration['enrolled_keys'] as $entry): ?>
                 <tr>
                     <td><code><?php echo esc_html($entry['key_id']); ?></code></td>
-                    <td><?php echo esc_html($entry['label']); ?></td>
                     <td><?php echo esc_html($entry['added_at'] > 0 ? gmdate('Y-m-d', $entry['added_at']) : '—'); ?></td>
                     <td>
                         <form method="post" action="<?php echo esc_url($post_url); ?>" style="display:inline">

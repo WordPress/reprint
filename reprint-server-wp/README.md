@@ -80,8 +80,8 @@ host with OpenSSL, so embedders that call it directly must move to
 ### Public keys
 
 The settings page has an enrollment form which takes a PEM or one-line public
-key with an optional label, and a table of enrolled keys with each key's id and
-a per-key push grant. Enrolled keys live in the `reprint_server_public_keys`
+key, and a table of enrolled keys with each key's id, the date it was added,
+and a per-key push grant. Enrolled keys live in the `reprint_server_public_keys`
 option (the network option on multisite), which is never exposed through REST.
 A `public-keys.php` file beside the plugin overrides the option, the same
 precedence `secret.php` has for the token: the file returns a list of PEM or

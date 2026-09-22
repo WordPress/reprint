@@ -41,7 +41,6 @@ final class ReprintServerPluginRuntimeLoadTest extends TestCase {
         $this->assertSame('saved', $report['enrollment']);
         $this->assertCount(1, $report['enrolled_keys_after']);
         $this->assertSame($report['last_enrolled_key_id'], $report['enrolled_keys_after'][0]['key_id']);
-        $this->assertSame('settings page', $report['enrolled_keys_after'][0]['label']);
         $this->assertSame('saved', $report['push_grant']);
         // A key host refuses to remove its last key; the refusal needs the host rule from the runtime.
         $this->assertSame('last_key', $report['removal']);
@@ -60,7 +59,6 @@ final class ReprintServerPluginRuntimeLoadTest extends TestCase {
         $entry = [
             'key_id' => \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key),
             'public_key' => $public_key,
-            'label' => 'laptop',
             'added_at' => 1700000000,
             'push' => true,
         ];
@@ -126,7 +124,7 @@ PHP;
 $before = WordPress\Reprint\Server\Plugin\get_configuration_state();
 $private_key = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
 $public_key_pem = openssl_pkey_get_details($private_key)['key'];
-$enrollment = WordPress\Reprint\Server\Plugin\enroll_public_key($public_key_pem, 'settings page');
+$enrollment = WordPress\Reprint\Server\Plugin\enroll_public_key($public_key_pem);
 $last_enrolled_key_id = WordPress\Reprint\Server\Plugin\get_last_enrolled_key_id();
 $after = WordPress\Reprint\Server\Plugin\get_configuration_state();
 $push_grant = WordPress\Reprint\Server\Plugin\change_key_push_access((string) $last_enrolled_key_id, true);
