@@ -2520,14 +2520,6 @@ function endpoint_preflight(array $config): array
         }
     }
 
-    // Post-processing must identify renamed installations, not assume the
-    // plugin directory is named reprint-server. Basenames can contain non-UTF-8 bytes.
-    $reprint_plugin = null;
-    if (defined('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') && function_exists('plugin_basename')) {
-        $plugin_directory = Utils::trim_right_slash(constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR'), Utils::native_path_format());
-        $reprint_plugin = ['basename_b64' => base64_encode(plugin_basename($plugin_directory . '/index.php'))];
-    }
-
     // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
@@ -2539,7 +2531,6 @@ function endpoint_preflight(array $config): array
         "timestamp" => time(),
         "protocol_version" => EXPORT_PROTOCOL_VERSION,
         "path_format" => Utils::native_path_format(),
-        "reprint_plugin" => $reprint_plugin,
         "capabilities" => [
             "base64_path_parameters" => true,
         ],

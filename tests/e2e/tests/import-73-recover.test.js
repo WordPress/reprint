@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ensureSite } from '../lib/site-setup.js';
-import { apiRequest, getSiteDir } from '../lib/test-helpers.js';
+import { getSiteDir } from '../lib/test-helpers.js';
 
 describe('Recover: load WordPress and deactivate fatal plugins', () => {
     const siteDirectory = getSiteDir('recover');
@@ -139,12 +139,7 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         const result = runPostProcessCommand([`--state-dir=${stateDirectory}`, ...options]);
         assert.equal(result.exitCode, 0, result.stderr);
         assert.equal(result.report.status, 'complete');
-        const registeredTasks = JSON.parse(execFileSync('php', ['-r',
-            'require $argv[1]; echo json_encode(\\Reprint\\Importer\\PostProcess::TASKS);',
-            join(import.meta.dirname, '../../../packages/reprint-client/src/lib/post-process/class-post-process.php')], { encoding: 'utf8' }));
-        assert.deepEqual(result.report.results.map(item => item.task), options.length
-            ? ['disable-hosting-plugins', 'disable-failing-plugins']
-            : registeredTasks);
+        assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins', 'disable-failing-plugins']);
         assert.deepEqual(result.report.results[0].removed_paths, ['wp-content/mu-plugins/hostinger-mu-plugin.php']);
         assert.deepEqual(result.report.results.find(item => item.task === 'disable-failing-plugins').disabled_plugins.map(item => item.plugin), ['recover-first/main.php']);
         assert.equal(existsSync(join(mustUseDirectory, 'hostinger-mu-plugin.php')), false);
@@ -172,31 +167,16 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
     });
 
-    it.each([false, true])('removes renamed Reprint before startup, with unrecoverable MU-plugin fatal: %s', async (fatalAfterPreflight) => {
+    it.each([false, true])('keeps Reprint files and settings, with unrecoverable MU-plugin fatal: %s', (fatalAfterPreflight) => {
+        savePreflightFixture();
         cpSync(join(pluginsDirectory, 'reprint-server'), join(pluginsDirectory, 'renamed-reprint'), { recursive: true });
         setActivePlugins(['renamed-reprint/index.php', 'recover-healthy/main.php']);
-        for (const name of ['reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint', 'site_export_secret', 'site_export_push_authorized_token_fingerprint']) {
+        const connectionOptions = ['reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint'];
+        for (const name of connectionOptions) {
             runWordPressCliCommand(['option', 'update', name, 'copied-source-credential']);
         }
-        const response = await apiRequest('recover', 'preflight');
-        assert.equal(response.status, 200, response.text);
-        assert.equal(Buffer.from(response.json.reprint_plugin.basename_b64, 'base64').toString(), 'renamed-reprint/index.php');
-        const target = JSON.parse(runWordPressCliCommand(['eval', "echo json_encode(['host' => DB_HOST, 'user' => DB_USER, 'pass' => DB_PASSWORD, 'db' => DB_NAME]);"]));
-        execFileSync('php', ['-r', `
-            require $argv[1];
-            $client = new ImportClient($argv[2], $argv[3], $argv[4]);
-            $client->get_state()->set_preflight_record(['http_code' => 200, 'data' => json_decode($argv[5], true)]);
-            $target = json_decode($argv[6], true);
-            $apply = $client->get_state()->apply;
-            $apply->target_engine = 'mysql';
-            $apply->target_host = $target['host'];
-            $apply->target_port = 3306;
-            $apply->target_user = $target['user'];
-            $apply->target_pass = $target['pass'];
-            $apply->target_db = $target['db'];
-            $client->save_state();
-        `, join(import.meta.dirname, '../../../packages/reprint-client/src/import.php'), sourceUrl, stateDirectory, siteDirectory,
-        JSON.stringify(response.json), JSON.stringify(target)], { encoding: 'utf8' });
+        const secretPath = join(pluginsDirectory, 'renamed-reprint/secret.php');
+        const secretContents = readFileSync(secretPath, 'utf8');
 
         if (fatalAfterPreflight) {
             mkdirSync(mustUseDirectory, { recursive: true });
@@ -204,22 +184,19 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         }
         const result = runPostProcessCommand([`--state-dir=${stateDirectory}`]);
         assert.equal(result.exitCode, fatalAfterPreflight ? 1 : 0, result.stderr);
-        assert.equal(existsSync(join(pluginsDirectory, 'renamed-reprint/secret.php')), false, 'A startup fatal must not prevent removal of the copied connection token');
-        assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins', 'remove-reprint', 'disable-failing-plugins']);
-        assert.equal(result.report.results[1].status, 'complete');
-        assert.deepEqual(result.report.results[1].removed_paths, ['wp-content/plugins/renamed-reprint']);
+        assert.deepEqual(result.report.results.map(item => item.task), ['disable-hosting-plugins', 'disable-failing-plugins']);
+        assert.equal(result.report.results[0].status, 'complete');
         if (fatalAfterPreflight) {
-            assert.equal(result.report.results[2].status, 'failed');
-            assert.match(result.report.results[2].error.message, /recover_missing_function/);
+            assert.equal(result.report.results[1].status, 'failed');
+            assert.match(result.report.results[1].error.message, /recover_missing_function/);
             rmSync(join(mustUseDirectory, 'recover-fatal.php'));
         }
-        assert.deepEqual(readActivePlugins(), ['recover-healthy/main.php']);
-        const remainingOptions = JSON.parse(runWordPressCliCommand(['option', 'list', '--search=*', '--field=option_name', '--format=json']));
-        for (const name of ['reprint_server_connection_token', 'reprint_server_push_authorized_token_fingerprint', 'site_export_secret', 'site_export_push_authorized_token_fingerprint']) {
-            assert.equal(remainingOptions.includes(name), false, name);
+        assert.ok(existsSync(join(pluginsDirectory, 'renamed-reprint/index.php')));
+        assert.equal(readFileSync(secretPath, 'utf8'), secretContents);
+        assert.deepEqual(readActivePlugins(), ['renamed-reprint/index.php', 'recover-healthy/main.php']);
+        for (const name of connectionOptions) {
+            assert.equal(runWordPressCliCommand(['option', 'get', name]).trim(), 'copied-source-credential');
         }
-        assert.equal(runRecoverCommand().exitCode, 0);
-        assert.deepEqual(runPostProcessCommand([`--state-dir=${stateDirectory}`, '--tasks=remove-reprint']).report.results[0].removed_paths, []);
     });
 
     it('runs only hosting cleanup without loading or deactivating an ordinary failing plugin', () => {
@@ -296,10 +273,10 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         const result = runPostProcessCommand([`--state-dir=${stateDirectory}`]);
         assert.equal(result.exitCode, 1);
         assert.equal(result.report.status, 'failed');
-        assert.deepEqual(result.report.results.map(item => item.status), ['complete', 'complete', 'failed']);
+        assert.deepEqual(result.report.results.map(item => item.status), ['complete', 'failed']);
         assert.deepEqual(result.report.results[0].removed_paths, ['wp-content/plugins/hostinger']);
-        assert.match(result.report.results[2].error.message, /recover_missing_function/);
-        assert.deepEqual(result.report.results[2].disabled_plugins, []);
+        assert.match(result.report.results[1].error.message, /recover_missing_function/);
+        assert.deepEqual(result.report.results[1].disabled_plugins, []);
     });
 
     it.each([null, { error: 'The saved source preflight was rejected.' }])('refuses hosting cleanup with missing or rejected preflight: %j', (preflight) => {
@@ -361,7 +338,6 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
             require $argv[1];
             $client = new ImportClient($argv[2], $argv[3], $argv[4], ['allow_http' => true]);
             $client->get_state()->set_preflight_record(['http_code' => 200, 'data' => [
-                'reprint_plugin' => null,
                 'runtime' => ['document_root' => $argv[5]],
                 'database' => ['wp' => ['paths_urls' => [
                     'abspath' => $argv[5] . '/',

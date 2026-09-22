@@ -916,15 +916,13 @@ Run only selected tasks with `--tasks`:
 reprint post-process --fs-root=/path/to/wordpress --tasks=disable-failing-plugins
 reprint post-process --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state \
   --tasks=disable-hosting-plugins
-reprint post-process --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state \
-  --tasks=remove-reprint
 ```
 
-Omitting `--tasks`, or passing `--tasks=all`, runs all three. A comma-separated
-list selects only those tasks. Hosting cleanup runs first, Reprint removal
-runs second, and startup recovery runs last, regardless of the list's order.
-Processing stops at the first failure. A theme or must-use plugin fatal during
-startup therefore cannot prevent Reprint's earlier removal.
+Omitting `--tasks`, or passing `--tasks=all`, runs both tasks. A comma-separated
+list selects only those tasks. Hosting cleanup runs first and startup recovery
+runs second, regardless of the list's order. Processing stops at the first
+failure. A theme or must-use plugin fatal during startup therefore cannot
+prevent the earlier hosting cleanup.
 
 `disable-hosting-plugins` removes known source-host plugin, MU-plugin, and
 drop-in files using the same rules as `apply-runtime`. It reads the saved
@@ -945,22 +943,8 @@ reprint post-process https://source.example/?reprint-api \
   --fs-root=/path/to/wordpress --state-dir=/path/to/migration-state
 ```
 
-`remove-reprint` removes the migrated Reprint plugin, including `secret.php`,
-its site and selected-network activation entries, and its four current and
-legacy connection options. It uses the exact plugin basename from saved
-preflight, so renamed installations work. Update the source Reprint Server and
-rerun preflight if the saved report lacks this metadata. The task connects to
-the destination database recorded by `db-apply` or `apply-runtime`; those saved
-settings must still point to this destination. Finish the pull before running
-it. It does not load WordPress or run deactivation or uninstall hooks.
-
-Reprint removal uses `wp-content/plugins` under `--fs-root`, records removed
-paths for later pushes, and can be repeated after a failed run. It removes an
-in-site symlink target as well as the plugin link. A link to a shared installation
-outside this site is only unlinked; the shared files remain. The downloaded SQL
-is not changed and still contains the source credentials. No import-time
-exclusion flags are added. Direct database cleanup does not flush a persistent
-WordPress object cache; flush that destination cache separately if enabled.
+Post-processing does not uninstall Reprint. Use WordPress's plugin uninstall
+flow when Reprint is no longer needed so the plugin can clean up its settings.
 
 `disable-failing-plugins` performs the startup recovery described below. It
 does not need migration state when run alone. JSON output has `status` and a
