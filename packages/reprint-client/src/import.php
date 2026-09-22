@@ -15524,7 +15524,7 @@ if (
             "short" => "Stage a full database overwrite for explicit confirmation",
             "usage" => "reprint db-push <remote-reprint-api-url> --state-dir=DIR --secret=TOKEN [options]",
             "description" => "Prepares a local MySQL snapshot, rewrites URLs on the client, and streams it into private hosted tables. Prints the table list and review token without changing live tables.\nRequires a host-configured standalone API route. Stop all writers before --commit. Clear caches and verify the site before --cleanup.\n",
-            "extra" => "Initial limits: InnoDB only, 256 tables, 128 columns per table, 1 MiB per row before and after rewriting. No multisite, foreign keys, triggers, generated/spatial columns, partitions, events, or routines.\n",
+            "extra" => "Initial limits: InnoDB only, 256 tables, 128 columns per table, 1 MiB per row before and after rewriting. No multisite, foreign keys crossing the selected site boundary, triggers, events, or routines.\n",
         ],
         "db-pull" => [
             "level" => "low",
