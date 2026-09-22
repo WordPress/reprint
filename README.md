@@ -444,54 +444,6 @@ paths, plus version-control metadata, `node_modules`, IDE and package-manager
 caches, operating-system metadata, and editor scratch files. `--include`,
 `--exclude`, `--filter`, and `--remap` cannot override these omissions.
 
-**Reprint plugin and connection state**
-
-For example, `pull --exclude-reprint` skips the source Reprint plugin directory
-and removes its connection options and activation entries from the destination
-after importing the database. Other plugins and their settings stay.
-
-New pulls include Reprint unless you pass `--exclude-reprint`. The same choice
-works with `pull-files`, `pull-db`, `files-pull`, `db-pull`, and `db-apply`:
-
-```bash
-php reprint.phar pull "$URL" --secret="$SECRET" \
-    --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --exclude-reprint
-```
-
-The source reports its installed plugin path, including renamed directories
-and symlink aliases. File downloads skip those paths. Database cleanup deletes
-these exact option rows: `reprint_server_connection_token`,
-`reprint_server_push_authorized_token_fingerprint`, `site_export_secret`, and
-`site_export_push_authorized_token_fingerprint`. It removes the source plugin's
-exact basename from site and selected-network activation lists. It changes only
-the destination and does not run the plugin's deactivation or uninstall hooks.
-
-**The SQL dump still contains Reprint's credentials and activation entries.**
-Export does not change them. Importing `db.sql` with a plain SQL client therefore
-leaves them in the target. Reprint's `db-apply` and direct `db-pull --sql-output=mysql`
-perform cleanup before reporting completion; file and stdout output do not.
-Keep the downloaded dump private even after a completed migration.
-
-Cleanup stops if an activation list cannot be decoded and re-encoded without
-changing its bytes. MySQL cleanup also checks conversion back to the stored
-charset. SQLite cleanup requires the imported bytes themselves to round-trip.
-A failed cleanup keeps the import unfinished. After correcting the cause, rerun
-the same command: it repeats cleanup without importing SQL again or contacting
-the source.
-
-The choice is saved in the state directory. Later commands keep it without
-repeating the flag. `--include-reprint` selects inclusion again; the two flags
-cannot be combined. Finish an unfinished pull or use `--abort` before changing
-its choice. Older saved state keeps the previous inclusion behavior.
-
-Exclusion needs a source server that reports its plugin path and basename.
-Update the source and rerun preflight if the command reports missing metadata,
-or use `--include-reprint`. Existing multisite restrictions still apply.
-
-This is not a local uninstall. Plugin files already present at the destination
-are not removed. The dump is never rewritten; once its download is complete,
-a standalone `db-apply --exclude-reprint` can clean the imported destination.
-
 **Host platform plugins**
 
 New pulls keep host platform plugins, MU plugins, and host cache drop-ins.

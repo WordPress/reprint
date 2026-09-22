@@ -16,6 +16,7 @@ parameters:
         analyseAndScan:
             - reprint-server-wp/wordpress/
             - reprint-server-wp/index.php
+            - reprint-server-wp/uninstall.php
             - reprint-server-wp/vendor/
             - lib/sqlite-database-integration/packages/mysql-on-sqlite/src/mysql/native/
         analyse:
