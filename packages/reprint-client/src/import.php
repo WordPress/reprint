@@ -5447,75 +5447,6 @@ class ImportClient
         return $removed_paths;
     }
 
-    /**
-     * Remove the migrated Reprint plugin and its imported connection state.
-     * The caller holds the state directory's ReprintProcessLock for this task.
-     *
-     * @param string $local_document_root Local site root with the standard wp-content layout.
-     * @return string[] Removed paths, relative to the local site root.
-     */
-    public function remove_imported_reprint_plugin_files_and_data(string $local_document_root): array
-    {
-        $this->state = $this->load_state();
-        $this->require_preflight();
-        $preflight = $this->get_state()->preflight_record()['data'];
-        if (!array_key_exists('reprint_plugin', $preflight)) {
-            throw new RuntimeException('The source did not report its Reprint plugin. Update the source Reprint Server and rerun preflight before remove-reprint.');
-        }
-        if ($preflight['reprint_plugin'] === null) {
-            return [];
-        }
-        $encoded_basename = $preflight['reprint_plugin']['basename_b64'] ?? null;
-        $plugin_basename = is_string($encoded_basename) ? base64_decode($encoded_basename, true) : false;
-        if ($plugin_basename === false || strpos($plugin_basename, '/') === false
-            || preg_match('~[\\\\\x00]|(^|/)(\.{0,2})(/|$)~', $plugin_basename)) {
-            throw new RuntimeException('remove-reprint requires a relative Reprint plugin basename with a plugin directory and no empty, dot, or parent components.');
-        }
-        $this->assert_no_unfinished_files_push_or_files_pull();
-        $checkpoint = $this->get_state()->active_resumable_command;
-        $pipeline = $this->get_state()->pull_pipeline;
-        if (( $checkpoint->command_name !== null && $checkpoint->completion_state !== 'complete' )
-            || ( $pipeline->started_by_command !== null && $pipeline->stage_sequence !== []
-                && $pipeline->last_completed_stage !== end($pipeline->stage_sequence) )) {
-            throw new RuntimeException('Finish the current pull before remove-reprint so later import stages cannot restore its credentials or activation entries.');
-        }
-        $target = $this->get_local_site_database_target();
-        if ($target['engine'] === null) {
-            throw new RuntimeException('remove-reprint requires the target database settings saved by db-apply or apply-runtime.');
-        }
-        // Keep cleanup inside this site. A link to a shared plugin outside the
-        // site is unlinked, not followed; an in-site copy is removed as well.
-        $relative_paths = ['wp-content/plugins/' . dirname($plugin_basename)];
-        $plugin_path = wp_join_unix_paths($local_document_root, $relative_paths[0]);
-        $plugin_parent = realpath(dirname($plugin_path));
-        if ($plugin_parent !== false && Utils::relative_path_under($plugin_parent, $local_document_root) === null) {
-            throw new RuntimeException('remove-reprint requires wp-content/plugins inside --fs-root. Refusing to remove files through an outside parent directory.');
-        }
-        $physical_path = realpath($plugin_path);
-        if ($physical_path !== false) {
-            $physical_relative_path = Utils::relative_path_under($physical_path, $local_document_root);
-            if ($physical_relative_path === '' || ( $plugin_parent !== false && Utils::relative_path_under($plugin_parent, $physical_path) !== null )) {
-                throw new RuntimeException('The Reprint plugin path resolves to a parent directory. Refusing to remove it.');
-            }
-            if ($physical_relative_path !== null) {
-                array_unshift($relative_paths, $physical_relative_path);
-            }
-        }
-        $relative_paths = array_values(array_unique($relative_paths));
-        [$database] = $this->create_target_database_connection($target, false);
-        try {
-            PostProcess::remove_reprint_plugin_data_from_the_imported_database($database, $target['engine'], $plugin_basename, $preflight['database']['wp']);
-        } finally {
-            if ($database->inTransaction()) {
-                $database->rollBack();
-            }
-            $database->close();
-        }
-        // Save the same push exclusions as hosting cleanup before any deletion.
-        // A failed removal can repeat without restoring already-cleared options.
-        return $this->record_push_exclusions_and_remove_local_paths($relative_paths, $local_document_root);
-    }
-
     /** @return string[] Hosting-plugin paths relative to the local site root. */
     private function get_local_hosting_plugin_paths_to_remove(): array
     {
@@ -15079,11 +15010,6 @@ if (
                 "    and drop-in files using the same rules as apply-runtime. Requires\n" .
                 "    --state-dir with successful saved preflight. Does not load WordPress\n" .
                 "    or edit active_plugins. Uses wp-content under --fs-root.\n" .
-                "  remove-reprint: Remove the migrated Reprint plugin files, activation\n" .
-                "    entries, and current and legacy connection options. Requires saved\n" .
-                "    preflight from an updated source and target database settings saved\n" .
-                "    by db-apply or apply-runtime. Does not load WordPress or edit dumps.\n" .
-                "    Uses wp-content/plugins under --fs-root.\n" .
                 "  disable-failing-plugins: Require wp-load.php in fresh PHP processes.\n" .
                 "    Deactivate an active regular plugin when its file causes a fatal,\n" .
                 "    then try again. Keeps files and data; skips deactivation hooks.\n" .

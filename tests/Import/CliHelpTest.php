@@ -61,6 +61,19 @@ class CliHelpTest extends TestCase
         $this->assertStringNotContainsString('--check-url', $output);
         $this->assertStringNotContainsString('--secret', $output);
         $this->assertStringNotContainsString('--include-host-plugins', $output);
+        $this->assertStringNotContainsString('remove-reprint', $output);
+    }
+
+    public function testPostProcessRejectsTheRemovedReprintTask(): void
+    {
+        $result = PostProcess::run_selected_tasks(__DIR__, 'remove-reprint');
+
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame([], $result['results']);
+        $this->assertSame(
+            'Unknown post-process task "remove-reprint". Use all or disable-hosting-plugins, disable-failing-plugins.',
+            $result['message']
+        );
     }
 
     public function testPostProcessRequiresAWordPressRootBeforeAnyTaskRuns(): void
