@@ -359,11 +359,16 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
         $plugin->enqueue_assets('tools_page_other');
         $this->assertSame([], $GLOBALS['reprint_server_test_scripts']);
+        $this->assertSame([], $GLOBALS['reprint_server_test_styles']);
 
         $plugin->enqueue_assets('tools_page_reprint-server');
         $this->assertSame(
             ['wp-a11y'],
             $GLOBALS['reprint_server_test_scripts']['reprint-server-admin']['dependencies']
+        );
+        $this->assertStringEndsWith(
+            'wordpress/reprint-server.css',
+            $GLOBALS['reprint_server_test_styles']['reprint-server-admin']['src']
         );
     }
 
@@ -432,7 +437,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('<form method="post" action="options.php">', $html);
         $this->assertStringContainsString('name="option_page" value="reprint_server"', $html);
         $this->assertStringContainsString('action="https://example.test/wp-admin/admin-post.php"', $html);
-        $this->assertSame(2, substr_count($html, '<p class="submit">'));
+        // The settings form, the push form, and the key enrollment form each wrap their button.
+        $this->assertSame(3, substr_count($html, '<p class="submit">'));
         $this->assertSame([''], $GLOBALS['reprint_server_settings_error_requests']);
         $this->assertStringNotContainsString('checked="checked"', $html);
         $this->assertStringNotContainsString('<style>', $html);

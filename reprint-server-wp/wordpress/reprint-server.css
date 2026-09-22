@@ -1,0 +1,7 @@
+/*
+ * Layout for the bundled settings page. WordPress list tables align cells to
+ * the top, which leaves the key id sitting above the buttons beside it.
+ */
+.reprint-server-key-table td {
+	vertical-align: middle;
+}

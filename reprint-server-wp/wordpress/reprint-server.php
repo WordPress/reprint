@@ -156,6 +156,13 @@ class SettingsPage {
             VERSION,
             true
         );
+
+        wp_enqueue_style(
+            'reprint-server-admin',
+            plugins_url('wordpress/reprint-server.css', PLUGIN_DIR . 'index.php'),
+            [],
+            VERSION
+        );
     }
 
     /** Explain where the connection token comes from. */
@@ -493,11 +500,11 @@ class SettingsPage {
             );
             ?>
             </p>
-            <?php submit_button(__('Enroll key', 'reprint'), 'secondary', 'submit', false, $file_override ? ['disabled' => 'disabled'] : []); ?>
+            <?php submit_button(__('Enroll key', 'reprint'), 'secondary', 'submit', true, $file_override ? ['disabled' => 'disabled'] : []); ?>
         </form>
 
         <?php if ($configuration['enrolled_keys'] !== []): ?>
-        <table class="widefat striped">
+        <table class="widefat striped reprint-server-key-table">
             <thead>
                 <tr>
                     <th><?php echo esc_html__('Key id', 'reprint'); ?></th>

@@ -58,6 +58,7 @@ $GLOBALS['reprint_server_test_menu'] = null;
 $GLOBALS['reprint_server_test_sections'] = [];
 $GLOBALS['reprint_server_test_fields'] = [];
 $GLOBALS['reprint_server_test_scripts'] = [];
+$GLOBALS['reprint_server_test_styles'] = [];
 $GLOBALS['reprint_server_fail_option_updates'] = [];
 $GLOBALS['reprint_server_test_redirect'] = null;
 
@@ -462,6 +463,12 @@ if (!function_exists('wp_enqueue_script')) {
     }
 }
 
+if (!function_exists('wp_enqueue_style')) {
+    function wp_enqueue_style($handle, $src, $dependencies, $version): void {
+        $GLOBALS['reprint_server_test_styles'][$handle] = compact('src', 'dependencies', 'version');
+    }
+}
+
 if (!function_exists('sanitize_key')) {
     function sanitize_key(string $key): string {
         return preg_replace('/[^a-z0-9_\-]/', '', strtolower($key)) ?? '';
@@ -546,6 +553,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $GLOBALS['reprint_server_test_sections'] = [];
         $GLOBALS['reprint_server_test_fields'] = [];
         $GLOBALS['reprint_server_test_scripts'] = [];
+        $GLOBALS['reprint_server_test_styles'] = [];
         $GLOBALS['reprint_server_fail_option_updates'] = [];
         $GLOBALS['reprint_server_test_redirect'] = null;
         $_SERVER = [];
