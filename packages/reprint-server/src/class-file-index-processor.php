@@ -653,12 +653,12 @@ final class FileIndexProcessor {
             }
         }
 
-        // Version-control metadata and local development dependencies match
-        // complete path components. Similar names such as cache-control or
-        // node_modules-backup remain included.
+        // Version-control metadata, IDE settings, and package-manager caches
+        // match complete path components. Similar names such as cache-control
+        // or .git-backup remain included. Keep node_modules: plugins and themes
+        // may bundle runtime PHP, JavaScript, and CSS dependencies there.
         static $skipped_components = [
             ".git", ".svn", ".hg", ".bzr",
-            "node_modules",
             ".idea", ".vscode",
             ".cache", ".npm", ".yarn", ".pnpm-store",
         ];
