@@ -12488,7 +12488,11 @@ class ImportClient
      * @param string      $url    Full request URL.
      * @param string      $body   Raw content to hash: file contents for uploads,
      *                            http_build_query() output for forms, '' otherwise.
-     * @param string|null $cursor The X-Export-Cursor value being sent, or null.
+     * @param string|null $cursor The X-Export-Cursor value being sent as a
+     *                            header, or null. The cursor is signed only
+     *                            when sent this way; the streaming fetch no
+     *                            longer sends it as a header, so it passes
+     *                            no cursor here.
      */
     private function get_auth_headers(string $method, string $url, string $body = '', ?string $cursor = null): array
     {
@@ -13279,9 +13283,11 @@ class ImportClient
             "Sec-Fetch-User: ?1",
         ];
 
-        if ($cursor) {
-            $headers[] = "X-Export-Cursor: {$cursor}";
-        }
+        // The cursor travels only in the request body (see build_request()),
+        // which the signed content hash already covers. Sending it again as
+        // a header would let a proxy that strips custom headers silently
+        // drop the value the signature was computed over, breaking
+        // verification behind exactly the hosts this is meant to survive.
 
         // Configure POST data. We need to know the body
         // content BEFORE generating HMAC headers so the content hash
@@ -13333,7 +13339,7 @@ class ImportClient
         }
 
         // Append auth headers now that we know the body content
-        array_push($headers, ...($this->get_auth_headers('POST', $url, $body_for_signing, $cursor ?: null)));
+        array_push($headers, ...($this->get_auth_headers('POST', $url, $body_for_signing)));
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,

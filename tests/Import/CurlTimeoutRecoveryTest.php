@@ -1037,7 +1037,7 @@ PHP);
                     fclose($listener);
                     exit(4);
                 }
-                if (stripos($request, "X-Export-Cursor: {$cursor}\r\n") === false) {
+                if (( $params['cursor'] ?? '' ) !== $cursor) {
                     fclose($connection);
                     fclose($listener);
                     exit(5);
