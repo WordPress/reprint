@@ -511,7 +511,11 @@ function update_push_authorization(bool $enabled): bool {
 }
 
 /**
- * Verify HMAC authentication.
+ * Verifies a connection-token (HMAC) signature. Retained for embedders that
+ * call it directly; new embedders should call RequestAuthenticator through
+ * handle_api_request(). On hosts that have `openssl_verify`, HMACServer
+ * refuses every token (its last_error_reason() is `requires_key_auth`), so
+ * this returns that refusal message there whatever the token.
  *
  * The signature covers a SHA-256 hash of the request body rather than
  * the raw bytes.  This sidesteps the problem that libcurl generates
@@ -538,11 +542,15 @@ function verify_hmac(string $secret): ?string {
 }
 
 /**
- * Default HMAC authentication handler.
+ * Connection-token authentication handler retained for embedders that call it
+ * directly; handle_api_request() no longer uses it. New embedders should call
+ * RequestAuthenticator through handle_api_request().
  *
  * Reads the connection token from secret.php when present, otherwise from the
- * site option, and verifies the request's HMAC signature.
- * Calls error() on failure.
+ * site option, and verifies the request's HMAC signature. On hosts that have
+ * `openssl_verify` the verification refuses every token (HMACServer's
+ * `requires_key_auth` rule) and this answers HTTP 403 with that message,
+ * without a reason field. Calls error() on failure.
  */
 function default_authenticate(): void {
     if (has_connection_token_file()) {

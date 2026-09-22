@@ -71,7 +71,9 @@ Where it does not, the authenticator accepts only the connection token and
 answers a key signature with `requires_token_auth`. A site on a host with
 OpenSSL that has no enrolled key answers every request with `not_configured`
 (HTTP 503); a stored connection token is kept but not accepted there, and the
-settings page says so beside a Remove button. `HMACServer` itself refuses on a
+settings page says so. The Remove button appears for an option-stored token
+only; a `secret.php` token is named and must be removed from disk, since the
+page cannot delete that file. `HMACServer` itself refuses on a
 host with OpenSSL, so embedders that call it directly must move to
 `RequestAuthenticator`.
 
