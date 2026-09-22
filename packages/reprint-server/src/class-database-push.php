@@ -22,7 +22,7 @@ final class DatabasePush {
     public const MAX_RECORD_BYTES = 2097152;
     public const MAX_TABLES = 256;
 
-    /** @var PDO */
+    /** @var PDO|MysqliDriverPDO */
     private $database;
     /** @var string */
     private $table_prefix;
@@ -39,7 +39,8 @@ final class DatabasePush {
     /** @var bool */
     private $closed = false;
 
-    public function __construct(PDO $database, string $table_prefix, string $push_session_id) {
+    /** @param PDO|MysqliDriverPDO $database Dedicated target connection. */
+    public function __construct($database, string $table_prefix, string $push_session_id) {
         if (!preg_match('/^[a-f0-9]{32}$/D', $push_session_id)) {
             throw new InvalidArgumentException('Database push requires a 32-character hexadecimal push session ID.');
         }
@@ -142,6 +143,16 @@ final class DatabasePush {
             $enum_zero_warnings = [];
             foreach ($record['values'] as $column => $encoded) {
                 $columns[] = self::identifier($column);
+                if (is_array($encoded) && isset($encoded['unsigned'])) {
+                    $value = $encoded['unsigned'];
+                    if (!is_string($value) || !preg_match('/^(0|[1-9][0-9]{0,19})$/D', $value)
+                        || ( strlen($value) === 20 && strcmp($value, '18446744073709551615') > 0 )) {
+                        throw new RuntimeException('Archive column ' . $column . ' requires an unsigned 64-bit decimal integer.');
+                    }
+                    $expressions[] = 'CAST(? AS UNSIGNED)';
+                    $values[] = $value;
+                    continue;
+                }
                 if (is_array($encoded)) {
                     $value = base64_decode($encoded['wkb'] ?? '', true);
                     if ($value === false || !isset($encoded['srid']) || !is_int($encoded['srid']) || $encoded['srid'] < 0 || $encoded['srid'] > 4294967295) {
@@ -173,19 +184,23 @@ final class DatabasePush {
                 foreach ($values as $position => $value) {
                     // Integer zero restores ENUM index zero even if "0" is
                     // itself a declared label. All other values remain bytes.
-                    $type = $value === 0 ? PDO::PARAM_INT : ( $value === null ? PDO::PARAM_NULL : PDO::PARAM_STR );
+                    $type = $value === 0 ? PdoConstants::param_int() : ( $value === null ? PdoConstants::param_null() : PdoConstants::param_str() );
                     $statement->bindValue($position + 1, $value, $type);
                 }
                 $statement->execute();
                 if ($enum_zero_warnings !== []) {
                     // MySQL cannot prepare these diagnostic statements. PDO's
                     // fallback would replace the INSERT warnings with error 1295.
-                    $this->database->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
+                    if ($this->database instanceof PDO) {
+                        $this->database->setAttribute(PDO::ATTR_EMULATE_PREPARES, true);
+                    }
                     try {
                         $warning_count = (int) $this->database->query('SHOW COUNT(*) WARNINGS')->fetchColumn();
-                        $warnings = $this->database->query('SHOW WARNINGS')->fetchAll(PDO::FETCH_ASSOC);
+                        $warnings = $this->database->query('SHOW WARNINGS')->fetchAll(PdoConstants::fetch_assoc());
                     } finally {
-                        $this->database->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+                        if ($this->database instanceof PDO) {
+                            $this->database->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+                        }
                     }
                     if ($statement->rowCount() !== 1 || $warning_count !== count($warnings) || $warning_count !== count($enum_zero_warnings)) {
                         throw new RuntimeException('Restoring ENUM index zero inserted ' . $statement->rowCount() . ' rows with ' . $warning_count . ' warnings (' . count($warnings) . ' available); expected one row and ' . count($enum_zero_warnings) . ' warnings.');
@@ -336,7 +351,7 @@ final class DatabasePush {
         // server supports distinct wp_ and WP_ sites. Scope uses exact bytes.
         $statement = $this->database->prepare('SELECT TABLE_NAME, ENGINE, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND BINARY LEFT(TABLE_NAME, ?) = ? ORDER BY BINARY TABLE_NAME LIMIT 257');
         $statement->execute([strlen($this->table_prefix), $this->table_prefix]);
-        $tables = $statement->fetchAll(PDO::FETCH_ASSOC);
+        $tables = $statement->fetchAll(PdoConstants::fetch_assoc());
         if (count($tables) > self::MAX_TABLES) {
             throw new RuntimeException('Database push supports at most 256 site tables.');
         }

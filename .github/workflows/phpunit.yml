@@ -47,7 +47,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+          extensions: pdo, pdo_mysql, pdo_sqlite, mysqli, json, hash, zlib, mbstring
 
       - run: composer install --no-interaction --prefer-dist
 
@@ -81,7 +81,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
-          extensions: pdo, pdo_mysql, mysqli, json, hash, zlib, mbstring
+          extensions: pdo, pdo_mysql, pdo_sqlite, mysqli, json, hash, zlib, mbstring
       - run: composer install --no-interaction --prefer-dist
       - name: Force InnoDB in the disposable test server
         run: |
@@ -89,3 +89,62 @@ jobs:
       - name: Run schema conversion tests
         working-directory: tests
         run: ../vendor/bin/phpunit Import/MysqlAutoIncrementImportTest.php
+
+  database-push-compatibility:
+    name: Database push without PDO on the host
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: my-secret-pw
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      mysql55:
+        image: mysql:5.5.62
+        env:
+          MYSQL_ROOT_PASSWORD: my-secret-pw
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: true
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, pdo_sqlite, mysqli, curl, mbstring
+      - run: composer install --no-interaction --prefer-dist
+      - name: Run endpoint without PDO and client without pdo_mysql
+        working-directory: tests
+        env:
+          DB_HOST: 127.0.0.1
+          DB_USER: root
+          DB_PASS: my-secret-pw
+          DB_NAME: test_database_push
+          REPRINT_MYSQL55_HOST: 127.0.0.1;port=3307
+        run: |
+          cat > "$RUNNER_TEMP/reprint-no-pdo-php" <<'SH'
+          #!/bin/sh
+          exec php -n -d extension=mysqlnd -d extension=mysqli -d extension=curl -d extension=ctype -d extension=mbstring "$@"
+          SH
+          cat > "$RUNNER_TEMP/reprint-no-pdo-mysql-php" <<'SH'
+          #!/bin/sh
+          exec php -n -d extension=pdo -d extension=pdo_sqlite -d extension=mysqlnd -d extension=mysqli -d extension=curl -d extension=ctype -d extension=mbstring "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/reprint-no-pdo-php" "$RUNNER_TEMP/reprint-no-pdo-mysql-php"
+          export REPRINT_DB_PUSH_SERVER_PHP="$RUNNER_TEMP/reprint-no-pdo-php"
+          export REPRINT_DB_PUSH_CLIENT_PHP="$RUNNER_TEMP/reprint-no-pdo-mysql-php"
+          "$REPRINT_DB_PUSH_SERVER_PHP" -r 'if (class_exists("PDO") || !extension_loaded("mysqli")) { exit(1); }'
+          "$REPRINT_DB_PUSH_CLIENT_PHP" -r 'if (extension_loaded("pdo_mysql") || !extension_loaded("mysqli")) { exit(1); }'
+          ../vendor/bin/phpunit MySQLDumpProducer/DatabasePushTest.php MySQLDumpProducer/DatabasePushHttpTest.php

@@ -50,6 +50,48 @@ class DatabasePushTest extends MySQLDumpProducerTestBase {
         fclose($archive);
     }
 
+    public function testMysqliSourceAndTargetKeepBinaryValuesAndTransactions(): void {
+        require_once __DIR__ . '/../../packages/reprint-client/src/lib/database-push/class-database-push-archive.php';
+        $this->pdo->exec("CREATE TABLE wp_values (id int PRIMARY KEY, value longblob, choice ENUM('', '0', 'one')) ENGINE=InnoDB");
+        $this->pdo->exec("SET SESSION sql_mode=''");
+        $this->pdo->exec("INSERT INTO wp_values VALUES (1, X'00FF3F', 'invalid')");
+        $dsn = 'mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName;
+        $source = new \WordPress\Reprint\Server\MysqliDriverPDO($dsn, getenv('DB_USER'), getenv('DB_PASS'));
+        $target = new \WordPress\Reprint\Server\MysqliDriverPDO($dsn, getenv('DB_USER'), getenv('DB_PASS'));
+        $metadata = $target->prepare('SELECT ? AS name UNION ALL SELECT ? AS name');
+        $metadata->execute(['first', 'second']);
+        self::assertSame([['name' => 'first'], ['name' => 'second']], $metadata->fetchAll(PDO::FETCH_ASSOC));
+        $target->beginTransaction();
+        $target->exec("INSERT INTO wp_values VALUES (2, X'CAFE', 'one')");
+        $target->rollBack();
+        self::assertSame(1, (int) $this->pdo->query('SELECT COUNT(*) FROM wp_values')->fetchColumn());
+        $path = sys_get_temp_dir() . '/reprint-mysqli-push-' . bin2hex(random_bytes(8));
+        $archive = new DatabasePushArchive($source, $path, 'wp_', [], $this->push_session_id);
+        $push = new DatabasePush($target, 'wp_', $this->push_session_id);
+        try {
+            while ($archive->next_step()) {
+                self::assertFileDoesNotExist($path);
+            }
+            $push->start();
+            while ($push->get_status()['phase'] !== 'ready') {
+                $push->import_next_record($path);
+            }
+            $push->commit();
+            self::assertSame(['00FF3F', '0'], $this->pdo->query('SELECT HEX(value), CAST(choice+0 AS CHAR) FROM wp_values')->fetch(PDO::FETCH_NUM));
+            while ($push->get_status()['phase'] !== 'complete') {
+                $push->cleanup_next_table();
+            }
+        } finally {
+            $archive->close();
+            $push->close();
+            foreach ([$path, $path . '.building'] as $file) {
+                if (is_file($file)) {
+                    unlink($file);
+                }
+            }
+        }
+    }
+
     public function testForeignKeyReplayAfterProgressWriteTimesOut(): void {
         $prefix = '__reprint_db_' . $this->push_session_id . '_';
         $archive = tmpfile();
@@ -145,6 +187,34 @@ class DatabasePushTest extends MySQLDumpProducerTestBase {
                 if (is_file($file)) {
                     unlink($file);
                 }
+            }
+        }
+    }
+
+    public function testNontransactionalSourceReadLocksAreReleasedAfterPreparationStops(): void {
+        require_once __DIR__ . '/../../packages/reprint-client/src/lib/database-push/class-database-push-archive.php';
+        $this->pdo->exec('CREATE TABLE wp_values (id int PRIMARY KEY, value text) ENGINE=MyISAM');
+        $this->pdo->exec("INSERT INTO wp_values VALUES (1, 'original')");
+        $source = new PDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName, getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $this->pdo->exec('SET SESSION lock_wait_timeout=1');
+        $path = sys_get_temp_dir() . '/reprint-source-lock-' . bin2hex(random_bytes(8));
+        $archive = new DatabasePushArchive($source, $path, 'wp_', [], $this->push_session_id);
+        try {
+            self::assertTrue($archive->next_step());
+            try {
+                $this->pdo->exec("UPDATE wp_values SET value='changed' WHERE id=1");
+                self::fail('The source read lock must stop concurrent writes during preparation.');
+            } catch (PDOException $exception) {
+                self::assertSame(1205, $exception->errorInfo[1]);
+            }
+            $archive->close();
+            $archive->close();
+            $this->pdo->exec("UPDATE wp_values SET value='changed' WHERE id=1");
+            self::assertSame('changed', $this->pdo->query('SELECT value FROM wp_values')->fetchColumn());
+        } finally {
+            $archive->close();
+            if (is_file($path . '.building')) {
+                unlink($path . '.building');
             }
         }
     }

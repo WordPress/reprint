@@ -6618,14 +6618,18 @@ class ImportClient
             ];
             if ($source['dsn'] === '') {
                 $target = $this->get_local_site_database_target();
-                if (( $target['engine'] ?? null ) !== 'mysql') {
-                    throw new InvalidArgumentException('db-push requires a recorded local MySQL database or --source-dsn, --source-user, and --source-pass. SQLite sources are not yet supported.');
+                if (!in_array($target['engine'], ['mysql', 'sqlite'], true)) {
+                    throw new InvalidArgumentException('db-push requires a recorded local database or --source-dsn.');
                 }
-                $source = [
-                    'dsn' => 'mysql:host=' . $target['host'] . ';port=' . $target['port'] . ';dbname=' . $target['db'] . ';charset=utf8mb4',
-                    'user' => $target['user'],
-                    'pass' => $target['pass'],
-                ];
+                if ($target['engine'] === 'sqlite') {
+                    $source['dsn'] = 'mysql-on-sqlite:path=' . $this->escape_pdo_dsn_value($target['sqlite_path']) . ';dbname=' . $this->escape_pdo_dsn_value($target['db']);
+                } else {
+                    $source = [
+                        'dsn' => 'mysql:host=' . $target['host'] . ';port=' . $target['port'] . ';dbname=' . $target['db'] . ';charset=utf8mb4',
+                        'user' => $target['user'],
+                        'pass' => $target['pass'],
+                    ];
+                }
             }
             $url_mapping = [];
             foreach ($options['rewrite_url'] ?? [] as [$local_url, $hosted_url]) {
@@ -14503,7 +14507,7 @@ if (
             'name' => 'source-dsn',
             'type' => 'value',
             'target' => 'source_dsn',
-            'help' => 'Local MySQL PDO DSN (otherwise uses the recorded db-apply target)',
+            'help' => 'Local mysql: or mysql-on-sqlite: DSN (otherwise uses the recorded db-apply target)',
             'commands' => ['db-push'],
         ],
         [
@@ -15523,8 +15527,8 @@ if (
             "level" => "low",
             "short" => "Stage a full database overwrite for explicit confirmation",
             "usage" => "reprint db-push <remote-reprint-api-url> --state-dir=DIR --secret=TOKEN [options]",
-            "description" => "Prepares a local MySQL snapshot, rewrites URLs on the client, and streams it into private hosted tables. Prints the table list and review token without changing live tables.\nRequires a host-configured standalone API route. Stop all writers before --commit. Clear caches and verify the site before --cleanup.\n",
-            "extra" => "Initial limits: InnoDB only, 256 tables, 128 columns per table, 1 MiB per row before and after rewriting. No multisite, foreign keys crossing the selected site boundary, triggers, events, or routines.\n",
+            "description" => "Prepares a local database snapshot, rewrites URLs on the client, and streams it into private hosted tables. Prints the table list and review token without changing live tables.\nRequires a host-configured standalone API route. Stop all writers before --commit. Clear caches and verify the site before --cleanup.\n",
+            "extra" => "Initial limits: InnoDB target tables, 256 tables, 128 columns per table, 1 MiB per row before and after rewriting. No multisite, foreign keys crossing the selected site boundary, triggers, events, or routines.\n",
         ],
         "db-pull" => [
             "level" => "low",

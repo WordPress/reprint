@@ -65,17 +65,17 @@ class DatabasePushProcessor {
      * @param MultipartPushStreamClient $client Authenticated streaming client.
      * @param string $state_dir Private directory dedicated to this database push.
      * @param array $source {
-     *     Dedicated local MySQL connection settings. The password is not saved.
-     *     @type string $dsn PDO connection string.
-     *     @type string $user MySQL username.
-     *     @type string $pass MySQL password.
+     *     Dedicated local MySQL or SQLite connection settings. The password is not saved.
+     *     @type string $dsn mysql: or mysql-on-sqlite: connection string.
+     *     @type string $user MySQL username, empty for SQLite.
+     *     @type string $pass MySQL password, empty for SQLite.
      * }
      * @param string $table_prefix Identical local and hosted site table prefix.
      * @param array<string,string> $url_mapping Local URLs mapped to hosted URLs.
      */
     private function __construct(MultipartPushStreamClient $client, string $state_dir, array $source, string $table_prefix, array $url_mapping) {
-        if (!isset($source['dsn'], $source['user'], $source['pass']) || strpos($source['dsn'], 'mysql:') !== 0) {
-            throw new InvalidArgumentException('Database push requires a MySQL source DSN, username, and password. SQLite sources are not yet supported.');
+        if (!isset($source['dsn'], $source['user'], $source['pass']) || ( strpos($source['dsn'], 'mysql:') !== 0 && strpos($source['dsn'], 'mysql-on-sqlite:') !== 0 )) {
+            throw new InvalidArgumentException('Database push requires a mysql: or mysql-on-sqlite: source DSN and user/pass settings.');
         }
         if (!is_dir($state_dir) && !mkdir($state_dir, 0700, true)) {
             throw new RuntimeException('Cannot create database push state directory: ' . $state_dir);
@@ -142,8 +142,23 @@ class DatabasePushProcessor {
                     return true;
                 case 'preparing':
                     if ($this->archive === null) {
-                        $database = new PDO($this->source['dsn'], $this->source['user'], $this->source['pass'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
-                        $database->exec('SET NAMES utf8mb4');
+                        if (strpos($this->source['dsn'], 'mysql-on-sqlite:') === 0) {
+                            require_once \Reprint\Importer\resolve_sqlite_integration_path('/packages/mysql-on-sqlite/src/load.php');
+                            $settings = \WordPress\Reprint\Server\Utils::parse_pdo_dsn($this->source['dsn']);
+                            if (empty($settings['path']) || !is_file($settings['path'])) {
+                                throw new RuntimeException('Database push requires an existing SQLite source file: ' . ( $settings['path'] ?? '(missing path)' ));
+                            }
+                            // Opening the source must not create a database or
+                            // upgrade its metadata as a side effect of exporting.
+                            $sqlite = new PDO('sqlite:' . $settings['path'], null, null, [
+                                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+                                ( defined('Pdo\\Sqlite::ATTR_OPEN_FLAGS') ? constant('Pdo\\Sqlite::ATTR_OPEN_FLAGS') : PDO::SQLITE_ATTR_OPEN_FLAGS ) => ( defined('Pdo\\Sqlite::OPEN_READONLY') ? constant('Pdo\\Sqlite::OPEN_READONLY') : PDO::SQLITE_OPEN_READONLY ),
+                            ]);
+                            $database = new WP_PDO_MySQL_On_SQLite($this->source['dsn'], null, null, ['pdo' => $sqlite]);
+                        } else {
+                            $database = \WordPress\Reprint\Server\Utils::connect_mysql($this->source['dsn'], $this->source['user'], $this->source['pass']);
+                            $database->exec('SET NAMES utf8mb4');
+                        }
                         $this->archive = new DatabasePushArchive($database, $this->state_dir . '/database.jsonl', $this->table_prefix, $this->url_mapping, $this->state['push_session_id']);
                         return true;
                     }

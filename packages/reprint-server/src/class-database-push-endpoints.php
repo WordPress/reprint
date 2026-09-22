@@ -53,14 +53,14 @@ final class DatabasePushEndpoints {
             if (( $credentials['db_engine'] ?? 'mysql' ) !== 'mysql' || empty($credentials['table_prefix'])) {
                 throw new RuntimeException('Database push requires a MySQL target and a trusted WordPress table prefix.');
             }
-            // Native prepares keep binary row values as data, not SQL syntax.
-            // Do not fall back to wpdb: transactional cursor commits need this
-            // dedicated connection and its session lock.
-            $database = new PDO(Utils::build_pdo_dsn($credentials['db_host'], $credentials['db_name']), $credentials['db_user'], $credentials['db_password'], [
-                PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+            // Native parameters keep binary row values as data, not SQL syntax.
+            // Keep transaction state and the advisory lock on one dedicated
+            // connection. Neither driver needs WordPress or its shared $wpdb.
+            $options = extension_loaded('pdo_mysql') ? [
                 PDO::ATTR_EMULATE_PREPARES => false,
                 ( defined('Pdo\\Mysql::ATTR_MULTI_STATEMENTS') ? constant('Pdo\\Mysql::ATTR_MULTI_STATEMENTS') : PDO::MYSQL_ATTR_MULTI_STATEMENTS ) => false,
-            ]);
+            ] : [];
+            $database = Utils::connect_mysql(Utils::build_pdo_dsn($credentials['db_host'], $credentials['db_name']), $credentials['db_user'], $credentials['db_password'], $options);
             $database->exec('SET NAMES utf8mb4');
             $push_session_id = $config['push_session_id'] ?? '';
             $push = new DatabasePush($database, $credentials['table_prefix'], $push_session_id);

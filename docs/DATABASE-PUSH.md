@@ -18,9 +18,19 @@ sites.
 
 This first implementation is deliberately opt-in and limited:
 
-- Local and hosted databases use MySQL 8.0+ or MariaDB 10.6.1+, with InnoDB
-  base tables. Both machines need `pdo_mysql`. The client needs PHP 8.1+ for
-  streamed uploads; the server needs PHP 7.2+.
+- The hosted database requires MySQL 8.0+ or MariaDB 10.6.1+ and InnoDB
+  tables for the crash-safe swap. This requirement does not apply to the
+  local source: MySQL 5.5 sources and SQLite databases created by the bundled
+  WordPress SQLite integration are tested.
+- MySQL connections use `pdo_mysql` when available, otherwise `mysqli`.
+  The hosted endpoint does not need PDO. The client still needs PDO core;
+  SQLite sources also need `pdo_sqlite`. The client needs PHP 8.1+ for
+  streamed uploads; the server source package needs PHP 7.2+.
+- Source MyISAM tables are read-locked during preparation and become InnoDB
+  on the target. Definitions must be valid for InnoDB. In particular, MyISAM
+  per-group AUTO_INCREMENT keys without an index led by the auto-number
+  column are not converted. Such a definition fails staging without changing
+  live tables.
 - The local and hosted table prefixes are identical. Multisite is rejected.
 - Between 1 and 256 source tables, 128 columns per table, and 1 MiB of values per row, before
   and after URL rewriting. The client asks MySQL to withhold larger rows and
@@ -32,9 +42,10 @@ This first implementation is deliberately opt-in and limited:
   tables can coexist. Their definitions and enforcement settings are preserved.
 - Source storage placement (`DATA DIRECTORY`, `INDEX DIRECTORY`, `TABLESPACE`,
   and `CONNECTION`) is omitted by the client. The target chooses its own
-  storage. References to tables outside the push, triggers, events, and
-  routines remain unsupported.
-- SQLite sources, table-prefix conversion, automatic writer shutdown, cache
+  storage. References to tables outside the push and triggers on selected
+  tables remain unsupported. Source routines and events are not exported;
+  targets containing routines or events are rejected.
+- Table-prefix conversion, automatic writer shutdown, cache
   clearing, health checks, and automatic rollback are not implemented.
 
 The host must keep a standalone Reprint API route and its authentication
@@ -137,10 +148,20 @@ table remains so repeated requests can report the result. The local archive
 also remains; remove the private local state directory when no longer needed.
 Use a new state directory for the next deployment.
 
+A recorded SQLite `db-apply` target is selected automatically. To use another
+WordPress SQLite database, supply
+`--source-dsn='mysql-on-sqlite:path=/absolute/path/database.sqlite;dbname=wordpress'`.
+Double any semicolon inside a DSN value. MySQL credentials are not used for SQLite.
+
 ## Preparation and recovery
 
-The client takes one consistent InnoDB read snapshot and writes a private
-archive. It rewrites each complete value locally, including serialized PHP
+The client takes one consistent read snapshot and writes a private archive.
+InnoDB and SQLite use a read transaction. When any selected MySQL table uses
+another engine, all selected tables stay read-locked until preparation ends;
+local writes wait during that time. Nontransactional sources therefore need
+`LOCK TABLES` permission. SQLite sources are opened read-only, using the
+integration's stored MySQL schema. Plain SQLite databases and integration
+metadata requiring an upgrade are not supported. It rewrites each complete value locally, including serialized PHP
 lengths and structured WordPress content, before base64 encoding it. Binary
 columns are copied unchanged. ENUM index zero is distinct from a declared empty
 label or the label `0`. Restoring that legacy value accepts only the server
@@ -148,7 +169,7 @@ warnings naming its columns; other warnings roll the row back. Rewriting a
 primary key is rejected. Source
 rows are never updated. Keep source **DDL** unchanged during preparation.
 If preparation is interrupted, a new run starts a fresh snapshot; an open
-MySQL transaction cannot survive process death. A sealed archive is reused
+database transaction or read lock cannot survive process death. A sealed archive is reused
 without scanning the source again.
 
 Upload reuses the existing multipart sender and private work store, with many
@@ -158,7 +179,8 @@ byte offset. A failed request ends the current run; no automatic retry occurs.
 
 The client parses each `SHOW CREATE TABLE` result with its existing SQL parser.
 It preserves expressions, quoted names, comments, defaults, indexes, and
-partitioning while removing source storage placement. It gives CHECK and
+partitioning while removing source storage placement and selecting InnoDB for
+the incoming tables. It gives CHECK and
 foreign key constraints new names that do not collide with the live schema.
 Generated columns are omitted from row inserts so the target computes them
 from rewritten input values. Spatial values travel as WKB bytes plus their
@@ -197,7 +219,9 @@ HTTP dispatcher. They cover staging without live changes, cancellation,
 process death with an open request after a confirmed request, a discarded
 commit response, stale review tokens, failed unique-value imports, discard,
 cleanup, client-side serialization rewriting, row-size rejection, exact
-binary/decimal/BIT/NULL values, and zero auto-increment IDs. Schema tests cover
+binary/decimal/BIT/NULL values, and zero auto-increment IDs. Compatibility
+cases run with a PDO-free endpoint, a client without `pdo_mysql`, MySQL 5.5
+and MyISAM sources, and SQLite ENUM labels, BIT numbers, and binary values. Schema tests cover
 keyword-like literals, generated values, spatial bytes and SRIDs, partitions,
 source storage placement, cyclic/self-referencing foreign keys, constraint
 validation failures, long names, and replay after an ALTER commits but its

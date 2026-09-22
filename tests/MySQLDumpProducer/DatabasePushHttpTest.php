@@ -27,7 +27,7 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         $this->remote_reprint_api_url = 'http://' . $address . '/';
         $environment = getenv();
         $environment['REPRINT_DB_TEST_ROOT'] = $this->root;
-        $this->server = proc_open([PHP_BINARY, '-d', 'post_max_size=2M', '-S', $address, __DIR__ . '/../fixtures/database-push-router.php'], [['pipe', 'r'], ['file', $this->root . '/server.log', 'a'], ['file', $this->root . '/server.log', 'a']], $pipes, null, $environment);
+        $this->server = proc_open([getenv('REPRINT_DB_PUSH_SERVER_PHP') ?: PHP_BINARY, '-d', 'post_max_size=2M', '-S', $address, __DIR__ . '/../fixtures/database-push-router.php'], [['pipe', 'r'], ['file', $this->root . '/server.log', 'a'], ['file', $this->root . '/server.log', 'a']], $pipes, null, $environment);
         fclose($pipes[0]);
         $deadline = microtime(true) + 5;
         do {
@@ -53,6 +53,77 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
         rmdir($this->root);
         parent::tearDown();
+    }
+
+    /** @dataProvider sourceDatabaseProvider */
+    public function testSourceReadSupportDoesNotRequireTargetSwapSupport(string $engine): void {
+        if ($engine === 'sqlite') {
+            require_once \Reprint\Importer\resolve_sqlite_integration_path('/packages/mysql-on-sqlite/src/load.php');
+            $dsn = 'mysql-on-sqlite:path=' . $this->root . '/source.sqlite;dbname=source';
+            $source = new WP_PDO_MySQL_On_SQLite($dsn, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        } else {
+            $dsn = 'mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName;
+            $source = $this->pdo;
+        }
+        $source->exec('CREATE TABLE wp_values (id int PRIMARY KEY, value longtext, bytes blob, flag BIT(16), choice ENUM(\'\', \'0\', \'one\')) ENGINE=' . ( $engine === 'sqlite' ? 'InnoDB' : 'MyISAM' ));
+        $source->exec("INSERT INTO wp_values VALUES (1, 'https://local.test/page', X'00FF', 257, '0'), (2, NULL, NULL, NULL, '')");
+        $source_hash = $engine === 'sqlite' ? hash_file('sha256', $this->root . '/source.sqlite') : null;
+        $client = $this->client();
+        $processor = DatabasePushProcessor::start($client, $this->root . '/source-state', ['dsn' => $dsn, 'user' => getenv('DB_USER'), 'pass' => getenv('DB_PASS')], 'wp_', ['https://local.test' => 'https://production.example.com']);
+        try {
+            while ($processor->next_step()) {
+                self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+            }
+            $status = $processor->get_status();
+            self::assertSame('ready', $status['phase']);
+            $commit = $client->send_push_request('POST', 'push_db_commit', ['push_session_id' => $status['push_session_id'], 'review' => $status['review'], 'writers_stopped' => 'yes'], ['accepted']);
+            self::assertSame('complete', $commit['status'], json_encode($commit));
+            self::assertSame([['https://production.example.com/page', '00FF', '257', '0', '2'], [null, null, null, '', '1']], $this->receiver->query('SELECT value, HEX(bytes), CAST(flag+0 AS CHAR), choice, CAST(choice+0 AS CHAR) FROM wp_values ORDER BY id')->fetchAll(PDO::FETCH_NUM));
+            self::assertSame('InnoDB', $this->receiver->query("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='wp_values'")->fetchColumn());
+            self::assertSame('https://local.test/page', $source->query('SELECT value FROM wp_values')->fetchColumn());
+            if ($engine === 'sqlite') {
+                self::assertSame($source_hash, hash_file('sha256', $this->root . '/source.sqlite'));
+            }
+        } finally {
+            $processor->close();
+        }
+    }
+
+    public static function sourceDatabaseProvider(): array {
+        return [['myisam'], ['sqlite']];
+    }
+
+    public function testOldMysqlSourceExportsEnumBinaryAndSpatialValues(): void {
+        $host = getenv('REPRINT_MYSQL55_HOST');
+        if (!$host) {
+            self::markTestSkipped('REPRINT_MYSQL55_HOST is required for the legacy-source integration test.');
+        }
+        $source = new PDO('mysql:host=' . $host, getenv('DB_USER'), getenv('DB_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        $name = 'reprint_push_' . bin2hex(random_bytes(6));
+        $source->exec('CREATE DATABASE `' . $name . '`');
+        try {
+            self::assertStringStartsWith('5.5.', $source->query('SELECT VERSION()')->fetchColumn());
+            $source->exec('USE `' . $name . '`');
+            $source->exec("CREATE TABLE wp_values (id int PRIMARY KEY, value text, bytes blob, choice ENUM('', '0'), location point) ENGINE=MyISAM");
+            $source->exec("SET SESSION sql_mode=''");
+            $source->exec("INSERT INTO wp_values VALUES (1, 'https://local.test/', X'00FF', 'invalid', GeomFromText('POINT(1 2)', 0))");
+            $client = $this->client();
+            $processor = DatabasePushProcessor::start($client, $this->root . '/old-source-state', ['dsn' => 'mysql:host=' . $host . ';dbname=' . $name, 'user' => getenv('DB_USER'), 'pass' => getenv('DB_PASS')], 'wp_', ['https://local.test' => 'https://production.example.com']);
+            try {
+                while ($processor->next_step()) {
+                    self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+                }
+                $status = $processor->get_status();
+                $commit = $client->send_push_request('POST', 'push_db_commit', ['push_session_id' => $status['push_session_id'], 'review' => $status['review'], 'writers_stopped' => 'yes'], ['accepted']);
+                self::assertSame('complete', $commit['status'], json_encode($commit));
+                self::assertSame(['https://production.example.com/', '00FF', '0', 'POINT(1 2)'], $this->receiver->query('SELECT value, HEX(bytes), CAST(choice+0 AS CHAR), ST_AsText(location) FROM wp_values')->fetch(PDO::FETCH_NUM));
+                self::assertSame('MyISAM', $source->query("SHOW TABLE STATUS LIKE 'wp_values'")->fetch(PDO::FETCH_ASSOC)['Engine']);
+            } finally {
+                $processor->close();
+            }
+        } finally {
+            $source->exec('DROP DATABASE `' . $name . '`');
+        }
     }
 
     public function testCancelledUploadResumesWithoutChangingLiveRowsUntilConfirmed(): void {
@@ -142,12 +213,21 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
     }
 
-    public function testCliStagesReviewsDiscardsAndLeavesProductionUnchanged(): void {
-        $this->pdo->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longtext) ENGINE=InnoDB');
-        $this->pdo->exec("INSERT INTO wp_options VALUES (1, 'https://local.test/')");
-        $arguments = [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client', 'db-push', $this->remote_reprint_api_url,
+    /** @dataProvider sourceDatabaseProvider */
+    public function testCliStagesReviewsDiscardsAndLeavesProductionUnchanged(string $engine): void {
+        if ($engine === 'sqlite') {
+            require_once \Reprint\Importer\resolve_sqlite_integration_path('/packages/mysql-on-sqlite/src/load.php');
+            $dsn = 'mysql-on-sqlite:path=' . $this->root . '/cli;;source.sqlite;dbname=source';
+            $database = new WP_PDO_MySQL_On_SQLite($dsn);
+        } else {
+            $dsn = 'mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName;
+            $database = $this->pdo;
+        }
+        $database->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longtext) ENGINE=InnoDB');
+        $database->exec("INSERT INTO wp_options VALUES (1, 'https://local.test/')");
+        $arguments = [getenv('REPRINT_DB_PUSH_CLIENT_PHP') ?: PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client', 'db-push', $this->remote_reprint_api_url,
             '--state-dir=' . $this->root . '/cli-state', '--secret=database-push-test-secret', '--force-http'];
-        $source = ['--source-dsn=mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName, '--source-user=' . getenv('DB_USER'), '--source-pass=' . getenv('DB_PASS'), '--rewrite-url', 'https://local.test', 'https://production.example.com'];
+        $source = ['--source-dsn=' . $dsn, '--source-user=' . getenv('DB_USER'), '--source-pass=' . getenv('DB_PASS'), '--rewrite-url', 'https://local.test', 'https://production.example.com'];
         $staged = $this->runCli(array_merge($arguments, $source));
         self::assertSame('ready', $staged['phase']);
         self::assertSame(['wp_options', 'wp_orders'], $staged['replace_tables']);

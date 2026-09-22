@@ -4,6 +4,8 @@
 
 
 use WordPress\Reprint\Server\DatabasePush;
+use WordPress\Reprint\Server\MysqliDriverPDO;
+use WordPress\Reprint\Server\PdoConstants;
 
 require_once __DIR__ . '/../url-rewrite/load.php';
 require_once __DIR__ . '/../import/functions.php';
@@ -12,15 +14,15 @@ require_once __DIR__ . '/../import/functions.php';
  * Prepares an immutable archive locally, rewriting whole values before encoding.
  *
  * One step writes a table definition, one row, one deferred foreign key, or
- * the end record. The source uses one consistent InnoDB snapshot. An interrupted
- * preparation must start a
- * new snapshot; only a sealed archive may be uploaded or resumed. Source DDL
- * must remain unchanged during preparation. No local source row is modified.
+ * the end record. InnoDB and SQLite use a read transaction; other source engines
+ * hold read locks. An interrupted preparation must take a new snapshot; only
+ * a sealed archive may be uploaded or resumed. Source DDL must remain unchanged
+ * during preparation. No local source row is modified.
  */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Client library class, not a WordPress plugin API.
 class DatabasePushArchive {
     private const MAX_ROW_BYTES = 1048576;
-    /** @var PDO */
+    /** @var PDO|MysqliDriverPDO */
     private $database;
     /** @var SqlStatementRewriter */
     private $rewriter;
@@ -28,12 +30,18 @@ class DatabasePushArchive {
     private $local_absolute_path;
     /** @var resource|null */
     private $output;
-    /** @var PDOStatement|null */
+    /** @var PDOStatement|\WordPress\Reprint\Server\MysqliDriverPDOStatement|null */
     private $rows;
     /** @var list<string> */
     private $tables;
     /** @var array<string,array<string,mixed>> */
     private $columns = [];
+    /** @var bool Nontransactional sources stay read-locked until the archive is sealed. */
+    private $source_tables_locked = false;
+    /** @var bool */
+    private $sqlite_source;
+    /** @var string */
+    private $spatial_function_prefix;
     /** @var array<string,string> */
     private $incoming_tables = [];
     /** @var string */
@@ -50,28 +58,53 @@ class DatabasePushArchive {
     private $closed = false;
 
     /**
-     * @param PDO $database Dedicated local source connection; never the hosted database.
+     * @param PDO|MysqliDriverPDO $database Dedicated local source connection; never the hosted database.
      * @param string $local_absolute_path Private archive filename.
      * @param string $table_prefix Site table prefix, identical on both sites.
      * @param array<string,string> $url_mapping Local URLs mapped to hosted URLs.
      * @param string $push_session_id Target session whose private table names receive this archive.
      */
-    public function __construct(PDO $database, string $local_absolute_path, string $table_prefix, array $url_mapping, string $push_session_id) {
-        if ($database->getAttribute(PDO::ATTR_DRIVER_NAME) !== 'mysql') {
-            throw new RuntimeException('Database push currently requires a MySQL source; SQLite source support is not implemented.');
-        }
+    public function __construct($database, string $local_absolute_path, string $table_prefix, array $url_mapping, string $push_session_id) {
+        $this->sqlite_source = $database instanceof WP_PDO_MySQL_On_SQLite;
         if (file_exists($local_absolute_path)) {
             throw new RuntimeException('A sealed database push archive already exists: ' . $local_absolute_path);
         }
         $this->database = $database;
         $this->database_name = $database->query('SELECT DATABASE()')->fetchColumn();
+        $this->spatial_function_prefix = version_compare($database->query('SELECT VERSION()')->fetchColumn(), '5.6', '<') ? '' : 'ST_';
         $this->local_absolute_path = $local_absolute_path;
         $this->rewriter = new SqlStatementRewriter(new StructuredDataUrlRewriter($url_mapping), $table_prefix);
-        $inspection = new DatabasePush($database, $table_prefix, $push_session_id);
-        try {
-            $this->tables = $inspection->assert_supported_target();
-        } finally {
-            $inspection->close();
+        // Source reads do not require the target's crash-safe RENAME support.
+        // SHOW TABLE STATUS is also the discovery query used by pull's reader
+        // and is implemented by the SQLite integration's MySQL interface.
+        $this->tables = [];
+        $needs_read_lock = false;
+        $quoting_database = $database instanceof WP_PDO_MySQL_On_SQLite ? $database->get_connection()->get_pdo() : $database;
+        $table_status = $database->query('SHOW TABLE STATUS LIKE ' . $quoting_database->quote(addcslashes($table_prefix, '_%\\') . '%'));
+        // phpcs:ignore Generic.CodeAnalysis.AssignmentInCondition.FoundInWhileCondition -- Read only the bounded selected table metadata.
+        while (( $status = $table_status->fetch(PdoConstants::fetch_assoc()) ) !== false) {
+            $name = $status['Name'];
+            if (strpos($name, $table_prefix) !== 0 || \WordPress\Reprint\Server\MultisiteDatabaseSelection::is_internal_table($name)) {
+                continue;
+            }
+            DatabasePush::identifier($name);
+            if (!isset($status['Engine'])) {
+                throw new RuntimeException('Database push does not yet export views: ' . $name . '.');
+            }
+            $needs_read_lock = $needs_read_lock || ( !$this->sqlite_source && $status['Engine'] !== 'InnoDB' );
+            $this->tables[] = $name;
+            if (count($this->tables) > DatabasePush::MAX_TABLES) {
+                throw new RuntimeException('Database push supports at most 256 source tables.');
+            }
+        }
+        unset($table_status);
+        sort($this->tables, SORT_STRING);
+        if (!$this->sqlite_source) {
+            $statement = $database->prepare('SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND BINARY LEFT(EVENT_OBJECT_TABLE, ?) = ?');
+            $statement->execute([strlen($table_prefix), $table_prefix]);
+            if ( (int) $statement->fetchColumn() !== 0) {
+                throw new RuntimeException('Database push does not yet export triggers on source site tables.');
+            }
         }
         if ($this->tables === []) {
             throw new RuntimeException('The local source has no tables for prefix ' . $table_prefix . '.');
@@ -88,8 +121,22 @@ class DatabasePushArchive {
             throw new RuntimeException('Cannot create the private database push archive.');
         }
         chmod($local_absolute_path . '.building', 0600);
-        $database->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-        $database->exec('START TRANSACTION WITH CONSISTENT SNAPSHOT');
+        if ($needs_read_lock) {
+            // MyISAM cannot supply a transactional snapshot. Lock the whole
+            // selection, including InnoDB tables, so related rows stay aligned.
+            $database->exec('LOCK TABLES ' . implode(',', array_map(static function ($name) {
+                return DatabasePush::identifier($name) . ' READ';
+            }, $this->tables)));
+            $this->source_tables_locked = true;
+        } elseif ($this->sqlite_source) {
+            $database->beginTransaction();
+        } else {
+            $database->exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ');
+            $database->beginTransaction();
+        }
+        if (!$needs_read_lock) {
+            $database->query('SELECT 1 FROM ' . DatabasePush::identifier($this->tables[0]) . ' LIMIT 1')->fetchColumn();
+        }
     }
 
     public function next_step(): bool {
@@ -100,9 +147,12 @@ class DatabasePushArchive {
             throw new RuntimeException('Database archive preparation is closed.');
         }
         if ($this->rows !== null) {
-            $row = $this->rows->fetch(PDO::FETCH_ASSOC);
+            $row = $this->rows->fetch(PdoConstants::fetch_assoc());
             if ($row === false) {
-                $this->rows->closeCursor();
+                // The SQLite proxy has no closeCursor(); releasing it closes its native result.
+                if (!$this->sqlite_source) {
+                    $this->rows->closeCursor();
+                }
                 $this->rows = null;
                 return true;
             }
@@ -113,17 +163,24 @@ class DatabasePushArchive {
             $values = [];
             $rewritten_bytes = 0;
             foreach ($row as $column => $value) {
-                if (preg_match('/^enum\(/i', $this->columns[$column]['Type'])) {
-                    [$value, $enum_index] = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
-                    if ($enum_index === 0) {
+                if (!$this->sqlite_source && preg_match('/^enum\(/i', $this->columns[$column]['Type'])) {
+                    [$enum_index, $value] = $value === null ? [null, null] : explode(':', $value, 2);
+                    if ($enum_index !== null && (int) $enum_index === 0) {
                         // A permissively stored invalid ENUM is index zero,
                         // not the empty label or a label containing "0".
                         $values[$column] = 0;
                         continue;
                     }
                 }
+                if ($value !== null && $this->sqlite_source && preg_match('/^bit\(/i', $this->columns[$column]['Type'])) {
+                    // SQLite stores BIT as a number, not MySQL's packed bytes.
+                    $values[$column] = ['unsigned' => (string) $value];
+                    $rewritten_bytes += strlen( (string) $value);
+                    continue;
+                }
                 if ($value !== null && $this->columns[$column]['spatial']) {
-                    [$srid, $hex] = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
+                    [$srid, $hex] = explode(':', $value, 2);
+                    $srid = (int) $srid;
                     $bytes = hex2bin($hex);
                     $rewritten_bytes += strlen($bytes);
                     $values[$column] = ['wkb' => base64_encode($bytes), 'srid' => $srid];
@@ -148,7 +205,7 @@ class DatabasePushArchive {
         if ($this->tables !== []) {
             $this->current_table = array_shift($this->tables);
             $table = DatabasePush::identifier($this->current_table);
-            $ddl = $this->database->query('SHOW CREATE TABLE ' . $table)->fetch(PDO::FETCH_NUM)[1];
+            $ddl = $this->database->query('SHOW CREATE TABLE ' . $table)->fetchColumn(1);
             if (strlen($ddl) > DatabasePush::MAX_RECORD_BYTES) {
                 throw new RuntimeException('Source table definition exceeds the 2 MiB archive record limit: ' . $this->current_table . '.');
             }
@@ -211,6 +268,11 @@ class DatabasePushArchive {
             }
             foreach (array_merge($create->get_descendant_nodes('createTableOption'), $create->get_descendant_nodes('partitionOption')) as $option) {
                 $first = $option->get_first_descendant_token()->id;
+                if ($first === WP_MySQL_Lexer::ENGINE_SYMBOL) {
+                    // Incoming rows and progress must commit together, regardless
+                    // of the engine from which the client reads them.
+                    $edits[] = [$option->get_start(), $option->get_length(), 'ENGINE=InnoDB'];
+                }
                 if (in_array($first, [WP_MySQL_Lexer::TABLESPACE_SYMBOL, WP_MySQL_Lexer::DATA_SYMBOL, WP_MySQL_Lexer::INDEX_SYMBOL, WP_MySQL_Lexer::CONNECTION_SYMBOL], true)) {
                     // Storage paths and named tablespaces belong to the source
                     // host. Let the target place its own InnoDB tables.
@@ -225,7 +287,7 @@ class DatabasePushArchive {
             }
             $this->columns = [];
             $sizes = [];
-            foreach ($this->database->query('SHOW FULL COLUMNS FROM ' . $table)->fetchAll(PDO::FETCH_ASSOC) as $column) {
+            foreach ($this->database->query('SHOW FULL COLUMNS FROM ' . $table)->fetchAll(PdoConstants::fetch_assoc()) as $column) {
                 DatabasePush::identifier($column['Field']);
                 if ($column['Field'] === '__reprint_row_bytes') {
                     throw new RuntimeException('Source column __reprint_row_bytes conflicts with the archive row-size check.');
@@ -242,7 +304,7 @@ class DatabasePushArchive {
                     // charset (latin1 text can grow on the connection).
                     $value = 'CONVERT(' . $value . ' USING utf8mb4)';
                 }
-                $sizes[] = 'COALESCE(OCTET_LENGTH(' . $value . '),0)';
+                $sizes[] = 'COALESCE(LENGTH(CAST(' . $value . ' AS BINARY)),0)';
             }
             if (count($this->columns) > 128) {
                 throw new RuntimeException('Database push supports at most 128 columns per table: ' . $this->current_table . '.');
@@ -254,21 +316,27 @@ class DatabasePushArchive {
                 // Ask MySQL to withhold an oversized row before PHP receives it.
                 // PDO decodes BIT result metadata as an integer. CAST keeps
                 // these bytes unchanged through IF and native parameter binding.
-                $value = preg_match('/^bit\(/i', $this->columns[$column]['Type'])
+                $value = !$this->sqlite_source && preg_match('/^bit\(/i', $this->columns[$column]['Type'])
                     ? 'CAST(' . $identifier . ' AS BINARY)' : $identifier;
-                if (preg_match('/^enum\(/i', $this->columns[$column]['Type'])) {
+                if (!$this->sqlite_source && preg_match('/^enum\(/i', $this->columns[$column]['Type'])) {
                     // Carry the index as well as the label to distinguish
-                    // index zero from a declared empty-string member. MySQL
-                    // emits +0 as a JSON float; CAST gives both engines integers.
-                    $value = 'JSON_ARRAY(' . $identifier . ',CAST(' . $identifier . ' AS UNSIGNED))';
+                    // index zero from a declared empty-string member. A numeric
+                    // prefix works on old MySQL versions without JSON functions.
+                    $value = "CONCAT(CAST(" . $identifier . " AS UNSIGNED),':'," . $identifier . ')';
                 }
                 if ($this->columns[$column]['spatial']) {
-                    $value = 'IF(' . $identifier . ' IS NULL,NULL,JSON_ARRAY(ST_SRID(' . $identifier . '),HEX(ST_AsWKB(' . $identifier . '))))';
+                    // Use the engine's WKB conversion: MySQL's raw geographic
+                    // bytes use a different axis order for some SRIDs.
+                    $value = 'CONCAT(' . $this->spatial_function_prefix . 'SRID(' . $identifier . "),':',HEX(" . $this->spatial_function_prefix . 'AsWKB(' . $identifier . ')))';
                 }
                 $select[] = 'IF(' . $size . '>' . self::MAX_ROW_BYTES . ',NULL,' . $value . ') AS ' . $identifier;
             }
             $select[] = $size . ' AS __reprint_row_bytes';
-            $this->database->setAttribute(( defined('Pdo\\Mysql::ATTR_USE_BUFFERED_QUERY') ? constant('Pdo\\Mysql::ATTR_USE_BUFFERED_QUERY') : PDO::MYSQL_ATTR_USE_BUFFERED_QUERY ), false);
+            if ($this->database instanceof MysqliDriverPDO) {
+                $this->database->set_buffered(false);
+            } elseif (!$this->sqlite_source) {
+                $this->database->setAttribute(( defined('Pdo\\Mysql::ATTR_USE_BUFFERED_QUERY') ? constant('Pdo\\Mysql::ATTR_USE_BUFFERED_QUERY') : PDO::MYSQL_ATTR_USE_BUFFERED_QUERY ), false);
+            }
             $this->rows = $this->database->query('SELECT ' . implode(',', $select) . ' FROM ' . $table);
             $this->write_record(['table' => $this->current_table, 'ddl' => $ddl], $this->output);
             return true;
@@ -286,7 +354,12 @@ class DatabasePushArchive {
             return true;
         }
         $this->write_record(['end' => true], $this->output);
-        $this->database->commit();
+        if ($this->source_tables_locked) {
+            $this->database->exec('UNLOCK TABLES');
+            $this->source_tables_locked = false;
+        } else {
+            $this->database->commit();
+        }
         if (!fflush($this->output)) {
             throw new RuntimeException('Cannot flush the prepared database push archive.');
         }
@@ -304,8 +377,14 @@ class DatabasePushArchive {
             return;
         }
         if ($this->rows !== null) {
-            $this->rows->closeCursor();
+            if (!$this->sqlite_source) {
+                $this->rows->closeCursor();
+            }
             $this->rows = null;
+        }
+        if ($this->source_tables_locked) {
+            $this->database->exec('UNLOCK TABLES');
+            $this->source_tables_locked = false;
         }
         if ($this->database->inTransaction()) {
             $this->database->rollBack();

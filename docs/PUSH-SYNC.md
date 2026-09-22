@@ -657,7 +657,10 @@ outside instead of requiring SSH.
 
 ## Full database overwrite
 
-`db-push` stages a complete local MySQL database in private incoming tables.
+`db-push` stages a complete local MySQL or WordPress SQLite database in private
+incoming InnoDB tables. Source reads do not require the hosted database
+version needed for a crash-safe swap. MySQL connections may use `mysqli`
+instead of `pdo_mysql`; URL and schema rewriting remain on the client.
 URL rewriting happens in the client. Staging returns a table list and review
 token; a separate confirmed command exchanges the live and incoming tables
 with one multi-table rename. Production-only site tables are moved aside too.

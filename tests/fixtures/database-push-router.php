@@ -3,6 +3,9 @@
 // The production library authenticates and dispatches every request. The host
 // route uses file-backed credentials so replacing wp_options cannot remove it.
 require dirname(__DIR__, 2) . '/vendor/autoload.php';
+if (getenv('REPRINT_DB_PUSH_SERVER_PHP') && class_exists('PDO', false)) {
+    throw new RuntimeException('The PDO-free push endpoint test must run without PDO.');
+}
 define('ABSPATH', getenv('REPRINT_DB_TEST_ROOT') . '/site/');
 define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', dirname(__DIR__, 2) . '/reprint-server-wp/');
 define('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE', getenv('REPRINT_DB_TEST_ROOT') . '/secret.php');
