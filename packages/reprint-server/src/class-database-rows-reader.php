@@ -128,6 +128,9 @@ class DatabaseRowsReader {
     /** @var array<string,string> Internal SRID-prefix aliases keyed by spatial column name. */
     private $spatial_prefix_aliases = [];
 
+    /** @var array<string,array<string,string>> Trusted SELECT expressions, keyed by table and column. */
+    private $column_read_expressions = [];
+
     /** @var array<string,list<array{column:string,value:string}>> Row exclusions keyed by table. */
     private $exclude_rows_by_table = [];
 
@@ -182,6 +185,7 @@ class DatabaseRowsReader {
      *     @type int        $batch_size          Maximum records per query.
      *     @type int|null   $query_time_limit_ms Maximum query duration in milliseconds.
      *     @type int|null   $maximum_inline_spatial_bytes Largest spatial value returned inline.
+     *     @type array<string,array<string,string>> $column_read_expressions Trusted server-built SELECT expressions keyed by table and column; never request SQL.
      *     @type array      $exclude_rows        Table, column, and value exclusion rules.
      *     @type string[]   $exclude_tables      Table names to omit from automatic discovery.
      *     @type MultisiteDatabaseSelection $multisite_selection Site table and row rules built from source WordPress state.
@@ -190,6 +194,20 @@ class DatabaseRowsReader {
     public function __construct($db, $options = [])
     {
         $this->db = $db;
+        $this->column_read_expressions = array_key_exists('column_read_expressions', $options) ? $options['column_read_expressions'] : [];
+        if (!is_array($this->column_read_expressions)) {
+            throw new \InvalidArgumentException('column_read_expressions must be an array; received ' . gettype($this->column_read_expressions) . '.');
+        }
+        foreach ($this->column_read_expressions as $table => $expressions) {
+            if (!is_string($table) || $table === '' || !is_array($expressions)) {
+                throw new \InvalidArgumentException('column_read_expressions must map non-empty table names to arrays; received ' . gettype($expressions) . ' for table ' . json_encode($table) . '.');
+            }
+            foreach ($expressions as $column => $expression) {
+                if (!is_string($column) || $column === '' || !is_string($expression) || $expression === '') {
+                    throw new \InvalidArgumentException('column_read_expressions must map non-empty column names to non-empty SQL strings; received ' . json_encode($expression) . ' for column ' . json_encode($column) . '.');
+                }
+            }
+        }
         $this->multisite_selection = $options["multisite_selection"] ?? null;
         if ($this->multisite_selection !== null && !$this->multisite_selection instanceof MultisiteDatabaseSelection) {
             throw new \InvalidArgumentException("multisite_selection must be a trusted MultisiteDatabaseSelection object.");
@@ -887,6 +905,7 @@ class DatabaseRowsReader {
             $select_parts = [];
             foreach ($this->current_column_types as $column => $column_info) {
                 $quoted_column = $this->quote_identifier($column);
+                $read_expression = $this->get_column_read_expression($column);
                 if (
                     $this->maximum_inline_spatial_bytes !== null &&
                     $this->is_spatial_type($column_info["data_type"])
@@ -926,9 +945,9 @@ class DatabaseRowsReader {
                     $this->is_numeric_type($column_info["data_type"]) ||
                     $this->is_binary_type($column_info["data_type"])
                 ) {
-                    $select_parts[] = $quoted_column;
+                    $select_parts[] = $read_expression . " AS " . $quoted_column;
                 } else {
-                    $select_parts[] = "CAST({$quoted_column} AS BINARY) AS {$quoted_column}";
+                    $select_parts[] = "CAST({$read_expression} AS BINARY) AS {$quoted_column}";
                 }
             }
             if ($this->multisite_selection !== null) {
@@ -947,6 +966,24 @@ class DatabaseRowsReader {
         }
 
         return $query;
+    }
+
+    /**
+     * Use the same exported value for ordered reads, reloads, and oversized chunks.
+     * Keep its source character set so SUBSTRING counts characters, not bytes.
+     */
+    public function get_column_read_expression(string $column): string
+    {
+        if (!isset($this->column_read_expressions[$this->current_table][$column])) {
+            return $this->quote_identifier($column);
+        }
+        $expression = $this->column_read_expressions[$this->current_table][$column];
+        $collation = $this->get_column_metadata($column)['collation'];
+        if ($collation !== null) {
+            $charset = explode('_', $collation, 2)[0];
+            return "CONVERT(({$expression}) USING {$charset})";
+        }
+        return "({$expression})";
     }
 
     /** Returns an internal SELECT alias which cannot collide with a real column. */
