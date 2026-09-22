@@ -126,18 +126,6 @@ export function createHmacClient(siteName) {
 }
 
 /**
- * Run `php -r` with a site's name in the environment, so a test can inspect
- * the CLI PHP configuration. This is the container's CLI PHP, not the site's
- * PHP-FPM pool; a pool setting is proven through requests to the site.
- */
-export function runSitePhp(siteName, code) {
-    return execFileSync('php', ['-r', code], {
-        encoding: 'utf-8',
-        env: { ...process.env, REPRINT_E2E_SITE: siteName },
-    });
-}
-
-/**
  * Make an authenticated HTTP request to the export API.
  * @param {string} siteName - Site name
  * @param {string} endpoint - API endpoint
@@ -317,6 +305,15 @@ export function remoteStateDirectory(outputDirectory, remoteReprintApiUrl) {
         .update(remoteReprintApiUrl.replace(/[?&]+$/, ''))
         .digest('hex');
     return join(outputDirectory, 'remotes', remoteReprintApiUrlHash);
+}
+
+/**
+ * Return the private key path the client uses for a remote: key.pem inside
+ * the remote state directory, where `reprint keygen` writes it and every
+ * later command finds it.
+ */
+export function exportedKeyPath(remoteReprintApiUrl, stateDirectory) {
+    return join(remoteStateDirectory(stateDirectory, remoteReprintApiUrl), 'key.pem');
 }
 
 /**
@@ -872,6 +869,15 @@ export function readAuditLog(outputDir) {
     const logPath = join(outputDir, 'audit.log');
     if (!existsSync(logPath)) return '';
     return readFileSync(logPath, 'utf-8');
+}
+
+/**
+ * Count the requests the client sent, from the HTTP_REQUEST audit line it
+ * writes for each one. The audit log is append-only, so a scenario takes the
+ * count before and after a run to see how many requests that run made.
+ */
+export function countAuditLogRequests(outputDir) {
+    return (readAuditLog(outputDir).match(/HTTP_REQUEST \|/g) || []).length;
 }
 
 /**
