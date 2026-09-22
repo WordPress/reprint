@@ -13283,11 +13283,16 @@ class ImportClient
             "Sec-Fetch-User: ?1",
         ];
 
-        // The cursor travels only in the request body (see build_request()),
-        // which the signed content hash already covers. Sending it again as
-        // a header would let a proxy that strips custom headers silently
-        // drop the value the signature was computed over, breaking
-        // verification behind exactly the hosts this is meant to survive.
+        // The cursor travels only in the request body (see build_request()).
+        // For form-encoded requests the signed content hash covers that body
+        // cursor. A multipart file_fetch request hashes only the uploaded
+        // file contents, so its form fields, cursor included, stay unsigned
+        // exactly as they always have on the HMAC path; closing that is the
+        // scope of docs/superpowers/specs/2026-09-21-multipart-signing-gap.md.
+        // Sending the cursor again as a header would let a proxy that strips
+        // custom headers silently drop the value the signature was computed
+        // over, breaking verification behind exactly the hosts this is meant
+        // to survive.
 
         // Configure POST data. We need to know the body
         // content BEFORE generating HMAC headers so the content hash

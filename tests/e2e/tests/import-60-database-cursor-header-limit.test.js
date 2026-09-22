@@ -1,8 +1,11 @@
 /**
  * A large non-key column value must not be copied into the next database
  * resume cursor. The test site deliberately returns 431 at its 8191-byte
- * X-Export-Cursor threshold. A later boundary covers offset continuation for
- * a table without a primary key.
+ * X-Export-Cursor threshold, which models a host header limit. The importer
+ * sends the cursor only in the request body, so that guard no longer sees
+ * importer requests; the resume scenario bounds the cursors the importer
+ * persisted instead. A later boundary covers offset continuation for a
+ * table without a primary key.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -20,6 +23,13 @@ describe('Import: bounded database resume cursor', { timeout: 180000 }, () => {
     const unkeyedTable = 'ab_cursor_offset_resume';
     const tables = [sourceTable, unkeyedTable];
     const importDb = 'e2e_database_cursor_header_limit_import_60';
+    // Direct MySQL output keeps its resume position only in the target: the
+    // importer saves each SQL group's exporter cursor into this table (its
+    // name is fixed in ImportClient::DATABASE_IMPORT_POSITION_TABLE) inside
+    // the group's transaction. The trigger below records the byte length of
+    // every cursor saved there.
+    const positionTable = '__reprint_db_pull_progress_49acb118-a97a-45c7-814d-8e670db7f6b4';
+    const savedCursorBytesTable = 'e2e_saved_source_cursor_bytes';
     let tempDir;
 
     beforeAll(async () => {
@@ -60,6 +70,24 @@ describe('Import: bounded database resume cursor', { timeout: 180000 }, () => {
         const connection = await createMysqlConnection();
         await connection.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
         await connection.query(`CREATE DATABASE \`${importDb}\``);
+        // The same definition the importer's CREATE TABLE IF NOT EXISTS uses,
+        // created ahead of it so the trigger exists before the first save.
+        await connection.query(
+            `CREATE TABLE \`${importDb}\`.\`${positionTable}\` (`
+            + '`id` TINYINT UNSIGNED NOT NULL PRIMARY KEY, '
+            + '`source_hash` CHAR(64) CHARACTER SET ascii NOT NULL, '
+            + '`source_cursor` MEDIUMTEXT NOT NULL, '
+            + '`file_byte_offset` BIGINT UNSIGNED NULL) ENGINE=InnoDB'
+        );
+        await connection.query(
+            `CREATE TABLE \`${importDb}\`.\`${savedCursorBytesTable}\` (`
+            + '`source_cursor_bytes` INT UNSIGNED NOT NULL) ENGINE=InnoDB'
+        );
+        await connection.query(
+            `CREATE TRIGGER \`${importDb}\`.\`record_saved_source_cursor\` `
+            + `AFTER INSERT ON \`${importDb}\`.\`${positionTable}\` FOR EACH ROW `
+            + `INSERT INTO \`${importDb}\`.\`${savedCursorBytesTable}\` VALUES (LENGTH(NEW.source_cursor))`
+        );
         await connection.end();
 
         clearHookState(site);
@@ -156,6 +184,16 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                 + `${hookState?.boundary_cursor_header_bytes?.[sourceTable]}`,
         );
 
+        // The importer now sends the cursor in the request body, so the
+        // site's 431 header guard never observes importer requests. This
+        // bounds every cursor the importer persisted in the target instead:
+        // each one is what the next resume request would carry.
+        const savedCursorBytes = await readSavedCursorBytes(importDb, savedCursorBytesTable);
+        assert.ok(savedCursorBytes.length > 0, 'Expected the importer to persist at least one resume cursor');
+        for (const bytes of savedCursorBytes) {
+            assert.ok(bytes < 8191, `Expected every persisted cursor below 8191 bytes, got ${bytes}`);
+        }
+
         const sourceKeyed = await readTable(getDbName(site), sourceTable, 'id');
         const importedKeyed = await readTable(importDb, sourceTable, 'id');
         assert.deepEqual(importedKeyed, sourceKeyed, 'The large row or a neighboring row changed');
@@ -177,6 +215,16 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         return `${getSiteUrl(site)}&directory=${getSiteDir(site)}`;
     }
 });
+
+async function readSavedCursorBytes(database, table) {
+    const connection = await createMysqlConnection(database);
+    try {
+        const [rows] = await connection.query(`SELECT \`source_cursor_bytes\` FROM \`${table}\``);
+        return rows.map((row) => Number(row.source_cursor_bytes));
+    } finally {
+        await connection.end();
+    }
+}
 
 async function readTable(database, table, orderBy) {
     const connection = await createMysqlConnection(database);

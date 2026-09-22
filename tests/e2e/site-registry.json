@@ -215,7 +215,8 @@
       "port": 8143
     },
     "multisite-admin": {
-      "port": 8144
+      "port": 8144,
+      "hmacOnly": true
     },
     "multisite-files": {
       "port": 8145
