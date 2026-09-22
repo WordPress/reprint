@@ -75,6 +75,27 @@ final class CredentialResolutionTest extends TestCase
         ImportClient::resolve_credential(['secret' => 'tok', 'private_key' => $flag_path], $this->temp_dir);
     }
 
+    public function testEmptySecretFlagIsAnErrorNotAnAbsentCredential(): void
+    {
+        // pull --secret=$UNSET must stop here rather than generate a key.
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('--secret was given without a value.');
+        ImportClient::resolve_credential(['secret' => ''], $this->temp_dir);
+    }
+
+    public function testEmptyPrivateKeyFlagIsAnErrorNotAnAbsentCredential(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('--private-key was given without a value.');
+        ImportClient::resolve_credential(['private_key' => ''], $this->temp_dir);
+    }
+
+    public function testAbsentSecretStoredAsNullIsNotACredential(): void
+    {
+        // _cli_parse_options() seeds 'secret' => null before reading argv.
+        $this->assertSame(['scheme' => null], ImportClient::resolve_credential(['secret' => null], $this->temp_dir));
+    }
+
     public function testGroupReadableKeyIsRefused(): void
     {
         if (DIRECTORY_SEPARATOR === '\\') {

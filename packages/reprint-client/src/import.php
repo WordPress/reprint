@@ -2555,12 +2555,21 @@ class ImportClient
      * @param array<string,mixed> $options                Parsed CLI options.
      * @param string              $remote_state_directory `<state-dir>/remotes/<md5>`.
      * @return array{scheme:string|null,secret?:string,private_key_pem?:string,path?:string,source?:string}
-     * @throws InvalidArgumentException On conflicting flags or an unusable key file.
+     * @throws InvalidArgumentException On an empty flag value, conflicting flags, or an unusable key file.
      */
     public static function resolve_credential(array $options, string $remote_state_directory): array
     {
-        $secret = isset($options['secret']) && is_string($options['secret']) && $options['secret'] !== '' ? $options['secret'] : null;
-        $flag_path = isset($options['private_key']) && is_string($options['private_key']) && $options['private_key'] !== '' ? $options['private_key'] : null;
+        // The option parser stores `--secret=` as '' and an absent flag as
+        // null or no key. An empty value is a present, invalid option: falling
+        // through to key generation would hide an unset shell variable.
+        if (isset($options['secret']) && $options['secret'] === '') {
+            throw new InvalidArgumentException('--secret was given without a value.');
+        }
+        if (isset($options['private_key']) && $options['private_key'] === '') {
+            throw new InvalidArgumentException('--private-key was given without a value.');
+        }
+        $secret = isset($options['secret']) && is_string($options['secret']) ? $options['secret'] : null;
+        $flag_path = isset($options['private_key']) && is_string($options['private_key']) ? $options['private_key'] : null;
         if ($secret !== null && $flag_path !== null) {
             throw new InvalidArgumentException('--secret and --private-key cannot be combined. Pass one credential.');
         }
@@ -15133,6 +15142,7 @@ if (
         echo "  0  Command completed successfully\n";
         echo "  2  Partial progress — run the same command again to continue\n";
         echo "  3  Temporary transfer failure — retry the same command later\n";
+        echo "  4  pull generated a key and stopped so it can be enrolled\n";
         echo "  1  Error\n";
         echo "\n";
         echo "Resumable commands keep their command-specific work under --state-dir.\n";

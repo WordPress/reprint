@@ -1010,6 +1010,24 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertArrayNotHasKey('show_in_rest', $registered['args']);
     }
 
+    /** A Settings API write in the keys' own group passes the same validation as enrollment. */
+    public function testPublicKeysOptionSanitizesSettingsApiWrites(): void
+    {
+        \WordPress\Reprint\Server\Plugin\register_public_keys_setting();
+        $registered = $GLOBALS['reprint_server_registered_settings'][PUBLIC_KEYS_OPTION];
+        $this->assertSame('WordPress\\Reprint\\Server\\Plugin\\sanitize_public_keys_option', $registered['args']['sanitize_callback']);
+
+        $valid_entry = $this->sampleKeyEntry('laptop');
+        $valid_entry['push'] = true;
+        $sanitized = call_user_func($registered['args']['sanitize_callback'], [
+            'not an entry',
+            ['key_id' => 'garbage', 'public_key' => 'bm90IGEga2V5', 'label' => 'garbage', 'push' => true],
+            $valid_entry,
+        ]);
+        $this->assertSame([$valid_entry], $sanitized, 'only the entry with a parseable RSA key survives; label, added_at and push are kept');
+        $this->assertSame([], call_user_func($registered['args']['sanitize_callback'], 'not an array'));
+    }
+
     /**
      * options.php resets every option in a submitted group that the form did not post, so the keys must
      * not share the token form's group or each token save would empty them.

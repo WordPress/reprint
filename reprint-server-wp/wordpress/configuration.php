@@ -68,8 +68,38 @@ function register_public_keys_setting(): void {
         [
             'type' => 'array',
             'default' => [],
+            'sanitize_callback' => __NAMESPACE__ . '\\sanitize_public_keys_option',
         ]
     );
+}
+
+/**
+ * Keeps only entries that carry a valid RSA public key when the option is
+ * written through the Settings API, so an options.php POST in the keys' own
+ * group cannot store entries enroll_public_key() would have refused.
+ *
+ * @param mixed $value Submitted option value.
+ * @return array[] Entries in the shape normalize_public_key_entry() returns; empty
+ *                 when the value is not an array or the server runtime is missing.
+ */
+function sanitize_public_keys_option($value): array {
+    if (!is_array($value) || !require_server_runtime()) {
+        return [];
+    }
+    $entries = [];
+    foreach ($value as $stored_entry) {
+        $entry = normalize_public_key_entry($stored_entry);
+        if ($entry === null) {
+            continue;
+        }
+        try {
+            $entry['public_key'] = \WordPress\Reprint\Server\PublicKeyServer::assert_valid_public_key($entry['public_key']);
+        } catch (\InvalidArgumentException $exception) {
+            continue;
+        }
+        $entries[] = $entry;
+    }
+    return $entries;
 }
 
 /** @var string|null Key id of the entry enroll_public_key() last stored. */
