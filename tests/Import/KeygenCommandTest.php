@@ -119,6 +119,21 @@ final class KeygenCommandTest extends TestCase
         $this->assertStringContainsString('--private-key=' . $out, $result['output']);
     }
 
+    public function testKeygenRefusesAnEmptyOutEvenWithForce(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $this->assertSame(0, $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir])['exit_code']);
+        $state_key_path = ImportClient::key_file_path($url, $this->state_dir);
+        $enrolled_key = file_get_contents($state_key_path);
+
+        // `--out=$UNSET --force` must not fall back to the state key and replace it.
+        $result = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--out=', '--force']);
+
+        $this->assertSame(1, $result['exit_code'], $result['output']);
+        $this->assertStringContainsString('--out was given without a value', $result['output']);
+        $this->assertSame($enrolled_key, file_get_contents($state_key_path));
+    }
+
     public function testKeygenHelpIsDocumented(): void
     {
         $result = $this->runCli(['keygen', '--help']);

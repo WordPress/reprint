@@ -16229,7 +16229,13 @@ if (
         // each command owns every local state transition for its complete invocation.
         $reprint_process_lock = new ReprintProcessLock($state_dir);
         if ($command === 'keygen') {
-            $reprint_key_path = isset($options['out']) && is_string($options['out']) && $options['out'] !== ''
+            // As with --secret and --private-key, `--out=` is a present, invalid
+            // option. Treating it as absent would let `--out=$UNSET --force`
+            // replace the state directory's enrolled key.
+            if (isset($options['out']) && $options['out'] === '') {
+                throw new InvalidArgumentException('--out was given without a value.');
+            }
+            $reprint_key_path = isset($options['out']) && is_string($options['out'])
                 ? $options['out']
                 : ImportClient::key_file_path($remote_reprint_api_url, $state_dir);
             $reprint_generated_key = ImportClient::generate_key_file($reprint_key_path, !empty($options['force']));
