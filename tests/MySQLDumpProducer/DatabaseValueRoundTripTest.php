@@ -32,7 +32,7 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
             $members .= ",'member" . $index . "'";
         }
         $this->pdo->exec('CREATE TABLE wp_sets (flags SET(' . $members . ') PRIMARY KEY, nullable_flags SET(\'\',\'a\'), payload TEXT) ENGINE=InnoDB');
-        foreach (['0', '1', '2', '3', '9223372036854775808', '18446744073709551615'] as $mask) {
+        foreach (['0', '1', '2', '3', '9223372036854775808', '9223372036854775809', '18446744073709551615'] as $mask) {
             $this->pdo->exec('INSERT INTO wp_sets VALUES (' . $mask . ', ' . (in_array($mask, ['0', '1', '2', '3'], true) ? $mask : 'NULL') . ", REPEAT('x', 4000))");
         }
         $query = 'SELECT CAST(flags AS UNSIGNED), CAST(nullable_flags AS UNSIGNED), payload FROM wp_sets ORDER BY CAST(flags AS UNSIGNED)';

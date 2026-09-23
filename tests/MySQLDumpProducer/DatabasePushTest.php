@@ -238,7 +238,7 @@ class DatabasePushTest extends MySQLDumpProducerTestBase {
             $record = $reader->get_record();
             self::assertSame('https://target.test/changed', base64_decode($record['values']['value']));
             self::assertSame('0', base64_decode($record['values']['choice']));
-            self::assertSame('0102', bin2hex(base64_decode($record['values']['flag'])));
+            self::assertSame(['unsigned' => '258'], $record['values']['flag']);
         } finally {
             $reader->close();
         }
