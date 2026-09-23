@@ -59,6 +59,15 @@ jobs:
           MARIADB_SOURCE_USER: root
           MARIADB_SOURCE_PASS: my-secret-pw
 
+      - name: Test shared database values on MariaDB
+        working-directory: tests
+        run: ../vendor/bin/phpunit MySQLDumpProducer/DatabaseValueRoundTripTest.php
+        env:
+          DB_HOST: 127.0.0.1;port=3307
+          DB_USER: root
+          DB_PASS: my-secret-pw
+          DB_NAME: test_value_roundtrip_mariadb
+
       - name: Test administrator JavaScript
         run: node --test tests/reprint-server-admin.test.cjs
 
