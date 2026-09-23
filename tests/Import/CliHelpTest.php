@@ -17,6 +17,25 @@ class CliHelpTest extends TestCase
         return shell_exec($cmd . ' 2>&1') ?? '';
     }
 
+    public function testDatabasePushRejectsSelectionFlagsBeforeCreatingState(): void
+    {
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+        $state_directory = sys_get_temp_dir() . '/db-push-selection-' . uniqid('', true);
+        foreach (['--filter=none', '--exclude=/wp_orders', '--exclude-host-plugins'] as $flag) {
+            $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry)
+                . ' db-push https://example.test --state-dir=' . escapeshellarg($state_directory)
+                . ' ' . escapeshellarg($flag);
+            $output = shell_exec($command . ' 2>&1') ?? '';
+            $this->assertStringContainsString('db-push does not accept', $output);
+            $this->assertDirectoryDoesNotExist($state_directory);
+        }
+        $help = $this->runHelp('db-push');
+        $this->assertStringContainsString('--commit=', $help);
+        $this->assertStringContainsString('--writers-stopped', $help);
+        $this->assertStringContainsString('--abort', $help);
+        $this->assertStringNotContainsString('--fs-root', $help);
+    }
+
     public function testHostPluginFlagIsDocumentedOnAllImportCommands(): void
     {
         foreach (['pull', 'pull-files', 'pull-db', 'files-pull', 'db-apply', 'apply-runtime'] as $command) {

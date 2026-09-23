@@ -130,7 +130,7 @@ final class FilesPushCommandTest extends TestCase
             'https://example.test',
         ]);
         $this->assertStringNotContainsString(
-            '--force-http is accepted only by files-push.',
+            '--force-http is accepted only by files-push and db-push.',
             $rewriteUrlWithForceHttpSource['output']
         );
     }
