@@ -177,6 +177,9 @@ class DatabasePushSource {
                 }
                 if ($value !== null && ( strtoupper($this->rows->get_data_type($column)) === 'BIT' || ( !$this->sqlite_source && strtoupper($this->rows->get_data_type($column)) === 'SET' ) )) {
                     // Pull and push read the same unsigned BIT/SET value.
+                    // Keep 18446744073709551615 as decimal text through JSON;
+                    // the target's unsigned marker applies CAST(? AS UNSIGNED)
+                    // instead of inserting a SET label or overflowing a PHP int.
                     $values[$column] = ['unsigned' => (string) $value];
                     $rewritten_bytes += strlen( (string) $value);
                     continue;

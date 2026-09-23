@@ -9,7 +9,30 @@ use Reprint\Importer\Database\DatabaseConnection;
 use RuntimeException;
 use WP_MySQL_Lexer;
 
-/** Converts exported SET masks to the labels stored by the SQLite integration. */
+/**
+ * Converts exported SET masks to the labels stored by the SQLite integration.
+ *
+ * For SET('a','b'), MySQL uses one bit per declared member: 1 selects 'a',
+ * 2 selects 'b', and 3 selects both. The dump exports that number so a MySQL
+ * target can restore the exact selection. SQLite stores SET columns as text;
+ * importing 3 directly would store '3', not the source label 'a,b'.
+ *
+ * With `flags` declared as SET('a','b'), this turns:
+ *
+ *     INSERT INTO `wp_sets` (`flags`) VALUES (3);
+ *
+ * into:
+ *
+ *     INSERT INTO `wp_sets` (`flags`) VALUES (FROM_BASE64('YSxi'));
+ *
+ * FROM_BASE64('YSxi') yields 'a,b'. Using the dump's existing string encoding
+ * also handles quotes and backslashes in member names without SQL escaping.
+ * SET primary keys in chunk UPDATEs need the same conversion after INSERT.
+ *
+ * This preserves the displayed label, not hidden SET bits. With SET('','a'),
+ * masks 0 and 1 both become '', and masks 2 and 3 both become 'a'. SQLite's
+ * text storage cannot keep those selections distinct.
+ */
 class SqliteSetValueStatementRewriter {
     private DatabaseConnection $database;
     private ?string $table = null;
@@ -20,6 +43,14 @@ class SqliteSetValueStatementRewriter {
         $this->database = $database;
     }
 
+    /**
+     * Rewrites the INSERT and UPDATE forms emitted by MySQLDumpProducer.
+     *
+     * The caller executes each rewritten statement before passing the next one,
+     * so SHOW FULL COLUMNS sees the preceding CREATE/ALTER. Keep one instance
+     * per import group to reuse the current table's members. A resumed group
+     * can load them from the target schema without separate saved metadata.
+     */
     public function rewrite(string $sql): string {
         $lexer = new WP_MySQL_Lexer($sql);
         if (!$lexer->next_token()) {
@@ -32,6 +63,8 @@ class SqliteSetValueStatementRewriter {
             $this->table = null;
             return $sql;
         }
+        // Read only the statement head until we know the table has SET columns.
+        // Ordinary WordPress tables need no full-statement lexer pass here.
         $table_index = $insert ? 2 : 1;
         for ($index = 1; $index <= $table_index; ++$index) {
             $lexer->next_token();
@@ -85,6 +118,10 @@ class SqliteSetValueStatementRewriter {
         if (!$insert) {
             // Chunk UPDATEs compare an exported SET primary key by unsigned
             // mask. SQLite stores its label, so both sides must change together.
+            // For SET('a','b'), CAST(`wp_sets`.`flags` AS UNSIGNED) = 3
+            // becomes `wp_sets`.`flags` = FROM_BASE64('YSxi'). Keeping the CAST
+            // would compare the numeric conversion of 'a,b' with 3 and miss
+            // the row whose large value the UPDATE is meant to finish.
             $token_count = count($tokens);
             for ($index = 0; $index + 9 < $token_count; ++$index) {
                 if ($tokens[$index]->id !== WP_MySQL_Lexer::CAST_SYMBOL ||
@@ -117,7 +154,17 @@ class SqliteSetValueStatementRewriter {
         return $sql;
     }
 
-    /** @param list<string> $members Declared SET members in bit order. */
+    /**
+     * Returns the dump's string literal for the selected members in schema order.
+     *
+     * Divide the decimal string by two once per member. Each remainder tells
+     * whether that member is selected: mask 5 gives remainders 1, 0, 1 and
+     * selects the first and third members. Casting the whole mask to PHP int
+     * would lose values above PHP_INT_MAX, such as 18446744073709551615.
+     *
+     * @param string       $mask    Unsigned decimal mask, not a SET label.
+     * @param list<string> $members Declared SET members in bit order.
+     */
     private function label_literal(string $mask, array $members): string {
         $original_mask = $mask;
         $label = '';

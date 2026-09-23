@@ -679,6 +679,13 @@ class DatabaseRowsReader {
     /**
      * Keep values and primary-key cursors independent of PHP's precision settings.
      *
+     * With precision=3, casting the float 1.2345678901234567 to a string gives
+     * '1.23'. JSON can shorten it too when serialize_precision is low. Convert
+     * native floats to strings with up to 17 significant digits before either,
+     * including hidden primary-key fields and rows reloaded after resume.
+     * Otherwise the copied value changes, and a rounded resume key can select
+     * the same row again or skip a nearby key. Already-string values stay intact.
+     *
      * @param array<string,mixed> $record Fetched row, including hidden key fields.
      * @return array<string,mixed> Row with native floats written as round-trip decimals.
      */
@@ -888,8 +895,10 @@ class DatabaseRowsReader {
                 foreach ($this->current_column_types as $column => $metadata) {
                     if (strtoupper($metadata["data_type"]) === "SET" &&
                         ( isset($this->last_pk_values[$column]) || isset($this->current_row[$column]) )) {
-                        // A prior server emitted labels. A numeric label such
-                        // as '2' is not necessarily mask 2; never guess on resume.
+                        // A prior server emitted labels. For SET('2','1'), its
+                        // saved label '2' means mask 1. Reading it as mask 2
+                        // would skip the next row. The format marker is needed
+                        // even when the saved value looks numeric.
                         throw new \RuntimeException(
                             "Cannot resume table " . $this->quote_identifier($this->current_table) .
                             ": its cursor lacks unsigned SET masks. Abort this database transfer and start again."
@@ -1409,7 +1418,21 @@ class DatabaseRowsReader {
         return $columns;
     }
 
-    /** Returns a lossless numeric SELECT expression for both pull and push. */
+    /**
+     * Returns the SELECT expression used by pull and push to read numeric values.
+     *
+     * MySQL SET('','a') displays both mask 0 and mask 1 as ''. Reading the
+     * unsigned mask keeps them distinct, including when the column is a primary
+     * key. SQLite has only the label, so its SET columns remain text.
+     *
+     * FLOAT needs promotion on the database side, before the driver's text
+     * protocol can round it. Adding 0e0 requests a DOUBLE result without adding
+     * precision to the stored value. preserve_floating_point_values() then
+     * prevents a second loss of digits when PHP converts a native float.
+     *
+     * Other types return their quoted identifier unchanged. Callers may pass
+     * every column; this method does not turn text or spatial values into numbers.
+     */
     public function get_numeric_value_expression(string $column): string
     {
         $identifier = $this->quote_identifier($column);
