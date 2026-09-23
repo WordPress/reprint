@@ -420,6 +420,23 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
     }
 
+    public function testTokenGeneratorDoesNotSubmitTheFormOrChangeTheStoredToken(): void
+    {
+        $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
+
+        $document = new DOMDocument();
+        $document->loadHTML($this->renderAdminPage());
+        $xpath = new DOMXPath($document);
+        $buttons = $xpath->query('//button[contains(@class, "reprint-server-generate-token")]');
+
+        $this->assertCount(1, $buttons);
+        $button = $buttons->item(0);
+        $this->assertSame('button', $button->getAttribute('type'));
+        $this->assertSame('reprint_server_connection_token', $button->getAttribute('aria-controls'));
+        $this->assertSame('Generate new token', trim($button->textContent));
+        $this->assertSame('current-token', get_connection_token());
+    }
+
     public function testDownloadOnlyAdminCopyAndPushAccessForm(): void
     {
         \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
