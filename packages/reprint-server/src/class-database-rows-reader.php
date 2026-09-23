@@ -749,6 +749,7 @@ class DatabaseRowsReader {
      *     @type int         $tables_before_current SQL tables before this table, excluding ID-only reads.
      *     @type int         $tables_total        Number of tables selected for export.
      *     @type array|null  $current_row         Encoded retained record.
+     *     @type string      $set_value_format    unsigned on MySQL, label on SQLite.
      *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
      *     @type array|null  $current_column_names Current column names.
      *     @type string|null $multisite_selection Rule version, base prefix, network ID and site ID; null without selected-site rules.
@@ -767,6 +768,7 @@ class DatabaseRowsReader {
             "table_group" => $this->table_group,
             "last_scanned_usermeta_id" => $this->last_scanned_usermeta_id,
             "current_table" => $this->current_table,
+            "set_value_format" => $this->is_numeric_type("SET") ? "unsigned" : "label",
             "current_pk_columns" => $this->current_pk_columns,
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
             "current_offset" => $this->current_offset,
@@ -882,6 +884,19 @@ class DatabaseRowsReader {
                 );
             }
             $this->current_column_types = $this->get_column_types($this->current_table);
+            if ($this->is_numeric_type("SET") && ( $cursor_data["set_value_format"] ?? null ) !== "unsigned") {
+                foreach ($this->current_column_types as $column => $metadata) {
+                    if (strtoupper($metadata["data_type"]) === "SET" &&
+                        ( isset($this->last_pk_values[$column]) || isset($this->current_row[$column]) )) {
+                        // A prior server emitted labels. A numeric label such
+                        // as '2' is not necessarily mask 2; never guess on resume.
+                        throw new \RuntimeException(
+                            "Cannot resume table " . $this->quote_identifier($this->current_table) .
+                            ": its cursor lacks unsigned SET masks. Abort this database transfer and start again."
+                        );
+                    }
+                }
+            }
             if (empty($this->current_column_types)) {
                 throw new \RuntimeException(
                     "Table " . $this->quote_identifier($this->current_table) . " was dropped between export requests " .

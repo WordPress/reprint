@@ -4,6 +4,7 @@ require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/database-push/class-database-push-source.php';
 
 use WordPress\Reprint\Server\DatabasePush;
+use WordPress\Reprint\Server\DatabaseRowsReader;
 use WordPress\Reprint\Server\MysqliDriverPDO;
 use WordPress\Reprint\Server\MySQLDumpProducer;
 
@@ -49,6 +50,23 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
         $expected = $this->pdo->query($query)->fetchAll(PDO::FETCH_NUM);
         $target = $this->transfer($operation, $driver, 'wp_places');
         self::assertSame($expected, $target->query($query)->fetchAll(PDO::FETCH_NUM));
+    }
+
+    public function testLegacySetLabelCursorRequiresANewTransfer(): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (flags SET('2', '1') PRIMARY KEY) ENGINE=InnoDB");
+        $this->pdo->exec('INSERT INTO wp_sets VALUES (1), (2)');
+        // Before unsigned SET reads, get_cursor_state() encoded the label '2'
+        // after reading mask 1. Treating it as mask 2 would skip the second row.
+        $legacy_cursor = [
+            'current_table' => 'wp_sets',
+            'current_pk_columns' => ['flags'],
+            'last_pk_values' => ['flags' => ['__binary__' => base64_encode('2')]],
+            'current_row' => null,
+        ];
+        $reader = new DatabaseRowsReader($this->pdo, ['tables_to_process' => ['wp_sets']]);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('cursor lacks unsigned SET masks');
+        $reader->restore_cursor_state($legacy_cursor);
     }
 
     public static function transferProvider(): array {
