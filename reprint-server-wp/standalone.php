@@ -25,14 +25,20 @@ $require_private_file = static function ($path, string $docroot) use ($reject_co
         $reject_configuration('Standalone Reprint requires a readable private configuration file and token file.');
     }
     $resolved = str_replace('\\', '/', $resolved);
+    $configured = str_replace('\\', '/', $path);
     $docroot = rtrim(str_replace('\\', '/', $docroot), '/') . '/';
-    if (DIRECTORY_SEPARATOR === '\\') {
-        $inside = strncasecmp($resolved, $docroot, strlen($docroot)) === 0;
-    } else {
-        $inside = strpos($resolved, $docroot) === 0;
+    if ($configured[0] !== '/' && !preg_match('/^[A-Za-z]:\//', $configured)) {
+        $reject_configuration('Standalone Reprint configuration and token paths must be absolute.');
     }
-    if ($inside) {
-        $reject_configuration('Standalone Reprint configuration and token files must be outside the document root.');
+    // Check the supplied path too: a public symlink to a private file still
+    // exposes that file through the web server's document root.
+    foreach ([$configured, $resolved] as $candidate) {
+        $inside = DIRECTORY_SEPARATOR === '\\'
+            ? strncasecmp($candidate, $docroot, strlen($docroot)) === 0
+            : strpos($candidate, $docroot) === 0;
+        if ($inside) {
+            $reject_configuration('Standalone Reprint configuration and token files must be outside the document root.');
+        }
     }
     return $resolved;
 };

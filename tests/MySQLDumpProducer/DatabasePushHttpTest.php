@@ -95,6 +95,16 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         self::assertStringContainsString('outside', $response['detail']);
     }
 
+    public function testStandaloneRejectsPublicTokenAliasToPrivateFile(): void {
+        symlink($this->root . '/secret.php', $this->root . '/site/token.php');
+        $config = file_get_contents($this->root . '/config.php');
+        file_put_contents($this->root . '/config.php', str_replace($this->root . '/secret.php', $this->root . '/site/token.php', $config));
+        $context = stream_context_create(['http' => ['ignore_errors' => true]]);
+        $response = json_decode(file_get_contents($this->remote_reprint_api_url . '?endpoint=push_db_status', false, $context), true);
+        self::assertSame('not_configured', $response['reason']);
+        self::assertStringContainsString('outside', $response['detail']);
+    }
+
     public function testStandaloneAuthenticationSurvivesOptionsReplacementAndCleanup(): void {
         $this->pdo->exec('CREATE TABLE wp_options (option_name varchar(191) PRIMARY KEY, option_value longtext) ENGINE=InnoDB');
         $this->pdo->exec("INSERT INTO wp_options VALUES ('active_plugins', 'a:0:{}'), ('reprint_server_connection_token', 'different-token')");
