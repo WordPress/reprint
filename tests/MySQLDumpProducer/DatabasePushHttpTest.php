@@ -213,6 +213,70 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
     }
 
+    /** @dataProvider triggerSourcesProvider */
+    public function testCliWarnsAndLeavesTriggersOffNewLiveTables(bool $source_trigger, bool $target_trigger): void {
+        $this->pdo->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longtext) ENGINE=InnoDB');
+        if ($source_trigger) {
+            $this->pdo->exec("CREATE TRIGGER mark_value BEFORE INSERT ON wp_options FOR EACH ROW SET NEW.value=CONCAT('source:', NEW.value)");
+        }
+        $this->pdo->exec("INSERT INTO wp_options VALUES (1, 'local')");
+        if ($target_trigger) {
+            $this->receiver->exec("CREATE TRIGGER mark_value BEFORE INSERT ON wp_options FOR EACH ROW SET NEW.value=CONCAT('target:', NEW.value)");
+        }
+        $this->receiver->exec("INSERT INTO wp_options VALUES (2, 'before')");
+        $this->receiver->exec('CREATE TABLE unrelated (id int PRIMARY KEY, value longtext) ENGINE=InnoDB');
+        $this->receiver->exec("CREATE TRIGGER mark_unrelated BEFORE INSERT ON unrelated FOR EACH ROW SET NEW.value=CONCAT('unrelated:', NEW.value)");
+        $trigger_query = 'SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() ORDER BY TRIGGER_NAME';
+        $source_triggers = $this->pdo->query($trigger_query)->fetchAll(PDO::FETCH_ASSOC);
+        $target_triggers = $this->receiver->query($trigger_query)->fetchAll(PDO::FETCH_ASSOC);
+        $target_rows = $this->receiver->query('SELECT * FROM wp_options ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+        $arguments = [getenv('REPRINT_DB_PUSH_CLIENT_PHP') ?: PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client', 'db-push', $this->remote_reprint_api_url,
+            '--state-dir=' . $this->root . '/cli-state', '--secret=database-push-test-secret', '--force-http'];
+        $source = ['--source-dsn=mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName, '--source-user=' . getenv('DB_USER'), '--source-pass=' . getenv('DB_PASS')];
+        $staged = $this->runCli(array_merge($arguments, $source));
+        self::assertSame('ready', $staged['phase']);
+        self::assertSame(['Triggers are not copied. After commit, the new live tables will have no triggers.'], $staged['warnings']);
+        self::assertSame($target_triggers, $this->receiver->query($trigger_query)->fetchAll(PDO::FETCH_ASSOC));
+        self::assertSame($target_rows, $this->receiver->query('SELECT * FROM wp_options ORDER BY id')->fetchAll(PDO::FETCH_ASSOC));
+        $resumed = $this->runCli(array_merge($arguments, $source));
+        self::assertSame($staged['warnings'], $resumed['warnings']);
+        self::assertSame($staged['review'], $resumed['review']);
+
+        $commit_arguments = array_merge($arguments, ['--commit=' . $staged['review'], '--writers-stopped']);
+        $committed = $this->runCli($commit_arguments);
+        self::assertSame('committed', $committed['phase']);
+        self::assertSame($source_trigger ? 'source:local' : 'local', $this->receiver->query('SELECT value FROM wp_options WHERE id=1')->fetchColumn());
+        self::assertSame(0, (int) $this->receiver->query("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND EVENT_OBJECT_TABLE='wp_options'")->fetchColumn());
+        $this->receiver->exec("INSERT INTO wp_options VALUES (2, 'after')");
+        self::assertSame('after', $this->receiver->query('SELECT value FROM wp_options WHERE id=2')->fetchColumn());
+        if ($target_trigger) {
+            $old_table = $this->receiver->query("SELECT EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME='mark_value'")->fetchColumn();
+            self::assertContains($old_table, $committed['old_tables']);
+            self::assertSame($target_rows, $this->receiver->query('SELECT * FROM `' . $old_table . '` ORDER BY id')->fetchAll(PDO::FETCH_ASSOC));
+        }
+        $replayed = $this->runCli($commit_arguments);
+        self::assertSame($committed['old_tables'], $replayed['old_tables']);
+        self::assertSame('after', $this->receiver->query('SELECT value FROM wp_options WHERE id=2')->fetchColumn());
+        $cleaned = $this->runCli(array_merge($arguments, ['--cleanup']));
+        self::assertSame('complete', $cleaned['phase']);
+        self::assertSame([['TRIGGER_NAME' => 'mark_unrelated', 'EVENT_OBJECT_TABLE' => 'unrelated']], $this->receiver->query($trigger_query)->fetchAll(PDO::FETCH_ASSOC));
+        $this->receiver->exec("INSERT INTO unrelated VALUES (1, 'after')");
+        self::assertSame('unrelated:after', $this->receiver->query('SELECT value FROM unrelated')->fetchColumn());
+        self::assertSame($source_triggers, $this->pdo->query($trigger_query)->fetchAll(PDO::FETCH_ASSOC));
+        $this->pdo->exec("INSERT INTO wp_options VALUES (2, 'after')");
+        self::assertSame($source_trigger ? 'source:after' : 'after', $this->pdo->query('SELECT value FROM wp_options WHERE id=2')->fetchColumn());
+    }
+
+    /** @return array<string,array{bool,bool}> Trigger placement on the two databases. */
+    public static function triggerSourcesProvider(): array {
+        return [
+            'source only' => [true, false],
+            'target only' => [false, true],
+            'both' => [true, true],
+            'neither' => [false, false],
+        ];
+    }
+
     /** @dataProvider sourceDatabaseProvider */
     public function testCliStagesReviewsDiscardsAndLeavesProductionUnchanged(string $engine): void {
         if ($engine === 'sqlite') {
@@ -225,16 +289,20 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
         $database->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longtext) ENGINE=InnoDB');
         $database->exec("INSERT INTO wp_options VALUES (1, 'https://local.test/')");
+        $this->receiver->exec("CREATE TRIGGER mark_value BEFORE INSERT ON wp_options FOR EACH ROW SET NEW.value=CONCAT('target:', NEW.value)");
         $arguments = [getenv('REPRINT_DB_PUSH_CLIENT_PHP') ?: PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client', 'db-push', $this->remote_reprint_api_url,
             '--state-dir=' . $this->root . '/cli-state', '--secret=database-push-test-secret', '--force-http'];
         $source = ['--source-dsn=' . $dsn, '--source-user=' . getenv('DB_USER'), '--source-pass=' . getenv('DB_PASS'), '--rewrite-url', 'https://local.test', 'https://production.example.com'];
         $staged = $this->runCli(array_merge($arguments, $source));
         self::assertSame('ready', $staged['phase']);
+        self::assertSame(['Triggers are not copied. After commit, the new live tables will have no triggers.'], $staged['warnings']);
         self::assertSame(['wp_options', 'wp_orders'], $staged['replace_tables']);
         self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
         $discarded = $this->runCli(array_merge($arguments, ['--abort']));
         self::assertSame('discarded', $discarded['phase']);
         self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+        $this->receiver->exec("INSERT INTO wp_options VALUES (2, 'after')");
+        self::assertSame('target:after', $this->receiver->query('SELECT value FROM wp_options WHERE id=2')->fetchColumn());
         $remaining = $this->receiver->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
         self::assertCount(3, $remaining); // Two live tables and one terminal progress marker.
     }

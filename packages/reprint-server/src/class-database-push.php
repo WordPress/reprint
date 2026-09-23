@@ -308,6 +308,7 @@ final class DatabasePush {
      *     @type list<string> $incoming_tables Final site names for incoming tables.
      *     @type list<string> $replace_tables Current live site table names when ready.
      *     @type list<string> $old_tables Private names retained after commit.
+     *     @type list<string> $warnings Overwrite warnings to show with the ready table review.
      * }
      */
     public function get_status(): array {
@@ -318,6 +319,7 @@ final class DatabasePush {
             'incoming_tables' => array_keys($state['tables']),
             'replace_tables' => $state['phase'] === 'ready' ? $this->assert_supported_target() : [],
             'old_tables' => in_array($state['phase'], ['committed', 'complete'], true) ? $state['old_tables'] : [],
+            'warnings' => $state['phase'] === 'ready' ? ['Triggers are not copied. After commit, the new live tables will have no triggers.'] : [],
         ];
     }
 
@@ -369,11 +371,6 @@ final class DatabasePush {
         $statement->execute([strlen($this->table_prefix), $this->table_prefix, strlen($this->table_prefix), $this->table_prefix]);
         if ( (int) $statement->fetchColumn() !== 0) {
             throw new RuntimeException('Another table has a foreign key referencing this site; database push cannot exchange it.');
-        }
-        $statement = $this->database->prepare('SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND BINARY LEFT(EVENT_OBJECT_TABLE, ?) = ?');
-        $statement->execute([strlen($this->table_prefix), $this->table_prefix]);
-        if ( (int) $statement->fetchColumn() !== 0) {
-            throw new RuntimeException('Database push does not support triggers on site tables.');
         }
         foreach (['EVENTS' => 'EVENT_SCHEMA', 'ROUTINES' => 'ROUTINE_SCHEMA'] as $table => $column) {
             if ( (int) $this->database->query('SELECT COUNT(*) FROM information_schema.' . $table . ' WHERE ' . $column . '=DATABASE()')->fetchColumn() !== 0) {

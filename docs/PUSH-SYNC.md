@@ -666,6 +666,11 @@ token; a separate confirmed command exchanges the live and incoming tables
 with one multi-table rename. Production-only site tables are moved aside too.
 No row diff is computed. Old tables remain until explicit cleanup.
 
+Triggers are outside the database push scope. The table review always warns
+that the new live tables will have no triggers. Existing target triggers stay
+with the retained old tables until cleanup; source triggers and triggers on
+tables outside the selected prefix are left alone.
+
 This command is separate from file commit. It requires a host-configured
 standalone API route, an operator-controlled stop of all writers, and manual
 cache clearing and site inspection before reopening. The first version has

@@ -14,6 +14,12 @@ prefix are not selected. Prefix matching is case-sensitive. Every table inside
 that prefix is selected; hosts must not share that prefix between independent
 sites.
 
+Triggers are not moved. Every table review warns that the new live tables
+will have no triggers after commit. Source triggers are left alone. Existing
+target triggers stay attached to the retained old tables and are deleted when
+cleanup drops those tables. Triggers on tables outside the selected prefix
+are left alone. Staging or aborting a push does not remove live triggers.
+
 ## Initial support
 
 This first implementation is deliberately opt-in and limited:
@@ -42,9 +48,9 @@ This first implementation is deliberately opt-in and limited:
   tables can coexist. Their definitions and enforcement settings are preserved.
 - Source storage placement (`DATA DIRECTORY`, `INDEX DIRECTORY`, `TABLESPACE`,
   and `CONNECTION`) is omitted by the client. The target chooses its own
-  storage. References to tables outside the push and triggers on selected
-  tables remain unsupported. Source routines and events are not exported;
-  targets containing routines or events are rejected.
+  storage. References to tables outside the push remain unsupported. Source
+  routines and events are not exported; targets containing routines or events
+  are rejected.
 - Table-prefix conversion, automatic writer shutdown, cache
   clearing, health checks, and automatic rollback are not implemented.
 
@@ -111,9 +117,10 @@ reprint db-push https://example.com/reprint-api.php \
   --rewrite-url https://local.test https://example.com
 ```
 
-The result contains `incoming_tables`, `replace_tables`, and a `review` token.
-No live table has changed. Check the complete replacement list. Then stop and
-drain **all** web requests, cron, queues, CLI commands, and schema migrations
+The result contains `incoming_tables`, `replace_tables`, `warnings`, and a
+`review` token. No live table has changed. Check the complete replacement list
+and the trigger warning. Then stop and drain **all** web requests, cron,
+queues, CLI commands, and schema migrations
 which may use these tables. WordPress's `.maintenance` file alone is not enough.
 
 ```sh
@@ -227,6 +234,12 @@ keyword-like literals, generated values, spatial bytes and SRIDs, partitions,
 source storage placement, cyclic/self-referencing foreign keys, constraint
 validation failures, long names, and replay after an ALTER commits but its
 progress write times out. They do not simulate database-server power loss or claim automatic writer draining.
+
+Trigger tests use the real CLI and HTTP endpoint. They cover source triggers,
+target triggers, both, and neither; the warning also appears on a resumed
+review. They check that incoming tables have no triggers, old target triggers
+remain until cleanup, abort leaves live triggers working, and source triggers
+and triggers outside the selected prefix are unchanged.
 
 The WordPress E2E suite shares pull datasets for SQL edge values, structured
 URL rewriting, binary/composite keys, legacy ENUM values, 200 × 80 KiB payloads,

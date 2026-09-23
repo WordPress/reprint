@@ -104,13 +104,6 @@ class DatabasePushArchive {
         }
         unset($table_status);
         sort($this->tables, SORT_STRING);
-        if (!$this->sqlite_source) {
-            $statement = $database->prepare('SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND BINARY LEFT(EVENT_OBJECT_TABLE, ?) = ?');
-            $statement->execute([strlen($table_prefix), $table_prefix]);
-            if ( (int) $statement->fetchColumn() !== 0) {
-                throw new RuntimeException('Database push does not yet export triggers on source site tables.');
-            }
-        }
         if ($this->tables === []) {
             throw new RuntimeException('The local source has no tables for prefix ' . $table_prefix . '.');
         }
