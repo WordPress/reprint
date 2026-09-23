@@ -52,12 +52,15 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
     }
 
     public static function transferProvider(): array {
-        return [['pull', 'pdo'], ['push', 'pdo'], ['pull', 'mysqli'], ['push', 'mysqli']];
+        return [['pull', 'pdo'], ['push', 'pdo'], ['pull', 'pdo-stringify'], ['push', 'pdo-stringify'], ['pull', 'mysqli'], ['push', 'mysqli']];
     }
 
     private function transfer(string $operation, string $driver, string $table): PDO {
         $dsn = 'mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName;
         $source = $driver === 'mysqli' ? new MysqliDriverPDO($dsn, getenv('DB_USER'), getenv('DB_PASS')) : $this->pdo;
+        if ($driver === 'pdo-stringify') {
+            $source->setAttribute(PDO::ATTR_STRINGIFY_FETCHES, true);
+        }
         if ($operation === 'pull') {
             $options = ['tables_to_process' => [$table], 'batch_size' => 1, 'max_statement_size' => 2048];
             $producer = new MySQLDumpProducer($source, $options);
