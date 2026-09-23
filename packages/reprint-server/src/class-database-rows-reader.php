@@ -448,6 +448,7 @@ class DatabaseRowsReader {
             return false;
         }
 
+        $record = $this->preserve_floating_point_values($record);
         $primary_key_values = $record;
         if ($column_expressions !== null) {
             $primary_key_values = [];
@@ -499,8 +500,7 @@ class DatabaseRowsReader {
         foreach ($this->current_pk_columns ?? [] as $index => $column) {
             $identifier = $this->quote_identifier($column);
             $data_type = $this->get_data_type($column);
-            $value = strtoupper($data_type) === 'BIT' ? 'CAST(' . $identifier . ' AS UNSIGNED)'
-                : ( $this->is_numeric_type($data_type) ? $identifier : 'CAST(' . $identifier . ' AS BINARY)' );
+            $value = $this->is_numeric_type($data_type) ? $this->get_numeric_value_expression($column) : 'CAST(' . $identifier . ' AS BINARY)';
             $expressions[] = $value . ' AS ' . $this->quote_identifier($this->get_custom_primary_key_alias($index, $column_expressions));
         }
         return implode(',', $expressions);
@@ -668,11 +668,30 @@ class DatabaseRowsReader {
             );
         }
 
+        $record = $this->preserve_floating_point_values($record);
         $record = $this->check_saved_user_reference($record);
         $record = $this->extract_spatial_value_metadata($record);
 
         $this->current_row = $record;
         $this->current_row_ends_query_batch = false;
+    }
+
+    /**
+     * Keep values and primary-key cursors independent of PHP's precision settings.
+     *
+     * @param array<string,mixed> $record Fetched row, including hidden key fields.
+     * @return array<string,mixed> Row with native floats written as round-trip decimals.
+     */
+    private function preserve_floating_point_values(array $record): array
+    {
+        foreach ($record as $column => $value) {
+            if (is_float($value)) {
+                // Seventeen significant digits round-trip a binary64 value.
+                // sprintf respects LC_NUMERIC; SQL always needs a decimal point.
+                $record[$column] = str_replace(',', '.', sprintf('%.17g', $value));
+            }
+        }
+        return $record;
     }
 
     /**
@@ -949,24 +968,16 @@ class DatabaseRowsReader {
                         " THEN LEFT({$binary_value}, 4) ELSE NULL END AS {$quoted_prefix_alias}";
                     continue;
                 }
-                if (strtoupper($column_info["data_type"]) === "BIT") {
-                    // Drivers may return native BIT results as packed bytes. Ask
-                    // the server for an unsigned number instead, keeping SQL
-                    // values and cursor comparisons numeric without a PHP cast
-                    // that could lose the upper half of BIT(64)'s range.
-                    $select_parts[] = "CAST({$quoted_column} AS UNSIGNED) AS {$quoted_column}";
-                } elseif ($this->db instanceof SqliteDriverPDO && PHP_VERSION_ID < 80100
-                    && !$this->is_numeric_type($column_info["data_type"])) {
+                if ($this->is_numeric_type($column_info["data_type"])) {
+                    $select_parts[] = $this->get_numeric_value_expression($column) . " AS {$quoted_column}";
+                } elseif ($this->db instanceof SqliteDriverPDO && PHP_VERSION_ID < 80100) {
                     // Before PHP 8.1, PDO SQLite returns an empty BLOB as NULL.
                     // For example, CAST(permalink_structure AS BINARY) loses an
                     // empty option value. Return SQL text '' for zero bytes, but
                     // keep real NULLs and non-empty binary bytes unchanged.
                     $select_parts[] = "CASE WHEN LENGTH(CAST({$quoted_column} AS BINARY)) = 0 THEN '' " .
                         "ELSE CAST({$quoted_column} AS BINARY) END AS {$quoted_column}";
-                } elseif (
-                    $this->is_numeric_type($column_info["data_type"]) ||
-                    $this->is_binary_type($column_info["data_type"])
-                ) {
+                } elseif ($this->is_binary_type($column_info["data_type"])) {
                     $select_parts[] = $quoted_column;
                 } else {
                     $select_parts[] = "CAST({$quoted_column} AS BINARY) AS {$quoted_column}";
@@ -1188,14 +1199,17 @@ class DatabaseRowsReader {
      * database can use a primary-key range scan. FROM_BASE64() and UNHEX() have higher
      * coercibility than the column, so MySQL applies the column's character set
      * and collation without reading cursor bytes through the connection
-     * character set. ENUM and SET use a binary cast because their index
-     * positions and fetched string values differ.
+     * character set. ENUM uses a binary cast because its index position and
+     * fetched label differ. MySQL SET compares and sorts the exported mask.
      */
     private function build_primary_key_column_expression($column)
     {
         $qualified_column = $this->quote_identifier($this->current_table) . "." .
             $this->quote_identifier($column);
         $data_type = strtoupper($this->get_data_type($column));
+        if ($data_type === "SET" && $this->is_numeric_type($data_type)) {
+            return "CAST({$qualified_column} AS UNSIGNED)";
+        }
         if ($this->is_numeric_type($data_type) || $this->is_binary_type($data_type)) {
             return $qualified_column;
         }
@@ -1380,10 +1394,33 @@ class DatabaseRowsReader {
         return $columns;
     }
 
+    /** Returns a lossless numeric SELECT expression for both pull and push. */
+    public function get_numeric_value_expression(string $column): string
+    {
+        $identifier = $this->quote_identifier($column);
+        $data_type = strtoupper($this->get_data_type($column));
+        if ($data_type === "BIT" || ( $data_type === "SET" && $this->is_numeric_type($data_type) )) {
+            // Packed BIT bytes vary by driver. SET labels cannot distinguish
+            // mask 0 from an empty-string member. Never cast either to PHP int:
+            // both types can use the full unsigned 64-bit range.
+            return "CAST({$identifier} AS UNSIGNED)";
+        }
+        if (in_array($data_type, ["FLOAT", "DOUBLE", "REAL"], true)) {
+            // Promote FLOAT before transport: the text protocol can otherwise
+            // return only six significant digits of its stored binary value.
+            return "({$identifier} + 0e0)";
+        }
+        return $identifier;
+    }
+
     /** Identifies numeric types which the dump emits as bare literals. */
     public function is_numeric_type($data_type)
     {
         $data_type = strtoupper($data_type);
+        if ($data_type === "SET") {
+            // Both SQLite adapters store labels, without a MySQL SET bitmask.
+            return !$this->db instanceof SqliteDriverPDO && !$this->db instanceof \WP_PDO_MySQL_On_SQLite;
+        }
         foreach (["TINYINT", "SMALLINT", "MEDIUMINT", "INTEGER", "INT", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "BIT", "YEAR"] as $type) {
             if (strpos($data_type, $type) === 0) {
                 return true;

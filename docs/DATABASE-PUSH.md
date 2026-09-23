@@ -191,7 +191,18 @@ PHP lengths and structured WordPress content. Binary columns are copied unchange
 ENUM index zero is distinct from a declared empty label or the label `0`.
 Restoring that legacy value accepts only the server warnings naming its columns;
 other warnings roll the row back. Rewriting a primary key is rejected. Source
-rows are never updated. MySQL source connections use UTC so TIMESTAMP values
+rows are never updated. Pull and push share numeric reads: native floating-point
+values become 17-digit round-trip decimals before PHP string conversion or cursor
+storage. MySQL SET values travel as unsigned masks, preserving empty members and
+all 64 bits. SQLite stores SET labels rather than masks and keeps that text path.
+
+Spatial type detection is shared, but the formats remain different. Push uses
+the source engine's WKB conversion plus SRID; pull retains its raw spatial bytes,
+large-value streaming, and cross-engine axis-order guard. Sharing the spatial
+format would require changing the SQL dump and importer together, not just
+moving the push expression into a helper.
+
+MySQL source connections use UTC so TIMESTAMP values
 keep their meaning on the target. SQLite sources are opened read-only, using the
 integration's stored MySQL schema. Plain SQLite databases and integration
 metadata requiring an upgrade are not supported.

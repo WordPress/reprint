@@ -175,8 +175,8 @@ class DatabasePushSource {
                         continue;
                     }
                 }
-                if ($value !== null && $this->sqlite_source && preg_match('/^bit\(/i', $this->columns[$column]['Type'])) {
-                    // SQLite stores BIT as a number, not MySQL's packed bytes.
+                if ($value !== null && ( strtoupper($this->rows->get_data_type($column)) === 'BIT' || ( !$this->sqlite_source && strtoupper($this->rows->get_data_type($column)) === 'SET' ) )) {
+                    // Pull and push read the same unsigned BIT/SET value.
                     $values[$column] = ['unsigned' => (string) $value];
                     $rewritten_bytes += strlen( (string) $value);
                     continue;
@@ -261,6 +261,12 @@ class DatabasePushSource {
 
     private function open_rows(): void {
         $table = DatabasePush::identifier($this->current_table);
+        $this->rows = new \WordPress\Reprint\Server\DatabaseRowsReader($this->database, ['tables_to_process' => [$this->current_table]]);
+        if (isset($this->cursor['reader'])) {
+            $this->rows->restore_cursor_state($this->cursor['reader']);
+        } else {
+            $this->rows->move_to_next_table();
+        }
         $this->columns = [];
         $sizes = [];
         foreach ($this->database->query('SHOW FULL COLUMNS FROM ' . $table)->fetchAll(PdoConstants::fetch_assoc()) as $column) {
@@ -272,7 +278,7 @@ class DatabasePushSource {
                 // The target computes generated values from rewritten inputs.
                 continue;
             }
-            $column['spatial'] = in_array(strtolower($column['Type']), ['geometry', 'point', 'linestring', 'polygon', 'multipoint', 'multilinestring', 'multipolygon', 'geometrycollection'], true);
+            $column['spatial'] = $this->rows->is_spatial_type($this->rows->get_data_type($column['Field']));
             $this->columns[$column['Field']] = $column;
             $value = DatabasePush::identifier($column['Field']);
             if ($column['Collation'] !== null) {
@@ -290,10 +296,7 @@ class DatabasePushSource {
         foreach (array_keys($this->columns) as $column) {
             $identifier = DatabasePush::identifier($column);
             // Ask MySQL to withhold an oversized row before PHP receives it.
-            // PDO decodes BIT result metadata as an integer. CAST keeps
-            // these bytes unchanged through IF and native parameter binding.
-            $value = !$this->sqlite_source && preg_match('/^bit\(/i', $this->columns[$column]['Type'])
-                ? 'CAST(' . $identifier . ' AS BINARY)' : $identifier;
+            $value = $this->rows->get_numeric_value_expression($column);
             if (!$this->sqlite_source && preg_match('/^enum\(/i', $this->columns[$column]['Type'])) {
                 // Carry the index as well as the label to distinguish
                 // index zero from a declared empty-string member. A numeric
@@ -308,12 +311,6 @@ class DatabasePushSource {
             $this->select[$column] = 'IF(' . $size . '>' . self::MAX_ROW_BYTES . ',NULL,' . $value . ')';
         }
         $this->select['__reprint_row_bytes'] = $size;
-        $this->rows = new \WordPress\Reprint\Server\DatabaseRowsReader($this->database, ['tables_to_process' => [$this->current_table]]);
-        if (isset($this->cursor['reader'])) {
-            $this->rows->restore_cursor_state($this->cursor['reader']);
-        } else {
-            $this->rows->move_to_next_table();
-        }
         if ($this->database instanceof MysqliDriverPDO) {
             $this->database->set_buffered(false);
         } elseif (!$this->sqlite_source) {
