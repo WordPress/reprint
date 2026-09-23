@@ -128,15 +128,16 @@ rules.
 ## Uninstalling
 
 Deleting Reprint Server through WordPress removes its stored connection token,
-push authorization, and activation redirect transient, including the legacy
-`site_export_*` settings. On multisite, it cleans these settings on every site
-and removes the connection token from every network. Other plugins' settings
-are left alone. Deactivation keeps Reprint's settings.
+enrolled public keys, push authorization, and activation redirect transient,
+including the legacy `site_export_*` settings. On multisite, it cleans these
+settings on every site and removes the connection token and enrolled keys from
+every network. Other plugins' settings are left alone. Deactivation keeps
+Reprint's settings.
 
 Migration integrations must run WordPress's uninstall routine while the plugin
 files are still present. Removing the directory directly does not run cleanup.
-WordPress deletes files inside the plugin directory, including `secret.php`,
-when deleting the plugin. Host-configured token files and private transfer
+WordPress deletes files inside the plugin directory, including `secret.php`
+and `public-keys.php`, when deleting the plugin. Host-configured token files and private transfer
 directories outside that directory are not removed by this uninstall routine.
 
 ## Using as a library

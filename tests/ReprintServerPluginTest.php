@@ -422,6 +422,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testTokenGeneratorDoesNotSubmitTheFormOrChangeTheStoredToken(): void
     {
+        // Only a host without OpenSSL renders the editable token field the generator fills.
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
 
         $document = new DOMDocument();
