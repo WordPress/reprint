@@ -8,6 +8,9 @@ namespace WordPress\Reprint\Server\Plugin;
 // replace its option-backed token. Only trusted host configuration is loaded.
 ini_set('display_errors', '0');
 header('Cache-Control: no-store');
+// FPM workers retain realpath results across requests. Recheck private paths
+// before loading config, not only later inside the shared request handler.
+clearstatcache(true);
 
 $reject_configuration = static function (string $detail): void {
     http_response_code(503);
