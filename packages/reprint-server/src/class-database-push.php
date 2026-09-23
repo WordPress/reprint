@@ -115,7 +115,7 @@ final class DatabasePush {
             }
         } elseif (isset($record['table'])) {
             $table = $record['table'];
-            self::identifier($table);
+            self::validate_identifier($table);
             if (strpos($table, $this->table_prefix) !== 0 || isset($state['tables'][$table]) || count($state['tables']) >= self::MAX_TABLES) {
                 throw new RuntimeException('Archive table is repeated, outside the target prefix, or exceeds the 256-table limit: ' . $table);
             }
@@ -336,10 +336,15 @@ final class DatabasePush {
     }
 
     public static function identifier(string $name): string {
+        self::validate_identifier($name);
+        return '`' . $name . '`';
+    }
+
+    /** Reject names outside the database push identifier format without returning SQL. */
+    public static function validate_identifier(string $name): void {
         if (!preg_match('/^[a-zA-Z0-9_]{1,64}$/D', $name)) {
             throw new InvalidArgumentException('Database push SQL identifier must contain 1–64 letters, digits, or underscores: ' . $name . '.');
         }
-        return '`' . $name . '`';
     }
 
     /** @return list<string> Supported current site table names in sorted order. */
@@ -363,7 +368,7 @@ final class DatabasePush {
                 throw new RuntimeException('Database push requires InnoDB base tables; observed ' . $table['TABLE_NAME'] . '.');
             }
             $name = $table['TABLE_NAME'];
-            self::identifier($name);
+            self::validate_identifier($name);
             $names[] = $name;
         }
         // A foreign key in another prefix/schema can still point into this site.

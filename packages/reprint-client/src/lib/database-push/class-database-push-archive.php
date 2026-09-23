@@ -92,7 +92,7 @@ class DatabasePushArchive {
             if (strpos($name, $table_prefix) !== 0 || \WordPress\Reprint\Server\MultisiteDatabaseSelection::is_internal_table($name)) {
                 continue;
             }
-            DatabasePush::identifier($name);
+            DatabasePush::validate_identifier($name);
             if (!isset($status['Engine'])) {
                 throw new RuntimeException('Database push does not yet export views: ' . $name . '.');
             }
@@ -286,7 +286,7 @@ class DatabasePushArchive {
             $this->columns = [];
             $sizes = [];
             foreach ($this->database->query('SHOW FULL COLUMNS FROM ' . $table)->fetchAll(PdoConstants::fetch_assoc()) as $column) {
-                DatabasePush::identifier($column['Field']);
+                DatabasePush::validate_identifier($column['Field']);
                 if ($column['Field'] === '__reprint_row_bytes') {
                     throw new RuntimeException('Source column __reprint_row_bytes conflicts with the archive row-size check.');
                 }
