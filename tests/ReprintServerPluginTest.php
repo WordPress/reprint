@@ -853,6 +853,27 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertArrayNotHasKey('status', $response['body'], 'a pull endpoint keeps the pull error shape');
     }
 
+    public function testEmptySecretFileDoesNotBlockAKeySignedRequestOnAKeyHost(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(true);
+        file_put_contents(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE, "<?php return '';\n");
+        [$private_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $key_client = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
+        update_option_public_keys([[
+            'key_id' => $key_client->get_key_id(), 'public_key' => $public_key,
+            'added_at' => 1, 'push' => false,
+        ]]);
+
+        // A key host never accepts the token, so a broken secret.php is irrelevant there.
+        $response = $this->dispatchAndCapture(
+            $this->serverWithAuth($key_client->get_auth_headers('GET', 'https://s.test/?reprint-api'))
+        );
+
+        $this->assertNotSame(403, $response['status']);
+        $this->assertNotSame(503, $response['status']);
+        $this->assertArrayNotHasKey('reason', $response['body']);
+    }
+
     /**
      * An exit callable that returns must not hand control back to the
      * dispatcher: the process still ends, so nothing after the error body

@@ -710,7 +710,9 @@ function handle_api_request(array $options = []): void {
             }
             error(500, $runtime_message);
         }
-        if (has_connection_token_file() && empty(get_file_connection_token())) {
+        // A broken secret.php only matters where the token is the scheme; a
+        // key host never accepts it, so enrolled keys must still authenticate.
+        if (!Utils::key_auth_required() && has_connection_token_file() && empty(get_file_connection_token())) {
             $secret_file_message = 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.';
             if (is_push_endpoint($endpoint)) {
                 push_error(503, 'not_configured', $secret_file_message);
