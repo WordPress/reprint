@@ -141,7 +141,7 @@ class SettingsPage {
     /** Explain where the connection token comes from. */
     public function render_connection_section(): void {
         echo '<p>' . esc_html__(
-            'Paste the connection token supplied by the tool which will connect to this site.',
+            'Paste the connection token supplied by your tool, or generate a random token and use it in your tool. Save Changes to apply the token.',
             'reprint'
         ) . '</p>';
     }
@@ -164,6 +164,12 @@ class SettingsPage {
                 data-show-label="<?php echo esc_attr__('Show connection token', 'reprint'); ?>"
                 data-hide-label="<?php echo esc_attr__('Hide connection token', 'reprint'); ?>">
             <span class="dashicons dashicons-visibility" aria-hidden="true"></span>
+        </button>
+        <button type="button"
+                class="button reprint-server-generate-token"
+                aria-controls="reprint_server_connection_token"
+                data-generated-message="<?php echo esc_attr__('Random connection token generated. Save Changes to apply it.', 'reprint'); ?>">
+            <?php echo esc_html__('Generate new token', 'reprint'); ?>
         </button>
         <?php
     }

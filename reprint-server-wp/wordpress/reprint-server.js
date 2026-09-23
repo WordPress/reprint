@@ -15,6 +15,24 @@
 		} );
 	}
 
+	var generate = document.querySelector( '.reprint-server-generate-token' );
+	if ( token && generate ) {
+		generate.addEventListener( 'click', function() {
+			var bytes = window.crypto.getRandomValues( new Uint8Array( 32 ) );
+			token.value = Array.from( bytes, function( byte ) {
+				return byte.toString( 16 ).padStart( 2, '0' );
+			} ).join( '' );
+			if ( token.type === 'password' && toggle ) {
+				toggle.click();
+			}
+			token.focus();
+			token.select();
+			if ( window.wp && wp.a11y ) {
+				wp.a11y.speak( generate.dataset.generatedMessage );
+			}
+		} );
+	}
+
 	var remoteReprintApiUrl = document.getElementById( 'reprint-server-api-url' );
 	var copy = document.querySelector( '.reprint-server-copy-url' );
 	if ( remoteReprintApiUrl && copy ) {
