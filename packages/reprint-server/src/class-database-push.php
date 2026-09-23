@@ -9,9 +9,9 @@ use PDO;
 use RuntimeException;
 
 /**
- * Imports one archive record per call, then exchanges all site tables together.
+ * Imports one streamed record per call, then exchanges all site tables together.
  *
- * Rows and the archive cursor commit in the same InnoDB transaction. CREATE
+ * Rows and the source cursor commit in the same InnoDB transaction. CREATE
  * TABLE uses IF NOT EXISTS; foreign-key ALTER checks the constraint name before
  * replay. The progress table participates in cutover, so a lost response cannot
  * repeat it.
@@ -32,8 +32,8 @@ final class DatabasePush {
     private $lock_name;
     /** @var array<string,mixed>|null */
     private $state;
-    /** @var resource|null */
-    private $input;
+    /** @var string|null One bounded, incomplete record, never a database archive. */
+    private $partial_record;
     /** @var string|null */
     private $progress_table;
     /** @var bool */
@@ -50,54 +50,108 @@ final class DatabasePush {
         $this->database = $database;
         $this->table_prefix = $table_prefix;
         $this->private_prefix = '__reprint_db_' . $push_session_id . '_';
-        $this->lock_name = 'reprint-db-' . substr(hash('sha256', $database->query('SELECT DATABASE()')->fetchColumn() . ':' . $table_prefix), 0, 40);
+        // Explicit extra tables can overlap selections with different prefixes.
+        // Serialize requests for the whole database, not just one prefix.
+        $this->lock_name = 'reprint-db-' . substr(hash('sha256', $database->query('SELECT DATABASE()')->fetchColumn()), 0, 40);
         $statement = $database->prepare('SELECT GET_LOCK(?, 0)');
         $statement->execute([$this->lock_name]);
         if ( (int) $statement->fetchColumn() !== 1) {
-            throw new PushException('busy', 'Another database push request is still running for this table prefix. Run the command again after it finishes.');
+            throw new PushException('busy', 'Another database push request is still running for this database. Run the command again after it finishes.');
         }
         // Do not inherit exporter AUTOCOMMIT=0 or a permissive SQL mode.
         // Host engine overrides must not replace InnoDB progress with MyISAM.
         $database->exec("SET SESSION sql_mode='STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION', autocommit=1, foreign_key_checks=1, lock_wait_timeout=5, time_zone='+00:00'");
     }
 
-    public function start(): void {
+    /** @param list<string> $extra_tables Explicitly selected tables outside the WordPress prefix. */
+    public function start(array $extra_tables = []): void {
         $this->assert_open();
+        $extra_tables = self::normalize_extra_tables($extra_tables, $this->table_prefix);
         if ($this->table_exists($this->private_prefix . 'state') || $this->table_exists($this->private_prefix . 'done')) {
-            return;
+            $state = $this->load_state();
+            // CREATE may have finished before the initial state row was saved.
+            if ( (int) $this->database->query('SELECT COUNT(*) FROM ' . self::identifier($this->progress_table) . ' WHERE id=1')->fetchColumn() !== 0) {
+                if ($state['extra_tables'] !== $extra_tables) {
+                    throw new RuntimeException('Database push extra table selection changed. Use the original selection or a new state directory.');
+                }
+                return;
+            }
         }
-        $this->assert_supported_target();
-        $this->database->exec('CREATE TABLE ' . self::identifier($this->private_prefix . 'state') . ' (id int PRIMARY KEY, state longtext NOT NULL) ENGINE=InnoDB');
+        $this->assert_supported_target($extra_tables);
+        $this->progress_table = $this->private_prefix . 'state';
+        $this->database->exec('CREATE TABLE IF NOT EXISTS ' . self::identifier($this->private_prefix . 'state') . ' (id int PRIMARY KEY, state longtext NOT NULL, partial_record longblob NOT NULL) ENGINE=InnoDB');
         // A process may stop after CREATE but before INSERT. load_state() also
         // supplies this initial state when the progress table is still empty.
-        $this->save_state($this->initial_state());
+        $state = $this->initial_state();
+        $state['extra_tables'] = $extra_tables;
+        $this->save_state($state);
     }
 
-    public function import_next_record(string $local_absolute_path): void {
+    /**
+     * Accepts one bounded piece of a database record. A record may span requests.
+     *
+     * A new client process restarts its first unconfirmed record at offset zero,
+     * because the source row may have changed. An uninterrupted client can keep
+     * its one encoded record and continue it across successful requests.
+     */
+    public function accept_record_chunk(int $record_number, int $total_bytes, int $offset, string $chunk): void {
+        $state = $this->load_state();
+        if ($state['phase'] !== 'importing' || $record_number !== $state['records']) {
+            throw new RuntimeException('Expected database record ' . $state['records'] . ' in importing phase; received ' . $record_number . ' in ' . $state['phase'] . '.');
+        }
+        if ($total_bytes <= 0 || $total_bytes > self::MAX_RECORD_BYTES || $offset < 0 || $offset + strlen($chunk) > $total_bytes) {
+            throw new RuntimeException('Database record has total ' . $total_bytes . ', offset ' . $offset . ', and chunk length ' . strlen($chunk) . '; records must fit within 2 MiB.');
+        }
+        if ($offset === 0) {
+            $this->partial_record = '';
+        } elseif ($this->partial_record === null) {
+            $this->partial_record = (string) $this->database->query('SELECT partial_record FROM ' . self::identifier($this->progress_table) . ' WHERE id=1')->fetchColumn();
+        }
+        if (strlen($this->partial_record) !== $offset) {
+            throw new RuntimeException('Database record chunk starts at ' . $offset . ' but the target has ' . strlen($this->partial_record) . ' bytes. Resume from the target source cursor.');
+        }
+        $this->partial_record .= $chunk;
+        if (strlen($this->partial_record) === $total_bytes) {
+            $record = json_decode($this->partial_record, true);
+            if (!is_array($record)) {
+                throw new RuntimeException('Database stream record is not a JSON object.');
+            }
+            $this->import_record($record);
+            $this->partial_record = '';
+        }
+    }
+
+    /** Save only the one incomplete record after a fully received request. */
+    public function finish_record_request(): void {
+        if ($this->partial_record !== null && $this->partial_record !== '') {
+            $statement = $this->database->prepare('UPDATE ' . self::identifier($this->progress_table) . ' SET partial_record=? WHERE id=1');
+            $statement->execute([$this->partial_record]);
+        }
+    }
+
+    /**
+     * @param array $record {
+     *     One client-prepared record.
+     *     @type array $cursor Source position after this record, saved with its rows.
+     *     @type string $table Site table name for CREATE or a foreign key.
+     *     @type string $ddl Client-prepared CREATE TABLE statement.
+     *     @type string $foreign_key Private deferred constraint name.
+     *     @type string $definition FOREIGN KEY clause with incoming table references.
+     *     @type array $values Column names mapped to encoded values.
+     *     @type bool $end True only after all tables, rows, and foreign keys.
+     * }
+     */
+    public function import_record(array $record): void {
         $this->assert_open();
         $state = $this->load_state();
         if ($state['phase'] !== 'importing') {
-            return;
+            throw new RuntimeException('Database records require importing phase; observed ' . $state['phase'] . '.');
         }
-        if ($this->input === null) {
-            $this->input = fopen($local_absolute_path, 'rb');
-            if ($this->input === false) {
-                throw new RuntimeException('Cannot open the completed database push archive.');
-            }
-            if (fseek($this->input, $state['offset']) !== 0) {
-                throw new RuntimeException('Cannot seek to the confirmed database archive byte offset.');
-            }
+        if (!is_array($record['cursor'] ?? null) || strlen(json_encode($record['cursor'])) > 32768) {
+            throw new RuntimeException('Database record requires a source cursor of at most 32 KiB.');
         }
-        $input = $this->input;
-        $line = fgets($input, self::MAX_RECORD_BYTES + 1);
-        if ($line === false || substr($line, -1) !== "\n") {
-            throw new RuntimeException('Database archive ended before its end record, or one record exceeds 2 MiB.');
-        }
-        $record = json_decode($line, true);
-        if (!is_array($record)) {
-            throw new RuntimeException('Database archive record is not a JSON object.');
-        }
-        $next_offset = ftell($input);
+        $state['cursor'] = $record['cursor'];
+        ++$state['records'];
         if (isset($record['foreign_key'])) {
             $table = $record['table'];
             $incoming = $state['tables'][$table] ?? null;
@@ -116,14 +170,14 @@ final class DatabasePush {
         } elseif (isset($record['table'])) {
             $table = $record['table'];
             self::validate_identifier($table);
-            if (strpos($table, $this->table_prefix) !== 0 || isset($state['tables'][$table]) || count($state['tables']) >= self::MAX_TABLES) {
-                throw new RuntimeException('Archive table is repeated, outside the target prefix, or exceeds the 256-table limit: ' . $table);
+            if (( strpos($table, $this->table_prefix) !== 0 && !in_array($table, $state['extra_tables'], true) ) || isset($state['tables'][$table]) || count($state['tables']) >= self::MAX_TABLES) {
+                throw new RuntimeException('Stream table is repeated, outside the selected tables, or exceeds the 256-table limit: ' . $table);
             }
             $incoming = $this->private_prefix . 't' . count($state['tables']);
             $ddl = $record['ddl'] ?? '';
             $head = 'CREATE TABLE ' . self::identifier($table) . ' (';
             if (strpos($ddl, $head) !== 0) {
-                throw new RuntimeException('Archive table definition must begin with ' . $head);
+                throw new RuntimeException('Stream table definition must begin with ' . $head);
             }
             // TODO: validate client-prepared DDL with a server-side parser.
             // Keyword matching cannot distinguish SQL from names or literals.
@@ -147,7 +201,7 @@ final class DatabasePush {
                     $value = $encoded['unsigned'];
                     if (!is_string($value) || !preg_match('/^(0|[1-9][0-9]{0,19})$/D', $value)
                         || ( strlen($value) === 20 && strcmp($value, '18446744073709551615') > 0 )) {
-                        throw new RuntimeException('Archive column ' . $column . ' requires an unsigned 64-bit decimal integer.');
+                        throw new RuntimeException('Stream column ' . $column . ' requires an unsigned 64-bit decimal integer.');
                     }
                     $expressions[] = 'CAST(? AS UNSIGNED)';
                     $values[] = $value;
@@ -156,7 +210,7 @@ final class DatabasePush {
                 if (is_array($encoded)) {
                     $value = base64_decode($encoded['wkb'] ?? '', true);
                     if ($value === false || !isset($encoded['srid']) || !is_int($encoded['srid']) || $encoded['srid'] < 0 || $encoded['srid'] > 4294967295) {
-                        throw new RuntimeException('Archive spatial column ' . $column . ' requires base64 WKB and an unsigned 32-bit SRID.');
+                        throw new RuntimeException('Stream spatial column ' . $column . ' requires base64 WKB and an unsigned 32-bit SRID.');
                     }
                     // MariaDB rejects text-typed WKB parameters even when their bytes are valid.
                     $expressions[] = 'ST_GeomFromWKB(CAST(? AS BINARY),?)';
@@ -167,7 +221,7 @@ final class DatabasePush {
                 $expressions[] = '?';
                 $value = $encoded === null || $encoded === 0 ? $encoded : base64_decode($encoded, true);
                 if ($value === false) {
-                    throw new RuntimeException('Archive column ' . $column . ' is not valid base64.');
+                    throw new RuntimeException('Stream column ' . $column . ' is not valid base64.');
                 }
                 $values[] = $value;
                 if ($value === 0) {
@@ -211,7 +265,6 @@ final class DatabasePush {
                         }
                     }
                 }
-                $state['offset'] = $next_offset;
                 $this->save_state($state);
                 $this->database->commit();
                 $this->state = $state;
@@ -220,12 +273,11 @@ final class DatabasePush {
                 throw $exception;
             }
             return;
-        } elseif (( $record['end'] ?? false ) === true && $state['tables'] !== [] && fgetc($input) === false) {
+        } elseif (( $record['end'] ?? false ) === true && $state['tables'] !== []) {
             $state['phase'] = 'ready';
         } else {
-            throw new RuntimeException('Unexpected database archive record or bytes after the end record.');
+            throw new RuntimeException('Unexpected database stream record.');
         }
-        $state['offset'] = $next_offset;
         $this->save_state($state);
     }
 
@@ -238,7 +290,7 @@ final class DatabasePush {
         if ($state['phase'] !== 'ready') {
             throw new RuntimeException('Database push must be ready before committing; observed ' . $state['phase'] . '.');
         }
-        $live_tables = $this->assert_supported_target();
+        $live_tables = $this->assert_supported_target($state['extra_tables']);
         $renames = [];
         $state['old_tables'] = [];
         foreach ($live_tables as $index => $table) {
@@ -304,7 +356,10 @@ final class DatabasePush {
      * @return array {
      *     Progress read under the database lock.
      *     @type string $phase importing, ready, committed, complete, discarding, or discarded.
-     *     @type int $offset Confirmed archive byte offset.
+     *     @type int $records Number of applied records.
+     *     @type array|null $cursor Target-confirmed source position.
+     *     @type int $partial_bytes Saved bytes of the one incomplete record.
+     *     @type list<string> $extra_tables Explicit selection outside the WordPress prefix.
      *     @type list<string> $incoming_tables Final site names for incoming tables.
      *     @type list<string> $replace_tables Current live site table names when ready.
      *     @type list<string> $old_tables Private names retained after commit.
@@ -315,9 +370,12 @@ final class DatabasePush {
         $state = $this->load_state();
         return [
             'phase' => $state['phase'],
-            'offset' => $state['offset'],
+            'records' => $state['records'],
+            'cursor' => $state['cursor'],
+            'partial_bytes' => (int) $this->database->query('SELECT OCTET_LENGTH(partial_record) FROM ' . self::identifier($this->progress_table) . ' WHERE id=1')->fetchColumn(),
+            'extra_tables' => $state['extra_tables'],
             'incoming_tables' => array_keys($state['tables']),
-            'replace_tables' => $state['phase'] === 'ready' ? $this->assert_supported_target() : [],
+            'replace_tables' => $state['phase'] === 'ready' ? $this->assert_supported_target($state['extra_tables']) : [],
             'old_tables' => in_array($state['phase'], ['committed', 'complete'], true) ? $state['old_tables'] : [],
             'warnings' => $state['phase'] === 'ready' ? ['Triggers are not copied. After commit, the new live tables will have no triggers.'] : [],
         ];
@@ -325,10 +383,7 @@ final class DatabasePush {
 
     public function close(): void {
         if (!$this->closed) {
-            if (is_resource($this->input)) {
-                fclose($this->input);
-                $this->input = null;
-            }
+            $this->partial_record = null;
             $this->closed = true;
             $statement = $this->database->prepare('SELECT RELEASE_LOCK(?)');
             $statement->execute([$this->lock_name]);
@@ -347,8 +402,38 @@ final class DatabasePush {
         }
     }
 
-    /** @return list<string> Supported current site table names in sorted order. */
-    public function assert_supported_target(): array {
+    /**
+     * @param list<string> $tables Requested additional table names; no patterns.
+     * @param string $table_prefix Tables with this prefix are already selected.
+     * @return list<string> Sorted, distinct extra names, excluding redundant prefixed names.
+     */
+    public static function normalize_extra_tables(array $tables, string $table_prefix): array {
+        if (count($tables) > self::MAX_TABLES) {
+            throw new InvalidArgumentException('Database push supports at most 256 explicitly included tables.');
+        }
+        $extra_tables = [];
+        foreach ($tables as $table) {
+            if (!is_string($table)) {
+                throw new InvalidArgumentException('An included table name must be a string; observed ' . gettype($table) . '.');
+            }
+            self::validate_identifier($table);
+            if (stripos($table, '__reprint_db_') === 0 || MultisiteDatabaseSelection::is_internal_table($table)) {
+                throw new InvalidArgumentException('Database push cannot include its internal table ' . $table . '.');
+            }
+            if (strpos($table, $table_prefix) !== 0) {
+                $extra_tables[] = $table;
+            }
+        }
+        $extra_tables = array_values(array_unique($extra_tables));
+        sort($extra_tables, SORT_STRING);
+        return $extra_tables;
+    }
+
+    /**
+     * @param list<string> $extra_tables Saved explicit selection outside the prefix.
+     * @return list<string> Supported current selected table names in sorted order.
+     */
+    public function assert_supported_target(array $extra_tables = []): array {
         $version = (string) $this->database->query('SELECT VERSION()')->fetchColumn();
         $minimum = stripos($version, 'MariaDB') !== false ? '10.6.1' : '8.0.0';
         if (version_compare($version, $minimum, '<')) {
@@ -356,8 +441,9 @@ final class DatabasePush {
         }
         // information_schema's default collation ignores case even when the
         // server supports distinct wp_ and WP_ sites. Scope uses exact bytes.
-        $statement = $this->database->prepare('SELECT TABLE_NAME, ENGINE, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND BINARY LEFT(TABLE_NAME, ?) = ? ORDER BY BINARY TABLE_NAME LIMIT 257');
-        $statement->execute([strlen($this->table_prefix), $this->table_prefix]);
+        $statement = $this->database->prepare('SELECT TABLE_NAME, ENGINE, TABLE_TYPE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND ' . $this->table_selection_sql('TABLE_NAME', $extra_tables) . ' ORDER BY BINARY TABLE_NAME LIMIT 257');
+        $parameters = array_merge([strlen($this->table_prefix), $this->table_prefix], $extra_tables);
+        $statement->execute($parameters);
         $tables = $statement->fetchAll(PdoConstants::fetch_assoc());
         if (count($tables) > self::MAX_TABLES) {
             throw new RuntimeException('Database push supports at most 256 site tables.');
@@ -371,9 +457,9 @@ final class DatabasePush {
             self::validate_identifier($name);
             $names[] = $name;
         }
-        // A foreign key in another prefix/schema can still point into this site.
-        $statement = $this->database->prepare('SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA=DATABASE() AND BINARY LEFT(REFERENCED_TABLE_NAME, ?) = ? AND NOT (TABLE_SCHEMA=DATABASE() AND BINARY LEFT(TABLE_NAME, ?) = ?)');
-        $statement->execute([strlen($this->table_prefix), $this->table_prefix, strlen($this->table_prefix), $this->table_prefix]);
+        // An unselected table or another schema can still point into this selection.
+        $statement = $this->database->prepare('SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE REFERENCED_TABLE_SCHEMA=DATABASE() AND ' . $this->table_selection_sql('REFERENCED_TABLE_NAME', $extra_tables) . ' AND NOT (TABLE_SCHEMA=DATABASE() AND ' . $this->table_selection_sql('TABLE_NAME', $extra_tables) . ')');
+        $statement->execute(array_merge($parameters, $parameters));
         if ( (int) $statement->fetchColumn() !== 0) {
             throw new RuntimeException('Another table has a foreign key referencing this site; database push cannot exchange it.');
         }
@@ -383,6 +469,12 @@ final class DatabasePush {
             }
         }
         return $names;
+    }
+
+    /** @param list<string> $extra_tables Saved explicit selection outside the prefix. */
+    private function table_selection_sql(string $column, array $extra_tables): string {
+        return '(BINARY LEFT(' . $column . ', ?) = ?'
+            . ( $extra_tables === [] ? '' : ' OR BINARY ' . $column . ' IN (' . implode(',', array_fill(0, count($extra_tables), '?')) . ')' ) . ')';
     }
 
     private function drop_private_table(string $table): void {
@@ -409,9 +501,9 @@ final class DatabasePush {
         return (int) $statement->fetchColumn() === 1;
     }
 
-    /** @return array<string,mixed> Initial archive cursor and table mapping. */
+    /** @return array<string,mixed> Initial stream cursor and table mapping. */
     private function initial_state(): array {
-        return ['phase' => 'importing', 'offset' => 0, 'tables' => [], 'current_table' => null, 'old_tables' => []];
+        return ['phase' => 'importing', 'records' => 0, 'cursor' => null, 'tables' => [], 'extra_tables' => [], 'current_table' => null, 'old_tables' => []];
     }
 
     /** @return array<string,mixed> State read under the database lock. */
@@ -437,9 +529,11 @@ final class DatabasePush {
 
     /**
      * @param array $state {
-     *     Next archive cursor and table mapping. Row progress shares its data transaction.
+     *     Next stream cursor and table mapping. Row progress shares its data transaction.
      *     @type string $phase Durable phase.
-     *     @type int $offset Byte offset after the last applied record.
+     *     @type int $records Number of applied records.
+     *     @type array|null $cursor Client source cursor after the last applied record.
+     *     @type list<string> $extra_tables Immutable explicit selection outside the prefix.
      *     @type array<string,string> $tables Final site name mapped to incoming table name.
      *     @type string|null $current_table Incoming table receiving rows, or null before DDL.
      *     @type list<string> $old_tables Private names retained by commit.
@@ -448,7 +542,7 @@ final class DatabasePush {
      */
     private function save_state(array $state): void {
         $table = $this->progress_table ?? $this->private_prefix . 'state';
-        $statement = $this->database->prepare('REPLACE INTO ' . self::identifier($table) . ' (id, state) VALUES (1, ?)');
+        $statement = $this->database->prepare('REPLACE INTO ' . self::identifier($table) . ' (id, state, partial_record) VALUES (1, ?, \'\')');
         $statement->execute([json_encode($state)]);
         if (!$this->database->inTransaction()) {
             $this->state = $state;

@@ -10,8 +10,10 @@ require_once __DIR__ . '/class-database-push.php';
 
 /** Authenticated database endpoints. URL rewriting remains entirely in the client. */
 final class DatabasePushEndpoints {
-    /** @var array<string,mixed> */
-    private $options;
+    /** @var int */
+    private $maximum_part_bytes;
+    /** @var int|null */
+    private $post_max_bytes;
 
     /**
      * @param array $options {
@@ -24,11 +26,9 @@ final class DatabasePushEndpoints {
     public function __construct(array $options) {
         // Reuse the established outside-document-root validation first.
         new PushEndpoints($options);
-        $private_root = $options['reprint_directory'] . '/.reprint/database';
-        $options['reprint_directory'] = $private_root . '/transfers';
-        $options['docroot'] = $private_root . '/artifacts';
-        $options['excluded_paths'] = [];
-        $this->options = $options;
+        $this->maximum_part_bytes = min( (int) ( $options['maximum_part_bytes'] ?? DatabasePush::MAX_RECORD_BYTES ), DatabasePush::MAX_RECORD_BYTES);
+        $post_max_bytes = array_key_exists('post_max_bytes', $options) ? $options['post_max_bytes'] : Utils::parse_size( (string) ini_get('post_max_size'));
+        $this->post_max_bytes = $post_max_bytes > 0 ? (int) $post_max_bytes : null;
     }
 
     /**
@@ -36,6 +36,7 @@ final class DatabasePushEndpoints {
      *     Signed endpoint parameters; database credentials and prefix are host configuration.
      *     @type string $endpoint Registered database push endpoint.
      *     @type string $push_session_id Existing or new 32-character session ID.
+     *     @type string $extra_tables JSON table-name list on create; immutable for this push.
      *     @type string $review Required for commit. Token from the current table review.
      *     @type string $writers_stopped Required for commit. Must be the literal yes.
      * }
@@ -64,42 +65,19 @@ final class DatabasePushEndpoints {
             $database->exec('SET NAMES utf8mb4');
             $push_session_id = $config['push_session_id'] ?? '';
             $push = new DatabasePush($database, $credentials['table_prefix'], $push_session_id);
-            $uploads = new PushEndpoints($this->options);
             if ($endpoint === 'push_db_create') {
-                $push->start();
-                if (!is_dir($this->options['docroot']) && !mkdir($this->options['docroot'], 0700, true)) {
-                    throw new RuntimeException('Cannot create private database archive storage.');
+                $extra_tables = json_decode($config['extra_tables'] ?? '[]', true);
+                if (!is_array($extra_tables) || array_values($extra_tables) !== $extra_tables) {
+                    throw new RuntimeException('Database push extra_tables must be a JSON list of table names.');
                 }
-                $uploads->create($config);
+                $push->start($extra_tables);
+                $this->respond(200, ['status' => 'created', 'max_part_bytes' => $this->maximum_part_bytes, 'post_max_bytes' => $this->post_max_bytes]);
                 return;
+            }
+            if ($endpoint === 'push_db_upload') {
+                $this->upload($push);
             }
             $state = $push->get_status();
-            if ($endpoint === 'push_db_upload') {
-                if ($state['phase'] !== 'importing' || $state['offset'] !== 0) {
-                    throw new RuntimeException('Database archive is immutable after import starts.');
-                }
-                $uploads->upload($config);
-                return;
-            }
-            $archive_status = null;
-            if (!in_array($state['phase'], ['committed', 'complete', 'discarding', 'discarded'], true)) {
-                $session = PushSession::open($this->options['reprint_directory'], $this->options['docroot'], $push_session_id, []);
-                $archive_status = $session->get_status('database.jsonl')['path'];
-                if ($endpoint === 'push_db_import') {
-                    if (( $archive_status['state'] ?? null ) !== 'complete' || ( $archive_status['type'] ?? null ) !== 'file') {
-                        throw new RuntimeException('Database import requires the completed database.jsonl archive.');
-                    }
-                    // The HTTP caller supplies a small request budget; each
-                    // processor call applies one bounded archive record.
-                    $deadline = microtime(true) + 2;
-                    for ($records = 0; $records < 128; ++$records) {
-                        $push->import_next_record($session->get_push_directory() . '/work/files/database.jsonl');
-                        if ($push->get_status()['phase'] !== 'importing' || microtime(true) >= $deadline) {
-                            break;
-                        }
-                    }
-                }
-            }
             if ($endpoint === 'push_db_commit') {
                 if (( $config['writers_stopped'] ?? '' ) !== 'yes') {
                     throw new RuntimeException('Stop and drain web requests, cron, queues, and other writers before confirming the overwrite.');
@@ -117,22 +95,74 @@ final class DatabasePushEndpoints {
                 $push->cleanup_next_table();
             }
             $state = $push->get_status();
-            if (( $endpoint === 'push_db_cleanup' && $state['phase'] === 'complete' ) || ( $endpoint === 'push_db_discard' && $state['phase'] === 'discarded' )) {
-                if (!PushSession::remove($this->options['reprint_directory'], $this->options['docroot'], $push_session_id, [])) {
-                    $state['phase'] = $endpoint === 'push_db_cleanup' ? 'cleaning_archive' : 'discarding_archive';
-                }
-            }
             $state['review'] = $state['phase'] === 'ready' ? hash('sha256', json_encode([$push_session_id, $state['incoming_tables'], $state['replace_tables']])) : null;
             $state['table_prefix'] = $credentials['table_prefix'];
-            $state['path'] = $archive_status;
             $this->respond(200, ['status' => 'accepted'] + $state);
         } catch (Throwable $exception) {
-            $busy = $exception instanceof PushException && $exception->get_error_code() === 'busy';
-            $this->respond($busy ? 409 : 400, ['status' => 'rejected', 'reason' => $busy ? 'busy' : 'database_push_failed', 'detail' => $exception->getMessage()]);
+            $reason = $exception instanceof PushException ? $exception->get_error_code() : 'database_push_failed';
+            $this->respond($reason === 'request_too_large' ? 413 : ( $reason === 'busy' ? 409 : 400 ), ['status' => 'rejected', 'reason' => $reason, 'detail' => $exception->getMessage(), 'post_max_bytes' => $this->post_max_bytes]);
         } finally {
             if ($push !== null) {
                 $push->close();
             }
+        }
+    }
+
+    /** Read the request directly into incoming rows; retain only one unfinished record. */
+    private function upload(DatabasePush $push): void {
+        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- The strict multipart parser validates the exact wire header.
+        $multipart = new MultipartProcessor(MultipartProcessor::boundary_from_content_type( (string) ( $_SERVER['CONTENT_TYPE'] ?? '' )));
+        $input = fopen('php://input', 'rb');
+        if ($input === false) {
+            throw new RuntimeException('Cannot open the database push request body.');
+        }
+        $request_bytes = 0;
+        $record_number = 0;
+        $total_bytes = 0;
+        $offset = 0;
+        try {
+            while (!feof($input)) {
+                $chunk = fread($input, MultipartProcessor::MAX_INPUT_FRAGMENT_BYTES);
+                if ($chunk === '' && feof($input)) {
+                    break;
+                }
+                if ($chunk === false || $chunk === '') {
+                    throw new RuntimeException('Cannot read the next database push request chunk.');
+                }
+                $request_bytes += strlen($chunk);
+                if ($this->post_max_bytes !== null && $request_bytes > $this->post_max_bytes) {
+                    throw new PushException('request_too_large', 'Database push request exceeds the target post_max_size of ' . $this->post_max_bytes . ' bytes.');
+                }
+                $multipart->append_bytes($chunk);
+                while ($multipart->next_token()) {
+                    if ($multipart->get_token_type() === MultipartProcessor::TOKEN_PART_START) {
+                        $headers = $multipart->get_current_headers();
+                        if (( $headers['x-chunk-type'] ?? '' ) !== 'database') {
+                            throw new RuntimeException('Database push accepts only database multipart parts.');
+                        }
+                        foreach (['x-record-number', 'x-record-size', 'x-chunk-offset'] as $name) {
+                            if (!isset($headers[$name]) || !preg_match('/^(0|[1-9][0-9]{0,14})$/D', $headers[$name])) {
+                                throw new RuntimeException('Database part requires a non-negative decimal ' . $name . '; observed ' . json_encode($headers[$name] ?? null) . '.');
+                            }
+                        }
+                        $record_number = (int) $headers['x-record-number'];
+                        $total_bytes = (int) $headers['x-record-size'];
+                        $offset = (int) $headers['x-chunk-offset'];
+                        $length = (int) $headers['content-length'];
+                        if ($length <= 0 || $length > $this->maximum_part_bytes || $total_bytes > DatabasePush::MAX_RECORD_BYTES || $offset + $length > $total_bytes) {
+                            throw new RuntimeException('Database part has length ' . $length . ', offset ' . $offset . ', and record size ' . $total_bytes . '; maximum part bytes is ' . $this->maximum_part_bytes . '.');
+                        }
+                    } elseif ($multipart->get_token_type() === MultipartProcessor::TOKEN_BODY) {
+                        $piece = $multipart->get_current_body_piece();
+                        $push->accept_record_chunk($record_number, $total_bytes, $offset, $piece);
+                        $offset += strlen($piece);
+                    }
+                }
+            }
+            $multipart->finish_input();
+            $push->finish_record_request();
+        } finally {
+            fclose($input);
         }
     }
 

@@ -6636,12 +6636,12 @@ class ImportClient
                 $url_mapping[$local_url] = $hosted_url;
             }
             $factory = is_file($state_dir . '/state.json') ? 'resume' : 'start';
-            $processor = DatabasePushProcessor::$factory($transport, $state_dir, $source, $options['table_prefix'] ?? 'wp_', $url_mapping);
+            $processor = DatabasePushProcessor::$factory($transport, $state_dir, $source, $options['table_prefix'] ?? 'wp_', $url_mapping, $options['include_table'] ?? []);
             try {
                 // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedWhile -- The processor performs the work; the command owns the whole-operation loop.
                 while ($processor->next_step()) {
                     // The command owns the whole-operation loop. Each processor
-                    // step performs one row, file chunk, request, or transition.
+                    // step prepares one record, sends one chunk, or changes phase.
                 }
                 echo json_encode($processor->get_status(), $json_flags) . "\n";
             } finally {
@@ -14369,7 +14369,7 @@ if (
             'name' => 'abort',
             'type' => 'flag',
             'target' => 'abort',
-            'help' => 'Abort current sync (preserves downloads). For db-push, discard staged tables and hosted archive without changing live tables',
+            'help' => 'Abort current sync (preserves downloads). For db-push, discard staged tables without changing live tables',
             'help_section' => 'global',
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
         ],
@@ -14532,6 +14532,15 @@ if (
             'commands' => ['db-push'],
         ],
         [
+            'name' => 'include-table',
+            'type' => 'value-or-next',
+            'target' => 'include_table',
+            'placeholder' => 'TABLE',
+            'repeatable' => true,
+            'help' => 'Also overwrite this exact table outside the WordPress prefix; repeat for several',
+            'commands' => ['db-push'],
+        ],
+        [
             'name' => 'commit',
             'type' => 'value',
             'target' => 'commit',
@@ -14549,7 +14558,7 @@ if (
             'name' => 'cleanup',
             'type' => 'flag',
             'target' => 'cleanup',
-            'help' => 'Delete retained old tables and the hosted archive after inspection and cache clearing',
+            'help' => 'Delete retained old tables after inspection and cache clearing',
             'commands' => ['db-push'],
         ],
         // ── db-pull options ──────────────────────────────────────
@@ -15527,7 +15536,7 @@ if (
             "level" => "low",
             "short" => "Stage a full database overwrite for explicit confirmation",
             "usage" => "reprint db-push <remote-reprint-api-url> --state-dir=DIR --secret=TOKEN [options]",
-            "description" => "Prepares a local database snapshot, rewrites URLs on the client, and streams it into private hosted tables. Prints the table list and review token without changing live tables.\nRequires a host-configured standalone API route. Stop all writers before --commit. Clear caches and verify the site before --cleanup.\n",
+            "description" => "Streams local database rows into private hosted tables, rewriting URLs on the client without a full dump or frozen snapshot. Prints the table list and review token without changing live tables.\nRequires a host-configured standalone API route. Stop all writers before --commit. Clear caches and verify the site before --cleanup.\n",
             "extra" => "Initial limits: InnoDB target tables, 256 tables, 128 columns per table, 1 MiB per row before and after rewriting. No multisite, foreign keys crossing the selected site boundary, triggers, events, or routines.\n",
         ],
         "db-pull" => [

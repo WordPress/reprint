@@ -3,9 +3,9 @@
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These errors are protocol or CLI text, never HTML.
 
 
-require_once __DIR__ . '/class-database-push-archive.php';
+require_once __DIR__ . '/class-database-push-source.php';
 
-/** One caller-stepped preparation, upload, and import lifecycle. Never commits. */
+/** One caller-stepped source and upload lifecycle. Never commits. */
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Client library class, not a WordPress plugin API.
 class DatabasePushProcessor {
     /** @var MultipartPushStreamClient */
@@ -20,18 +20,20 @@ class DatabasePushProcessor {
     private $url_mapping;
     /** @var string */
     private $table_prefix;
-    /** @var DatabasePushArchive|null */
-    private $archive;
-    /** @var resource|null */
-    private $input;
+    /** @var DatabasePushSource|null */
+    private $reader;
+    /** @var string|null One encoded record, kept across request boundaries. */
+    private $record;
+    /** @var int */
+    private $record_number = 0;
+    /** @var array<string,mixed>|null */
+    private $source_cursor;
     /** @var resource|null */
     private $lock;
     /** @var bool */
     private $request_open = false;
     /** @var int */
     private $offset = 0;
-    /** @var int */
-    private $total_bytes = 0;
     /** @var string */
     private $phase = 'creating';
     /** @var array<string,mixed> */
@@ -42,23 +44,25 @@ class DatabasePushProcessor {
     /**
      * @param array<string,mixed> $source Local connection settings described by the constructor.
      * @param array<string,string> $url_mapping Local URLs mapped to hosted URLs.
+     * @param list<string> $extra_tables Explicit extra tables outside the prefix.
      */
-    public static function start(MultipartPushStreamClient $client, string $state_dir, array $source, string $table_prefix, array $url_mapping): self {
+    public static function start(MultipartPushStreamClient $client, string $state_dir, array $source, string $table_prefix, array $url_mapping, array $extra_tables = []): self {
         if (is_file($state_dir . '/state.json')) {
             throw new RuntimeException('Database push state already exists; resume it instead of starting another push.');
         }
-        return new self($client, $state_dir, $source, $table_prefix, $url_mapping);
+        return new self($client, $state_dir, $source, $table_prefix, $url_mapping, $extra_tables);
     }
 
     /**
      * @param array<string,mixed> $source Local connection settings described by the constructor.
      * @param array<string,string> $url_mapping The original URL mapping.
+     * @param list<string> $extra_tables The original explicit table selection.
      */
-    public static function resume(MultipartPushStreamClient $client, string $state_dir, array $source, string $table_prefix, array $url_mapping): self {
+    public static function resume(MultipartPushStreamClient $client, string $state_dir, array $source, string $table_prefix, array $url_mapping, array $extra_tables = []): self {
         if (!is_file($state_dir . '/state.json')) {
             throw new RuntimeException('No database push state exists to resume.');
         }
-        return new self($client, $state_dir, $source, $table_prefix, $url_mapping);
+        return new self($client, $state_dir, $source, $table_prefix, $url_mapping, $extra_tables);
     }
 
     /**
@@ -72,8 +76,9 @@ class DatabasePushProcessor {
      * }
      * @param string $table_prefix Identical local and hosted site table prefix.
      * @param array<string,string> $url_mapping Local URLs mapped to hosted URLs.
+     * @param list<string> $extra_tables Explicit extra tables outside the prefix.
      */
-    private function __construct(MultipartPushStreamClient $client, string $state_dir, array $source, string $table_prefix, array $url_mapping) {
+    private function __construct(MultipartPushStreamClient $client, string $state_dir, array $source, string $table_prefix, array $url_mapping, array $extra_tables) {
         if (!isset($source['dsn'], $source['user'], $source['pass']) || ( strpos($source['dsn'], 'mysql:') !== 0 && strpos($source['dsn'], 'mysql-on-sqlite:') !== 0 )) {
             throw new InvalidArgumentException('Database push requires a mysql: or mysql-on-sqlite: source DSN and user/pass settings.');
         }
@@ -93,10 +98,11 @@ class DatabasePushProcessor {
         unset($identity['pass']);
         $identity['table_prefix'] = $table_prefix;
         $identity['url_mapping'] = $url_mapping;
+        $identity['extra_tables'] = \WordPress\Reprint\Server\DatabasePush::normalize_extra_tables($extra_tables, $table_prefix);
         if (is_file($state_dir . '/state.json')) {
             $this->state = json_decode(file_get_contents($state_dir . '/state.json'), true);
             if (!is_array($this->state) || $this->state['source'] !== $identity) {
-                throw new RuntimeException('Database push source or URL mapping changed. Use the original settings or a new state directory.');
+                throw new RuntimeException('Database push source, table selection, or URL mapping changed. Use the original settings or a new state directory.');
             }
         } else {
             $this->state = ['push_session_id' => bin2hex(random_bytes(16)), 'source' => $identity];
@@ -126,22 +132,12 @@ class DatabasePushProcessor {
                         $this->phase = $response['phase'];
                         return false;
                     }
-                    if (( $response['path']['state'] ?? null ) === 'complete') {
-                        $this->phase = 'importing';
-                    } elseif (is_file($this->state_dir . '/database.jsonl')) {
-                        $this->offset = (int) ( $response['path']['accepted_bytes'] ?? 0 );
-                        $this->total_bytes = filesize($this->state_dir . '/database.jsonl');
-                        $this->input = fopen($this->state_dir . '/database.jsonl', 'rb');
-                        if ($this->input === false || $this->offset > $this->total_bytes || fseek($this->input, $this->offset) !== 0) {
-                            throw new RuntimeException('Cannot resume the prepared database archive at the target-confirmed byte offset.');
-                        }
-                        $this->phase = 'opening_request';
-                    } else {
-                        $this->phase = 'preparing';
-                    }
+                    $this->record_number = (int) $response['records'];
+                    $this->source_cursor = $response['cursor'];
+                    $this->phase = 'preparing';
                     return true;
                 case 'preparing':
-                    if ($this->archive === null) {
+                    if ($this->reader === null) {
                         if (strpos($this->source['dsn'], 'mysql-on-sqlite:') === 0) {
                             require_once \Reprint\Importer\resolve_sqlite_integration_path('/packages/mysql-on-sqlite/src/load.php');
                             $settings = \WordPress\Reprint\Server\Utils::parse_pdo_dsn($this->source['dsn']);
@@ -159,13 +155,25 @@ class DatabasePushProcessor {
                             $database = \WordPress\Reprint\Server\Utils::connect_mysql($this->source['dsn'], $this->source['user'], $this->source['pass']);
                             $database->exec('SET NAMES utf8mb4');
                         }
-                        $this->archive = new DatabasePushArchive($database, $this->state_dir . '/database.jsonl', $this->table_prefix, $this->url_mapping, $this->state['push_session_id']);
+                        $this->reader = new DatabasePushSource($database, $this->table_prefix, $this->url_mapping, $this->state['push_session_id'], $this->source_cursor, $this->state['tables'] ?? null, $this->state['source']['extra_tables']);
+                        if (!isset($this->state['tables'])) {
+                            $this->state['tables'] = $this->reader->get_tables();
+                            $this->save_state();
+                        }
                         return true;
                     }
-                    if (!$this->archive->next_step()) {
-                        $this->archive->close();
-                        $this->archive = null;
-                        $this->phase = 'checking';
+                    if (!$this->reader->next_step()) {
+                        $this->phase = 'finishing_request';
+                        return true;
+                    }
+                    $record = $this->reader->get_record();
+                    if ($record !== null) {
+                        $this->record = json_encode($record, JSON_THROW_ON_ERROR);
+                        if (strlen($this->record) > \WordPress\Reprint\Server\DatabasePush::MAX_RECORD_BYTES) {
+                            throw new RuntimeException('Prepared database record exceeds the 2 MiB record limit. Live tables have not been changed.');
+                        }
+                        $this->offset = 0;
+                        $this->phase = $this->request_open ? 'uploading' : 'opening_request';
                     }
                     return true;
                 case 'opening_request':
@@ -176,20 +184,23 @@ class DatabasePushProcessor {
                     $this->phase = 'uploading';
                     return true;
                 case 'uploading':
-                    $maximum = $this->client->next_file_body_bytes('database.jsonl', $this->total_bytes, $this->offset);
-                    if ($this->offset === $this->total_bytes || $maximum === 0 || $this->client->should_finish_request()) {
+                    $total_bytes = strlen($this->record);
+                    $maximum = $this->client->next_database_body_bytes($this->record_number, $total_bytes, $this->offset);
+                    if ($maximum === 0 || $this->client->should_finish_request()) {
                         $this->phase = 'finishing_request';
                         return true;
                     }
-                    $chunk = fread($this->input, $maximum);
-                    if ($chunk === false || $chunk === '') {
-                        throw new RuntimeException('Cannot read the next prepared database archive chunk.');
-                    }
-                    if (!$this->client->send_part(['type' => 'file', 'path' => 'database.jsonl', 'total_bytes' => $this->total_bytes, 'offset' => $this->offset, 'payload' => $chunk])) {
+                    $chunk = substr($this->record, $this->offset, $maximum);
+                    if (!$this->client->send_part(['type' => 'database', 'record_number' => $this->record_number, 'total_bytes' => $total_bytes, 'offset' => $this->offset, 'payload' => $chunk])) {
                         $this->phase = 'finishing_request';
                         return true;
                     }
                     $this->offset += strlen($chunk);
+                    if ($this->offset === $total_bytes) {
+                        ++$this->record_number;
+                        $this->record = null;
+                        $this->phase = 'preparing';
+                    }
                     return true;
                 case 'finishing_request':
                     $result = $this->client->finish_request();
@@ -197,21 +208,25 @@ class DatabasePushProcessor {
                     $this->state['request_sizer'] = $this->client->get_request_sizer_state();
                     $this->save_state();
                     if ($result['status'] !== 'complete') {
-                        throw new RuntimeException($result['detail'] ?? 'Database archive upload failed. Run the command again to resume.');
+                        throw new RuntimeException($result['detail'] ?? 'Database streaming upload failed. Run the command again to resume.');
                     }
-                    fclose($this->input);
-                    $this->input = null;
-                    // Never advance from bytes consumed by cURL. Ask the target
-                    // for its confirmed file cursor, including after interruption.
-                    $this->phase = 'checking';
-                    return true;
-                case 'importing':
-                    $response = $this->request('POST', 'push_db_import', ['accepted']);
+                    $response = $result['response'];
+                    // Written bytes alone are not confirmed. On a failed or
+                    // lost response this run stops; resume reads the target's
+                    // source cursor and re-reads only unconfirmed source data.
+                    if ( (int) $response['records'] !== $this->record_number) {
+                        throw new RuntimeException('Target confirmed ' . $response['records'] . ' database records; expected ' . $this->record_number . '. Resume from its source cursor.');
+                    }
+                    $expected_partial_bytes = $this->record === null ? 0 : $this->offset;
+                    if ( (int) $response['partial_bytes'] !== $expected_partial_bytes) {
+                        throw new RuntimeException('Target confirmed ' . $response['partial_bytes'] . ' partial record bytes; expected ' . $expected_partial_bytes . '. Resume from its source cursor.');
+                    }
                     if ($response['phase'] === 'ready') {
                         $this->result = $response;
                         $this->phase = 'ready';
                         return false;
                     }
+                    $this->phase = $this->record === null ? 'preparing' : 'opening_request';
                     return true;
             }
             throw new RuntimeException('Unknown database push phase: ' . $this->phase);
@@ -240,6 +255,7 @@ class DatabasePushProcessor {
             $this->client->cancel_request();
             $this->request_open = false;
         }
+        $this->record = null;
         if (!in_array($this->phase, ['ready', 'committed', 'complete', 'failed'], true)) {
             $this->phase = 'closed';
         }
@@ -251,14 +267,11 @@ class DatabasePushProcessor {
         if (!in_array($this->phase, ['ready', 'committed', 'complete', 'discarded', 'failed'], true)) {
             $this->phase = 'closed';
         }
-        if ($this->archive !== null) {
-            $this->archive->close();
-            $this->archive = null;
+        if ($this->reader !== null) {
+            $this->reader->close();
+            $this->reader = null;
         }
-        if (is_resource($this->input)) {
-            fclose($this->input);
-            $this->input = null;
-        }
+        $this->record = null;
         if (is_resource($this->lock)) {
             flock($this->lock, LOCK_UN);
             fclose($this->lock);
@@ -268,7 +281,11 @@ class DatabasePushProcessor {
 
     /** @param list<string> $statuses Accepted protocol results. @return array<string,mixed> */
     private function request(string $method, string $endpoint, array $statuses): array {
-        $result = $this->client->send_push_request($method, $endpoint, ['push_session_id' => $this->state['push_session_id']], $statuses);
+        $parameters = ['push_session_id' => $this->state['push_session_id']];
+        if ($endpoint === 'push_db_create') {
+            $parameters['extra_tables'] = json_encode($this->state['source']['extra_tables'], JSON_THROW_ON_ERROR);
+        }
+        $result = $this->client->send_push_request($method, $endpoint, $parameters, $statuses);
         if ($result['status'] !== 'complete') {
             throw new RuntimeException($result['detail'] ?? 'Database push request failed.');
         }

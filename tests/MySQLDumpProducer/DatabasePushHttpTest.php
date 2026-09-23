@@ -55,6 +55,71 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         parent::tearDown();
     }
 
+    /**
+     * Interruption cases: confirmed rows stay copied; an incomplete row is read
+     * again; edits to unread rows are observed. Large rows cross request limits.
+     *
+     * @dataProvider streamingKeyProvider
+     */
+    public function testStreamingResumeReadsCurrentSourceAfterConfirmedRows(bool $primary_key, string $change): void {
+        $this->pdo->exec('CREATE TABLE wp_options (id int ' . ( $primary_key ? 'PRIMARY KEY' : '' ) . ', value longblob) ENGINE=InnoDB');
+        $original = str_repeat('original', 110000);
+        $insert = $this->pdo->prepare('INSERT INTO wp_options VALUES (?, ?)');
+        for ($id = 1; $id <= 6; ++$id) {
+            $insert->execute([$id, $original]);
+        }
+        $client = $this->client();
+        $processor = $this->processor($client);
+        $session = $processor->get_status()['push_session_id'];
+        $incoming = '__reprint_db_' . $session . '_t0';
+        $confirmed = 0;
+        try {
+            for ($step = 0; $step < 3000 && $confirmed === 0; ++$step) {
+                self::assertTrue($processor->next_step());
+                self::assertFileDoesNotExist($this->root . '/state/database.jsonl.building');
+                self::assertFileDoesNotExist($this->root . '/state/database.jsonl');
+                if ($this->receiver->query("SHOW TABLES LIKE '" . $incoming . "'")->fetchColumn()) {
+                    $confirmed = (int) $this->receiver->query('SELECT COUNT(*) FROM `' . $incoming . '`')->fetchColumn();
+                }
+            }
+            self::assertGreaterThan(0, $confirmed, 'Some rows must arrive before the source is fully read.');
+            self::assertLessThan(6, $confirmed);
+            $processor->cancel();
+        } finally {
+            $processor->close();
+        }
+        $client = $this->client();
+        $status = $client->send_push_request('GET', 'push_db_status', ['push_session_id' => $session], ['accepted']);
+        self::assertSame('complete', $status['status'], json_encode($status));
+        $confirmed = (int) $this->receiver->query('SELECT COUNT(*) FROM `' . $incoming . '`')->fetchColumn();
+        self::assertLessThan(6, $confirmed);
+        $changed = $change === 'same-size' ? str_repeat('newbytes', 110000) : str_repeat('changed', $change === 'grew' ? 140000 : 90000);
+        $this->pdo->prepare('UPDATE wp_options SET value=?')->execute([$changed]);
+        $processor = $this->processor($client);
+        try {
+            while ($processor->next_step()) {
+                self::assertSame('in_progress', $processor->get_status()['status']);
+            }
+            self::assertSame('ready', $processor->get_status()['phase']);
+            $rows = $this->receiver->query('SELECT id, value FROM `' . $incoming . '` ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+            self::assertCount(6, $rows);
+            foreach ($rows as $row) {
+                self::assertSame($row['id'] <= $confirmed ? $original : $changed, $row['value']);
+            }
+            self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+            foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($this->root, FilesystemIterator::SKIP_DOTS)) as $entry) {
+                self::assertNotContains($entry->getFilename(), ['database.jsonl', 'database.jsonl.building', 'inflight.data']);
+            }
+            self::assertNotContains('push_db_import', file($this->root . '/requests', FILE_IGNORE_NEW_LINES));
+        } finally {
+            $processor->close();
+        }
+    }
+
+    public static function streamingKeyProvider(): array {
+        return [[true, 'shrank'], [true, 'grew'], [true, 'same-size'], [false, 'shrank'], [false, 'grew'], [false, 'same-size']];
+    }
+
     /** @dataProvider sourceDatabaseProvider */
     public function testSourceReadSupportDoesNotRequireTargetSwapSupport(string $engine): void {
         if ($engine === 'sqlite') {
@@ -67,18 +132,22 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
         $source->exec('CREATE TABLE wp_values (id int PRIMARY KEY, value longtext, bytes blob, flag BIT(16), choice ENUM(\'\', \'0\', \'one\')) ENGINE=' . ( $engine === 'sqlite' ? 'InnoDB' : 'MyISAM' ));
         $source->exec("INSERT INTO wp_values VALUES (1, 'https://local.test/page', X'00FF', 257, '0'), (2, NULL, NULL, NULL, '')");
+        $source->exec('CREATE TABLE plugin_rows (id int PRIMARY KEY, value text) ENGINE=InnoDB');
+        $source->exec("INSERT INTO plugin_rows VALUES (7, 'https://local.test/plugin')");
         $source_hash = $engine === 'sqlite' ? hash_file('sha256', $this->root . '/source.sqlite') : null;
         $client = $this->client();
-        $processor = DatabasePushProcessor::start($client, $this->root . '/source-state', ['dsn' => $dsn, 'user' => getenv('DB_USER'), 'pass' => getenv('DB_PASS')], 'wp_', ['https://local.test' => 'https://production.example.com']);
+        $processor = DatabasePushProcessor::start($client, $this->root . '/source-state', ['dsn' => $dsn, 'user' => getenv('DB_USER'), 'pass' => getenv('DB_PASS')], 'wp_', ['https://local.test' => 'https://production.example.com'], ['plugin_rows']);
         try {
             while ($processor->next_step()) {
                 self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
             }
             $status = $processor->get_status();
             self::assertSame('ready', $status['phase']);
+            self::assertSame(['plugin_rows', 'wp_values'], $status['incoming_tables']);
             $commit = $client->send_push_request('POST', 'push_db_commit', ['push_session_id' => $status['push_session_id'], 'review' => $status['review'], 'writers_stopped' => 'yes'], ['accepted']);
             self::assertSame('complete', $commit['status'], json_encode($commit));
             self::assertSame([['https://production.example.com/page', '00FF', '257', '0', '2'], [null, null, null, '', '1']], $this->receiver->query('SELECT value, HEX(bytes), CAST(flag+0 AS CHAR), choice, CAST(choice+0 AS CHAR) FROM wp_values ORDER BY id')->fetchAll(PDO::FETCH_NUM));
+            self::assertSame('https://production.example.com/plugin', $this->receiver->query('SELECT value FROM plugin_rows')->fetchColumn());
             self::assertSame('InnoDB', $this->receiver->query("SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='wp_values'")->fetchColumn());
             self::assertSame('https://local.test/page', $source->query('SELECT value FROM wp_values')->fetchColumn());
             if ($engine === 'sqlite') {
@@ -192,7 +261,7 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
     }
 
-    public function testSourceRowLimitFailsBeforeUploadAndKeepsSourceUnchanged(): void {
+    public function testSourceRowLimitLeavesLiveTablesAndSourceUnchanged(): void {
         $this->pdo->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longblob) ENGINE=InnoDB');
         $this->pdo->exec("INSERT INTO wp_options VALUES (1, REPEAT('x', 1048577))");
         $client = $this->client();
@@ -205,7 +274,7 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
             self::assertStringContainsString('1 MiB', $exception->getMessage());
             self::assertSame('failed', $processor->get_status()['phase']);
             self::assertFalse($processor->next_step());
-            self::assertStringNotContainsString('push_db_upload', file_get_contents($this->root . '/requests'));
+            self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
             self::assertSame(1048577, (int) $this->pdo->query('SELECT LENGTH(value) FROM wp_options')->fetchColumn());
         } finally {
             $processor->close();
@@ -305,6 +374,36 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         self::assertSame('target:after', $this->receiver->query('SELECT value FROM wp_options WHERE id=2')->fetchColumn());
         $remaining = $this->receiver->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN);
         self::assertCount(3, $remaining); // Two live tables and one terminal progress marker.
+    }
+
+    public function testCliIncludesNamedTablesOutsidePrefixAndKeepsOtherTables(): void {
+        $this->pdo->exec('CREATE TABLE wp_parent (id int PRIMARY KEY) ENGINE=InnoDB');
+        $this->pdo->exec('CREATE TABLE plugin_rows (id int PRIMARY KEY, parent_id int, FOREIGN KEY (parent_id) REFERENCES wp_parent(id)) ENGINE=InnoDB');
+        $this->pdo->exec('INSERT INTO wp_parent VALUES (2)');
+        $this->pdo->exec('INSERT INTO plugin_rows VALUES (20, 2)');
+        $this->pdo->exec('CREATE TABLE not_selected (id int) ENGINE=InnoDB');
+        $this->receiver->exec('CREATE TABLE wp_parent (id int PRIMARY KEY) ENGINE=InnoDB');
+        $this->receiver->exec('CREATE TABLE plugin_rows (id int PRIMARY KEY, parent_id int, FOREIGN KEY (parent_id) REFERENCES wp_parent(id)) ENGINE=InnoDB');
+        $this->receiver->exec('INSERT INTO wp_parent VALUES (1)');
+        $this->receiver->exec('INSERT INTO plugin_rows VALUES (10, 1)');
+        $this->receiver->exec('CREATE TABLE not_selected (id int) ENGINE=InnoDB');
+        $this->receiver->exec('INSERT INTO not_selected VALUES (99)');
+        $arguments = [getenv('REPRINT_DB_PUSH_CLIENT_PHP') ?: PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client', 'db-push', $this->remote_reprint_api_url,
+            '--state-dir=' . $this->root . '/cli-state', '--secret=database-push-test-secret', '--force-http'];
+        $source = ['--source-dsn=mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName, '--source-user=' . getenv('DB_USER'), '--source-pass=' . getenv('DB_PASS'), '--include-table=plugin_rows'];
+        $staged = $this->runCli(array_merge($arguments, $source));
+        self::assertSame(['plugin_rows', 'wp_parent'], $staged['incoming_tables']);
+        self::assertSame(['plugin_rows', 'wp_options', 'wp_orders', 'wp_parent'], $staged['replace_tables']);
+        self::assertSame(10, (int) $this->receiver->query('SELECT id FROM plugin_rows')->fetchColumn());
+        $resumed = $this->runCli(array_merge($arguments, $source));
+        self::assertSame($staged['review'], $resumed['review']);
+        $committed = $this->runCli(array_merge($arguments, ['--commit=' . $staged['review'], '--writers-stopped']));
+        self::assertSame('committed', $committed['phase']);
+        self::assertSame([20, 2], array_map('intval', $this->receiver->query('SELECT id, parent_id FROM plugin_rows')->fetch(PDO::FETCH_NUM)));
+        self::assertSame('wp_parent', $this->receiver->query("SELECT REFERENCED_TABLE_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='plugin_rows' AND REFERENCED_TABLE_NAME IS NOT NULL")->fetchColumn());
+        $this->runCli(array_merge($arguments, ['--cleanup']));
+        self::assertSame(99, (int) $this->receiver->query('SELECT id FROM not_selected')->fetchColumn());
+        self::assertSame(20, (int) $this->pdo->query('SELECT id FROM plugin_rows')->fetchColumn());
     }
 
     public function testBinaryNumericNullAndZeroAutoIncrementValuesRoundTrip(): void {
@@ -497,10 +596,19 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
             $parameters = ['push_session_id' => $processor->get_status()['push_session_id']];
             $before = $client->send_push_request('GET', 'push_db_status', $parameters, ['accepted']);
             self::assertSame('importing', $before['response']['phase']);
-            $retry = $client->send_push_request('POST', 'push_db_import', $parameters, ['accepted']);
-            self::assertSame('failed', $retry['status']);
+            $processor->close();
+            $client = $this->client();
+            $processor = $this->processor($client);
+            try {
+                while ($processor->next_step()) {
+                    self::assertSame('in_progress', $processor->get_status()['status']);
+                }
+                self::fail('Resuming must retry the unconfirmed record and report the same SQL failure.');
+            } catch (RuntimeException $exception) {
+                self::assertStringContainsString('foreign key constraint', $exception->getMessage());
+            }
             $after = $client->send_push_request('GET', 'push_db_status', $parameters, ['accepted']);
-            self::assertSame($before['response']['offset'], $after['response']['offset']);
+            self::assertSame($before['response']['records'], $after['response']['records']);
             do {
                 $result = $client->send_push_request('POST', 'push_db_discard', $parameters, ['accepted']);
                 self::assertSame('complete', $result['status'], json_encode($result));
@@ -568,7 +676,7 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         return $records[0];
     }
 
-    public function testProcessDeathWithOpenRequestResumesFromReceiverBytes(): void {
+    public function testProcessDeathWithOpenRequestResumesFromConfirmedSourceCursor(): void {
         $this->pdo->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value longtext) ENGINE=InnoDB');
         $insert = $this->pdo->prepare('INSERT INTO wp_options VALUES (?, ?)');
         for ($row = 1; $row <= 80; ++$row) {
@@ -582,11 +690,11 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         $previous_phase = '';
         // php -S buffers an HTTP request before dispatch. Complete one request
         // first, then kill the sender in the next one. Only the earlier request
-        // can have target-confirmed bytes on this actual server.
+        // can have target-confirmed rows on this actual server.
         try {
             while (($line = fgets($pipes[1])) !== false) {
                 $phase = trim($line);
-                if ($phase === 'checking' && $previous_phase === 'finishing_request') {
+                if ($previous_phase === 'finishing_request') {
                     $finished_request = true;
                 }
                 $previous_phase = $phase;
@@ -606,8 +714,9 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         $processor = null;
         try {
             $remote = $client->send_push_request('GET', 'push_db_status', ['push_session_id' => $state['push_session_id']], ['accepted']);
-            self::assertSame('partial', $remote['response']['path']['state'], json_encode($remote));
-            self::assertGreaterThan(0, $remote['response']['path']['accepted_bytes']);
+            self::assertSame('importing', $remote['response']['phase'], json_encode($remote));
+            self::assertGreaterThan(1, $remote['response']['records']);
+            self::assertNotNull($remote['response']['cursor']);
             $processor = $this->processor($client);
             while ($processor->next_step()) {
             }
@@ -618,6 +727,62 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
                 $processor->close();
             }
             $client->close();
+        }
+    }
+
+    public function testLostUploadReplyResumesAfterTargetCommittedRow(): void {
+        $this->pdo->exec('CREATE TABLE wp_options (id int PRIMARY KEY, value text) ENGINE=InnoDB');
+        $this->pdo->exec("INSERT INTO wp_options VALUES (1, 'original first'), (2, 'original second')");
+        $client = $this->client();
+        $processor = $this->processor($client);
+        try {
+            // Persist local selection, but stop before opening the upload.
+            while ($processor->get_status()['phase'] !== 'opening_request') {
+                self::assertTrue($processor->next_step());
+            }
+            $session = $processor->get_status()['push_session_id'];
+        } finally {
+            $processor->close();
+        }
+        $reader = new DatabasePushSource($this->pdo, 'wp_', [], $session);
+        $body = '';
+        $boundary = 'lost-upload-reply';
+        try {
+            for ($number = 0; $number < 2; ++$number) {
+                self::assertTrue($reader->next_step());
+                $record = json_encode($reader->get_record());
+                $body .= '--' . $boundary . "\r\nX-Chunk-Type: database\r\nX-Record-Number: " . $number
+                    . "\r\nX-Record-Size: " . strlen($record) . "\r\nX-Chunk-Offset: 0\r\nContent-Length: " . strlen($record) . "\r\n\r\n" . $record . "\r\n";
+            }
+        } finally {
+            $reader->close();
+        }
+        $body .= '--' . $boundary . "--\r\n";
+        $url = $this->remote_reprint_api_url . '?' . http_build_query(['endpoint' => 'push_db_upload', 'push_session_id' => $session]);
+        $headers = ( new Site_Export_HMAC_Client('database-push-test-secret') )->get_envelope_auth_headers('POST', $url);
+        $address = parse_url($url, PHP_URL_HOST) . ':' . parse_url($url, PHP_URL_PORT);
+        $socket = stream_socket_client('tcp://' . $address);
+        $request = 'POST /?' . parse_url($url, PHP_URL_QUERY) . " HTTP/1.1\r\nHost: " . $address
+            . "\r\nContent-Type: multipart/mixed; boundary=" . $boundary . "\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n";
+        foreach ($headers as $name => $value) {
+            $request .= $name . ': ' . $value . "\r\n";
+        }
+        self::assertSame(strlen($request . "\r\n" . $body), fwrite($socket, $request . "\r\n" . $body));
+        fclose($socket); // Discard the reply, not the already delivered request.
+        $client = $this->client();
+        $status = $client->send_push_request('GET', 'push_db_status', ['push_session_id' => $session], ['accepted']);
+        self::assertSame(2, $status['response']['records'], json_encode($status));
+        $this->pdo->exec("UPDATE wp_options SET value=CONCAT('changed ', id)");
+        $processor = $this->processor($client);
+        try {
+            while ($processor->next_step()) {
+                self::assertSame('in_progress', $processor->get_status()['status']);
+            }
+            self::assertSame('ready', $processor->get_status()['phase']);
+            self::assertSame(['original first', 'changed 2'], $this->receiver->query('SELECT value FROM `__reprint_db_' . $session . '_t0` ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
+            self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+        } finally {
+            $processor->close();
         }
     }
 
@@ -660,11 +825,20 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
             }
             $parameters = ['push_session_id' => $processor->get_status()['push_session_id']];
             $before = $client->send_push_request('GET', 'push_db_status', $parameters, ['accepted']);
-            $retry = $client->send_push_request('POST', 'push_db_import', $parameters, ['accepted']);
-            self::assertSame('failed', $retry['status']);
+            $processor->close();
+            $client = $this->client();
+            $processor = $this->processor($client);
+            try {
+                while ($processor->next_step()) {
+                    self::assertSame('in_progress', $processor->get_status()['status']);
+                }
+                self::fail('Resuming must retry the unconfirmed record and report the same SQL failure.');
+            } catch (RuntimeException $exception) {
+                self::assertStringContainsString('Duplicate entry', $exception->getMessage());
+            }
             $after = $client->send_push_request('GET', 'push_db_status', $parameters, ['accepted']);
-            self::assertSame($before['response']['offset'], $after['response']['offset']);
-            self::assertGreaterThan(0, $after['response']['offset']);
+            self::assertSame($before['response']['records'], $after['response']['records']);
+            self::assertGreaterThan(0, $after['response']['records']);
             do {
                 $discard = $client->send_push_request('POST', 'push_db_discard', $parameters, ['accepted']);
                 self::assertSame('complete', $discard['status'], json_encode($discard));

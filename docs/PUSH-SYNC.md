@@ -663,13 +663,20 @@ version needed for a crash-safe swap. MySQL connections may use `mysqli`
 instead of `pdo_mysql`; URL and schema rewriting remain on the client.
 URL rewriting happens in the client. Staging returns a table list and review
 token; a separate confirmed command exchanges the live and incoming tables
-with one multi-table rename. Production-only site tables are moved aside too.
+with one multi-table rename. Production-only prefixed tables are moved aside
+too. `--include-table=plugin_orders` also selects an exact non-prefix table for
+full replacement; unlisted non-prefix tables stay untouched.
 No row diff is computed. Old tables remain until explicit cleanup.
+
+Rows stream without a full local or hosted archive. The target commits each row
+with its source cursor. Resume uses pull's row reader, without a frozen source
+snapshot: copied rows stay as they were, later reads may see changes, and unkeyed
+tables use OFFSET pagination. Keep the source still for a consistent copy.
 
 Triggers are outside the database push scope. The table review always warns
 that the new live tables will have no triggers. Existing target triggers stay
 with the retained old tables until cleanup; source triggers and triggers on
-tables outside the selected prefix are left alone.
+unselected tables are left alone.
 
 This command is separate from file commit. It requires a host-configured
 standalone API route, an operator-controlled stop of all writers, and manual
@@ -739,7 +746,7 @@ Files first, followed by full database overwrite and then selective database cha
    and resumable `commit.json` cursor.
 9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
 10. **Full database overwrite, then selective changes** — `db-push` first
-    prepares and rewrites a local snapshot, stages incoming tables, and
+    streams and rewrites local rows, stages incoming tables, and
     exchanges them only after explicit review. The client prepares table DDL,
     row inserts for generated/spatial columns, and deferred foreign keys. The
     opt-in server currently trusts that SQL without a parser. The later selective mode

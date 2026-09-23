@@ -9,15 +9,22 @@ one `RENAME TABLE` moves both original tables aside and installs the incoming
 This is a full overwrite, not a merge. Orders, accounts, settings, and other
 rows missing locally are removed from the live site. That includes rows
 excluded during pull and rows created on production while staging. There is
-no full-database row comparison. Tables outside the configured WordPress
-prefix are not selected. Prefix matching is case-sensitive. Every table inside
-that prefix is selected; hosts must not share that prefix between independent
-sites.
+no full-database row comparison. Every table inside the configured WordPress prefix is selected. Prefix matching
+is case-sensitive; hosts must not share that prefix between independent sites.
+
+A plugin can also create a table such as `plugin_orders`, without `wp_`. Include
+it explicitly with `--include-table=plugin_orders`; repeat the option for each
+extra table. These names are exact, not patterns. Push cannot tell whether an
+unprefixed table belongs to this site, so it never selects one automatically.
+The source must still contain tables with the configured WordPress prefix.
+An explicitly included table must exist locally. Its production copy is replaced
+in full and appears in the review. Other tables outside the prefix stay alone.
+Reprint's internal progress tables cannot be included.
 
 Triggers are not moved. Every table review warns that the new live tables
 will have no triggers after commit. Source triggers are left alone. Existing
 target triggers stay attached to the retained old tables and are deleted when
-cleanup drops those tables. Triggers on tables outside the selected prefix
+cleanup drops those tables. Triggers on tables outside the selected tables
 are left alone. Staging or aborting a push does not remove live triggers.
 
 ## Initial support
@@ -32,15 +39,15 @@ This first implementation is deliberately opt-in and limited:
   The hosted endpoint does not need PDO. The client still needs PDO core;
   SQLite sources also need `pdo_sqlite`. The client needs PHP 8.1+ for
   streamed uploads; the server source package needs PHP 7.2+.
-- Source MyISAM tables are read-locked during preparation and become InnoDB
-  on the target. Definitions must be valid for InnoDB. In particular, MyISAM
+- Source MyISAM tables become InnoDB on the target. Definitions must be valid for InnoDB. In particular, MyISAM
   per-group AUTO_INCREMENT keys without an index led by the auto-number
   column are not converted. Such a definition fails staging without changing
   live tables.
-- The local and hosted table prefixes are identical. Multisite is rejected.
-- Between 1 and 256 source tables, 128 columns per table, and 1 MiB of values per row, before
+- The local and hosted table prefixes are identical. Explicit extra names are
+  also identical on both sides. Multisite is rejected.
+- Between 1 and 256 source tables, including explicit extras; 128 columns per table; and 1 MiB of values per row, before
   and after URL rewriting. The client asks MySQL to withhold larger rows and
-  rejects them before upload. Archive records are limited to 2 MiB.
+  rejects them without changing live tables. Stream records are limited to 2 MiB.
 - Table and column identifiers contain only ASCII letters, digits, and
   underscores. Foreign keys between selected tables, CHECK constraints,
   generated columns, spatial columns/indexes, and partitions are supported.
@@ -50,7 +57,9 @@ This first implementation is deliberately opt-in and limited:
   and `CONNECTION`) is omitted by the client. The target chooses its own
   storage. References to tables outside the push remain unsupported. Source
   routines and events are not exported; targets containing routines or events
-  are rejected.
+  are rejected. Collations are preserved, so the target must support them.
+  For example, MariaDB 10.6 rejects the `utf8mb4_0900_ai_ci` collation used by
+  the SQLite integration by default; staging fails without changing live tables.
 - Table-prefix conversion, automatic writer shutdown, cache
   clearing, health checks, and automatic rollback are not implemented.
 
@@ -113,9 +122,13 @@ reprint db-push https://example.com/reprint-api.php \
   --state-dir=/private/deploy-42 --secret=TOKEN \
   --source-dsn='mysql:host=127.0.0.1;dbname=local_site;charset=utf8mb4' \
   --source-user=local_user --source-pass=LOCAL_PASSWORD \
-  --table-prefix=wp_ \
+  --table-prefix=wp_ --include-table=plugin_orders \
   --rewrite-url https://local.test https://example.com
 ```
+
+Omit `--include-table` when the prefix covers all site tables. Keep the same
+extra table list when resuming staging. Commit, cleanup, and abort use the saved
+selection; they do not need source credentials or the extra table options.
 
 The result contains `incoming_tables`, `replace_tables`, `warnings`, and a
 `review` token. No live table has changed. Check the complete replacement list
@@ -141,49 +154,55 @@ then reopen it. Old tables remain under the private names reported in
 `old_tables`. Do not switch back after reopening without accounting for new
 writes; that would be another destructive overwrite.
 
-Once satisfied, explicitly delete the retained old tables and hosted archive:
+Once satisfied, explicitly delete the retained old tables:
 
 ```sh
 reprint db-push https://example.com/reprint-api.php \
   --state-dir=/private/deploy-42 --secret=TOKEN --cleanup
 ```
 
-Before commit, `--abort` instead discards incoming tables and the hosted
-archive. It never undoes a committed overwrite. Cleanup/discard remove one
-table per call and then use bounded archive removal. A small terminal progress
-table remains so repeated requests can report the result. The local archive
-also remains; remove the private local state directory when no longer needed.
-Use a new state directory for the next deployment.
+Before commit, `--abort` instead discards incoming tables. It never undoes a
+committed overwrite. Cleanup/discard remove one table per call. A small terminal
+progress table remains so repeated requests can report the result. Remove the
+private local state directory when no longer needed. Use a new state directory
+for the next deployment.
 
 A recorded SQLite `db-apply` target is selected automatically. To use another
 WordPress SQLite database, supply
 `--source-dsn='mysql-on-sqlite:path=/absolute/path/database.sqlite;dbname=wordpress'`.
 Double any semicolon inside a DSN value. MySQL credentials are not used for SQLite.
 
-## Preparation and recovery
+## Streaming and recovery
 
-The client takes one consistent read snapshot and writes a private archive.
-MySQL source connections use UTC so TIMESTAMP values keep their meaning on
-the target. InnoDB and SQLite use a read transaction. When any selected MySQL table uses
-another engine, all selected tables stay read-locked until preparation ends;
-local writes wait during that time. Nontransactional sources therefore need
-`LOCK TABLES` permission. SQLite sources are opened read-only, using the
+For example, if row 10 changes locally after the target has copied it, the
+incoming table keeps the copied value. Rows read later may contain newer values.
+Push uses pull's row reader and its weaker consistency guarantee, without a
+transaction or table lock covering the whole push. Keep source data still if you
+need all copied tables to describe one moment. Keep source tables and columns
+unchanged until staging finishes.
+
+The client reads rows in primary-key order. After interruption it continues
+after the last key committed by the target. Tables without a primary key use
+OFFSET instead; inserts or deletes during the push can make that position skip
+or repeat rows. There is no change log or reconciliation pass.
+
+The client rewrites each complete value before sending it, including serialized
+PHP lengths and structured WordPress content. Binary columns are copied unchanged.
+ENUM index zero is distinct from a declared empty label or the label `0`.
+Restoring that legacy value accepts only the server warnings naming its columns;
+other warnings roll the row back. Rewriting a primary key is rejected. Source
+rows are never updated. MySQL source connections use UTC so TIMESTAMP values
+keep their meaning on the target. SQLite sources are opened read-only, using the
 integration's stored MySQL schema. Plain SQLite databases and integration
-metadata requiring an upgrade are not supported. It rewrites each complete value locally, including serialized PHP
-lengths and structured WordPress content, before base64 encoding it. Binary
-columns are copied unchanged. ENUM index zero is distinct from a declared empty
-label or the label `0`. Restoring that legacy value accepts only the server
-warnings naming its columns; other warnings roll the row back. Rewriting a
-primary key is rejected. Source
-rows are never updated. Keep source **DDL** unchanged during preparation.
-If preparation is interrupted, a new run starts a fresh snapshot; an open
-database transaction or read lock cannot survive process death. A sealed archive is reused
-without scanning the source again.
+metadata requiring an upgrade are not supported.
 
-Upload reuses the existing multipart sender and private work store, with many
-parts per request. Database archives use a separate private store and cannot
-be published by a file-push commit. Resume asks the target for its confirmed
-byte offset. A failed request ends the current run; no automatic retry occurs.
+There is no full local or hosted archive. Many bounded multipart parts travel
+in one request through the existing streaming sender. A record can span requests;
+the target keeps only that unfinished record in its progress table. A running
+client retains its encoded record between successful requests. A new client
+process instead reads the target-confirmed source cursor and restarts the
+unfinished record at byte zero, because its local row may have changed. A failed
+request ends the current run; no automatic retry occurs.
 
 The client parses each `SHOW CREATE TABLE` result with its existing SQL parser.
 It preserves expressions, quoted names, comments, defaults, indexes, and
@@ -194,17 +213,18 @@ Generated columns are omitted from row inserts so the target computes them
 from rewritten input values. Spatial values travel as WKB bytes plus their
 SRID, without URL rewriting.
 
-Foreign key clauses are written to a local temporary stream and appended after
-all tables and rows. References point to incoming tables, not live tables.
+After all rows are sent, the client revisits each table definition and sends
+its deferred foreign key clauses. It does not scan completed rows again. References point to incoming tables, not live tables.
 Each `ALTER TABLE ADD CONSTRAINT` validates the imported rows with foreign key
 checks enabled, including cycles and self-references. A failed validation
 leaves production unchanged and prevents the ready state. Validation can take
-longer than the HTTP step budget on large tables; a later request checks
+longer than a host request allows on large tables; a later request checks
 whether the constraint exists before replaying an unconfirmed ALTER.
 
 Each import step applies one table definition, one row, one foreign key, or
-the end record. The row and its archive byte offset commit in the same InnoDB
-transaction. Private table creation and removal can be replayed after
+the end record. The row and its source cursor commit in the same InnoDB
+transaction. Database push requests share one lock per target database, because
+explicit extra tables can overlap selections with different prefixes. Private table creation and removal can be replayed after
 interruption. Cleanup and discard disable foreign key checks only around each
 private-table DROP so cycles do not prevent removal. Foreign keys from tables
 outside the selected site are rejected before staging and again before commit.
@@ -224,8 +244,8 @@ recovery.
 
 The focused tests run against real MySQL/MariaDB and the production authenticated
 HTTP dispatcher. They cover staging without live changes, cancellation,
-process death with an open request after a confirmed request, a discarded
-commit response, stale review tokens, failed unique-value imports, discard,
+process death with an open request after a confirmed request, discarded upload and
+commit responses, stale review tokens, failed unique-value imports, discard,
 cleanup, client-side serialization rewriting, row-size rejection, exact
 binary/decimal/BIT/NULL values, and zero auto-increment IDs. Compatibility
 cases run with a PDO-free endpoint, a client without `pdo_mysql`, MySQL 5.5
@@ -233,7 +253,8 @@ and MyISAM sources, and SQLite ENUM labels, BIT numbers, and binary values. Sche
 keyword-like literals, generated values, spatial bytes and SRIDs, partitions,
 source storage placement, cyclic/self-referencing foreign keys, constraint
 validation failures, long names, and replay after an ALTER commits but its
-progress write times out. They do not simulate database-server power loss or claim automatic writer draining.
+progress write times out, source edits between runs, raw composite-key cursors,
+and a row rollback when its progress write fails. They do not simulate database-server power loss or claim automatic writer draining.
 
 Trigger tests use the real CLI and HTTP endpoint. They cover source triggers,
 target triggers, both, and neither; the warning also appears on a resumed

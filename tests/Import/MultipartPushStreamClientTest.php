@@ -72,6 +72,17 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertStringContainsString('X-Chunk-Type: delete-list', $received);
         $this->assertStringContainsString('X-Delete-Offset: 7', $received);
 
+        $this->assertStringNotContainsString('{}', $received);
+        $this->assertGreaterThanOrEqual(2, $client->next_database_body_bytes(3, 2, 0));
+        $this->assertTrue($client->send_part([
+            'type' => 'database', 'record_number' => 3, 'total_bytes' => 2,
+            'offset' => 0, 'payload' => '{}',
+        ]));
+        $received .= $this->read_available($connection);
+        $this->assertStringContainsString('X-Chunk-Type: database', $received);
+        $this->assertStringContainsString('X-Record-Number: 3', $received);
+        $this->assertStringContainsString('{}', $received, 'The database part leaves before finish_request().');
+
         $response = (string) json_encode(['status' => 'accepted', 'accepted' => []]);
         fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " . strlen($response) . "\r\nConnection: close\r\n\r\n" . $response);
         fclose($connection);
@@ -82,7 +93,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             $this->assertStringContainsString("{$name}: {$value}\r\n", $received);
         }
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
-        $this->assertSame(2, $result['parts_sent']);
+        $this->assertSame(3, $result['parts_sent']);
         $this->assertFalse($client->has_sent_parts());
     }
 

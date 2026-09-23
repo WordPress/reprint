@@ -2,7 +2,7 @@
 import { describe, it, beforeAll, beforeEach, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { writeFileSync, readFileSync, mkdirSync, chmodSync, statSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync, chmodSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
@@ -158,12 +158,12 @@ require '${targetPluginDirectory}/lib.php';
     });
 
     it('preserves all 200 payloads of 80 KiB', async () => {
-        await exercisePush(connection => createBoundedPayloadData(connection, 'wp_bounded_payloads'), { archiveBytes: 20 * 1024 * 1024 });
+        await exercisePush(connection => createBoundedPayloadData(connection, 'wp_bounded_payloads'));
     });
 
-    it('preserves 50,050 rows across hundreds of import requests', async () => {
+    it('preserves 50,050 rows across source query batches', async () => {
         // Fifty copies of the pull suite's 1,001-row batch-boundary dataset.
-        await exercisePush(connection => createManyRowData(connection, 'wp_many_rows', 50050), { imports: 390 });
+        await exercisePush(connection => createManyRowData(connection, 'wp_many_rows', 50050));
     });
 
     it('rejects the pull suite’s 13 MiB row without changing the live site', async () => {
@@ -181,7 +181,7 @@ require '${targetPluginDirectory}/lib.php';
     });
 });
 
-async function exercisePush(createData, { builder = false, archiveBytes = 0, imports = 1 } = {}) {
+async function exercisePush(createData, { builder = false } = {}) {
     const source = await createMysqlConnection(sourceDatabase);
     try {
         await createData(source);
@@ -247,8 +247,12 @@ async function exercisePush(createData, { builder = false, archiveBytes = 0, imp
     const requests = readFileSync(logPath, 'utf8').trim().split('\n');
     assert.ok(requests.includes('push_db_upload'));
     const archive = join(stateDirectory, 'remotes', createHash('md5').update(targetApi).digest('hex'), 'push/database/database.jsonl');
-    assert.ok(statSync(archive).size >= archiveBytes);
-    assert.ok(requests.filter(endpoint => endpoint === 'push_db_import').length >= imports);
+    assert.equal(existsSync(archive), false, 'Push must not spool a local database archive');
+    assert.equal(existsSync(archive + '.building'), false);
+    assert.equal(requests.includes('push_db_import'), false);
+    const uploads = requests.filter(endpoint => endpoint === 'push_db_upload').length;
+    assert.ok(uploads >= 1);
+    assert.ok(uploads < 80, 'Many records must share each request');
     await assertSiteWorks('E2E: ' + sourceSite, builder);
     const cleanup = push(stateDirectory, ['--cleanup']);
     assert.equal(cleanup.status, 0, cleanup.stderr + cleanup.stdout);
@@ -257,7 +261,7 @@ async function exercisePush(createData, { builder = false, archiveBytes = 0, imp
     await afterCleanup.end();
     assert.ok(retained.every(table => !tables.some(row => Object.values(row)[0] === table)));
     await assertSiteWorks('E2E: ' + sourceSite, builder);
-    console.log(`Verified ${Object.keys(expected).length} site tables; ${requests.filter(e => e === 'push_db_upload').length} uploads, ${requests.filter(e => e === 'push_db_import').length} imports`);
+    console.log(`Verified ${Object.keys(expected).length} site tables; ${requests.filter(e => e === 'push_db_upload').length} streamed uploads`);
 }
 
 function push(stateDirectory, arguments_) {

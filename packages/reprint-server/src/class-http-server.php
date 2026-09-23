@@ -24,7 +24,7 @@ final class HTTPServer {
         'push_remove' => 'remove',
     ];
 
-    private const DATABASE_PUSH_ENDPOINTS = ['push_db_create', 'push_db_upload', 'push_db_status', 'push_db_import', 'push_db_commit', 'push_db_cleanup', 'push_db_discard'];
+    private const DATABASE_PUSH_ENDPOINTS = ['push_db_create', 'push_db_upload', 'push_db_status', 'push_db_commit', 'push_db_cleanup', 'push_db_discard'];
 
     /** @var DatabasePushEndpoints|null */
     private $database_push_endpoints;
