@@ -560,7 +560,7 @@ class MultipartPushStreamClient
      *     @type string $path Required target-relative path for a file.
      *     @type int $total_bytes Required complete local file or encoded database record size.
      *     @type int $record_number Required zero-based database record number for database parts.
-     *     @type int $offset Required byte offset within the file or encoded record.
+     *     @type int $offset Required byte offset within the file, encoded record, or delete list.
      * }
      * @return int Maximum body bytes allowed after MIME overhead and the close.
      */
@@ -1070,8 +1070,9 @@ class MultipartPushStreamClient
      *
      * - `type`: required `file`, `directory`, `symlink`, `database`, or `delete-list`.
      * - `path`: required for file, directory, and symlink parts.
-     * - `total_bytes`: required complete local file size.
-     * - `offset`: required target-confirmed offset for a file or delete list.
+     * - `total_bytes`: required complete local file or encoded database record size.
+     * - `record_number`: required zero-based database record number.
+     * - `offset`: required byte offset within a file, database record, or delete list.
      * - `target`: required raw link target for a symlink.
      * - `complete`: optional delete-list completion declaration.
      * - `payload`: supplied by send_part(); only its separately computed byte
@@ -1082,6 +1083,7 @@ class MultipartPushStreamClient
      * directories add `X-Directory-Path`; symlinks add `X-Symlink-Path` and
      * `X-Symlink-Target`; delete lists add `X-Delete-Offset`, optionally
      * `X-Delete-Complete`, and an octet-stream `Content-Type`.
+     * Database parts add `X-Record-Number`, `X-Record-Size`, and `X-Chunk-Offset`.
      *
      * @param array<string,mixed> $part Part descriptor using the keys above.
      * @param int $payload_bytes Exact strlen() of its payload.
