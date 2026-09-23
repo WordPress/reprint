@@ -186,7 +186,19 @@ class ImportClient
         "flat-docroot",
         "merge-wp-content",
         "apply-runtime",
+        "keygen",
     ];
+
+    /** Commands that authenticate to the remote site and therefore need a credential. */
+    public const REMOTE_COMMANDS = [
+        'pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight',
+    ];
+
+    /** pull generated a key and stopped so it can be enrolled; not a failure, not a success. */
+    public const EXIT_CODE_ENROLLMENT_NEEDED = 4;
+
+    /** Private key file name inside the remote state directory. */
+    public const KEY_FILE_NAME = 'key.pem';
 
     /** Progress output modes accepted by every command. */
     public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl', 'compact'];
@@ -429,6 +441,15 @@ class ImportClient
     /** @var Site_Export_HMAC_Client|null Signs requests when HMAC auth is configured. */
     private $hmac_client = null;
 
+    /** @var \WordPress\Reprint\Server\PublicKeyClient|null */
+    private $public_key_client = null;
+
+    /** @var array Resolved credential: scheme plus its material. See resolve_credential(). */
+    private $credential = ['scheme' => null];
+
+    /** @var string `<state-dir>/remotes/<md5>` for this remote. */
+    private $remote_state_directory = '';
+
     /**
      * @var int|null Target max_allowed_packet ceiling sent to the exporter.
      * Passed to the server so it can split SQL statements to fit within this limit.
@@ -584,6 +605,7 @@ class ImportClient
                 $this->state_dir
             )
             : Utils::trim_right_slash($selected_remote_state_directory, Utils::native_path_format());
+        $this->remote_state_directory = $remote_state_directory;
         $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
         $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
@@ -1319,18 +1341,43 @@ class ImportClient
         }
 
         $this->initialize_tuner($options);
+        // --abort clears local state and never signs a request.
+        $signs_remote_requests = !$abort && in_array($command, self::REMOTE_COMMANDS, true);
+        $this->initialize_credential($signs_remote_requests, $options);
 
-        // Initialize HMAC authentication if a connection token was provided.
-        // When set, every outgoing HTTP request will include X-Auth-Signature,
-        // X-Auth-Nonce, and X-Auth-Timestamp headers so the export API can verify
-        // the caller without a SECRET_KEY in the URL.
-        if (!empty($options["secret"])) {
-            if (!class_exists('Site_Export_HMAC_Client')) {
-                throw new RuntimeException(
-                    'Streaming exporter runtime not found. Run composer install before using --secret.'
+        // A remote command with no credential never sends a request. pull is
+        // the one-stop command and generates a key so the user can enroll it;
+        // every other command is a precise tool and says what to run instead.
+        if ($signs_remote_requests && $this->credential['scheme'] === null) {
+            if ($command === 'pull') {
+                $generated = self::generate_key_file(
+                    self::key_file_path($this->remote_reprint_api_url, $this->state_dir),
+                    false
                 );
+                $enrollment_instructions = self::format_enrollment_instructions($generated, true, true);
+                // Only the terminal presentation prints the text. JSONL and
+                // compact output stay parseable: the command report below
+                // carries the key and the same text in its message field.
+                $this->progress->print_line($enrollment_instructions);
+                if ($this->verbose_mode) {
+                    // Verbose terminal output shows JSONL records and no command report.
+                    $this->output_progress(['status' => 'enrollment_needed', 'message' => $enrollment_instructions], true);
+                }
+                // The command report would otherwise call this stop an error with no message.
+                $this->command_report_details = [
+                    'status' => 'enrollment_needed',
+                    'message' => $enrollment_instructions,
+                    'key_id' => $generated['key_id'],
+                    'key_path' => $generated['path'],
+                    'public_key' => $generated['public_key'],
+                ];
+                $this->exit_code = self::EXIT_CODE_ENROLLMENT_NEEDED;
+                return;
             }
-            $this->hmac_client = new \Site_Export_HMAC_Client($options["secret"]);
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI guidance with local paths, never HTML.
+                self::no_credential_message($this->remote_reprint_api_url, $this->state_dir)
+            );
         }
 
         // Pull-like commands orchestrate preflight and lower-level stages
@@ -1368,6 +1415,15 @@ class ImportClient
                 ]);
                 $this->write_progress_file($e->getMessage());
                 throw $e;
+            }
+            if ($command === 'pull' && $this->credential['scheme'] === 'key' && ( $this->credential['source'] ?? '' ) === 'state') {
+                $key_message =
+                    "Key for this site: {$this->credential['path']}\n"
+                    . "Deleting the state directory destroys it, so the enrolled public key stops working; Tools > Reprint Server can also remove that key.";
+                // The plain terminal presentation drops JSONL records, so it
+                // gets the same text once, below the pull summary.
+                $this->progress->print_line("\033[2m{$key_message}\033[0m\n");
+                $this->output_progress(['status' => 'info', 'message' => $key_message], true);
             }
             return;
         }
@@ -1831,7 +1887,7 @@ class ImportClient
 
         if (!class_exists('Site_Export_HMAC_Client')) {
             throw new RuntimeException(
-                'Streaming exporter runtime not found. Run composer install before using --secret.'
+                'Streaming exporter runtime not found. Run composer install before using --secret or --private-key.'
             );
         }
 
@@ -1847,7 +1903,12 @@ class ImportClient
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'request_context_headers' => $this->request_context_headers,
-            'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
+            'envelope_signer' => self::build_envelope_signer(
+                $options,
+                $this->remote_reprint_api_url,
+                $this->state_dir,
+                $this->remote_state_directory
+            ),
             'allow_http' => $options['allow_http'] ?? false,
             'chunk_bytes' => $chunk_bytes,
             'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
@@ -2307,9 +2368,12 @@ class ImportClient
         string $filesystem_root,
         array $options
     ): array {
-        $secret = $options['secret'] ?? null;
-        if (!is_string($secret) || $secret === '') {
-            throw new InvalidArgumentException('files-push requires --secret=TOKEN.');
+        $credential = self::resolve_credential(
+            $options,
+            self::remote_state_directory_path($remote_reprint_api_url, $state_dir)
+        );
+        if ($credential['scheme'] === null) {
+            throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
         }
         if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
             throw new InvalidArgumentException(
@@ -2429,6 +2493,205 @@ class ImportClient
             'remotes',
             md5(rtrim($remote_reprint_api_url, '?&'))
         );
+    }
+
+    /** Returns `<remote state dir>/key.pem` for a remote. */
+    public static function key_file_path(string $remote_reprint_api_url, string $state_dir): string
+    {
+        return wp_join_unix_paths(self::remote_state_directory_path($remote_reprint_api_url, $state_dir), self::KEY_FILE_NAME);
+    }
+
+    /**
+     * Generates a keypair and writes the private half to $path with mode 0600.
+     *
+     * @return array {
+     *     @type string $path       Where the private key was written.
+     *     @type string $public_key The one-line public key to enroll on the site.
+     *     @type string $key_id     Fingerprint of the public key.
+     * }
+     * @throws RuntimeException When the file exists and $force is false, or on a write failure.
+     */
+    public static function generate_key_file(string $path, bool $force): array
+    {
+        if (file_exists($path) && !$force) {
+            throw new RuntimeException(
+                "A key already exists at {$path}. It may still be enrolled and in use. Pass --force to replace it."
+            );
+        }
+        $directory = dirname($path);
+        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
+            throw new RuntimeException("Could not create {$directory}.");
+        }
+        [$private_key_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        // Write a fresh sibling file and rename it over the target. Rewriting
+        // an existing file in place keeps its old mode until chmod runs and
+        // follows a symlink; a new file is 0600 from its first byte and the
+        // rename replaces a link entry instead of writing through it.
+        $temporary_path = $path . '.' . bin2hex(random_bytes(8)) . '.tmp';
+        $previous_umask = umask(0077);
+        try {
+            $written_bytes = file_put_contents($temporary_path, $private_key_pem);
+        } finally {
+            umask($previous_umask);
+        }
+        if (
+            $written_bytes !== strlen($private_key_pem)
+            || !chmod($temporary_path, 0600)
+            || !rename($temporary_path, $path)
+        ) {
+            if (file_exists($temporary_path)) {
+                unlink($temporary_path);
+            }
+            throw new RuntimeException("Could not write the private key to {$path}.");
+        }
+        return [
+            'path' => $path,
+            'public_key' => $public_key,
+            'key_id' => \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key),
+        ];
+    }
+
+    /**
+     * The text keygen prints, and pull prints when it generated a key itself.
+     *
+     * @param array $generated {
+     *     The result of generate_key_file().
+     *     @type string $path       Where the private key was written.
+     *     @type string $public_key The one-line public key to enroll on the site.
+     *     @type string $key_id     Fingerprint of the public key.
+     * }
+     * @param bool $generated_by_pull  True when pull generated it and stopped.
+     * @param bool $stored_in_state    True when the file is where every later command will find it.
+     */
+    public static function format_enrollment_instructions(array $generated, bool $generated_by_pull, bool $stored_in_state): string
+    {
+        $lines = [];
+        if ($generated_by_pull) {
+            $lines[] = 'No credential found for this site. Generated one:';
+        } else {
+            $lines[] = 'Generated a key for this site:';
+        }
+        $lines[] = '';
+        $lines[] = '  Key id:      ' . $generated['key_id'];
+        $lines[] = '  Stored at:   ' . $generated['path'];
+        $lines[] = '';
+        $lines[] = 'Enroll this public key on the site under Tools → Reprint Server,';
+        if ($generated_by_pull) {
+            $lines[] = 'then run the same command again:';
+        } elseif ($stored_in_state) {
+            $lines[] = 'then run any reprint command against this site; the key is found automatically:';
+        } else {
+            $lines[] = 'then pass --private-key=' . $generated['path'] . ' to every reprint command:';
+        }
+        $lines[] = '';
+        // The key sits at the start of its own line so a whole-line copy
+        // carries no leading whitespace into the enrollment form.
+        $lines[] = $generated['public_key'];
+        $lines[] = '';
+        return implode("\n", $lines);
+    }
+
+    /**
+     * Resolves which credential a command uses. First match wins:
+     *   1. --secret        → HMAC
+     *   2. --private-key   → key from that file
+     *   3. key.pem in the remote state directory → key from there
+     *   4. nothing
+     *
+     * @param array<string,mixed> $options                Parsed CLI options.
+     * @param string              $remote_state_directory `<state-dir>/remotes/<md5>`.
+     * @return array{scheme:string|null,secret?:string,private_key_pem?:string,path?:string,source?:string}
+     * @throws InvalidArgumentException On an empty flag value, conflicting flags, or an unusable key file.
+     */
+    public static function resolve_credential(array $options, string $remote_state_directory): array
+    {
+        // The option parser stores `--secret=` as '' and an absent flag as
+        // null or no key. An empty value is a present, invalid option: falling
+        // through to key generation would hide an unset shell variable.
+        if (isset($options['secret']) && $options['secret'] === '') {
+            throw new InvalidArgumentException('--secret was given without a value.');
+        }
+        if (isset($options['private_key']) && $options['private_key'] === '') {
+            throw new InvalidArgumentException('--private-key was given without a value.');
+        }
+        $secret = isset($options['secret']) && is_string($options['secret']) ? $options['secret'] : null;
+        $flag_path = isset($options['private_key']) && is_string($options['private_key']) ? $options['private_key'] : null;
+        if ($secret !== null && $flag_path !== null) {
+            throw new InvalidArgumentException('--secret and --private-key cannot be combined. Pass one credential.');
+        }
+        if ($secret !== null) {
+            return ['scheme' => 'hmac', 'secret' => $secret];
+        }
+        if ($flag_path !== null) {
+            return ['scheme' => 'key', 'private_key_pem' => self::read_private_key_file($flag_path), 'path' => $flag_path, 'source' => 'flag'];
+        }
+        $state_path = wp_join_unix_paths($remote_state_directory, self::KEY_FILE_NAME);
+        if (is_file($state_path)) {
+            return ['scheme' => 'key', 'private_key_pem' => self::read_private_key_file($state_path), 'path' => $state_path, 'source' => 'state'];
+        }
+        return ['scheme' => null];
+    }
+
+    /**
+     * Reads a private key file, refusing one other users could read.
+     *
+     * @throws InvalidArgumentException When unreadable or too permissive.
+     */
+    private static function read_private_key_file(string $path): string
+    {
+        if (!is_file($path) || !is_readable($path)) {
+            throw new InvalidArgumentException("The private key at {$path} could not be read.");
+        }
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $permissions = fileperms($path);
+            if ($permissions !== false && ( $permissions & 0077 ) !== 0) {
+                throw new InvalidArgumentException(
+                    "The private key at {$path} is readable by other users. Run: chmod 600 " . escapeshellarg($path)
+                );
+            }
+        }
+        $contents = file_get_contents($path);
+        if ($contents === false || trim($contents) === '') {
+            throw new InvalidArgumentException("The private key at {$path} is empty.");
+        }
+        return $contents;
+    }
+
+    /** The sentence every remote command throws when it finds no credential. */
+    private static function no_credential_message(string $remote_reprint_api_url, string $state_dir): string
+    {
+        return "No credential for this site. Run `reprint keygen {$remote_reprint_api_url} --state-dir={$state_dir}` "
+            . 'and enroll the printed key, or pass --secret=TOKEN.';
+    }
+
+    /**
+     * Builds the signer files-push hands to its stream client, from the same resolution every command uses.
+     *
+     * @param array  $options                Parsed CLI options; reads `secret` and `private_key`.
+     * @param string $remote_reprint_api_url Remote Reprint API URL, named in the no-credential message.
+     * @param string $state_dir              `--state-dir`, named in the no-credential message.
+     * @param string $remote_state_directory `<state-dir>/remotes/<md5>` searched for key.pem.
+     */
+    private static function build_envelope_signer(
+        array $options,
+        string $remote_reprint_api_url,
+        string $state_dir,
+        string $remote_state_directory
+    ): \WordPress\Reprint\Server\EnvelopeSigner {
+        $credential = self::resolve_credential($options, $remote_state_directory);
+        if ($credential['scheme'] === 'hmac') {
+            return new \Site_Export_HMAC_Client($credential['secret']);
+        }
+        if ($credential['scheme'] === 'key') {
+            try {
+                return new \WordPress\Reprint\Server\PublicKeyClient($credential['private_key_pem']);
+            } catch (InvalidArgumentException $exception) {
+                throw new InvalidArgumentException(
+                    "The private key at {$credential['path']} could not be used: " . $exception->getMessage()
+                );
+            }
+        }
+        throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -2707,6 +2970,47 @@ class ImportClient
             "TUNER CONFIG | " . json_encode($this->get_state()->tuning->config),
             false,
         );
+    }
+
+    /**
+     * Resolve the credential once and build the one client that signs every request.
+     *
+     * An invocation that never signs a request leaves the credential
+     * unresolved: a key file it would never use must not stop it.
+     *
+     * @param bool  $signs_remote_requests Whether this invocation sends signed requests.
+     * @param array $options               Parsed CLI options; reads `secret` and `private_key`.
+     */
+    private function initialize_credential(bool $signs_remote_requests, array $options): void
+    {
+        // Resolve the credential once: --secret, then --private-key, then
+        // key.pem in the remote state directory. Every request signs with
+        // whichever client this produced; nothing later re-decides.
+        $this->hmac_client = null;
+        $this->public_key_client = null;
+        $this->credential = ['scheme' => null];
+        if (!$signs_remote_requests) {
+            return;
+        }
+        $this->credential = self::resolve_credential($options, $this->remote_state_directory);
+        if ($this->credential['scheme'] === 'hmac') {
+            if (!class_exists('Site_Export_HMAC_Client')) {
+                throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --secret.');
+            }
+            $this->hmac_client = new \Site_Export_HMAC_Client($this->credential['secret']);
+        } elseif ($this->credential['scheme'] === 'key') {
+            if (!class_exists(\WordPress\Reprint\Server\PublicKeyClient::class)) {
+                throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --private-key.');
+            }
+            try {
+                $this->public_key_client = new \WordPress\Reprint\Server\PublicKeyClient($this->credential['private_key_pem']);
+            } catch (InvalidArgumentException $exception) {
+                throw new InvalidArgumentException(
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error naming a local file, never HTML.
+                    "The private key at {$this->credential['path']} could not be used: " . $exception->getMessage()
+                );
+            }
+        }
     }
 
     /**
@@ -12248,22 +12552,27 @@ class ImportClient
     }
 
     /**
-     * Return HMAC authentication headers formatted for curl ("Name: value"),
-     * or an empty array if no secret was configured.
+     * Authentication headers for curl ("Name: value"), or [] with no credential.
      *
-     * @param string $body The request body content whose SHA-256 hash will
-     *                     be included in the HMAC signature.  For CURLFile
-     *                     uploads, pass the raw file content (not the
-     *                     multipart envelope); for form-encoded POST, pass
-     *                     the http_build_query() output; for GET, omit or
-     *                     pass empty string.
+     * @param string      $method HTTP method of the request being built.
+     * @param string      $url    Full request URL.
+     * @param string      $body   Raw content to hash: file contents for uploads,
+     *                            http_build_query() output for forms, '' otherwise.
+     * @param string|null $cursor The X-Export-Cursor value being sent as a
+     *                            header, or null. The cursor is signed only
+     *                            when sent this way; the streaming fetch no
+     *                            longer sends it as a header, so it passes
+     *                            no cursor here.
      */
-    private function get_hmac_headers(string $body = ''): array
+    private function get_auth_headers(string $method, string $url, string $body = '', ?string $cursor = null): array
     {
-        if ($this->hmac_client === null) {
-            return [];
+        if ($this->public_key_client !== null) {
+            return $this->public_key_client->get_curl_headers($method, $url, $body, $cursor);
         }
-        return $this->hmac_client->get_curl_headers($body);
+        if ($this->hmac_client !== null) {
+            return $this->hmac_client->get_curl_headers($body);
+        }
+        return [];
     }
 
     /**
@@ -12615,6 +12924,7 @@ class ImportClient
 
         $decoded = json_decode($body, true);
         $server_msg = is_array($decoded) ? ($decoded['error'] ?? null) : null;
+        $server_reason = is_array($decoded) && isset($decoded['reason']) && is_string($decoded['reason']) ? $decoded['reason'] : null;
 
         $looks_like_html = !is_array($decoded) && $body !== '' && (
             stripos($body, '<html') !== false ||
@@ -12642,15 +12952,70 @@ class ImportClient
         }
 
         // ── Authentication / authorization ───────────────────────
-        if ($http_code === 401 || $http_code === 403) {
-            if ($this->hmac_client === null) {
+        // 503 not_configured is an auth answer too: the site is in a state
+        // where no credential of the kind we sent can succeed.
+        if ($http_code === 401 || $http_code === 403 || ( $http_code === 503 && $server_reason === 'not_configured' )) {
+            $using_key = $this->public_key_client !== null;
+            $key_hint = '';
+            if ($using_key) {
+                $key_hint = "\n\nYour public key (key id " . $this->public_key_client->get_key_id() . "):\n\n  "
+                    . $this->public_key_client->get_public_key();
+            }
+
+            if ($server_reason === 'requires_key_auth') {
                 return [
-                    'code' => 'AUTH_NO_SECRET',
+                    'code' => 'AUTH_REQUIRES_KEY',
                     'message' =>
-                        "No --secret was provided. The remote site requires " .
-                        "authentication.\n\n" .
-                        "Pass --secret=YOUR_SECRET using the same connection " .
-                        "token configured under Tools > Reprint Server on the remote site.",
+                        "This site's host has OpenSSL, so it accepts key authentication only; " .
+                        "connection tokens are not accepted there.\n\n" .
+                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` " .
+                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server.",
+                ];
+            }
+            if ($server_reason === 'requires_token_auth') {
+                return [
+                    'code' => 'AUTH_REQUIRES_TOKEN',
+                    'message' =>
+                        "This site's host has no OpenSSL, so it accepts connection-token authentication only.\n\n" .
+                        "Pass --secret=TOKEN using the connection token configured under Tools > Reprint Server.",
+                ];
+            }
+            if ($server_reason === 'not_configured') {
+                if ($using_key) {
+                    $not_configured_message =
+                        "This site requires key authentication but has no keys enrolled. " .
+                        "Enroll this public key under Tools > Reprint Server." . $key_hint;
+                } elseif (is_string($server_msg) && strpos($server_msg, 'requires key authentication') !== false) {
+                    // A key host keeps a stored token but never accepts it, so
+                    // setting a token there would change nothing.
+                    $not_configured_message =
+                        "This site's host requires key authentication and has no keys enrolled; " .
+                        "the connection token you passed is not accepted there.\n\n" .
+                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` " .
+                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server.";
+                } else {
+                    $not_configured_message =
+                        "This site has no connection token configured. " .
+                        "Set one under Tools > Reprint Server, or enroll a key if the host supports it.";
+                }
+                return ['code' => 'AUTH_NOT_CONFIGURED', 'message' => $not_configured_message];
+            }
+            if ($server_reason === 'unknown_key') {
+                return [
+                    'code' => 'AUTH_UNKNOWN_KEY',
+                    'message' =>
+                        "This key is not enrolled on the site. Enroll it under Tools > Reprint Server, " .
+                        "or check that the key id matches an enrolled key." . $key_hint,
+                ];
+            }
+
+            if ($this->hmac_client === null && !$using_key) {
+                return [
+                    'code' => 'AUTH_NO_CREDENTIAL',
+                    'message' =>
+                        "No credential was provided and the remote site requires authentication.\n\n" .
+                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` and enroll " .
+                        "the printed key, or pass --secret=TOKEN with the connection token from Tools > Reprint Server.",
                 ];
             }
 
@@ -12666,8 +13031,15 @@ class ImportClient
                 ];
             }
 
-            // The server tells us exactly what went wrong. Map each known
-            // HMAC error to a targeted message.
+            if ($using_key && $server_reason === null) {
+                return [
+                    'code' => 'AUTH_KEY_UNSUPPORTED',
+                    'message' =>
+                        "The site rejected the key signature without a reason code, which an older " .
+                        "Reprint Server plugin does when it does not understand key authentication.\n\n" .
+                        "Ask the site owner to update the Reprint Server plugin, or use --secret with a connection token.",
+                ];
+            }
 
             if (Utils::str_contains($server_msg, 'HMAC signature verification failed')) {
                 return [
@@ -12675,6 +13047,14 @@ class ImportClient
                     'message' =>
                         "Wrong connection token. The --secret value does not match " .
                         "the one configured under Tools > Reprint Server in wp-admin.",
+                ];
+            }
+
+            if (Utils::str_contains($server_msg, 'Signature verification failed')) {
+                return [
+                    'code' => 'AUTH_KEY_MISMATCH',
+                    'message' =>
+                        "Signature rejected. The private key does not match the enrolled public key with this key id." . $key_hint,
                 ];
             }
 
@@ -12833,7 +13213,7 @@ class ImportClient
 
         $headers = [
             ...$this->get_base_headers("application/json"),
-            ...($this->get_hmac_headers($body)),
+            ...($this->get_auth_headers('POST', $url, $body)),
         ];
 
         curl_setopt_array($ch, [
@@ -12983,9 +13363,17 @@ class ImportClient
             "Sec-Fetch-User: ?1",
         ];
 
-        if ($cursor) {
-            $headers[] = "X-Export-Cursor: {$cursor}";
-        }
+        // The cursor travels only in the request body (see build_request()).
+        // For form-encoded requests the signed content hash covers that body
+        // cursor. A multipart file_fetch request hashes only the uploaded
+        // file contents, so its form fields, cursor included, stay unsigned
+        // exactly as they always have on the HMAC path. Closing that gap for
+        // multipart requests is tracked separately: it needs a signed message
+        // that covers the form fields on both sides.
+        // Sending the cursor again as a header would let a proxy that strips
+        // custom headers silently drop the value the signature was computed
+        // over, breaking verification behind exactly the hosts this is meant
+        // to survive.
 
         // Configure POST data. We need to know the body
         // content BEFORE generating HMAC headers so the content hash
@@ -13036,8 +13424,8 @@ class ImportClient
             curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
         }
 
-        // Append HMAC auth headers now that we know the body content
-        array_push($headers, ...($this->get_hmac_headers($body_for_signing)));
+        // Append auth headers now that we know the body content
+        array_push($headers, ...($this->get_auth_headers('POST', $url, $body_for_signing)));
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
@@ -13369,7 +13757,7 @@ class ImportClient
         // An unmarked 401 or 403 after a signed request can be a temporary
         // firewall response produced before the request reaches Reprint.
         return ($http_code === 401 || $http_code === 403)
-            && $this->hmac_client !== null;
+            && ( $this->hmac_client !== null || $this->public_key_client !== null );
     }
 
     /**
@@ -14171,6 +14559,30 @@ if (
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
+            'name' => 'private-key',
+            'type' => 'value',
+            'target' => 'private_key',
+            'placeholder' => 'PATH',
+            'help' => 'RSA private key file for export API authentication; overrides the key stored in the state directory',
+            'help_section' => 'global',
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+        ],
+        [
+            'name' => 'out',
+            'type' => 'value',
+            'target' => 'out',
+            'placeholder' => 'PATH',
+            'help' => 'Write the private key here instead of the state directory; later commands then need --private-key=PATH',
+            'commands' => ['keygen'],
+        ],
+        [
+            'name' => 'force',
+            'type' => 'flag',
+            'target' => 'force',
+            'help' => 'Replace an existing key file',
+            'commands' => ['keygen'],
+        ],
+        [
             'name' => 'allow-unsafe-http',
             'type' => 'flag',
             'target' => 'allow_http',
@@ -14809,6 +15221,7 @@ if (
         echo "  0  Command completed successfully\n";
         echo "  2  Partial progress — run the same command again to continue\n";
         echo "  3  Temporary transfer failure — retry the same command later\n";
+        echo "  4  pull generated a key and stopped so it can be enrolled\n";
         echo "  1  Error\n";
         echo "\n";
         echo "Resumable commands keep their command-specific work under --state-dir.\n";
@@ -14918,15 +15331,21 @@ if (
         echo "  2. Go to Plugins → Add New Plugin → Upload Plugin\n";
         echo "  3. Upload reprint-exporter-wp.zip and activate Reprint Server\n";
         echo "\n";
-        echo "{$bold}Step 3: Configure the connection token{$reset}\n";
+        echo "{$bold}Step 3: Enroll a key{$reset}\n";
         echo "\n";
-        echo "  1. In wp-admin, go to Tools → Reprint Server\n";
-        echo "  2. Enter a connection token and save\n";
-        echo "  3. Pass the same token to reprint with --secret:\n";
+        echo "  1. Run reprint against the site; with no credential it generates a key,\n";
+        echo "     prints the public half, and stops with exit code 4:\n";
         echo "\n";
-        echo "     {$dim}php reprint.phar preflight https://your-site.com \\\n";
-        echo "       --secret=YOUR_SECRET \\\n";
+        echo "     {$dim}php reprint.phar pull https://your-site.com \\\n";
         echo "       --state-dir=./state --fs-root=./files{$reset}\n";
+        echo "\n";
+        echo "     (reprint keygen https://your-site.com --state-dir=./state does the same\n";
+        echo "     without starting a pull)\n";
+        echo "  2. In wp-admin, go to Tools → Reprint Server and enroll the printed key\n";
+        echo "  3. Run the same command again; the key is found in --state-dir\n";
+        echo "\n";
+        echo "  Only a host without OpenSSL uses a connection token instead: enter one\n";
+        echo "  under Tools → Reprint Server and pass it with --secret=YOUR_SECRET.\n";
         echo "\n";
     }
 
@@ -15060,27 +15479,33 @@ if (
                 "so you can pass just the site URL.\n",
             "extra" =>
                 "Examples:\n" .
-                "  # Download files and database without applying SQL:\n" .
+                "  # Download files and database without applying SQL. The first run\n" .
+                "  # with no credential generates a key, prints it for enrollment under\n" .
+                "  # Tools → Reprint Server, and exits 4; the second run uses that key:\n" .
                 "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n" .
+                "    --state-dir=./state --fs-root=./files\n" .
                 "\n" .
                 "  # Full clone with MySQL database apply and URL rewriting:\n" .
                 "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-user=root --target-db=wp_local \\\n" .
                 "    --new-site-url=http://localhost:8881\n" .
                 "\n" .
                 "  # Full clone with SQLite, flattened layout, and PHP built-in server:\n" .
                 "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
+                "    --state-dir=./state --fs-root=./files \\\n" .
                 "    --target-engine=sqlite \\\n" .
                 "    --new-site-url=http://localhost:8881 \\\n" .
                 "    --flatten-to=./site --runtime=php-builtin --output-dir=./runtime\n" .
                 "\n" .
                 "  # Prepare a Playground runtime but let another process start it:\n" .
                 "  reprint pull https://example.com \\\n" .
-                "    --secret=TOKEN --state-dir=./state --fs-root=./files \\\n" .
-                "    --runtime=playground-cli --start-runtime=none --output-dir=./runtime\n",
+                "    --state-dir=./state --fs-root=./files \\\n" .
+                "    --runtime=playground-cli --start-runtime=none --output-dir=./runtime\n" .
+                "\n" .
+                "  # Host without OpenSSL: pass the connection token instead of a key:\n" .
+                "  reprint pull https://example.com \\\n" .
+                "    --secret=TOKEN --state-dir=./state --fs-root=./files\n",
         ],
         "pull-files" => [
             "level" => "high",
@@ -15136,6 +15561,25 @@ if (
                 "\n" .
                 "The Reprint Server plugin must be installed on the remote site before\n" .
                 "any other reprint command can connect to it.\n",
+            "extra" => null,
+        ],
+        "keygen" => [
+            "level" => "low",
+            "short" => "Generate a private key for one remote site",
+            "usage" => "reprint keygen <remote-reprint-api-url> --state-dir=DIR [--out=PATH] [--force]",
+            "description" =>
+                "Generates a 2048-bit RSA keypair and stores the private half at\n" .
+                "  <state-dir>/remotes/<md5-of-url>/key.pem   (mode 0600)\n" .
+                "beside everything else about that site. Every later command\n" .
+                "finds it there; no --private-key flag is needed.\n" .
+                "\n" .
+                "Prints the public key as one line. Paste it into the site under\n" .
+                "Tools > Reprint Server. Deleting the state directory destroys the\n" .
+                "private half, so the enrolled key stops working; the settings page\n" .
+                "can also remove it.\n" .
+                "\n" .
+                "`reprint pull` generates a key itself when none exists, so this\n" .
+                "command is for scripts that want a deterministic first run.\n",
             "extra" => null,
         ],
         "preflight" => [
@@ -15228,7 +15672,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--allow-unsafe-http] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [--allow-unsafe-http] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -15605,6 +16049,7 @@ if (
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
                 || strpos($reprint_files_push_command_argument, '--secret=') === 0
+                || strpos($reprint_files_push_command_argument, '--private-key=') === 0
                 || strpos($reprint_files_push_command_argument, '--progress=') === 0;
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
@@ -15687,7 +16132,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$filesystem_root && !$flat_document_root && $command !== "pull-metadata") {
+    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "keygen"], true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
@@ -15695,9 +16140,9 @@ if (
     if (!$filesystem_root) {
         // For commands that need a filesystem root in the constructor, use the
         // flattened filesystem root. run_apply_runtime will resolve it properly.
-        // pull-metadata reads only state, but ImportClient still expects
-        // a filesystem root path. Point it at state-dir rather than requiring an
-        // otherwise-unused CLI option.
+        // pull-metadata reads only state and keygen only writes a key file, but
+        // ImportClient still expects a filesystem root path. Point it at
+        // state-dir rather than requiring an otherwise-unused CLI option.
         $filesystem_root = $flat_document_root ?: $state_dir;
     }
 
@@ -15709,6 +16154,25 @@ if (
         // Acquire the lock before local push state setup and audit writes so
         // each command owns every local state transition for its complete invocation.
         $reprint_process_lock = new ReprintProcessLock($state_dir);
+        if ($command === 'keygen') {
+            // As with --secret and --private-key, `--out=` is a present, invalid
+            // option. Treating it as absent would let `--out=$UNSET --force`
+            // replace the state directory's enrolled key.
+            if (isset($options['out']) && $options['out'] === '') {
+                throw new InvalidArgumentException('--out was given without a value.');
+            }
+            $reprint_key_path = isset($options['out']) && is_string($options['out'])
+                ? $options['out']
+                : ImportClient::key_file_path($remote_reprint_api_url, $state_dir);
+            $reprint_generated_key = ImportClient::generate_key_file($reprint_key_path, !empty($options['force']));
+            $reprint_key_stored_in_state =
+                $reprint_key_path === ImportClient::key_file_path($remote_reprint_api_url, $state_dir);
+            fwrite(
+                STDOUT,
+                ImportClient::format_enrollment_instructions($reprint_generated_key, false, $reprint_key_stored_in_state)
+            );
+            exit(0);
+        }
         $reprint_files_push_context = null;
         $reprint_files_diff_push_state_directory = null;
         if ($command === 'files-push') {

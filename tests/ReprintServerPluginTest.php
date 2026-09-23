@@ -17,15 +17,21 @@ use function WordPress\Reprint\Server\Plugin\change_connection_token;
 use function WordPress\Reprint\Server\Plugin\change_push_access;
 use function WordPress\Reprint\Server\Plugin\get_configuration_state;
 use function WordPress\Reprint\Server\Plugin\get_connection_token;
+use function WordPress\Reprint\Server\Plugin\get_enrolled_public_keys;
+use function WordPress\Reprint\Server\Plugin\get_enrolled_public_keys_by_id;
 use function WordPress\Reprint\Server\Plugin\get_managed_push_enabled;
 use function WordPress\Reprint\Server\Plugin\get_push_authorization_error;
+use function WordPress\Reprint\Server\Plugin\has_public_keys_file;
 use function WordPress\Reprint\Server\Plugin\is_push_authorized;
 use function WordPress\Reprint\Server\Plugin\register_connection_token_setting;
 use function WordPress\Reprint\Server\Plugin\update_connection_token;
+use function WordPress\Reprint\Server\Plugin\update_option_public_keys;
 use function WordPress\Reprint\Server\Plugin\update_push_authorization;
 use function WordPress\Reprint\Server\Plugin\verify_hmac;
 
 use const WordPress\Reprint\Server\Plugin\CONNECTION_TOKEN_OPTION;
+use const WordPress\Reprint\Server\Plugin\PUBLIC_KEYS_FILE;
+use const WordPress\Reprint\Server\Plugin\PUBLIC_KEYS_OPTION;
 use const WordPress\Reprint\Server\Plugin\PUSH_AUTHORIZATION_OPTION;
 
 require_once __DIR__ . '/lib/ReprintServerPluginTestCase.php';
@@ -137,6 +143,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testPluginHmacVerifierDelegatesToPackageServer(): void
     {
+        $this->forceHmacHost();
         $connection_token = 'delegated-token';
         $nonce = '0123456789abcdef0123456789abcdef';
         $client = new Site_Export_HMAC_Client($connection_token);
@@ -305,6 +312,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testConfigurationStateDescribesTheEffectiveConnection(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
 
         $configuration = get_configuration_state();
@@ -336,15 +344,31 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $admin_post_hooks = $GLOBALS['reprint_server_test_actions']['admin_post_reprint_server_save_push_access'] ?? [];
         $this->assertNotEmpty($admin_post_hooks);
         $this->assertSame([$plugin, 'handle_push_access_save'], $admin_post_hooks[0]['callback']);
+        $key_handlers = [
+            'admin_post_reprint_server_enroll_public_key' => 'handle_public_key_enroll',
+            'admin_post_reprint_server_remove_public_key' => 'handle_public_key_remove',
+            'admin_post_reprint_server_save_key_push_access' => 'handle_key_push_access_save',
+            'admin_post_reprint_server_remove_connection_token' => 'handle_connection_token_remove',
+        ];
+        foreach ($key_handlers as $hook_name => $method) {
+            $hooks = $GLOBALS['reprint_server_test_actions'][$hook_name] ?? [];
+            $this->assertNotEmpty($hooks, $hook_name);
+            $this->assertSame([$plugin, $method], $hooks[0]['callback']);
+        }
         $this->assertEmpty($GLOBALS['reprint_server_test_actions']['admin_bar_menu'] ?? []);
 
         $plugin->enqueue_assets('tools_page_other');
         $this->assertSame([], $GLOBALS['reprint_server_test_scripts']);
+        $this->assertSame([], $GLOBALS['reprint_server_test_styles']);
 
         $plugin->enqueue_assets('tools_page_reprint-server');
         $this->assertSame(
             ['wp-a11y'],
             $GLOBALS['reprint_server_test_scripts']['reprint-server-admin']['dependencies']
+        );
+        $this->assertStringEndsWith(
+            'wordpress/reprint-server.css',
+            $GLOBALS['reprint_server_test_styles']['reprint-server-admin']['src']
         );
     }
 
@@ -385,6 +409,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testUnconfiguredAdminShowsOnlyConnectionTokenSetup(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $html = $this->renderAdminPage();
 
         $this->assertStringContainsString('<strong>Not configured yet.</strong>', $html);
@@ -397,6 +422,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testTokenGeneratorDoesNotSubmitTheFormOrChangeTheStoredToken(): void
     {
+        // Only a host without OpenSSL renders the editable token field the generator fills.
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
 
         $document = new DOMDocument();
@@ -414,6 +441,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testDownloadOnlyAdminCopyAndPushAccessForm(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
 
         $html = $this->renderAdminPage();
@@ -428,7 +456,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('<form method="post" action="options.php">', $html);
         $this->assertStringContainsString('name="option_page" value="reprint_server"', $html);
         $this->assertStringContainsString('action="https://example.test/wp-admin/admin-post.php"', $html);
-        $this->assertSame(2, substr_count($html, '<p class="submit">'));
+        // The settings form, the push form, and the key enrollment form each wrap their button.
+        $this->assertSame(3, substr_count($html, '<p class="submit">'));
         $this->assertSame([''], $GLOBALS['reprint_server_settings_error_requests']);
         $this->assertStringNotContainsString('checked="checked"', $html);
         $this->assertStringNotContainsString('<style>', $html);
@@ -479,6 +508,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testOptedInAdminCopyShowsCurrentConnectionTokenCanPush(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $this->assertTrue(update_push_authorization(true));
 
@@ -493,6 +523,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testManagedAdminCopyIsReadOnlyAndShowsEffectiveState(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         putenv('REPRINT_SERVER_PUSH_ENABLED=true');
 
@@ -505,6 +536,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testManagedDisabledAdminCopyIsReadOnlyAndUnchecked(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         putenv('REPRINT_SERVER_PUSH_ENABLED=false');
 
@@ -518,6 +550,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testSecretFileOverrideShowsStoredOptionAndWarning(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'stored-token';
         file_put_contents(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE, "<?php return 'file-token';\n");
 
@@ -551,6 +584,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
     public function testAdministratorMapsEveryPushAccessResultToANativeNotice(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $expected_notices = [
             'saved' => ['notice-success', 'Push access updated.'],
@@ -575,8 +609,22 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         }
     }
 
+    /** Each key handler reports a missing Composer runtime under its own notice prefix. */
+    public function testAdministratorMapsAMissingRuntimeResultToAnErrorNoticeForEveryKeyHandler(): void
+    {
+        $expected_message = 'The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.';
+        foreach (['enroll_runtime_missing', 'remove_runtime_missing', 'key_push_runtime_missing'] as $result) {
+            $_GET['reprint_server_notice'] = $result;
+            $html = $this->renderAdminPage();
+
+            $this->assertStringContainsString('notice-error is-dismissible inline', $html, $result);
+            $this->assertStringContainsString($expected_message, $html, $result);
+        }
+    }
+
     public function testSettingsSaveSupersedesAStalePushAccessNotice(): void
     {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
         $GLOBALS['reprint_server_settings_errors'][] = [
             'setting' => 'general',
@@ -592,5 +640,654 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('Settings saved.', $html);
         $this->assertStringNotContainsString('<strong>Settings saved.</strong>', $html);
         $this->assertStringNotContainsString('Push access updated.', $html);
+    }
+
+    private function sampleKeyEntry(): array
+    {
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        return [
+            'key_id' => \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key),
+            'public_key' => $public_key,
+            'added_at' => 1700000000,
+            'push' => false,
+        ];
+    }
+
+    public function testNoKeysByDefault(): void
+    {
+        $this->assertSame([], get_enrolled_public_keys());
+        $this->assertSame([], get_enrolled_public_keys_by_id());
+        $this->assertFalse(has_public_keys_file());
+    }
+
+    public function testOptionKeysAreReturnedById(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $this->assertTrue(update_option_public_keys([$entry]));
+
+        $this->assertSame([$entry], get_enrolled_public_keys());
+        $this->assertSame([$entry['key_id'] => $entry['public_key']], get_enrolled_public_keys_by_id());
+    }
+
+    public function testMultisiteStoresKeysInTheNetworkOption(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $entry = $this->sampleKeyEntry();
+        update_option_public_keys([$entry]);
+
+        $this->assertSame([$entry], $GLOBALS['reprint_server_test_network_options'][PUBLIC_KEYS_OPTION]);
+        $this->assertArrayNotHasKey(PUBLIC_KEYS_OPTION, $GLOBALS['reprint_server_test_options']);
+        $this->assertSame([$entry], get_enrolled_public_keys());
+    }
+
+    public function testPublicKeysFileOverridesTheOption(): void
+    {
+        $option_entry = $this->sampleKeyEntry('option');
+        update_option_public_keys([$option_entry]);
+        [, $file_public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Builds the public-keys.php fixture source.
+        file_put_contents(PUBLIC_KEYS_FILE, "<?php return [" . var_export(\WordPress\Reprint\Server\Utils::public_key_to_pem($file_public_key), true) . "];\n");
+
+        try {
+            $this->assertTrue(has_public_keys_file());
+            $enrolled = get_enrolled_public_keys();
+            $this->assertCount(1, $enrolled);
+            $this->assertSame($file_public_key, $enrolled[0]['public_key']);
+            $this->assertSame(\WordPress\Reprint\Server\Utils::public_key_fingerprint($file_public_key), $enrolled[0]['key_id']);
+        } finally {
+            unlink(PUBLIC_KEYS_FILE);
+        }
+    }
+
+    public function testMalformedOptionValueYieldsNoKeys(): void
+    {
+        $GLOBALS['reprint_server_test_options'][PUBLIC_KEYS_OPTION] = 'not an array';
+        $this->assertSame([], get_enrolled_public_keys());
+
+        $GLOBALS['reprint_server_test_options'][PUBLIC_KEYS_OPTION] = [['key_id' => 'x']];
+        $this->assertSame([], get_enrolled_public_keys(), 'entries missing public_key are dropped');
+    }
+
+    /**
+     * Runs handle_api_request() with an exit callable that throws, so the
+     * test regains control and can read the JSON the dispatcher wrote.
+     *
+     * The dispatcher closes every open output buffer, including PHPUnit's,
+     * and installs error and exception handlers that call exit(1). Both are
+     * put back afterwards so the next test still runs under PHPUnit's own
+     * handlers and buffer level.
+     *
+     * @return array {
+     *     Decoded response.
+     *
+     *     @type int   $status HTTP status the dispatcher set; 200 when it set none.
+     *     @type array $body   Decoded JSON body, empty when the output was not JSON.
+     * }
+     */
+    private function dispatchAndCapture(array $server, array $get = []): array
+    {
+        $_SERVER = $server;
+        $_GET = $get;
+        $captured = ['status' => 200, 'body' => []];
+        $output_buffer_level_before = ob_get_level();
+        http_response_code(200);
+        $output = '';
+        try {
+            \WordPress\Reprint\Server\Plugin\handle_api_request(['exit' => static function () {
+                throw new \RuntimeException('exit');
+            }]);
+        } catch (\RuntimeException $exception) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The dispatcher's exit() is replaced by a throw so the test regains control.
+        } finally {
+            restore_exception_handler();
+            restore_error_handler();
+            $output = (string) ob_get_clean();
+            while (ob_get_level() < $output_buffer_level_before) {
+                ob_start();
+            }
+        }
+        $captured['status'] = http_response_code();
+        $captured['body'] = json_decode($output, true) ?? [];
+        return $captured;
+    }
+
+    /** @param array<string,string> $auth_headers Name => value, converted to $_SERVER keys. */
+    private function serverWithAuth(array $auth_headers): array
+    {
+        $server = ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/?reprint-api'];
+        foreach ($auth_headers as $name => $value) {
+            $server['HTTP_' . strtoupper(str_replace('-', '_', $name))] = $value;
+        }
+        return $server;
+    }
+
+    private function forceHmacHost(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+    }
+
+    // ── OpenSSL host (the test runtime's real state) ──
+
+    public function testKeyHostWithOnlyATokenIsNotConfigured(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        $client = new Site_Export_HMAC_Client('token');
+        $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
+    }
+
+    public function testKeyHostWithOnlyATokenIsNotConfiguredForAKeyRequest(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        [$private_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $key_client = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
+        $response = $this->dispatchAndCapture($this->serverWithAuth($key_client->get_auth_headers('GET', 'https://s.test/?reprint-api')));
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
+    }
+
+    public function testKeyHostRejectsAValidTokenWhenAKeyIsEnrolled(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        update_option_public_keys([$this->sampleKeyEntry()]);
+        $client = new Site_Export_HMAC_Client('token');
+        $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('requires_key_auth', $response['body']['reason']);
+    }
+
+    public function testKeyHostAcceptsAValidKeySignature(): void
+    {
+        [$private_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $key_client = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
+        update_option_public_keys([[
+            'key_id' => $key_client->get_key_id(), 'public_key' => $public_key,
+            'added_at' => 1, 'push' => false,
+        ]]);
+        $headers = $key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        // Every authentication failure answers 403 or 503 with a reason. Past
+        // the auth block the dispatcher fails on the missing server runtime
+        // under the test PLUGIN_DIR, which is enough to prove auth passed.
+        $response = $this->dispatchAndCapture($this->serverWithAuth($headers));
+        $this->assertNotSame(403, $response['status']);
+        $this->assertNotSame(503, $response['status']);
+        $this->assertArrayNotHasKey('reason', $response['body']);
+    }
+
+    public function testKeyHostReportsUnknownKey(): void
+    {
+        update_option_public_keys([$this->sampleKeyEntry()]);
+        [$private_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $stranger = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
+        $response = $this->dispatchAndCapture($this->serverWithAuth($stranger->get_auth_headers('GET', 'https://s.test/?reprint-api')));
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('unknown_key', $response['body']['reason']);
+    }
+
+    // ── HMAC-only host (forced through the Utils override) ──
+
+    public function testHmacHostReturnsNotConfiguredWhenNoTokenIsStored(): void
+    {
+        $this->forceHmacHost();
+        $response = $this->dispatchAndCapture(['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/?reprint-api']);
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
+    }
+
+    public function testHmacHostRejectsAKeyIdHeaderWithRequiresTokenAuth(): void
+    {
+        $this->forceHmacHost();
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        $response = $this->dispatchAndCapture($this->serverWithAuth(['X-Auth-Key-Id' => '0123456789abcdef']));
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('requires_token_auth', $response['body']['reason']);
+    }
+
+    public function testHmacHostAcceptsAValidTokenSignature(): void
+    {
+        $this->forceHmacHost();
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        $client = new Site_Export_HMAC_Client('token');
+        $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
+        $this->assertNotSame(403, $response['status']);
+        $this->assertNotSame(503, $response['status']);
+        $this->assertArrayNotHasKey('reason', $response['body']);
+    }
+
+    public function testEmptySecretFileAnswersNotConfiguredBeforeAnyCredentialIsRead(): void
+    {
+        $this->forceHmacHost();
+        update_option(CONNECTION_TOKEN_OPTION, 'token');
+        file_put_contents(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE, "<?php return '';\n");
+        $client = new Site_Export_HMAC_Client('token');
+
+        $response = $this->dispatchAndCapture($this->serverWithAuth($client->get_auth_headers('')));
+
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
+        $this->assertSame(
+            'Invalid secret.php configuration. Remove it or replace it with a valid connection token.',
+            $response['body']['error']
+        );
+        $this->assertArrayNotHasKey('status', $response['body'], 'a pull endpoint keeps the pull error shape');
+    }
+
+    public function testEmptySecretFileDoesNotBlockAKeySignedRequestOnAKeyHost(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(true);
+        file_put_contents(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE, "<?php return '';\n");
+        [$private_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $key_client = new \WordPress\Reprint\Server\PublicKeyClient($private_pem);
+        update_option_public_keys([[
+            'key_id' => $key_client->get_key_id(), 'public_key' => $public_key,
+            'added_at' => 1, 'push' => false,
+        ]]);
+
+        // A key host never accepts the token, so a broken secret.php is irrelevant there.
+        $response = $this->dispatchAndCapture(
+            $this->serverWithAuth($key_client->get_auth_headers('GET', 'https://s.test/?reprint-api'))
+        );
+
+        $this->assertNotSame(403, $response['status']);
+        $this->assertNotSame(503, $response['status']);
+        $this->assertArrayNotHasKey('reason', $response['body']);
+    }
+
+    /**
+     * An exit callable that returns must not hand control back to the
+     * dispatcher: the process still ends, so nothing after the error body
+     * is written. Proven in a subprocess because a real exit would end
+     * PHPUnit itself.
+     */
+    public function testAnExitCallableThatReturnsStillEndsTheRequest(): void
+    {
+        $lib_path = realpath(__DIR__ . '/../reprint-server-wp/lib.php');
+        $autoload_path = realpath(__DIR__ . '/../vendor/autoload.php');
+        $this->assertNotFalse($lib_path);
+        $this->assertNotFalse($autoload_path);
+        $plugin_directory_encoded = base64_encode(dirname($lib_path) . '/');
+        $lib_path_encoded = base64_encode($lib_path);
+        $autoload_path_encoded = base64_encode($autoload_path);
+        $php_code = <<<PHP
+        <?php
+        function plugin_dir_path(string \$file): string {
+            return base64_decode('{$plugin_directory_encoded}', true);
+        }
+        define('ABSPATH', __DIR__ . '/');
+        require base64_decode('{$autoload_path_encoded}', true);
+        \\WordPress\\Reprint\\Server\\Utils::override_key_auth_required_for_tests(false);
+        require base64_decode('{$lib_path_encoded}', true);
+        \$_SERVER = ['REQUEST_METHOD' => 'GET', 'REQUEST_URI' => '/?reprint-api'];
+        \\WordPress\\Reprint\\Server\\Plugin\\handle_api_request(['exit' => static function (): void {
+            echo "\\nEXIT-CALLABLE-RAN";
+        }]);
+        echo "\\nDISPATCH-CONTINUED";
+        PHP;
+
+        $run_directory = sys_get_temp_dir() . '/reprint-server-exit-test-' . uniqid('', true);
+        mkdir($run_directory, 0755, true);
+        try {
+            file_put_contents($run_directory . '/run.php', $php_code);
+            $process = proc_open(
+                [PHP_BINARY, $run_directory . '/run.php'],
+                [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes,
+                $run_directory
+            );
+            $this->assertIsResource($process);
+            fclose($pipes[0]);
+            $stdout = (string) stream_get_contents($pipes[1]);
+            $stderr = (string) stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            proc_close($process);
+        } finally {
+            array_map('unlink', glob($run_directory . '/*') ?: []);
+            rmdir($run_directory);
+        }
+
+        $this->assertSame('', $stderr);
+        $lines = explode("\n", $stdout);
+        $this->assertCount(2, $lines, $stdout);
+        $error_body = json_decode($lines[0], true);
+        $this->assertSame('not_configured', $error_body['reason'] ?? null, $stdout);
+        $this->assertSame('EXIT-CALLABLE-RAN', $lines[1]);
+        $this->assertStringNotContainsString('DISPATCH-CONTINUED', $stdout);
+    }
+
+    public function testPushGateHonoursThePerKeyFlag(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = true;
+        update_option_public_keys([$entry]);
+
+        $this->assertNull(\WordPress\Reprint\Server\Plugin\get_push_authorization_error($entry['key_id']));
+        $entry['push'] = false;
+        update_option_public_keys([$entry]);
+        $this->assertSame(
+            'Push access is disabled for the current key.',
+            \WordPress\Reprint\Server\Plugin\get_push_authorization_error($entry['key_id'])
+        );
+        $this->assertSame(
+            'Push access is disabled for the current key.',
+            \WordPress\Reprint\Server\Plugin\get_push_authorization_error('0000000000000000')
+        );
+    }
+
+    public function testEnrollStoresNormalizedKeyAndReportsItsId(): void
+    {
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $pem = \WordPress\Reprint\Server\Utils::public_key_to_pem($public_key);
+
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\enroll_public_key($pem));
+        $expected_id = \WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key);
+        $this->assertSame($expected_id, \WordPress\Reprint\Server\Plugin\get_last_enrolled_key_id());
+
+        $enrolled = get_enrolled_public_keys();
+        $this->assertCount(1, $enrolled);
+        $this->assertSame($public_key, $enrolled[0]['public_key']);
+        $this->assertFalse($enrolled[0]['push']);
+        $this->assertGreaterThan(0, $enrolled[0]['added_at']);
+    }
+
+    public function testEnrollRejectsInvalidAndDuplicateKeys(): void
+    {
+        $this->assertSame('invalid', \WordPress\Reprint\Server\Plugin\enroll_public_key('garbage'));
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key);
+        $this->assertSame('duplicate', \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key));
+        $this->assertCount(1, get_enrolled_public_keys());
+    }
+
+    public function testEnrollRefusesWhenTheFileOverrideIsActive(): void
+    {
+        file_put_contents(PUBLIC_KEYS_FILE, "<?php return [];\n");
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $this->assertSame('file_override', \WordPress\Reprint\Server\Plugin\enroll_public_key($public_key));
+        unlink(PUBLIC_KEYS_FILE);
+    }
+
+    public function testRemoveAndPushAccessOperations(): void
+    {
+        $first = $this->sampleKeyEntry('first');
+        $second = $this->sampleKeyEntry('second');
+        update_option_public_keys([$first, $second]);
+
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\change_key_push_access($first['key_id'], true));
+        $this->assertSame('unchanged', \WordPress\Reprint\Server\Plugin\change_key_push_access($first['key_id'], true));
+        $this->assertSame('unknown', \WordPress\Reprint\Server\Plugin\change_key_push_access('0000000000000000', true));
+        $this->assertTrue(get_enrolled_public_keys()[0]['push']);
+
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\remove_public_key($second['key_id']));
+        $this->assertSame('unknown', \WordPress\Reprint\Server\Plugin\remove_public_key($second['key_id']));
+        $this->assertCount(1, get_enrolled_public_keys());
+        // The test runtime has OpenSSL, so the last key cannot be removed.
+        $this->assertSame('last_key', \WordPress\Reprint\Server\Plugin\remove_public_key($first['key_id']));
+        $this->assertCount(1, get_enrolled_public_keys());
+
+        // On an HMAC-only host the keys are inert, so removing the last one is fine.
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\remove_public_key($first['key_id']));
+        $this->assertSame([], get_enrolled_public_keys());
+    }
+
+    public function testConfigurationStateReportsSchemeAndKeys(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        update_option_public_keys([$entry]);
+        $state = \WordPress\Reprint\Server\Plugin\get_configuration_state();
+
+        $this->assertSame('key', $state['required_scheme']);
+        $this->assertSame([$entry], $state['enrolled_keys']);
+        $this->assertFalse($state['has_public_keys_file']);
+
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $this->assertSame('hmac', \WordPress\Reprint\Server\Plugin\get_configuration_state()['required_scheme']);
+    }
+
+    public function testPublicKeysOptionIsNotExposedThroughRest(): void
+    {
+        \WordPress\Reprint\Server\Plugin\register_public_keys_setting();
+        $registered = $GLOBALS['reprint_server_registered_settings'][PUBLIC_KEYS_OPTION] ?? null;
+        $this->assertNotNull($registered);
+        $this->assertArrayNotHasKey('show_in_rest', $registered['args']);
+    }
+
+    /** A Settings API write in the keys' own group passes the same validation as enrollment. */
+    public function testPublicKeysOptionSanitizesSettingsApiWrites(): void
+    {
+        \WordPress\Reprint\Server\Plugin\register_public_keys_setting();
+        $registered = $GLOBALS['reprint_server_registered_settings'][PUBLIC_KEYS_OPTION];
+        $this->assertSame('WordPress\\Reprint\\Server\\Plugin\\sanitize_public_keys_option', $registered['args']['sanitize_callback']);
+
+        $valid_entry = $this->sampleKeyEntry();
+        $valid_entry['push'] = true;
+        $sanitized = call_user_func($registered['args']['sanitize_callback'], [
+            'not an entry',
+            ['key_id' => 'garbage', 'public_key' => 'bm90IGEga2V5', 'push' => true],
+            $valid_entry,
+        ]);
+        $this->assertSame([$valid_entry], $sanitized, 'only the entry with a parseable RSA key survives; added_at and push are kept');
+        $this->assertSame([], call_user_func($registered['args']['sanitize_callback'], 'not an array'));
+    }
+
+    /**
+     * options.php resets every option in a submitted group that the form did not post, so the keys must
+     * not share the token form's group or each token save would empty them.
+     */
+    public function testPublicKeysOptionIsNotInTheTokenFormsSettingsGroup(): void
+    {
+        \WordPress\Reprint\Server\Plugin\register_public_keys_setting();
+        register_connection_token_setting();
+        $keys_setting = $GLOBALS['reprint_server_registered_settings'][PUBLIC_KEYS_OPTION];
+        $token_setting = $GLOBALS['reprint_server_registered_settings'][CONNECTION_TOKEN_OPTION];
+        $this->assertSame('reprint_server', $token_setting['group']);
+        $this->assertNotSame('reprint_server', $keys_setting['group']);
+        $this->assertSame('reprint_server_public_keys', $keys_setting['group']);
+    }
+
+    public function testMultisiteRefusesKeyPushGrants(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+        $entry = $this->sampleKeyEntry();
+        update_option_public_keys([$entry]);
+
+        $this->assertSame('multisite', \WordPress\Reprint\Server\Plugin\change_key_push_access($entry['key_id'], true));
+        $this->assertFalse(get_enrolled_public_keys()[0]['push']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('name="reprint_server_key_push_enabled" value="1"', $html);
+        $this->assertMatchesRegularExpression(
+            '/name="reprint_server_key_push_enabled" value="1"\s+disabled="disabled"/',
+            $html,
+            'the per-key push checkbox is disabled on a network'
+        );
+
+        $_GET['reprint_server_notice'] = 'key_push_multisite';
+        $this->assertStringContainsString('Push is not supported on multisite networks.', $this->renderAdminPage());
+    }
+
+    public function testAdminPageShowsTheKeyStatusLineOnAnOpensslHost(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'stale-token');
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('Clients authenticate with public keys', $html);
+        $this->assertStringContainsString('reprint_server_enroll_public_key', $html);
+        $this->assertStringContainsString('not accepted on this host', $html, 'a stored token is shown as inert');
+        $this->assertStringContainsString('No client can connect until a key is enrolled', $html);
+    }
+
+    public function testAdminPageShowsTheTokenStatusLineOnAnHmacHost(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('Clients authenticate with a connection token', $html);
+        $this->assertStringContainsString('reprint_server_enroll_public_key', $html, 'enrollment form is present even on an HMAC host');
+        $this->assertStringContainsString('enrolled but not in use on this host', $html);
+    }
+
+    public function testAdminPageListsEnrolledKeysWithRemoveAndPushControls(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        update_option_public_keys([$entry]);
+        $html = $this->renderAdminPage();
+
+        $this->assertStringContainsString($entry['key_id'], $html);
+        $this->assertStringContainsString(gmdate('Y-m-d', $entry['added_at']), $html);
+        $this->assertStringContainsString('reprint_server_remove_public_key', $html);
+        $this->assertStringContainsString('reprint_server_save_key_push_access', $html);
+        $this->assertStringContainsString('reprint_server_key_id', $html);
+    }
+
+    public function testAdminPageDisablesEnrollmentWhenTheFileOverrideIsActive(): void
+    {
+        file_put_contents(PUBLIC_KEYS_FILE, "<?php return [];\n");
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('public-keys.php', $html);
+        $this->assertStringContainsString('disabled', $html);
+        unlink(PUBLIC_KEYS_FILE);
+    }
+
+    public function testEnrollmentNoticeNamesTheKeyId(): void
+    {
+        $_GET = ['reprint_server_notice' => 'enrolled', 'reprint_server_key_id' => '0123456789abcdef'];
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('0123456789abcdef', $html);
+        $this->assertStringContainsString('Public key enrolled', $html);
+    }
+
+    public function testEnrollHandlerStoresAndRedirects(): void
+    {
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $_POST = ['reprint_server_public_key' => $public_key];
+        $GLOBALS['reprint_server_test_redirect'] = null;
+        try {
+            SettingsPage::get_instance()->handle_public_key_enroll();
+        } catch (\RuntimeException $exception) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The harness wp_safe_redirect stub throws so the handler exit is never reached.
+        }
+        $this->assertCount(1, get_enrolled_public_keys());
+        $this->assertStringContainsString('reprint_server_notice=enrolled', (string) $GLOBALS['reprint_server_test_redirect']);
+    }
+
+    /** A token stored in the option is inert on a key host, so the read-only section offers to remove it. */
+    public function testAdminPageOffersToRemoveAStoredOptionTokenOnAKeyHost(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'stale-token');
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('reprint_server_remove_connection_token', $html);
+
+        file_put_contents(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE, "<?php return 'file-token';\n");
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('secret.php', $html);
+        $this->assertStringNotContainsString('reprint_server_remove_connection_token', $html, 'a secret.php token has no Remove button');
+        $this->assertStringContainsString('<code>secret.php</code> override is active.</strong> It is not accepted on this host.', $html);
+        $this->assertStringNotContainsString('Remove secret.php to use the stored option value.', $html);
+    }
+
+    public function testRemoveConnectionTokenHandlerClearsTheOptionAndRedirects(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'stale-token');
+        $GLOBALS['reprint_server_test_redirect'] = null;
+        try {
+            SettingsPage::get_instance()->handle_connection_token_remove();
+        } catch (\RuntimeException $exception) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The harness wp_safe_redirect stub throws so the handler exit is never reached.
+        }
+        $this->assertSame('', $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION]);
+        $this->assertNull(get_connection_token());
+        $this->assertStringContainsString('reprint_server_notice=token_removed', (string) $GLOBALS['reprint_server_test_redirect']);
+    }
+
+    /** A stored token is not a credential on a key host, so it does not make the site configured. */
+    public function testKeyHostWithOnlyATokenIsNotConfiguredOnThePage(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'stale-token');
+
+        $state = get_configuration_state();
+        $this->assertFalse($state['is_configured']);
+        $this->assertFalse($state['push_enabled']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('<strong>Not configured yet.</strong>', $html);
+        $this->assertStringContainsString('Enroll a public key', $html);
+        $this->assertStringNotContainsString('name="reprint_server_push_enabled"', $html);
+        $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
+        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
+    }
+
+    public function testKeyHostWithAPushingKeyIsConnectedForDownloadsAndPush(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = true;
+        update_option_public_keys([$entry]);
+
+        $state = get_configuration_state();
+        $this->assertTrue($state['is_configured']);
+        $this->assertTrue($state['push_enabled']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('<strong>Connected for downloads and push.</strong>', $html);
+        $this->assertStringContainsString('At least one enrolled key can change files on this site.', $html);
+        $this->assertStringNotContainsString('<h2>Push access</h2>', $html, 'push grants live in the key table on a key host');
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
+    }
+
+    public function testKeyHostWithANonPushingKeyIsConnectedForDownloadsOnly(): void
+    {
+        update_option_public_keys([$this->sampleKeyEntry()]);
+
+        $state = get_configuration_state();
+        $this->assertTrue($state['is_configured']);
+        $this->assertFalse($state['push_enabled']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('<strong>Connected for downloads.</strong>', $html);
+        $this->assertStringContainsString('No enrolled key can change files', $html);
+    }
+
+    /** The managed policy and the multisite refusal outrank a key's push flag, as they do for a request. */
+    public function testKeyHostPushEnabledFollowsTheManagedPolicyAndMultisiteRefusal(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = true;
+        update_option_public_keys([$entry]);
+
+        putenv('REPRINT_SERVER_PUSH_ENABLED=false');
+        $this->assertFalse(get_configuration_state()['push_enabled']);
+        putenv('REPRINT_SERVER_PUSH_ENABLED');
+
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        update_option_public_keys([$entry]);
+        $this->assertFalse(get_configuration_state()['push_enabled']);
+    }
+
+    /** The network page offers the same read-only token section on a key host as the site page. */
+    public function testMultisiteKeyHostShowsAReadOnlyNetworkTokenWithRemove(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_network_options'][CONNECTION_TOKEN_OPTION] = 'network-token';
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('reprint_server_remove_connection_token', $html);
+        $this->assertStringNotContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
+        $this->assertStringNotContainsString('reprint_server_save_network_token', $html);
+        $this->assertStringContainsString('reprint_server_enroll_public_key', $html);
+        $this->assertStringContainsString('Enrolled public keys can pull any site in this network.', $html);
+        $this->assertStringNotContainsString('This network token can pull any site in this network.', $html);
+    }
+
+    /** On an HMAC host the network page keeps its editable token form. */
+    public function testMultisiteHmacHostKeepsTheEditableNetworkTokenForm(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('reprint_server_save_network_token', $html);
+        $this->assertStringContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
+        $this->assertStringNotContainsString('reprint_server_remove_connection_token', $html);
+        $this->assertStringContainsString('This network token can pull any site in this network.', $html);
     }
 }

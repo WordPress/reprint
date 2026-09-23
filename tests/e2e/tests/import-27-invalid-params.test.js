@@ -62,24 +62,26 @@ describe('Import: Invalid API Parameters', () => {
         );
     });
 
-    it('wrong HMAC secret returns 403', async () => {
+    it('a key that is not enrolled returns 403', async () => {
         const requestBody = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) });
-        const wrongClient = createHmacClient('wrong-secret-value');
-        const headers = wrongClient.getAuthHeaders(requestBody);
+        // A credential string that is not a site name yields a key enrolled nowhere.
+        const strangerClient = createHmacClient('wrong-secret-value');
+        const headers = strangerClient.getAuthHeaders(requestBody, { url: getSiteUrl(site) });
         headers['Accept-Encoding'] = 'gzip';
         headers['Content-Type'] = 'application/json';
 
         const response = await fetch(getSiteUrl(site), { method: 'POST', headers, body: requestBody });
-        assert.equal(response.status, 403, 'Expected 403 for wrong HMAC');
+        assert.equal(response.status, 403, 'Expected 403 for a key that is not enrolled');
 
         const body = await response.json();
+        assert.equal(body.reason, 'unknown_key', `Expected unknown_key, got: ${JSON.stringify(body)}`);
         assert.ok(
-            body.error && (body.error.includes('HMAC') || body.error.includes('signature')),
-            `Expected HMAC error, got: ${body.error}`
+            body.error && body.error.includes('is not enrolled'),
+            `Expected the not-enrolled error, got: ${body.error}`
         );
     });
 
-    it('missing auth headers returns 403', async () => {
+    it('missing auth headers returns 403 naming key authentication', async () => {
         const response = await fetch(getSiteUrl(site), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -89,10 +91,7 @@ describe('Import: Invalid API Parameters', () => {
 
         const body = await response.json();
         assert.ok(body.error, 'Expected error message');
-        assert.ok(
-            body.error.includes('X-Auth-Signature') || body.error.includes('Missing'),
-            `Expected missing header error, got: ${body.error}`
-        );
+        assert.equal(body.reason, 'requires_key_auth', `Expected requires_key_auth, got: ${JSON.stringify(body)}`);
     });
 
     it('invalid cursor base64 returns error', async () => {

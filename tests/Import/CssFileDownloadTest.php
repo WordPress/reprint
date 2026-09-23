@@ -121,6 +121,7 @@ class InterruptedCssDownload extends ImportClient {
 $client = new InterruptedCssDownload($argv[1], $argv[2] . '/state', $argv[2] . '/files', ['allow_http' => true]);
 $client->run([
     'command' => $argv[3],
+    'secret' => 'test-secret',
     'rewrite_url' => [
         ['https://old.example', 'http://old.example/local'],
         ['https://old.example/assets', 'http://old.example/local/styles'],

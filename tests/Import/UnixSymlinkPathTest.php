@@ -187,7 +187,7 @@ final class UnixSymlinkPathTest extends TestCase {
         }
         $command = array_merge([PHP_BINARY, dirname(__DIR__, 2) . '/packages/reprint-client/src/import.php',
             'files-pull', $this->url, '--state-dir=' . $state_directory, '--fs-root=' . $this->root . '/files',
-            '--allow-unsafe-http', '--follow-symlinks', '--progress=jsonl'], $arguments);
+            '--allow-unsafe-http', '--follow-symlinks', '--progress=jsonl', '--secret=test-secret'], $arguments);
         $process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/pull.log', 'w'],
             2 => ['file', $this->root . '/pull.log', 'a']], $pipes);
         $this->assertIsResource($process);

@@ -115,6 +115,7 @@ final class FilesPushCommandTest extends TestCase
             'http://example.test/?reprint-api=1',
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->localTree,
+            '--secret=token',
             '--force-http',
         ]);
         $this->assertSame(1, $olderCommand['exit'], $olderCommand['output']);
@@ -204,7 +205,10 @@ final class FilesPushCommandTest extends TestCase
     {
         $missingSecret = $this->runFilesPush('https://example.test/?reprint-api=1', []);
         $this->assertSame(1, $missingSecret['exit']);
-        $this->assertStringContainsString('files-push requires --secret=TOKEN.', $missingSecret['output']);
+        $this->assertStringContainsString('No credential for this site.', $missingSecret['output']);
+        $this->assertStringContainsString('reprint keygen', $missingSecret['output']);
+        $this->assertStringContainsString('--state-dir=', $missingSecret['output']);
+        $this->assertStringContainsString('--secret', $missingSecret['output']);
         $missingSecretError = $this->lastWorkflowResult($missingSecret['stderr']);
         $this->assertArrayHasKey('error', $missingSecretError);
         $this->assertArrayNotHasKey('command', $missingSecretError);

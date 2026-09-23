@@ -74,8 +74,8 @@ class MultipartPushStreamClient
     /** @var array<string,string> Request-context headers shared by pull and push. */
     private array $request_context_headers;
 
-    /** @var Site_Export_HMAC_Client Signs the exact method and URL before transfer. */
-    private Site_Export_HMAC_Client $hmac_client;
+    /** @var \WordPress\Reprint\Server\EnvelopeSigner Signs the exact method and URL before transfer. */
+    private \WordPress\Reprint\Server\EnvelopeSigner $envelope_signer;
 
     /** @var PushRequestSizer Learns the decoded entity-body budget across requests. */
     private PushRequestSizer $request_sizer;
@@ -178,7 +178,7 @@ class MultipartPushStreamClient
      *         unless `allow_http` is true.
      *     @type array<string,string> $request_context_headers Required non-empty
      *         header-name-to-value map selected by ImportClient.
-     *     @type Site_Export_HMAC_Client $hmac_client Required signer for the
+     *     @type \WordPress\Reprint\Server\EnvelopeSigner $envelope_signer Required signer for the
      *         exact method and request URL.
      *     @type bool $allow_http Whether to permit an explicit HTTP remote Reprint API URL.
      *         Default false.
@@ -219,9 +219,9 @@ class MultipartPushStreamClient
                 'Push remote Reprint API URL must be https://, unless allow_http is true for an explicit http:// remote Reprint API URL.'
             );
         }
-        $hmac_client = $options['hmac_client'] ?? null;
-        if (!$hmac_client instanceof Site_Export_HMAC_Client) {
-            throw new InvalidArgumentException('MultipartPushStreamClient requires a Site_Export_HMAC_Client.');
+        $envelope_signer = $options['envelope_signer'] ?? null;
+        if (!$envelope_signer instanceof \WordPress\Reprint\Server\EnvelopeSigner) {
+            throw new InvalidArgumentException('MultipartPushStreamClient requires an envelope signer.');
         }
         $request_context_headers = $options['request_context_headers'] ?? null;
         if (!is_array($request_context_headers) || $request_context_headers === []) {
@@ -231,7 +231,7 @@ class MultipartPushStreamClient
         }
         $this->remote_reprint_api_url = rtrim($remote_reprint_api_url, '?&');
         $this->request_context_headers = $request_context_headers;
-        $this->hmac_client = $hmac_client;
+        $this->envelope_signer = $envelope_signer;
         $this->request_sizer = $options['request_sizer'] ?? new PushRequestSizer();
         if (!$this->request_sizer instanceof PushRequestSizer) {
             throw new InvalidArgumentException('request_sizer must be a PushRequestSizer.');
@@ -291,7 +291,7 @@ class MultipartPushStreamClient
 
         $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
         $headers = $this->request_context_headers;
-        foreach ($this->hmac_client->get_envelope_auth_headers('POST', $request_url) as $name => $value) {
+        foreach ($this->envelope_signer->get_envelope_auth_headers('POST', $request_url) as $name => $value) {
             $headers[$name] = $value;
         }
         $headers['Content-Type'] = 'multipart/mixed; boundary=' . $this->boundary;
@@ -832,7 +832,7 @@ class MultipartPushStreamClient
         $url = $this->endpoint_url($endpoint, $parameters);
         $headers = $this->request_context_headers;
         $headers['Accept'] = 'application/json';
-        foreach ($this->hmac_client->get_envelope_auth_headers($method, $url) as $name => $value) {
+        foreach ($this->envelope_signer->get_envelope_auth_headers($method, $url) as $name => $value) {
             $headers[$name] = $value;
         }
         $lines = ['Expect:'];

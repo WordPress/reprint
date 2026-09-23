@@ -13,7 +13,7 @@ if (empty($_COOKIE['zipwp_access'])) {
 
 require_once __DIR__ . '/../../../vendor/autoload.php';
 
-$reprint_authentication = new \WordPress\Reprint\Server\HMACServer('zipwp-test-secret');
+$reprint_authentication = new \WordPress\Reprint\Server\HMACServer('zipwp-test-secret', 300, false);
 if (\WordPress\Reprint\Server\HTTPServer::is_push_endpoint($_GET['endpoint'] ?? '')) {
     $reprint_authentication_error = $reprint_authentication->verify_envelope(
         getallheaders(),

@@ -171,4 +171,12 @@ add_filter('reprint_server_api_options', static function ($value) use ($reprint_
     return array_merge($value, $reprint_push_test_options);
 });
 
+// This fixture models a host without openssl_verify(), so the plugin keeps
+// verifying connection tokens. The class file is loaded directly because the
+// plugin requires the Composer autoloader only inside handle_api_request().
+if (!class_exists('WordPress\\Reprint\\Server\\Utils', false)) {
+    require_once dirname(__DIR__, 2) . '/packages/reprint-server/src/class-utils.php';
+}
+\WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+
 require_once dirname(__DIR__, 2) . '/reprint-server-wp/index.php';

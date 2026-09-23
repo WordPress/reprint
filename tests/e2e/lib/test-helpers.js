@@ -3,12 +3,14 @@
  */
 import assert from 'node:assert/strict';
 import { execSync, execFileSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, readdirSync, existsSync, mkdirSync, lstatSync } from 'node:fs';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
+import {
+    readFileSync, readdirSync, existsSync, mkdirSync, lstatSync, writeFileSync, linkSync, unlinkSync,
+} from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createConnection } from 'mysql2/promise';
-import { HmacClient } from './hmac-client.js';
+import { KeySigner } from './hmac-client.js';
 import { gunzipSync } from 'node:zlib';
 import { createRequire } from 'node:module';
 
@@ -21,6 +23,8 @@ const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
+const HARNESS_KEY_ROOT = join(tmpdir(), 'reprint-e2e-keys');
+const harnessKeyCache = new Map();
 
 /**
  * Get the base URL for a test site.
@@ -32,7 +36,8 @@ export function getSiteUrl(siteName, port = null) {
 }
 
 /**
- * Get the HMAC secret for a test site.
+ * Get the connection token (HMAC secret) for a test site. It also selects
+ * the site's harness key: see getHarnessKey().
  */
 export function getSiteSecret(siteName) {
     return `test-secret-${siteName}`;
@@ -46,10 +51,78 @@ export function getSiteDir(siteName) {
 }
 
 /**
- * Create HMAC client for a site.
+ * One RSA keypair per secret string, generated once per test run and cached
+ * under os.tmpdir()/reprint-e2e-keys/<sha256(secret)>/key.pem. A site's own
+ * secret yields the key ensureSite() enrolled on it; any other string yields
+ * a key that is enrolled nowhere, so "wrong credential" tests keep working.
+ *
+ * Vitest runs test files in parallel processes, so two processes can ask for
+ * the same key at once. Each writes its own candidate beside the target and
+ * publishes it with link(), which fails with EEXIST when another process
+ * published first; that process then discards its candidate and reads the
+ * published key. Every process therefore signs with the key the site holds.
+ *
+ * @returns {{ privateKeyPem: string, privateKeyPath: string, publicKey: string, keyId: string, signer: KeySigner }}
+ */
+export function getHarnessKey(secret) {
+    if (harnessKeyCache.has(secret)) {
+        return harnessKeyCache.get(secret);
+    }
+    const keyDirectory = join(HARNESS_KEY_ROOT, createHash('sha256').update(secret).digest('hex'));
+    const privateKeyPath = join(keyDirectory, 'key.pem');
+    if (!existsSync(privateKeyPath)) {
+        mkdirSync(keyDirectory, { recursive: true, mode: 0o700 });
+        const candidatePrivateKeyPem = generateKeyPairSync('rsa', {
+            modulusLength: 2048,
+            privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+            publicKeyEncoding: { type: 'spki', format: 'pem' },
+        }).privateKey;
+        // The PHP client refuses a key file other users can read, so the
+        // candidate is created with mode 0600 and the link keeps that mode.
+        const candidatePath = join(keyDirectory, `key.pem.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+        writeFileSync(candidatePath, candidatePrivateKeyPem, { mode: 0o600 });
+        try {
+            linkSync(candidatePath, privateKeyPath);
+        } catch (error) {
+            if (error.code !== 'EEXIST') {
+                throw error;
+            }
+        } finally {
+            unlinkSync(candidatePath);
+        }
+    }
+    const privateKeyPem = readFileSync(privateKeyPath, 'utf-8');
+    const signer = new KeySigner(privateKeyPem);
+    const harnessKey = {
+        privateKeyPem,
+        privateKeyPath,
+        publicKey: signer.getPublicKey(),
+        keyId: signer.getKeyId(),
+        signer,
+    };
+    harnessKeyCache.set(secret, harnessKey);
+    return harnessKey;
+}
+
+/**
+ * Signer for a site. The name is historical: since key authentication
+ * became the default this returns a KeySigner for the site's harness key.
+ * Its getAuthHeaders(body) still works for the JSON POSTs apiRequest makes,
+ * defaulting method to POST and url to the site's API URL. A caller that
+ * builds its own URL passes it as { url }, because the signature covers the
+ * request path and query.
  */
 export function createHmacClient(siteName) {
-    return new HmacClient(getSiteSecret(siteName));
+    const { signer } = getHarnessKey(getSiteSecret(siteName));
+    // Some callers pass a credential string rather than a registered site
+    // name to obtain an un-enrolled key; they must supply the URL themselves.
+    const siteUrl = REGISTRY.sites[siteName]?.port ? getSiteUrl(siteName) : undefined;
+    return {
+        getKeyId: () => signer.getKeyId(),
+        getPublicKey: () => signer.getPublicKey(),
+        getAuthHeaders: (body = '', options = {}) => signer.getAuthHeaders(body, { url: siteUrl, method: 'POST', ...options }),
+        getEnvelopeAuthHeaders: (method, requestUrl, cursor = null) => signer.getEnvelopeAuthHeaders(method, requestUrl, cursor),
+    };
 }
 
 /**
@@ -73,7 +146,8 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
             setApiRequestParameter(url.searchParams, k, v);
         }
     }
-    const headers = client.getAuthHeaders(body);
+    // Sign the final URL: for GET the parameters live in its query string.
+    const headers = client.getAuthHeaders(body, { method, url: url.toString() });
     headers['Accept-Encoding'] = 'gzip';
 
     const fetchOptions = {
@@ -234,11 +308,23 @@ export function remoteStateDirectory(outputDirectory, remoteReprintApiUrl) {
 }
 
 /**
+ * Return the private key path the client uses for a remote: key.pem inside
+ * the remote state directory, where `reprint keygen` writes it and every
+ * later command finds it.
+ */
+export function exportedKeyPath(remoteReprintApiUrl, stateDirectory) {
+    return join(remoteStateDirectory(stateDirectory, remoteReprintApiUrl), 'key.pem');
+}
+
+/**
  * Run the importer CLI.
  * @param {string} url - Export URL
  * @param {string} outputDir - Local output directory (state files live here; fs-root is outputDir/fs-root)
  * @param {string} command - Import command (files-pull, db-pull, etc.)
- * @param {Object} options - Additional options
+ * @param {Object} options - Additional options. `secret` selects the harness
+ *   key for that secret string and passes it as --private-key; with
+ *   `useToken: true` the secret itself is passed as --secret, which only a
+ *   scenario on the HMAC-only pool wants. `extraArgs` are appended.
  * @returns {Object} { stdout, stderr, exitCode }
  */
 export function runImporter(url, outputDir, command, options = {}) {
@@ -255,8 +341,10 @@ export function runImporter(url, outputDir, command, options = {}) {
             `--state-dir=${outputDir}`,
             `--fs-root=${fsRootDir(outputDir)}`,
         ];
-        if (secret) {
+        if (secret && options.useToken) {
             args.push(`--secret=${secret}`);
+        } else if (secret) {
+            args.push(`--private-key=${getHarnessKey(secret).privateKeyPath}`);
         }
         if (extraArgs.length > 0) {
             args.push(...extraArgs);
@@ -684,8 +772,9 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}, o
     const blob = new Blob([fileListJson], { type: 'application/json' });
     formData.append('file_list', blob, 'file_list.json');
 
-    // For HMAC: hash the file content (what the server will hash from $_FILES)
-    const headers = client.getAuthHeaders(fileListJson);
+    // The content hash covers the uploaded file's contents, which is what
+    // the server hashes from $_FILES.
+    const headers = client.getAuthHeaders(fileListJson, { method: 'POST', url: url.toString() });
 
     const response = await fetch(url.toString(), {
         method: 'POST',
@@ -781,6 +870,15 @@ export function readAuditLog(outputDir) {
     const logPath = join(outputDir, 'audit.log');
     if (!existsSync(logPath)) return '';
     return readFileSync(logPath, 'utf-8');
+}
+
+/**
+ * Count the requests the client sent, from the HTTP_REQUEST audit line it
+ * writes for each one. The audit log is append-only, so a scenario takes the
+ * count before and after a run to see how many requests that run made.
+ */
+export function countAuditLogRequests(outputDir) {
+    return (readAuditLog(outputDir).match(/HTTP_REQUEST \|/g) || []).length;
 }
 
 /**

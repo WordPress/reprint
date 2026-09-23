@@ -14,6 +14,7 @@ use InvalidArgumentException;
 use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\PushConfigurationException;
+use WordPress\Reprint\Server\RequestAuthenticator;
 use WordPress\Reprint\Server\Utils;
 
 if (!defined('ABSPATH')) {
@@ -38,6 +39,12 @@ if (!defined(__NAMESPACE__ . '\\CONNECTION_TOKEN_OPTION')) {
 if (!defined(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION')) {
     define(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION', 'reprint_server_push_authorized_token_fingerprint');
 }
+if (!defined(__NAMESPACE__ . '\\PUBLIC_KEYS_OPTION')) {
+    define(__NAMESPACE__ . '\\PUBLIC_KEYS_OPTION', 'reprint_server_public_keys');
+}
+if (!defined(__NAMESPACE__ . '\\PUBLIC_KEYS_FILE')) {
+    define(__NAMESPACE__ . '\\PUBLIC_KEYS_FILE', PLUGIN_DIR . 'public-keys.php');
+}
 
 /**
  * Maximum age of a request timestamp in seconds.
@@ -47,15 +54,39 @@ if (!defined(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE')) {
     define(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE', 300);
 }
 
-/** Sends a JSON error response and terminates. */
-function error(int $code, string $message): void {
+/**
+ * Sends a JSON error response and terminates.
+ *
+ * @param int         $code    HTTP status.
+ * @param string      $message Human-readable detail.
+ * @param string|null $reason  Stable machine-readable code the client maps to a message.
+ */
+function error(int $code, string $message, ?string $reason = null): void {
     http_response_code($code);
     // Hosts such as Hostinger rewrite domains so links and assets stay on a
     // preview domain while the stored site URL still uses the real domain.
     // This lets users preview a site before changing DNS, but also rewrites
     // application/json bodies. Octet-stream bypasses Hostinger's filter.
-    header('Content-Type: application/octet-stream');
-    echo json_encode(['error' => $message, 'code' => $code]);
+    @header('Content-Type: application/octet-stream');
+    $body = ['error' => $message, 'code' => $code];
+    if ($reason !== null) {
+        $body['reason'] = $reason;
+    }
+    echo json_encode($body);
+    terminate();
+}
+
+/**
+ * Ends the request. The 'exit' option of handle_api_request() is invoked
+ * first, before the process exits; a caller that wants control back, such
+ * as a test reading what the dispatcher wrote, throws from it. A callable
+ * that returns cannot let the dispatcher continue past an error.
+ */
+function terminate(): void {
+    $exit = $GLOBALS['reprint_server_exit'] ?? null;
+    if (is_callable($exit)) {
+        $exit();
+    }
     exit;
 }
 
@@ -87,7 +118,7 @@ function push_error(int $http_code, string $reason, string $detail): void {
         'reason' => $reason,
         'detail' => $detail,
     ]);
-    exit;
+    terminate();
 }
 
 /**
@@ -177,6 +208,19 @@ function load_server_runtime(): ?string {
     return null;
 }
 
+/**
+ * Loads the server runtime when a caller outside the API path needs its
+ * classes (the settings page reads the host rule and enrolled keys).
+ *
+ * @return bool Whether the Utils class is available afterwards.
+ */
+function require_server_runtime(): bool {
+    if (!class_exists(Utils::class, false)) {
+        load_server_runtime();
+    }
+    return class_exists(Utils::class);
+}
+
 /** Returns whether the legacy secret.php connection-token override exists. */
 function has_connection_token_file(): bool {
     return file_exists(CONNECTION_TOKEN_FILE);
@@ -238,6 +282,130 @@ function update_connection_token(string $connection_token): bool {
     return (bool) update_option(CONNECTION_TOKEN_OPTION, $connection_token, false);
 }
 
+/** Returns whether the public-keys.php override exists beside the plugin. */
+function has_public_keys_file(): bool {
+    return file_exists(PUBLIC_KEYS_FILE);
+}
+
+/**
+ * Normalizes one stored entry, or returns null when it cannot be used.
+ *
+ * @param mixed $entry Stored value.
+ * @return array|null {
+ *     Normalized entry, or null when the stored value has no usable public key
+ *     or the server runtime is missing.
+ *
+ *     @type string $key_id     Key id computed from the public key.
+ *     @type string $public_key One-line public key.
+ *     @type int    $added_at   Unix timestamp of enrollment, 0 when absent.
+ *     @type bool   $push       Whether this key may push.
+ * }
+ */
+function normalize_public_key_entry($entry): ?array {
+    if (!require_server_runtime()) {
+        // No key can be normalized or identified without the runtime.
+        return null;
+    }
+    if (!is_array($entry) || !isset($entry['public_key']) || !is_string($entry['public_key'])) {
+        return null;
+    }
+    try {
+        $public_key = Utils::normalize_public_key($entry['public_key']);
+    } catch (InvalidArgumentException $exception) {
+        return null;
+    }
+    return [
+        'key_id' => Utils::public_key_fingerprint($public_key),
+        'public_key' => $public_key,
+        'added_at' => isset($entry['added_at']) ? (int) $entry['added_at'] : 0,
+        'push' => !empty($entry['push']),
+    ];
+}
+
+/**
+ * Reads keys from the public-keys.php override. The file returns a list of
+ * PEM or one-line public keys. A public key on disk needs integrity, not
+ * secrecy, so this is the stronger storage for hand-provisioned sites.
+ *
+ * @return array[] Entries in the shape normalize_public_key_entry() returns.
+ */
+function get_file_public_keys(): array {
+    if (!has_public_keys_file()) {
+        return [];
+    }
+    $file_keys = require PUBLIC_KEYS_FILE;
+    if (!is_array($file_keys)) {
+        return [];
+    }
+    $entries = [];
+    foreach ($file_keys as $file_key) {
+        $entry = normalize_public_key_entry(['public_key' => $file_key]);
+        if ($entry !== null) {
+            $entries[] = $entry;
+        }
+    }
+    return $entries;
+}
+
+/**
+ * Reads keys from the site option, or the network option on multisite.
+ *
+ * @return array[] Entries in the shape normalize_public_key_entry() returns.
+ */
+function get_option_public_keys(): array {
+    if (!function_exists('get_option')) {
+        return [];
+    }
+    $stored = function_exists('is_multisite') && is_multisite() && function_exists('get_site_option')
+        ? get_site_option(PUBLIC_KEYS_OPTION, [])
+        : get_option(PUBLIC_KEYS_OPTION, []);
+    if (!is_array($stored)) {
+        return [];
+    }
+    $entries = [];
+    foreach ($stored as $stored_entry) {
+        $entry = normalize_public_key_entry($stored_entry);
+        if ($entry !== null) {
+            $entries[] = $entry;
+        }
+    }
+    return $entries;
+}
+
+/**
+ * Returns the effective enrolled keys: the file override when present,
+ * otherwise the option. Same precedence secret.php has for the token.
+ *
+ * @return array[] Entries in the shape normalize_public_key_entry() returns.
+ */
+function get_enrolled_public_keys(): array {
+    return has_public_keys_file() ? get_file_public_keys() : get_option_public_keys();
+}
+
+/** @return array<string,string> key id => one-line public key, for RequestAuthenticator. */
+function get_enrolled_public_keys_by_id(): array {
+    $by_id = [];
+    foreach (get_enrolled_public_keys() as $entry) {
+        $by_id[$entry['key_id']] = $entry['public_key'];
+    }
+    return $by_id;
+}
+
+/**
+ * Writes the option-backed key list. Never touches public-keys.php.
+ *
+ * @param array[] $entries Entries in the shape normalize_public_key_entry() returns.
+ */
+function update_option_public_keys(array $entries): bool {
+    if (!function_exists('update_option')) {
+        return false;
+    }
+    if (function_exists('is_multisite') && is_multisite() && function_exists('update_site_option')) {
+        return (bool) update_site_option(PUBLIC_KEYS_OPTION, array_values($entries));
+    }
+    return (bool) update_option(PUBLIC_KEYS_OPTION, array_values($entries), false);
+}
+
 /**
  * Returns the hosting provider's push policy, or null when the site controls it.
  *
@@ -274,8 +442,14 @@ function is_push_authorized(): bool {
     return get_push_authorization_error() === null;
 }
 
-/** Returns the exact push authorization failure, or null when push may start new work. */
-function get_push_authorization_error(): ?string {
+/**
+ * Returns the exact push authorization failure, or null when push may start new work.
+ *
+ * @param string|null $authenticated_key_id Key id the request authenticated with, or null for
+ *                                          a connection-token request. With a key id the entry's
+ *                                          push flag decides instead of the token fingerprint.
+ */
+function get_push_authorization_error(?string $authenticated_key_id = null): ?string {
     if (function_exists('is_multisite') && is_multisite()) {
         return 'Push into a multisite network is not supported. Pull the selected site into a fresh target instead.';
     }
@@ -284,6 +458,15 @@ function get_push_authorization_error(): ?string {
         return $managed_enabled
             ? null
             : 'Push access is disabled by the hosting provider through REPRINT_SERVER_PUSH_ENABLED.';
+    }
+
+    if ($authenticated_key_id !== null) {
+        foreach (get_enrolled_public_keys() as $entry) {
+            if ($entry['key_id'] === $authenticated_key_id) {
+                return $entry['push'] ? null : 'Push access is disabled for the current key.';
+            }
+        }
+        return 'Push access is disabled for the current key.';
     }
 
     $connection_token = get_connection_token();
@@ -326,7 +509,11 @@ function update_push_authorization(bool $enabled): bool {
 }
 
 /**
- * Verify HMAC authentication.
+ * Verifies a connection-token (HMAC) signature. Retained for embedders that
+ * call it directly; new embedders should call RequestAuthenticator through
+ * handle_api_request(). On hosts that have `openssl_verify`, HMACServer
+ * refuses every token (its last_error_reason() is `requires_key_auth`), so
+ * this returns that refusal message there whatever the token.
  *
  * The signature covers a SHA-256 hash of the request body rather than
  * the raw bytes.  This sidesteps the problem that libcurl generates
@@ -353,11 +540,15 @@ function verify_hmac(string $secret): ?string {
 }
 
 /**
- * Default HMAC authentication handler.
+ * Connection-token authentication handler retained for embedders that call it
+ * directly; handle_api_request() no longer uses it. New embedders should call
+ * RequestAuthenticator through handle_api_request().
  *
  * Reads the connection token from secret.php when present, otherwise from the
- * site option, and verifies the request's HMAC signature.
- * Calls error() on failure.
+ * site option, and verifies the request's HMAC signature. On hosts that have
+ * `openssl_verify` the verification refuses every token (HMACServer's
+ * `requires_key_auth` rule) and this answers HTTP 403 with that message,
+ * without a reason field. Calls error() on failure.
  */
 function default_authenticate(): void {
     if (has_connection_token_file()) {
@@ -392,8 +583,14 @@ function default_authenticate(): void {
  * @param array $options {
  *     Optional endpoint configuration overrides.
  *
- *     @type callable $authenticate Optional. Authenticates the request.
- *                                  Defaults to default_authenticate().
+ *     @type callable $authenticate Optional. Authenticates the request and
+ *                                  owns the whole decision. Defaults to
+ *                                  RequestAuthenticator with the stored
+ *                                  connection token and enrolled keys.
+ *     @type callable $exit Optional. Invoked by error() and push_error()
+ *                          before the process exits. A caller that wants
+ *                          control back, such as a test reading the
+ *                          response, throws from it; returning still exits.
  *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
@@ -412,6 +609,7 @@ function default_authenticate(): void {
  * }
  * @phpstan-param array{
  *     authenticate?:callable,
+ *     exit?:callable,
  *     docroot?:string,
  *     reprint_directory?:string,
  *     excluded_paths?:string[],
@@ -420,6 +618,8 @@ function default_authenticate(): void {
  * } $options
  */
 function handle_api_request(array $options = []): void {
+    $GLOBALS['reprint_server_exit'] = $options['exit'] ?? null;
+
     // Revert WordPress error display settings (wp_debug_mode may
     // have enabled display_errors based on WP_DEBUG_DISPLAY).
     if (function_exists('ini_set')) {
@@ -489,48 +689,51 @@ function handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // Push requests use envelope authentication: the signature covers the
-    // method and exact request target while TLS protects the streamed body.
-    // The legacy verifier hashes php://input and remains only for the existing
-    // pull endpoints with bounded command bodies. A custom authenticate
-    // callable still runs for every endpoint; its embedder owns that policy.
-    // filter_input, not WP sanitizers: lib.php also runs without WordPress
-    // bootstrapped (hosts that route the API from their own index.php).
+    // One call. Core reads the host rule and verifies only the scheme this
+    // host accepts; the plugin passes what it has stored and decides nothing.
+    // A custom authenticate callable still runs for every endpoint and owns
+    // the whole decision. filter_input, not WP sanitizers: lib.php also runs
+    // without WordPress bootstrapped.
     $endpoint = (string) filter_input(INPUT_GET, 'endpoint');
     $authenticate = $options['authenticate'] ?? null;
+    $authenticated_key_id = null;
     if ($authenticate !== null) {
         $authenticate();
-    } elseif (is_push_endpoint($endpoint)) {
-        if (has_connection_token_file()) {
-            $connection_token = get_file_connection_token();
-            if (empty($connection_token)) {
-                push_error(503, 'not_configured', 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.');
-            }
-        } else {
-            $connection_token = get_option_connection_token();
-        }
-        if (empty($connection_token) || !is_string($connection_token)) {
-            push_error(503, 'not_configured', 'Configure the connection token in WordPress admin under Tools > Reprint Server.');
-        }
-        if (!class_exists(HMACServer::class, false)) {
+    } else {
+        if (!class_exists(RequestAuthenticator::class, false)) {
             load_server_runtime();
         }
-        if (!class_exists(HMACServer::class)) {
-            push_error(500, 'filesystem_error', 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.');
+        if (!class_exists(RequestAuthenticator::class)) {
+            $runtime_message = 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.';
+            if (is_push_endpoint($endpoint)) {
+                push_error(500, 'filesystem_error', $runtime_message);
+            }
+            error(500, $runtime_message);
         }
-        // These exact request-line values are covered by the HMAC; WordPress
-        // slashing or sanitization would verify a different target.
-        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
-        $request_method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
-        // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
-        $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
-        $hmac_server = new HMACServer($connection_token, TIMESTAMP_TOLERANCE);
-        $auth_error = $hmac_server->verify_envelope($_SERVER, $request_method, $request_target);
+        // A broken secret.php only matters where the token is the scheme; a
+        // key host never accepts it, so enrolled keys must still authenticate.
+        if (!Utils::key_auth_required() && has_connection_token_file() && empty(get_file_connection_token())) {
+            $secret_file_message = 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.';
+            if (is_push_endpoint($endpoint)) {
+                push_error(503, 'not_configured', $secret_file_message);
+            }
+            error(503, $secret_file_message, 'not_configured');
+        }
+        $authenticator = new RequestAuthenticator(
+            get_connection_token(),
+            get_enrolled_public_keys_by_id(),
+            TIMESTAMP_TOLERANCE
+        );
+        $auth_error = $authenticator->verify_globals();
         if ($auth_error !== null) {
-            push_error(403, 'auth_failed', $auth_error);
+            $reason = $authenticator->last_error_reason() ?? RequestAuthenticator::REASON_AUTH_FAILED;
+            $status = $reason === RequestAuthenticator::REASON_NOT_CONFIGURED ? 503 : 403;
+            if (is_push_endpoint($endpoint)) {
+                push_error($status, $reason, $auth_error);
+            }
+            error($status, $auth_error, $reason);
         }
-    } else {
-        default_authenticate();
+        $authenticated_key_id = $authenticator->authenticated_key_id();
     }
 
     if (!push_is_supported() && is_push_endpoint($endpoint)) {
@@ -548,7 +751,7 @@ function handle_api_request(array $options = []): void {
     // does not need to read php://input after this gate.
     $push_authorization_error = null;
     if (is_push_endpoint($endpoint)) {
-        $push_authorization_error = get_push_authorization_error();
+        $push_authorization_error = get_push_authorization_error($authenticated_key_id);
     }
     if (
         $push_authorization_error !== null

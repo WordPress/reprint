@@ -43,11 +43,13 @@ cp -R "$PROJECT_ROOT/reprint-server-wp/." "$BUILD_ROOT/reprint-server-wp/"
 cp -R "$PROJECT_ROOT/packages/reprint-server/." "$BUILD_ROOT/packages/reprint-server/"
 
 # Runtime dependencies are generated from the downgraded package below. Never
-# carry a development vendor tree or a local secret into the release artifact.
+# carry a development vendor tree, a local secret, or locally enrolled keys
+# into the release artifact.
 rm -rf "$BUILD_ROOT/reprint-server-wp/vendor"
 rm -f \
     "$BUILD_ROOT/reprint-server-wp/composer.lock" \
-    "$BUILD_ROOT/reprint-server-wp/secret.php"
+    "$BUILD_ROOT/reprint-server-wp/secret.php" \
+    "$BUILD_ROOT/reprint-server-wp/public-keys.php"
 
 php "$PROJECT_ROOT/bin/downgrade-server-plugin.php" "$BUILD_ROOT"
 
@@ -101,12 +103,12 @@ COMPOSER_DISABLE_NETWORK=1 COMPOSER_MIRROR_PATH_REPOS=1 composer update \
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 # zip updates an existing archive in place, so remove any leftover first. The
-# exclusion must be './secret.php': a '*/secret.php' pattern does not match the
-# root-level entry produced by this layout.
+# exclusions must be './secret.php' and './public-keys.php': a '*/secret.php'
+# pattern does not match the root-level entry produced by this layout.
 rm -f "$OUTPUT_PATH"
 (
     cd "$BUILD_ROOT/reprint-server-wp"
-    zip -qr "$OUTPUT_PATH" . -x './secret.php'
+    zip -qr "$OUTPUT_PATH" . -x './secret.php' './public-keys.php'
 )
 
 echo "Built $OUTPUT_PATH"

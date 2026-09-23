@@ -50,7 +50,8 @@ class CompatibilityEntryPointsTest extends TestCase
         $this->assertSame($canonical_output, $alias_output);
         $this->assertSame($canonical_exit, $alias_exit);
         $this->assertStringContainsString('reprint-exporter-wp.zip', $canonical_output);
-        $this->assertStringContainsString('Configure the connection token', $canonical_output);
+        $this->assertStringContainsString('Enroll a key', $canonical_output);
+        $this->assertStringContainsString('host without OpenSSL', $canonical_output);
         $this->assertStringContainsString('Tools → Reprint Server', $canonical_output);
         $this->assertStringNotContainsString('Reprint Server (in the sidebar)', $canonical_output);
     }

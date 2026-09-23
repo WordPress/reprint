@@ -6,6 +6,9 @@ import { getSiteDir, getSiteUrl, getSiteSecret, createMysqlConnection, getDbName
 import { ensureMultisite, runWp } from '../lib/multisite-setup.js';
 import { HmacClient } from '../lib/hmac-client.js';
 
+// Network token administration only matters on a host without OpenSSL, so
+// the registry serves this site from the HMAC-only FPM pool (hmacOnly), where
+// the token form is shown and token-signed requests are accepted.
 const site = 'multisite-admin';
 const token = getSiteSecret(site);
 const origin = new URL(getSiteUrl(site)).origin;

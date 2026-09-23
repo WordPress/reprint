@@ -6,6 +6,7 @@ PHP_VERSION="${PHP_VERSION:-8.2}"
 FPM_SOCKET="/run/php/e2e.sock"
 OPEN_BASEDIR_FPM_SOCKET="/run/php/e2e-open-basedir.sock"
 NO_PDO_MYSQL_FPM_SOCKET="/run/php/e2e-no-pdo-mysql.sock"
+HMAC_ONLY_FPM_SOCKET="/run/php/e2e-hmac-only.sock"
 REGISTRY="/app/tests/e2e/site-registry.json"
 SITE_ROOT=$(jq -r '.siteRoot' "$REGISTRY")
 
@@ -79,6 +80,31 @@ php_admin_value[user_ini.cache_ttl] = 0
 php_admin_value[realpath_cache_ttl] = 0
 php_admin_value[open_basedir] = ${SITE_ROOT}/open-basedir:/tmp
 env[REPRINT_SERVER_TEST_MODE] = 1
+
+; A host whose OpenSSL extension is loaded but whose openssl_verify is
+; blocked by disable_functions. Reprint must treat it as HMAC-only, which is
+; the function_exists check rather than extension_loaded.
+[e2e-hmac-only]
+user = nginx
+group = nginx
+listen = ${HMAC_ONLY_FPM_SOCKET}
+listen.owner = nginx
+listen.group = nginx
+listen.mode = 0660
+pm = ondemand
+pm.max_children = 4
+php_admin_value[memory_limit] = 512M
+php_admin_value[max_execution_time] = 120
+php_admin_value[upload_max_filesize] = 50M
+php_admin_value[post_max_size] = 50M
+php_admin_value[error_reporting] = E_ALL
+php_admin_value[display_errors] = Off
+php_admin_value[log_errors] = On
+php_admin_value[error_log] = /tmp/php-e2e-errors.log
+php_admin_value[user_ini.cache_ttl] = 0
+php_admin_value[realpath_cache_ttl] = 0
+php_admin_value[disable_functions] = openssl_verify
+env[REPRINT_SERVER_TEST_MODE] = 1
 EOF
 rm -f "/etc/php/${PHP_VERSION}/fpm/pool.d/www.conf"
 "php-fpm${PHP_VERSION}" --nodaemonize &
@@ -137,7 +163,7 @@ PHP_INI_SCAN_DIR="$NO_PDO_MYSQL_CONF_D" "php-fpm${PHP_VERSION}" \
 # Wait for FPM socket
 for i in $(seq 1 30); do
     if [ -S "$FPM_SOCKET" ] && [ -S "$OPEN_BASEDIR_FPM_SOCKET" ] \
-       && [ -S "$NO_PDO_MYSQL_FPM_SOCKET" ]; then break; fi
+       && [ -S "$NO_PDO_MYSQL_FPM_SOCKET" ] && [ -S "$HMAC_ONLY_FPM_SOCKET" ]; then break; fi
     sleep 0.5
 done
 
@@ -167,13 +193,16 @@ rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
 
 # Standard sites — serve from WordPress root so that index.php
 # bootstraps WordPress and the Reprint Server plugin handles the request.
-jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false), (.value.noPdoMysql // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir no_pdo_mysql; do
+jq -r '.sites | to_entries[] | select((.value.nginx // "standard") == "standard") | [.key, .value.port, (.value.openBasedir // false), (.value.noPdoMysql // false), (.value.hmacOnly // false)] | @tsv' "$REGISTRY" | while IFS=$'\t' read -r site port open_basedir no_pdo_mysql hmac_only; do
     site_fpm_socket="$FPM_SOCKET"
     if [ "$open_basedir" = "true" ]; then
         site_fpm_socket="$OPEN_BASEDIR_FPM_SOCKET"
     fi
     if [ "$no_pdo_mysql" = "true" ]; then
         site_fpm_socket="$NO_PDO_MYSQL_FPM_SOCKET"
+    fi
+    if [ "$hmac_only" = "true" ]; then
+        site_fpm_socket="$HMAC_ONLY_FPM_SOCKET"
     fi
     cat > "/etc/nginx/conf.d/e2e-${site}.conf" <<VHOST
 server {

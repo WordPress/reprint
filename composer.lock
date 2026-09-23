@@ -358,13 +358,14 @@
         },
         {
             "name": "wp-php-toolkit/reprint-client",
-            "version": "dev-refactor/utils-class",
+            "version": "dev-worktree-public-key-auth",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-client",
-                "reference": "ad20e466bc2ea77ee5eff93f5a02d810a64ee23a"
+                "reference": "134e282491534c57a254ea708308decadbf6e89b"
             },
             "require": {
+                "ext-openssl": "*",
                 "ext-pdo": "*",
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.10.1",
@@ -389,11 +390,11 @@
         },
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-refactor/utils-class",
+            "version": "dev-worktree-public-key-auth",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-server",
-                "reference": "5a50dbfd84c6d39fcddfd8bff37cc69f9bddbeca"
+                "reference": "e42de18011ee216009c1d10a3c1449b2ac9faa03"
             },
             "require": {
                 "php": ">=7.2"
@@ -402,6 +403,7 @@
                 "wp-php-toolkit/reprint-exporter": "self.version"
             },
             "suggest": {
+                "ext-openssl": "Needed to verify public-key signatures; hosts without it accept HMAC connection tokens only.",
                 "ext-pdo": "Needed for the SQLite export path; recommended for MySQL exports (the wpdb fallback handles MySQL when absent).",
                 "ext-pdo_mysql": "Recommended for MySQL exports; falls back to wpdb when absent."
             },

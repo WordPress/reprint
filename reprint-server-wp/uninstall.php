@@ -9,6 +9,7 @@ if (!defined('WP_UNINSTALL_PLUGIN')) {
 $reprint_server_delete_site_settings = static function () {
     delete_option('reprint_server_connection_token');
     delete_option('reprint_server_push_authorized_token_fingerprint');
+    delete_option('reprint_server_public_keys');
     delete_option('site_export_secret');
     delete_option('site_export_push_authorized_token_fingerprint');
     delete_transient('reprint_server_activated');
@@ -44,6 +45,7 @@ do {
     ]);
     foreach ($reprint_server_network_ids as $reprint_server_network_id) {
         delete_network_option($reprint_server_network_id, 'reprint_server_connection_token');
+        delete_network_option($reprint_server_network_id, 'reprint_server_public_keys');
     }
     $reprint_server_batch_count = count($reprint_server_network_ids);
     $reprint_server_offset += $reprint_server_batch_count;

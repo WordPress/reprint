@@ -282,7 +282,7 @@ final class FilesPullLocalIndexTest extends TestCase
                     'Accept-Language' => 'en-US,en;q=0.9',
                     'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
                 ],
-                'hmac_client' => new \Site_Export_HMAC_Client('secret'),
+                'envelope_signer' => new \Site_Export_HMAC_Client('secret'),
                 'allow_http' => true,
             ], $processLock);
             $sender->close();
@@ -759,6 +759,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->rawFileRoot . '/state-inside',
             '--fs-root=' . $this->rawFileRoot,
+            '--secret=test-secret',
             '--mode=mirror',
         ]);
 
@@ -905,6 +906,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
+            '--secret=test-secret',
             '--mode=mirror',
         ]);
         $freshLocalIndex = $this->pullStateDirectory
@@ -975,6 +977,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
+            '--secret=test-secret',
             '--mode=mirror',
         ]);
         $walPath = $this->pullStateDirectory . '/index.wal';
@@ -1047,6 +1050,7 @@ final class FilesPullLocalIndexTest extends TestCase
         try {
             $client->run([
                 'command' => 'files-pull',
+                'secret' => 'test-secret',
                 'files_pull_mode' => 'mirror',
             ], $processLock);
             $this->fail(
@@ -1372,6 +1376,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
+            '--secret=test-secret',
         ]);
         $readyPath = $this->root . '/remote-overrides.json.pause-ready';
         $walPath = $this->pullStateDirectory . '/index.wal';
@@ -1461,6 +1466,7 @@ final class FilesPullLocalIndexTest extends TestCase
             $this->targetUrl,
             '--state-dir=' . $this->stateDirectory,
             '--fs-root=' . $this->rawFileRoot,
+            '--secret=test-secret',
         ], $extraArguments));
     }
 

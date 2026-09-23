@@ -22,7 +22,7 @@ When a request arrives at `https://example.com/?reprint-api`, the plugin:
 1. Detects `$_GET['reprint-api']` during plugin file load
 2. Reverts WordPress error display settings (`display_errors`, `html_errors`) that `wp_debug_mode()` may have turned on
 3. Clears any output buffering WordPress started
-4. Sets up error handlers, HMAC auth, and runs the export endpoint
+4. Sets up error handlers, authentication through `RequestAuthenticator`, and runs the export endpoint
 5. Calls `exit` — WordPress never finishes booting
 
 This gives us a clean execution environment while using WordPress's front controller as the entry point.
@@ -46,7 +46,7 @@ add_filter('reprint_server_api_options', static function (array $options): array
 The supported options are:
 
 - `authenticate` — a callback that authenticates every non-preflight API
-  request instead of the built-in HMAC verifier. For a push request, this
+  request instead of the built-in `RequestAuthenticator`. For a push request, this
   callback must authenticate from request metadata without reading or
   buffering `php://input`; the endpoint streams that body after authentication.
 - `docroot` — the document root for push. It must resolve to an
@@ -61,13 +61,45 @@ The supported options are:
 - `maximum_commit_entries` — the maximum number of bounded entries processed
   by one `push_commit` request. It defaults to 256.
 
+## Authentication
+
+The host decides the scheme; no option, constant, or environment variable
+selects it. `Utils::key_auth_required()` returns whether `openssl_verify`
+exists. Where it does, `RequestAuthenticator` accepts only signatures made with
+an enrolled public key and answers a connection token with `requires_key_auth`.
+Where it does not, the authenticator accepts only the connection token and
+answers a key signature with `requires_token_auth`. A site on a host with
+OpenSSL that has no enrolled key answers every request with `not_configured`
+(HTTP 503); a stored connection token is kept but not accepted there, and the
+settings page says so. The Remove button appears for an option-stored token
+only; a `secret.php` token is named and must be removed from disk, since the
+page cannot delete that file. `HMACServer` itself refuses on a
+host with OpenSSL, so embedders that call it directly must move to
+`RequestAuthenticator`.
+
+### Public keys
+
+The settings page has an enrollment form which takes a PEM or one-line public
+key, and a table of enrolled keys with each key's id, the date it was added,
+and a per-key push grant. Enrolled keys live in the `reprint_server_public_keys`
+option (the network option on multisite), which is never exposed through REST.
+A `public-keys.php` file beside the plugin overrides the option, the same
+precedence `secret.php` has for the token: the file returns a list of PEM or
+one-line public keys, it is the only key source while it exists, and the page
+shows its keys read-only and refuses enrollment. Removing a key from the table
+revokes its push grant with it. Keys from `public-keys.php` carry no grant, so
+push to such a site needs the managed policy below. On a host with OpenSSL the
+page refuses to remove the last key, because the site would stop answering.
+
 ## Push access
 
-Connection tokens authorize downloads only by default. This also applies to
-tokens that already existed when the plugin was upgraded; no migration enables
-push access. A site administrator can grant push access from the plugin settings
-page. The grant stores a fingerprint of the current connection token, so rotating
-that token revokes the grant and requires fresh consent.
+Connection tokens and enrolled keys authorize downloads only by default. This
+also applies to credentials that already existed when the plugin was upgraded;
+no migration enables push access. A site administrator grants push access from
+the plugin settings page: per key in the enrolled-key table, or for the
+connection token on a host without OpenSSL. The token grant stores a
+fingerprint of the current connection token, so rotating that token revokes the
+grant and requires fresh consent.
 
 Hosts can manage push access before active plugins load with an immutable boolean:
 
@@ -86,23 +118,26 @@ push is authorized again. Managed sites show the effective state as read-only
 in WordPress admin. Custom authentication does not bypass this authorization
 gate.
 
-The bundled settings page is available at **Tools > Reprint Server**. It uses
-the WordPress Settings API for the connection token and a separate authenticated
-administrator action for push access. The page is an adapter over the shared
-configuration functions; it does not own the token or push-authorization rules.
+The bundled settings page is available at **Tools > Reprint Server** (the
+network settings page on multisite). It uses the WordPress Settings API for the
+connection token and separate authenticated administrator actions for key
+enrollment, key removal, and push access. The page is an adapter over the shared
+configuration functions; it does not own the token, key, or push-authorization
+rules.
 
 ## Uninstalling
 
 Deleting Reprint Server through WordPress removes its stored connection token,
-push authorization, and activation redirect transient, including the legacy
-`site_export_*` settings. On multisite, it cleans these settings on every site
-and removes the connection token from every network. Other plugins' settings
-are left alone. Deactivation keeps Reprint's settings.
+enrolled public keys, push authorization, and activation redirect transient,
+including the legacy `site_export_*` settings. On multisite, it cleans these
+settings on every site and removes the connection token and enrolled keys from
+every network. Other plugins' settings are left alone. Deactivation keeps
+Reprint's settings.
 
 Migration integrations must run WordPress's uninstall routine while the plugin
 files are still present. Removing the directory directly does not run cleanup.
-WordPress deletes files inside the plugin directory, including `secret.php`,
-when deleting the plugin. Host-configured token files and private transfer
+WordPress deletes files inside the plugin directory, including `secret.php`
+and `public-keys.php`, when deleting the plugin. Host-configured token files and private transfer
 directories outside that directory are not removed by this uninstall routine.
 
 ## Using as a library
@@ -123,8 +158,10 @@ require_once '/path/to/reprint-server-wp/lib.php';
 
 // Route however you like — lib.php doesn't check URLs.
 if ($myRouter->matches('/export')) {
-    // Use default HMAC authentication (reads the connection token from secret.php when present,
-    // otherwise falls back to the site option):
+    // Use the default authentication: key signatures on a host with openssl_verify,
+    // connection tokens elsewhere. Keys come from public-keys.php when present,
+    // otherwise the public-keys option; the token from secret.php when present,
+    // otherwise the connection-token option.
     handle_api_request();
 
     // Or supply your own authentication:
@@ -156,10 +193,20 @@ register_wordpress_configuration();
 ```
 
 The embedding plugin may use the namespaced `get_configuration_state()`,
-`change_connection_token()`, and `change_push_access()` operations to render
-and process its own administrator surface. It should not require
+`change_connection_token()`, `change_push_access()`, `enroll_public_key()`,
+`remove_public_key()`, and `change_key_push_access()` operations to render and
+process its own administrator surface. It should not require
 `wordpress/reprint-server.php` unless it explicitly wants the bundled
 **Tools > Reprint Server** page.
+
+Reading the host rule and identifying keys needs the server runtime, which the
+API path loads only while answering a request. `get_configuration_state()` and
+the key operations therefore call `require_server_runtime()` themselves, which
+looks for the Composer autoloader in `vendor/` beside the plugin or at the
+repository root. An embedder that ships the `wp-php-toolkit/reprint-server`
+package elsewhere must make `WordPress\Reprint\Server\Utils` autoloadable
+before calling them: otherwise the key operations return `runtime_missing`,
+and the configuration state lists no enrolled keys.
 
 `lib.php` defines these constants in `WordPress\Reprint\Server\Plugin`
 (using WordPress's `plugin_dir_path`):
@@ -168,6 +215,8 @@ and process its own administrator surface. It should not require
 - `PLUGIN_DIR` — absolute path to the plugin directory
 - `CONNECTION_TOKEN_FILE` — optional path to a PHP file that overrides the stored connection token
 - `CONNECTION_TOKEN_OPTION` — WordPress site option name used for the stored connection token
+- `PUBLIC_KEYS_FILE` — optional path to a PHP file returning the enrolled public keys; it replaces the option while it exists
+- `PUBLIC_KEYS_OPTION` — WordPress site option name (network option on multisite) holding the enrolled public keys and their push grants
 - `PUSH_AUTHORIZATION_OPTION` — WordPress site option containing the connection-token fingerprint granted personal push access
 - `TIMESTAMP_TOLERANCE` — max request age in seconds (default 300)
 
