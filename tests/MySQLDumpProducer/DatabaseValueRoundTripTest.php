@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/MySQLDumpProducerTestBase.php';
+require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/database-push/class-database-push-source.php';
 
 use WordPress\Reprint\Server\DatabasePush;
@@ -50,6 +51,31 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
         $expected = $this->pdo->query($query)->fetchAll(PDO::FETCH_NUM);
         $target = $this->transfer($operation, $driver, 'wp_places');
         self::assertSame($expected, $target->query($query)->fetchAll(PDO::FETCH_NUM));
+    }
+
+    public function testMysqlSetDumpKeepsSourceLabelsWhenAppliedToSqlite(): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (id INT PRIMARY KEY, flags SET('', 'a', 'O''Reilly', '雪'), payload LONGTEXT) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT INTO wp_sets VALUES (1,0,REPEAT('x',4000)), (2,1,''), (3,2,''), (4,3,''), (5,12,''), (6,NULL,'')");
+        $expected = $this->pdo->query('SELECT * FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
+        $sql = $this->getDumpSQL(['batch_size' => 1, 'max_statement_size' => 2048]);
+        $root = sys_get_temp_dir() . '/reprint-set-roundtrip-' . bin2hex(random_bytes(5));
+        mkdir($root);
+        $sqlite = new WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=:memory:;dbname=wordpress');
+        $connection = new \Reprint\Importer\Database\PdoDatabaseConnection($sqlite, $sqlite->get_connection()->get_pdo());
+        try {
+            $client = new ImportClient('https://source.example/', $root, $root . '/files');
+            (new ReflectionMethod(ImportClient::class, 'create_database_import_position_table'))->invoke($client, $connection);
+            (new ReflectionMethod(ImportClient::class, 'execute_database_import_group'))->invoke(
+                $client, $connection, $sql, hash('sha256', 'set-roundtrip'), 'next-cursor', null, 'sqlite'
+            );
+            self::assertSame($expected, $sqlite->query('SELECT * FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_ASSOC));
+        } finally {
+            $connection->close();
+            foreach (new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST) as $entry) {
+                $entry->isDir() ? rmdir($entry->getPathname()) : unlink($entry->getPathname());
+            }
+            rmdir($root);
+        }
     }
 
     public function testLegacySetLabelCursorRequiresANewTransfer(): void {

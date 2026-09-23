@@ -25,6 +25,7 @@ use Reprint\Importer\ProgressReporter;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\RetryLaterException;
 use Reprint\Importer\SpatialSridGuard;
+use Reprint\Importer\SqliteSetValueStatementRewriter;
 use Reprint\Importer\MultisiteTarget;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
@@ -7834,6 +7835,7 @@ class ImportClient
             return $statement_count;
         }
 
+        $set_value_rewriter = new SqliteSetValueStatementRewriter($connection);
         $connection->beginTransaction();
         try {
             // The fast parser falls back to the lexer-based parser if one
@@ -7845,6 +7847,7 @@ class ImportClient
             while ($query_stream->next_query()) {
                 $query = $query_stream->get_query();
                 $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
+                $query = $set_value_rewriter->rewrite($query);
                 $executed_query = $query;
                 try {
                     $this->execute_db_apply_query(

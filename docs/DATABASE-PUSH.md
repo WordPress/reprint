@@ -194,7 +194,10 @@ other warnings roll the row back. Rewriting a primary key is rejected. Source
 rows are never updated. Pull and push share numeric reads: native floating-point
 values become 17-digit round-trip decimals before PHP string conversion or cursor
 storage. MySQL SET values travel as unsigned masks, preserving empty members and
-all 64 bits. SQLite stores SET labels rather than masks and keeps that text path.
+all 64 bits. When pulling into SQLite, the client converts those masks back to
+labels using the column definition. SQLite stores labels rather than masks; it
+cannot retain the distinction between an empty member and no member. Exact SET
+mask round-trips require MySQL or MariaDB.
 A saved MySQL cursor containing SET labels from an older server cannot resume
 with mask-based reads; abort that transfer and start again after upgrading.
 

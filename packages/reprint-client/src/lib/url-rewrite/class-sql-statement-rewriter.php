@@ -177,7 +177,7 @@ class SqlStatementRewriter
         // Slow path: lex once, share the token array between the column
         // map walker and Base64ValueScanner.
         $tokens = self::significant_tokens($sql);
-        $value_to_column_map = $this->map_values_to_columns_from_tokens($tokens);
+        $value_to_column_map = self::map_values_to_columns_from_tokens($tokens);
         $scanner = new Base64ValueScanner($sql, $tokens);
         return $this->rewrite_with_scanner($scanner, $value_to_column_map);
     }
@@ -357,7 +357,7 @@ class SqlStatementRewriter
      * }
      * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
      */
-    private function map_values_to_columns_from_tokens(array $tokens): ?array
+    public static function map_values_to_columns_from_tokens(array $tokens): ?array
     {
         $token_count = count($tokens);
         if ($token_count < 4) {
