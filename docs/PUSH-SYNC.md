@@ -646,14 +646,15 @@ Updating reprint itself is a separate concern, never part of a sync.
 
 ## Escape hatch: commit without booting WordPress
 
-Normally the endpoint runs through the WordPress boot because it is
-convenient. But a commit step can break that boot — a fatal in a partially
-committed plugin — so the same endpoint is also reachable as a standalone PHP file that
-never loads WordPress: it reads database credentials from `wp-config.php`
-directly and operates on the filesystem and database with reprint's own code.
-The driver falls back to it automatically when the normal route stops
-answering sensibly. This is what makes commit failures recoverable from the
-outside instead of requiring SSH.
+The plugin bundle includes `standalone.php`, which calls the same API without
+loading WordPress. The host sets `REPRINT_SERVER_CONFIG` to a private PHP file
+containing database credentials, a file-backed token, and API options. Neither
+plugin activation nor the token in `wp_options` controls this route, so replacing
+the database cannot disable it. See [host setup](DATABASE-PUSH.md#host-setup).
+
+The client must use this remote Reprint API URL explicitly. Automatic fallback
+from the WordPress route is not implemented. The endpoint does not parse or
+execute `wp-config.php`; that file can itself load WordPress or arbitrary plugins.
 
 ## Full database overwrite
 
