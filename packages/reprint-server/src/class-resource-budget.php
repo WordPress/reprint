@@ -38,6 +38,33 @@ class ResourceBudget
         $this->memory_threshold = $memory_threshold;
     }
 
+    /**
+     * A budget starting now: $max_execution_time seconds, capped by PHP's own limit, and
+     * $memory_threshold of memory_limit.
+     */
+    public static function from_ini(int $max_execution_time = 15, float $memory_threshold = 0.8): self
+    {
+        $ini_max_execution_time = (int) ini_get('max_execution_time');
+        if ($ini_max_execution_time > 0) {
+            $max_execution_time = min($max_execution_time, $ini_max_execution_time);
+        }
+
+        $memory_limit = (string) ini_get('memory_limit');
+        if ($memory_limit === '-1') {
+            $max_memory = PHP_INT_MAX;
+        } else {
+            try {
+                $max_memory = Utils::parse_size($memory_limit);
+            } catch (\InvalidArgumentException $e) {
+                // Empty, or a form parse_size() doesn't read (e.g. PHP 8.1's hex "0x20000000"):
+                // assume PHP's built-in default, which is on the low side.
+                $max_memory = 128 * 1024 * 1024;
+            }
+        }
+
+        return new self(microtime(true), $max_execution_time, $max_memory, $memory_threshold);
+    }
+
     /** Returns false when the request should yield due to time or memory pressure. */
     public function has_remaining(): bool
     {

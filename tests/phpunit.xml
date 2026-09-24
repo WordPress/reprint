@@ -28,6 +28,7 @@
             <file>ExportHttpServerTest.php</file>
             <file>WindowsPathAccessTest.php</file>
             <file>ExportResolveDirectoriesTest.php</file>
+            <file>ExportDirectorySizeTest.php</file>
             <file>FileIndexDedupTest.php</file>
             <file>FileIndexSkipDefaultsTest.php</file>
             <file>FileIndexProcessorTest.php</file>
