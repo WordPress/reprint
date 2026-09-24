@@ -202,6 +202,16 @@ When pulling into SQLite, the client converts masks back to
 labels using the column definition. SQLite stores labels rather than masks; it
 cannot retain the distinction between an empty member and no member. Exact SET
 mask round-trips require MySQL or MariaDB.
+
+MySQL and MariaDB can store `SET('🙂','ok')` while exporting its definition as
+`SET('?','ok')`. Applying the numeric mask would silently change `🙂` to `?`.
+Numeric SET exports now stop when a selected row's label cannot survive the
+server's table-definition encoding. The check runs in the existing row query,
+before returning that row or advancing its cursor; it does not scan the table
+again. Push cannot reach review or replace live tables after this rejection.
+This checks selected values, not unused SET members, and does not repair lossy
+schema metadata. Legacy label-format exports remain unchanged.
+
 A saved cursor containing SET values cannot resume in a different format; abort
 that transfer and start again after upgrading. Old clients can still resume
 their label-format cursors after a server upgrade.

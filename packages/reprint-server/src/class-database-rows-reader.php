@@ -113,6 +113,12 @@ class DatabaseRowsReader {
     /** @var string SET labels by default; unsigned masks only when requested. */
     private $set_value_format;
 
+    /** @var string|null Character set MySQL uses for table definitions. */
+    private $metadata_character_set = null;
+
+    /** @var string|null Hidden SELECT field naming a SET column whose label cannot be exported. */
+    private $invalid_set_column_alias = null;
+
     /** @var int|null */
     private $query_time_limit_ms = null;
 
@@ -458,6 +464,7 @@ class DatabaseRowsReader {
             return false;
         }
 
+        $record = $this->check_set_labels($record);
         $record = $this->preserve_floating_point_values($record);
         $primary_key_values = $record;
         if ($column_expressions !== null) {
@@ -512,6 +519,10 @@ class DatabaseRowsReader {
             $data_type = $this->get_data_type($column);
             $value = $this->is_numeric_type($data_type) ? $this->get_numeric_value_expression($column) : 'CAST(' . $identifier . ' AS BINARY)';
             $expressions[] = $value . ' AS ' . $this->quote_identifier($this->get_custom_primary_key_alias($index, $column_expressions));
+        }
+        $set_label_check = $this->get_set_label_check_expression(array_keys($column_expressions));
+        if ($set_label_check !== null) {
+            $expressions[] = $set_label_check;
         }
         return implode(',', $expressions);
     }
@@ -678,12 +689,35 @@ class DatabaseRowsReader {
             );
         }
 
+        $record = $this->check_set_labels($record);
         $record = $this->preserve_floating_point_values($record);
         $record = $this->check_saved_user_reference($record);
         $record = $this->extract_spatial_value_metadata($record);
 
         $this->current_row = $record;
         $this->current_row_ends_query_batch = false;
+    }
+
+    /**
+     * Stops lossy SET masks before they enter row data or the saved cursor.
+     *
+     * @param array<string,mixed> $record Fetched row, including the private SET check.
+     * @return array<string,mixed> Row without the private check field.
+     */
+    private function check_set_labels(array $record): array
+    {
+        if ($this->invalid_set_column_alias !== null) {
+            $column = $record[$this->invalid_set_column_alias];
+            unset($record[$this->invalid_set_column_alias]);
+            if ($column !== null) {
+                throw new \RuntimeException(
+                    "Cannot export numeric SET values from " . $this->quote_identifier($this->current_table) . "." .
+                    $this->quote_identifier($column) . ": MySQL replaces characters in a source label when exporting its " .
+                    $this->metadata_character_set . " table definition. Export stopped to avoid copying a different value."
+                );
+            }
+        }
+        return $record;
     }
 
     /**
@@ -1021,6 +1055,10 @@ class DatabaseRowsReader {
                     $select_parts[] = "CAST({$quoted_column} AS BINARY) AS {$quoted_column}";
                 }
             }
+            $set_label_check = $this->get_set_label_check_expression(array_keys($this->current_column_types));
+            if ($set_label_check !== null) {
+                $select_parts[] = $set_label_check;
+            }
             if ($this->multisite_selection !== null) {
                 $reference_check = $this->multisite_selection->get_user_reference_check($this->current_table);
                 if ($reference_check !== null) {
@@ -1037,6 +1075,51 @@ class DatabaseRowsReader {
         }
 
         return $query;
+    }
+
+    /**
+     * Checks SET labels in the existing row query, without another table scan.
+     *
+     * MySQL and MariaDB can store SET('🙂','ok') but expose SET('?','ok') in
+     * SHOW CREATE TABLE: definitions use the server's metadata character set,
+     * not character_set_results. Copying mask 1 would then silently store '?'.
+     * Round-trip each selected label through that encoding and return only the
+     * first affected column name. NULL and literal '?' labels remain valid.
+     * This checks selected rows, not unused members of the table definition.
+     *
+     * @param string[] $result_columns Selected column names; also used to avoid alias collisions.
+     * @return string|null Hidden check expression, or null without numeric SET columns.
+     */
+    private function get_set_label_check_expression(array $result_columns): ?string
+    {
+        $this->invalid_set_column_alias = null;
+        if (!$this->is_numeric_type("SET")) {
+            return null;
+        }
+        $checks = [];
+        foreach ($result_columns as $column) {
+            if (!isset($this->current_column_types[$column]) || strtoupper($this->get_data_type($column)) !== "SET") {
+                continue;
+            }
+            if ($this->metadata_character_set === null) {
+                $this->metadata_character_set = $this->db->query("SELECT @@character_set_system")->fetchColumn();
+            }
+            $identifier = $this->quote_identifier($column);
+            $metadata_character_set = $this->quote_identifier($this->metadata_character_set);
+            $label = "CONVERT({$identifier} USING utf8mb4)";
+            $round_tripped_label = "CONVERT(CONVERT({$identifier} USING {$metadata_character_set}) USING utf8mb4)";
+            $checks[] = "WHEN BINARY {$label} <> BINARY {$round_tripped_label} THEN X'" . bin2hex($column) . "'";
+        }
+        if ($checks === []) {
+            return null;
+        }
+        $alias = "__reprint_invalid_set_column";
+        $lowercase_columns = array_map("strtolower", $result_columns);
+        while (in_array(strtolower($alias), $lowercase_columns, true)) {
+            $alias = "_" . $alias;
+        }
+        $this->invalid_set_column_alias = $alias;
+        return "CASE " . implode(" ", $checks) . " END AS " . $this->quote_identifier($alias);
     }
 
     /** Returns an internal SELECT alias which cannot collide with a real column. */

@@ -673,6 +673,11 @@ with its source cursor. Resume uses pull's row reader, without a frozen source
 snapshot: copied rows stay as they were, later reads may see changes, and unkeyed
 tables use OFFSET pagination. Keep the source still for a consistent copy.
 
+The shared row reader rejects numeric SET values whose labels change in the
+source server's table-definition encoding, such as `🙂` becoming `?`. This
+stops staging before review and leaves live tables unchanged; it does not
+reconstruct missing characters in unused SET members.
+
 Triggers are outside the database push scope. The table review always warns
 that the new live tables will have no triggers. Existing target triggers stay
 with the retained old tables until cleanup; source triggers and triggers on

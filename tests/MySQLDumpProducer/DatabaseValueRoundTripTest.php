@@ -44,6 +44,75 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
     }
 
     /** @dataProvider transferProvider */
+    public function testSetExportRejectsLossyUnicodeLabelsWithoutChangingLiveTables(string $operation, string $driver): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (id INT PRIMARY KEY, flags SET('', '🙂', 'ok'), payload LONGTEXT) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT INTO wp_sets VALUES (1,0,''), (2,1,''), (3,2,REPEAT('x',4000)), (4,6,''), (5,NULL,'')");
+        $query = 'SELECT id, flags, CAST(flags AS UNSIGNED), payload FROM wp_sets ORDER BY id';
+        $expected = $this->pdo->query($query)->fetchAll(PDO::FETCH_NUM);
+        $failure = null;
+        try {
+            $this->transfer($operation, $driver, 'wp_sets');
+        } catch (RuntimeException $error) {
+            $failure = $error;
+        }
+        self::assertInstanceOf(RuntimeException::class, $failure, 'Numeric SET export must reject a label which becomes ? in the copied definition.');
+        self::assertStringContainsString('Cannot export numeric SET values from `wp_sets`.`flags`', $failure->getMessage());
+        // Push stages into this same database. Its live source table must not
+        // be swapped for incoming rows whose numeric masks now mean '?'.
+        $this->pdo->setAttribute(PDO::ATTR_STRINGIFY_FETCHES, false);
+        self::assertSame($expected, $this->pdo->query($query)->fetchAll(PDO::FETCH_NUM));
+    }
+
+    /** @dataProvider unicodeSetReadProvider */
+    public function testRejectedSetLabelDoesNotAdvanceAResumedPrimaryKey(string $driver, bool $reload): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (flags SET('ok', '🙂') PRIMARY KEY, payload TEXT) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT INTO wp_sets VALUES (1,'safe'), (2,'unsafe')");
+        $source = $driver === 'pdo' ? $this->pdo : new MysqliDriverPDO('mysql:host=' . getenv('DB_HOST') . ';dbname=' . $this->dbName, getenv('DB_USER'), getenv('DB_PASS'));
+        $options = ['set_value_format' => 'unsigned', 'tables_to_process' => ['wp_sets'], 'batch_size' => 1];
+        $reader = new DatabaseRowsReader($source, $options);
+        try {
+            self::assertTrue($reader->move_to_next_table());
+            self::assertTrue($reader->next_record());
+            $reader->clear_current_record();
+            $cursor = $reader->get_cursor_state();
+            $reader->close();
+            $reader = new DatabaseRowsReader($source, $options);
+            $reader->restore_cursor_state($cursor);
+            $failure = null;
+            try {
+                if ($reload) {
+                    $reader->reload_current_record(['flags' => '2']);
+                } else {
+                    $reader->next_record();
+                }
+            } catch (RuntimeException $error) {
+                $failure = $error;
+            }
+            self::assertInstanceOf(RuntimeException::class, $failure, 'Neither a resumed batch nor an exact-row reload may expose the lossy SET mask.');
+            self::assertStringContainsString('Cannot export numeric SET values from `wp_sets`.`flags`', $failure->getMessage());
+            self::assertNull($reader->get_current_record());
+            self::assertSame($cursor['last_pk_values'], $reader->get_cursor_state()['last_pk_values']);
+            self::assertSame($cursor['current_table_rows_processed'], $reader->get_cursor_state()['current_table_rows_processed']);
+        } finally {
+            $reader->close();
+        }
+    }
+
+    public static function unicodeSetReadProvider(): array {
+        return [['pdo', false], ['mysqli', false], ['pdo', true], ['mysqli', true]];
+    }
+
+    /** @dataProvider transferProvider */
+    public function testSetLabelCheckDoesNotReplaceRealColumnsOrChangeQuestionMarks(string $operation, string $driver): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (id INT PRIMARY KEY, flags SET('', '?', '雪'), __REPRINT_INVALID_SET_COLUMN TEXT, ___reprint_invalid_set_column TEXT) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT INTO wp_sets VALUES (1,2,'first','second'), (2,7,'','?'), (3,NULL,NULL,NULL)");
+        $query = 'SELECT *, CAST(flags AS UNSIGNED) FROM wp_sets ORDER BY id';
+        $expected = $this->pdo->query($query)->fetchAll(PDO::FETCH_NUM);
+        $target = $this->transfer($operation, $driver, 'wp_sets');
+        self::assertSame($expected, $target->query($query)->fetchAll(PDO::FETCH_NUM));
+    }
+
+    /** @dataProvider transferProvider */
     public function testSpatialValuesKeepCoordinatesAndSrid(string $operation, string $driver): void {
         $this->pdo->exec('CREATE TABLE wp_places (id int PRIMARY KEY, shape GEOMETRY) ENGINE=InnoDB');
         $this->pdo->exec("INSERT INTO wp_places VALUES (1, ST_GeomFromText('POINT(10 20)', 4326)), (2, ST_GeomFromText('GEOMETRYCOLLECTION(POINT(1 2),LINESTRING(3 4,5 6))', 0)), (3, NULL)");
@@ -54,9 +123,9 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
     }
 
     /** @dataProvider setValueFormatProvider */
-    public function testMysqlSetDumpKeepsSourceLabelsWhenAppliedToSqlite(string $format): void {
-        $this->pdo->exec("CREATE TABLE wp_sets (id INT PRIMARY KEY, flags SET('', 'a', 'O''Reilly', '雪', 'back\\\\slash', 'literal\\\\n'), payload LONGTEXT) ENGINE=InnoDB");
-        $this->pdo->exec("INSERT INTO wp_sets VALUES (1,0,REPEAT('x',4000)), (2,1,''), (3,2,''), (4,3,''), (5,12,''), (6,NULL,''), (7,48,'')");
+    public function testMysqlSetDumpKeepsSourceLabelsWhenAppliedToSqlite(string $format, string $last_member): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (id INT PRIMARY KEY, flags SET('', 'a', 'O''Reilly', '雪', 'back\\\\slash', 'literal\\\\n', '$last_member'), payload LONGTEXT) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT INTO wp_sets VALUES (1,0,REPEAT('x',4000)), (2,1,''), (3,2,''), (4,3,''), (5,12,''), (6,NULL,''), (7,48,''), (8,64,''), (9,66,'')");
         $expected = $this->pdo->query('SELECT * FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
         $sql = $this->getDumpSQL(['set_value_format' => $format, 'batch_size' => 1, 'max_statement_size' => 2048]);
         $root = sys_get_temp_dir() . '/reprint-set-roundtrip-' . bin2hex(random_bytes(5));
@@ -80,7 +149,7 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
     }
 
     public static function setValueFormatProvider(): array {
-        return [['label'], ['unsigned']];
+        return [['label', '?'], ['unsigned', '?'], ['label', '🙂']];
     }
 
     public function testLegacySetLabelCursorRequiresANewTransfer(): void {
