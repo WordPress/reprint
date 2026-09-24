@@ -53,11 +53,12 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
         self::assertSame($expected, $target->query($query)->fetchAll(PDO::FETCH_NUM));
     }
 
-    public function testMysqlSetDumpKeepsSourceLabelsWhenAppliedToSqlite(): void {
-        $this->pdo->exec("CREATE TABLE wp_sets (id INT PRIMARY KEY, flags SET('', 'a', 'O''Reilly', '雪'), payload LONGTEXT) ENGINE=InnoDB");
-        $this->pdo->exec("INSERT INTO wp_sets VALUES (1,0,REPEAT('x',4000)), (2,1,''), (3,2,''), (4,3,''), (5,12,''), (6,NULL,'')");
+    /** @dataProvider setValueFormatProvider */
+    public function testMysqlSetDumpKeepsSourceLabelsWhenAppliedToSqlite(string $format): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (id INT PRIMARY KEY, flags SET('', 'a', 'O''Reilly', '雪', 'back\\\\slash', 'literal\\\\n'), payload LONGTEXT) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT INTO wp_sets VALUES (1,0,REPEAT('x',4000)), (2,1,''), (3,2,''), (4,3,''), (5,12,''), (6,NULL,''), (7,48,'')");
         $expected = $this->pdo->query('SELECT * FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_ASSOC);
-        $sql = $this->getDumpSQL(['batch_size' => 1, 'max_statement_size' => 2048]);
+        $sql = $this->getDumpSQL(['set_value_format' => $format, 'batch_size' => 1, 'max_statement_size' => 2048]);
         $root = sys_get_temp_dir() . '/reprint-set-roundtrip-' . bin2hex(random_bytes(5));
         mkdir($root);
         $sqlite = new WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=:memory:;dbname=wordpress');
@@ -78,6 +79,10 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
         }
     }
 
+    public static function setValueFormatProvider(): array {
+        return [['label'], ['unsigned']];
+    }
+
     public function testLegacySetLabelCursorRequiresANewTransfer(): void {
         $this->pdo->exec("CREATE TABLE wp_sets (flags SET('2', '1') PRIMARY KEY) ENGINE=InnoDB");
         $this->pdo->exec('INSERT INTO wp_sets VALUES (1), (2)');
@@ -89,10 +94,56 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
             'last_pk_values' => ['flags' => ['__binary__' => base64_encode('2')]],
             'current_row' => null,
         ];
-        $reader = new DatabaseRowsReader($this->pdo, ['tables_to_process' => ['wp_sets']]);
+        $reader = new DatabaseRowsReader($this->pdo, ['set_value_format' => 'unsigned', 'tables_to_process' => ['wp_sets']]);
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('cursor lacks unsigned SET masks');
+        $this->expectExceptionMessage('SET value format changed from label to unsigned');
         $reader->restore_cursor_state($legacy_cursor);
+    }
+
+    public function testDefaultSetLabelsResumeFromACursorWithoutAFormatMarker(): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (flags SET('2', '1') PRIMARY KEY) ENGINE=InnoDB");
+        $this->pdo->exec('INSERT INTO wp_sets VALUES (1), (2)');
+        $options = ['tables_to_process' => ['wp_sets'], 'batch_size' => 1];
+        $reader = new DatabaseRowsReader($this->pdo, $options);
+        $reader->move_to_next_table();
+        self::assertTrue($reader->next_record());
+        // Label order is '1', '2'; mask order would be 1, 2. An old cursor
+        // must keep label comparisons rather than skip or repeat a row.
+        self::assertSame('1', $reader->get_current_record()['flags']);
+        $cursor = $reader->get_cursor_state();
+        self::assertSame('label', $cursor['set_value_format']);
+        unset($cursor['set_value_format']);
+        $reader->close();
+        $reader = new DatabaseRowsReader($this->pdo, $options);
+        $reader->restore_cursor_state($cursor);
+        self::assertTrue($reader->next_record());
+        self::assertSame('2', $reader->get_current_record()['flags']);
+        self::assertFalse($reader->next_record());
+    }
+
+    public function testUnsignedSetCursorCannotResumeAsLabels(): void {
+        $this->pdo->exec("CREATE TABLE wp_sets (flags SET('2', '1') PRIMARY KEY) ENGINE=InnoDB");
+        $this->pdo->exec('INSERT INTO wp_sets VALUES (1), (2)');
+        $reader = new DatabaseRowsReader($this->pdo, ['set_value_format' => 'unsigned', 'tables_to_process' => ['wp_sets']]);
+        $reader->move_to_next_table();
+        self::assertTrue($reader->next_record());
+        $cursor = $reader->get_cursor_state();
+        $reader->close();
+        $reader = new DatabaseRowsReader($this->pdo, ['set_value_format' => 'label', 'tables_to_process' => ['wp_sets']]);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('SET value format changed from unsigned to label');
+        $reader->restore_cursor_state($cursor);
+    }
+
+    /** @dataProvider invalidSetValueFormatProvider */
+    public function testInvalidSetValueFormatsAreRejected($format): void {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('set_value_format must be label or unsigned');
+        new DatabaseRowsReader($this->pdo, ['set_value_format' => $format]);
+    }
+
+    public static function invalidSetValueFormatProvider(): array {
+        return [[null], [false], ['numeric'], [[]]];
     }
 
     public static function transferProvider(): array {
@@ -106,7 +157,7 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
             $source->setAttribute(PDO::ATTR_STRINGIFY_FETCHES, true);
         }
         if ($operation === 'pull') {
-            $options = ['tables_to_process' => [$table], 'batch_size' => 1, 'max_statement_size' => 2048];
+            $options = ['set_value_format' => 'unsigned', 'tables_to_process' => [$table], 'batch_size' => 1, 'max_statement_size' => 2048];
             $producer = new MySQLDumpProducer($source, $options);
             $sql = '';
             for ($step = 0; $step < 300 && $producer->next_sql_fragment(); ++$step) {

@@ -236,8 +236,19 @@ final class RequestUrlPathEncodingTest extends TestCase
         $this->assertSame('https://example.com/?site-export-api&route=export', $request['url']);
         $this->assertSame(['endpoint' => 'sql_chunk'] + $params + [
             'multisite_mode' => 'one-site-network-v1',
+            'set_value_format' => 'unsigned',
             'cursor' => $cursor,
         ], $request['params']);
+    }
+
+    public function testInitialSqlRequestAdvertisesUnsignedSetSupportWithoutTuning(): void
+    {
+        $client = new \ImportClient('https://example.com/', $this->root . '/state', $this->root . '/files');
+        $build_request = new \ReflectionMethod($client, 'build_request');
+        $request = $build_request->invoke($client, 'sql_chunk', null);
+        $this->assertSame('unsigned', $request['params']['set_value_format'] ?? null);
+        $request = $build_request->invoke($client, 'preflight', null);
+        $this->assertArrayNotHasKey('set_value_format', $request['params']);
     }
 
     private function remove_tree(string $path): void

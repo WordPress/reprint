@@ -264,7 +264,7 @@ class DatabasePushSource {
 
     private function open_rows(): void {
         $table = DatabasePush::identifier($this->current_table);
-        $this->rows = new \WordPress\Reprint\Server\DatabaseRowsReader($this->database, ['tables_to_process' => [$this->current_table]]);
+        $this->rows = new \WordPress\Reprint\Server\DatabaseRowsReader($this->database, ['tables_to_process' => [$this->current_table], 'set_value_format' => 'unsigned']);
         if (isset($this->cursor['reader'])) {
             $this->rows->restore_cursor_state($this->cursor['reader']);
         } else {

@@ -194,12 +194,17 @@ other warnings roll the row back. Rewriting a primary key is rejected. Source
 rows are never updated. Pull and push share numeric reads: native floating-point
 values become 17-digit scientific-notation strings before PHP string conversion
 or cursor storage. The formatter always uses a decimal dot, regardless of locale.
-MySQL SET values travel as unsigned masks, preserving empty members and all 64 bits. When pulling into SQLite, the client converts those masks back to
+Push reads MySQL SET values as unsigned masks, preserving empty members and all
+64 bits. New pull clients request the same format with `set_value_format=unsigned`.
+Without that request, the server keeps the label format used by older clients.
+Older servers ignore the parameter and still send labels.
+When pulling into SQLite, the client converts masks back to
 labels using the column definition. SQLite stores labels rather than masks; it
 cannot retain the distinction between an empty member and no member. Exact SET
 mask round-trips require MySQL or MariaDB.
-A saved MySQL cursor containing SET labels from an older server cannot resume
-with mask-based reads; abort that transfer and start again after upgrading.
+A saved cursor containing SET values cannot resume in a different format; abort
+that transfer and start again after upgrading. Old clients can still resume
+their label-format cursors after a server upgrade.
 
 Spatial type detection is shared, but the formats remain different. Push uses
 the source engine's WKB conversion plus SRID; pull retains its raw spatial bytes,

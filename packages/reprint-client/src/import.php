@@ -12217,6 +12217,11 @@ class ImportClient
         // Keep the source export protocol value accepted by existing servers.
         // It selects one source site; the target boots as single-site WordPress.
         $params["multisite_mode"] = "one-site-network-v1";
+        if ($endpoint === "sql_chunk") {
+            // The SQLite importer can decode masks; older servers ignore this
+            // parameter and return labels, which the importer also accepts.
+            $params["set_value_format"] = "unsigned";
+        }
         if ($cursor !== null) {
             // Include the cursor in the body when hosts strip custom headers.
             $params["cursor"] = $cursor;

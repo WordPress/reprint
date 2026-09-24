@@ -80,7 +80,10 @@ class SqliteSetValueStatementRewriter {
             $result = $this->database->query('SHOW FULL COLUMNS FROM `' . str_replace('`', '``', $table) . '`');
             try {
                 foreach ($result->fetchAll(PDO::FETCH_ASSOC) as $column) {
-                    $type_lexer = new WP_MySQL_Lexer($column['Type']);
+                    // SQLite metadata has already decoded MySQL escapes: a
+                    // member written as 'back\\slash' in CREATE is 'back\slash'
+                    // here. Decode doubled quotes, but not backslashes again.
+                    $type_lexer = new WP_MySQL_Lexer($column['Type'], 80038, ['NO_BACKSLASH_ESCAPES']);
                     if (!$type_lexer->next_token() || $type_lexer->get_token()->id !== WP_MySQL_Lexer::SET_SYMBOL) {
                         continue;
                     }

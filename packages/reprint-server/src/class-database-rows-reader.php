@@ -110,6 +110,9 @@ class DatabaseRowsReader {
     /** @var int */
     private $batch_size;
 
+    /** @var string SET labels by default; unsigned masks only when requested. */
+    private $set_value_format;
+
     /** @var int|null */
     private $query_time_limit_ms = null;
 
@@ -179,6 +182,7 @@ class DatabaseRowsReader {
      *     Reader options.
      *
      *     @type array|null $tables_to_process   Tables to read, or null to discover them.
+     *     @type string     $set_value_format    label (default) or unsigned; SQLite always reads labels.
      *     @type int        $batch_size          Maximum records per query.
      *     @type int|null   $query_time_limit_ms Maximum query duration in milliseconds.
      *     @type int|null   $maximum_inline_spatial_bytes Largest spatial value returned inline.
@@ -190,6 +194,12 @@ class DatabaseRowsReader {
     public function __construct($db, $options = [])
     {
         $this->db = $db;
+        $this->set_value_format = array_key_exists("set_value_format", $options) ? $options["set_value_format"] : "label";
+        if (!in_array($this->set_value_format, ["label", "unsigned"], true)) {
+            throw new \InvalidArgumentException(
+                "set_value_format must be label or unsigned; received " . json_encode($this->set_value_format) . "."
+            );
+        }
         $this->multisite_selection = $options["multisite_selection"] ?? null;
         if ($this->multisite_selection !== null && !$this->multisite_selection instanceof MultisiteDatabaseSelection) {
             throw new \InvalidArgumentException("multisite_selection must be a trusted MultisiteDatabaseSelection object.");
@@ -758,7 +768,7 @@ class DatabaseRowsReader {
      *     @type int         $tables_before_current SQL tables before this table, excluding ID-only reads.
      *     @type int         $tables_total        Number of tables selected for export.
      *     @type array|null  $current_row         Encoded retained record.
-     *     @type string      $set_value_format    unsigned on MySQL, label on SQLite.
+     *     @type string      $set_value_format    unsigned when requested on MySQL; otherwise label.
      *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
      *     @type array|null  $current_column_names Current column names.
      *     @type string|null $multisite_selection Rule version, base prefix, network ID and site ID; null without selected-site rules.
@@ -893,17 +903,19 @@ class DatabaseRowsReader {
                 );
             }
             $this->current_column_types = $this->get_column_types($this->current_table);
-            if ($this->is_numeric_type("SET") && ( $cursor_data["set_value_format"] ?? null ) !== "unsigned") {
+            $set_value_format = $this->is_numeric_type("SET") ? "unsigned" : "label";
+            $cursor_set_value_format = $cursor_data["set_value_format"] ?? "label";
+            if ($cursor_set_value_format !== $set_value_format) {
                 foreach ($this->current_column_types as $column => $metadata) {
                     if (strtoupper($metadata["data_type"]) === "SET" &&
                         ( isset($this->last_pk_values[$column]) || isset($this->current_row[$column]) )) {
-                        // A prior server emitted labels. For SET('2','1'), its
-                        // saved label '2' means mask 1. Reading it as mask 2
-                        // would skip the next row. The format marker is needed
-                        // even when the saved value looks numeric.
+                        // For SET('2','1'), label '2' means mask 1. Changing
+                        // formats would skip or repeat rows. Old cursors have
+                        // no marker and contain labels, even if they look numeric.
                         throw new \RuntimeException(
                             "Cannot resume table " . $this->quote_identifier($this->current_table) .
-                            ": its cursor lacks unsigned SET masks. Abort this database transfer and start again."
+                            ": SET value format changed from " . $cursor_set_value_format . " to " . $set_value_format .
+                            ". Abort this database transfer and start again."
                         );
                     }
                 }
@@ -1424,8 +1436,9 @@ class DatabaseRowsReader {
      * Returns the SELECT expression used by pull and push to read numeric values.
      *
      * MySQL SET('','a') displays both mask 0 and mask 1 as ''. Reading the
-     * unsigned mask keeps them distinct, including when the column is a primary
-     * key. SQLite has only the label, so its SET columns remain text.
+     * unsigned mask when requested keeps them distinct, including when the
+     * column is a primary key. SQLite has only the label, so its SET columns
+     * remain text.
      *
      * FLOAT needs promotion on the database side, before the driver's text
      * protocol can round it. Adding 0e0 requests a DOUBLE result without adding
@@ -1459,7 +1472,7 @@ class DatabaseRowsReader {
         $data_type = strtoupper($data_type);
         if ($data_type === "SET") {
             // Both SQLite adapters store labels, without a MySQL SET bitmask.
-            return !$this->db instanceof SqliteDriverPDO && !$this->db instanceof \WP_PDO_MySQL_On_SQLite;
+            return $this->set_value_format === "unsigned" && !$this->db instanceof SqliteDriverPDO && !$this->db instanceof \WP_PDO_MySQL_On_SQLite;
         }
         foreach (["TINYINT", "SMALLINT", "MEDIUMINT", "INTEGER", "INT", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "BIT", "YEAR"] as $type) {
             if (strpos($data_type, $type) === 0) {

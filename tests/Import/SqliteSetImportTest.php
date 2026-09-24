@@ -54,6 +54,26 @@ class SqliteSetImportTest extends TestCase {
         $this->assertSame([['id' => 1, 'flags' => "O'Reilly,雪", 'payload' => 'CAST(`wp_sets`.`flags` AS UNSIGNED) = 3;'], ['id' => 2, 'flags' => '2', 'payload' => '']], $this->database->query('SELECT * FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_ASSOC));
     }
 
+    public function testBackslashesInMembersSurviveInsertAndResumedChunkUpdate(): void {
+        $this->import(<<<'SQL'
+CREATE TABLE `wp_sets` (`flags` SET('back\\slash','literal\\n','O''Reilly') PRIMARY KEY, `payload` LONGTEXT);
+INSERT INTO `wp_sets` (`flags`,`payload`) VALUES (7,'');
+SQL
+        );
+        $this->assertSame("back\\slash,literal\\n,O'Reilly", $this->database->query('SELECT flags FROM wp_sets')->fetchColumn());
+        $this->import("UPDATE `wp_sets` SET `payload` = CONCAT(`payload`,FROM_BASE64('Ynl0ZXM=')) WHERE CAST(`wp_sets`.`flags` AS UNSIGNED) = 7;");
+        $this->assertSame('bytes', $this->database->query('SELECT payload FROM wp_sets')->fetchColumn());
+    }
+
+    public function testTrailingBackslashDoesNotHideTheMemberClosingQuote(): void {
+        $this->import(<<<'SQL'
+CREATE TABLE `wp_sets` (`id` INT PRIMARY KEY, `flags` SET('trailing\\'));
+INSERT INTO `wp_sets` (`id`,`flags`) VALUES (1,1);
+SQL
+        );
+        $this->assertSame('trailing\\', $this->database->query('SELECT flags FROM wp_sets')->fetchColumn());
+    }
+
     private function import(string $sql): void {
         (new \ReflectionMethod(\ImportClient::class, 'execute_database_import_group'))->invoke(
             $this->client, $this->connection, $sql, hash('sha256', 'sets'), 'next-cursor', null, 'sqlite'
