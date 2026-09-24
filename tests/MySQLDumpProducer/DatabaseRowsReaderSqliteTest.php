@@ -37,6 +37,50 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
         }
     }
 
+    public function testFloatingPointValuesAndResumedKeysWithMultibyteDecimalSeparator(): void
+    {
+        $locale = setlocale(LC_NUMERIC, 0);
+        $reader = null;
+        try {
+            // glibc uses this separator for Pashto; macOS also uses it for
+            // Arabic and Persian. Check the actual separator, not just the name.
+            $selected_locale = false;
+            foreach (['ps_AF.UTF-8', 'ar_EG.UTF-8', 'fa_IR.UTF-8'] as $candidate) {
+                if (setlocale(LC_NUMERIC, $candidate) !== false && strlen(localeconv()['decimal_point']) > 1) {
+                    $selected_locale = true;
+                    break;
+                }
+            }
+            if (!$selected_locale) {
+                $this->markTestSkipped('Install a UTF-8 locale with a multibyte decimal separator, such as ps_AF.UTF-8.');
+            }
+            $database = new WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=:memory:;dbname=wordpress');
+            $database->exec('CREATE TABLE wp_numbers (id DOUBLE PRIMARY KEY, amount DOUBLE)');
+            $database->exec('INSERT INTO wp_numbers VALUES (1.2345678901234567, 1.7976931348623157e308), (1.2345678901234569, 4.9406564584124654e-324)');
+            $options = ['tables_to_process' => ['wp_numbers'], 'batch_size' => 1];
+            $reader = new DatabaseRowsReader($database, $options);
+            $this->assertTrue($reader->move_to_next_table());
+            foreach ([[1.2345678901234567, 1.7976931348623157e308], [1.2345678901234569, 4.9406564584124654e-324]] as [$key, $amount]) {
+                $this->assertTrue($reader->next_record());
+                $record = $reader->get_current_record();
+                $this->assertSame($key, (float) $record['id'], 'The key must not contain a locale decimal separator.');
+                $this->assertSame($amount, (float) $record['amount'], 'Extreme magnitudes must keep their stored value.');
+                $cursor = json_decode(json_encode($reader->get_cursor_state(), JSON_THROW_ON_ERROR), true, 512, JSON_THROW_ON_ERROR);
+                $reader->close();
+                $reader = new DatabaseRowsReader($database, $options);
+                $reader->restore_cursor_state($cursor);
+                $reader->reload_current_record(['id' => $record['id']]);
+                $this->assertSame($record, $reader->get_current_record());
+            }
+            $this->assertFalse($reader->next_record());
+        } finally {
+            if ($reader !== null) {
+                $reader->close();
+            }
+            setlocale(LC_NUMERIC, $locale);
+        }
+    }
+
     public function testDoubleCursorAndReloadKeepAllDigitsWithLowPhpPrecision(): void
     {
         $database = new WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=:memory:;dbname=wordpress');
@@ -49,7 +93,7 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
             $reader = new DatabaseRowsReader($database, $options);
             $this->assertTrue($reader->move_to_next_table());
             $this->assertTrue($reader->next_record());
-            $this->assertSame('1.2345678901234567', (string) $reader->get_current_record()['id']);
+            $this->assertSame('1.2345678901234567e+0', (string) $reader->get_current_record()['id']);
             // SQLite stores SET labels as text, not MySQL's numeric masks.
             $this->assertSame('a', $reader->get_current_record()['flags']);
             $cursor = json_decode(json_encode($reader->get_cursor_state()), true);
@@ -57,9 +101,9 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
             $reader = new DatabaseRowsReader($database, $options);
             $reader->restore_cursor_state($cursor);
             $reader->reload_current_record(['id' => '1.2345678901234567']);
-            $this->assertSame('1.2345678901234567', (string) $reader->get_current_record()['id']);
+            $this->assertSame('1.2345678901234567e+0', (string) $reader->get_current_record()['id']);
             $this->assertTrue($reader->next_record());
-            $this->assertSame('1.2345678901234569', (string) $reader->get_current_record()['id']);
+            $this->assertSame('1.2345678901234569e+0', (string) $reader->get_current_record()['id']);
             $this->assertFalse($reader->next_record());
         } finally {
             ini_set('precision', $precision);
@@ -91,8 +135,8 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
                 }
             }
             $this->assertSame([
-                ['id' => base64_encode('1.2345678901234567'), 'flags' => base64_encode('a'), 'bits' => ['unsigned' => '257']],
-                ['id' => base64_encode('1.2345678901234569'), 'flags' => '', 'bits' => null],
+                ['id' => base64_encode('1.2345678901234567e+0'), 'flags' => base64_encode('a'), 'bits' => ['unsigned' => '257']],
+                ['id' => base64_encode('1.2345678901234569e+0'), 'flags' => '', 'bits' => null],
             ], $rows);
         } finally {
             $reader->close();

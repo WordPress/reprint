@@ -192,9 +192,9 @@ ENUM index zero is distinct from a declared empty label or the label `0`.
 Restoring that legacy value accepts only the server warnings naming its columns;
 other warnings roll the row back. Rewriting a primary key is rejected. Source
 rows are never updated. Pull and push share numeric reads: native floating-point
-values become 17-digit round-trip decimals before PHP string conversion or cursor
-storage. MySQL SET values travel as unsigned masks, preserving empty members and
-all 64 bits. When pulling into SQLite, the client converts those masks back to
+values become 17-digit scientific-notation strings before PHP string conversion
+or cursor storage. The formatter always uses a decimal dot, regardless of locale.
+MySQL SET values travel as unsigned masks, preserving empty members and all 64 bits. When pulling into SQLite, the client converts those masks back to
 labels using the column definition. SQLite stores labels rather than masks; it
 cannot retain the distinction between an empty member and no member. Exact SET
 mask round-trips require MySQL or MariaDB.

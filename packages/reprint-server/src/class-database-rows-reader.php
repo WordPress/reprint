@@ -681,7 +681,7 @@ class DatabaseRowsReader {
      *
      * With precision=3, casting the float 1.2345678901234567 to a string gives
      * '1.23'. JSON can shorten it too when serialize_precision is low. Convert
-     * native floats to strings with up to 17 significant digits before either,
+     * native floats to strings with 17 significant digits before either,
      * including hidden primary-key fields and rows reloaded after resume.
      * Otherwise the copied value changes, and a rounded resume key can select
      * the same row again or skip a nearby key. Already-string values stay intact.
@@ -693,9 +693,11 @@ class DatabaseRowsReader {
     {
         foreach ($record as $column => $value) {
             if (is_float($value)) {
-                // Seventeen significant digits round-trip a binary64 value.
-                // sprintf respects LC_NUMERIC; SQL always needs a decimal point.
-                $record[$column] = str_replace(',', '.', sprintf('%.17g', $value));
+                // One digit before the point plus 16 after it round-trip binary64.
+                // Unlike %g, %e always uses a dot, including on PHP 7.2. Replacing
+                // commas is insufficient: some locales use a multibyte separator,
+                // and %g emits only its first byte (invalid UTF-8).
+                $record[$column] = sprintf('%.16e', $value);
             }
         }
         return $record;
