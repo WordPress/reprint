@@ -351,8 +351,9 @@ class SqlStatementRewriter
      *
      *     @type string $table      Table name.
      *     @type array  $column_map Tuples of start byte, exclusive end byte, and column name.
+     *     @type array  $row_ranges INSERT tuple byte ranges, including parentheses; absent for UPDATE.
      * }
-     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>, row_ranges?: list<array{int, int}>}|null
      */
     public static function map_values_to_columns_from_tokens(array $tokens): ?array
     {
@@ -388,8 +389,9 @@ class SqlStatementRewriter
      *
      *     @type string $table      Table name.
      *     @type array  $column_map Value ranges mapped to column names.
+     *     @type array  $row_ranges INSERT tuple byte ranges, including parentheses.
      * }
-     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>, row_ranges: list<array{int, int}>}|null
      */
     private static function walk_insert(array $tokens, int $token_count, int $cursor): ?array
     {
@@ -479,6 +481,7 @@ class SqlStatementRewriter
 
         $column_count = count($column_names);
         $column_map = [];
+        $row_ranges = [];
         while ($cursor < $token_count) {
             // Optional ROW prefix (MySQL 8.0+ explicit row constructor).
             if ($tokens[$cursor]->id === WP_MySQL_Lexer::ROW_SYMBOL) {
@@ -491,6 +494,7 @@ class SqlStatementRewriter
             if ($tokens[$cursor]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
                 return null;
             }
+            $row_start = $tokens[$cursor]->start;
             $cursor++; // step past `(`
 
             $column_index_in_row = 0;
@@ -534,6 +538,7 @@ class SqlStatementRewriter
             if (!$tuple_was_closed) {
                 return null;
             }
+            $row_ranges[] = [$row_start, $tokens[$cursor]->start + $tokens[$cursor]->length];
             $cursor++; // step past `)`
 
             // Another tuple, statement terminator, or trailer keyword.
@@ -556,7 +561,7 @@ class SqlStatementRewriter
             break;
         }
 
-        return ['table' => $table_name, 'column_map' => $column_map];
+        return ['table' => $table_name, 'column_map' => $column_map, 'row_ranges' => $row_ranges];
     }
 
     /**

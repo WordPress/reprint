@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Reprint\Importer;
 
+use Generator;
 use PDO;
 use Reprint\Importer\Database\DatabaseConnection;
 use RuntimeException;
@@ -44,24 +45,35 @@ class SqliteSetValueStatementRewriter {
     }
 
     /**
-     * Rewrites the INSERT and UPDATE forms emitted by MySQLDumpProducer.
+     * Yields rewritten statements for the INSERT and UPDATE forms in a dump.
      *
      * The caller executes each rewritten statement before passing the next one,
      * so SHOW FULL COLUMNS sees the preceding CREATE/ALTER. Keep one instance
      * per import group to reuse the current table's members. A resumed group
      * can load them from the target schema without separate saved metadata.
+     *
+     * SET inserts yield one row at a time. A 20-digit mask can expand to 64
+     * labels of 255 bytes each; expanding a whole 250-row batch can exhaust
+     * memory even though its source SQL is small. The caller must execute each
+     * yielded row before requesting the next, within the same group transaction.
+     * Statements for ordinary tables stay intact. Chunk UPDATEs still use the
+     * existing value and primary-key conversion.
+     *
+     * @return Generator<int,string>
      */
-    public function rewrite(string $sql): string {
+    public function rewrite_statements(string $sql): Generator {
         $lexer = new WP_MySQL_Lexer($sql);
         if (!$lexer->next_token()) {
-            return $sql;
+            yield $sql;
+            return;
         }
         $tokens = [$lexer->get_token()];
         $insert = $tokens[0]->id === WP_MySQL_Lexer::INSERT_SYMBOL;
         if (!$insert && $tokens[0]->id !== WP_MySQL_Lexer::UPDATE_SYMBOL) {
             // A DROP/CREATE or ALTER between statements may change SET members.
             $this->table = null;
-            return $sql;
+            yield $sql;
+            return;
         }
         // Read only the statement head until we know the table has SET columns.
         // Ordinary WordPress tables need no full-statement lexer pass here.
@@ -71,7 +83,8 @@ class SqliteSetValueStatementRewriter {
             $tokens[] = $lexer->get_token();
         }
         if (!isset($tokens[$table_index]) || $tokens[$table_index]->id !== WP_MySQL_Lexer::BACK_TICK_QUOTED_ID) {
-            return $sql;
+            yield $sql;
+            return;
         }
         $table = $tokens[$table_index]->get_value();
         if ($this->table !== $table) {
@@ -100,7 +113,8 @@ class SqliteSetValueStatementRewriter {
             }
         }
         if ($this->members === []) {
-            return $sql;
+            yield $sql;
+            return;
         }
         $tokens = array_merge($tokens, $lexer->remaining_tokens());
         if (end($tokens)->id === WP_MySQL_Lexer::EOF) {
@@ -111,6 +125,35 @@ class SqliteSetValueStatementRewriter {
             // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI import error, not HTML.
             throw new RuntimeException('Cannot map exported SET values to SQLite columns in table ' . $table . '.');
         }
+        if ($insert) {
+            $rows = $map['row_ranges'];
+            $head = substr($sql, 0, $rows[0][0]);
+            // Keep the producer's ON DUPLICATE KEY UPDATE no-op on every row.
+            // It lets a replay leave previously imported rows alone.
+            $tail = substr($sql, $rows[count($rows) - 1][1]);
+            $value_index = 0;
+            foreach ($rows as [$row_start, $row_end]) {
+                $row_sql = $head;
+                $copied_until = $row_start;
+                while (isset($map['column_map'][$value_index]) && $map['column_map'][$value_index][0] < $row_end) {
+                    [$start, $end, $column] = $map['column_map'][$value_index++];
+                    if (!isset($this->members[$column])) {
+                        continue;
+                    }
+                    $value = substr($sql, $start, $end - $start);
+                    if (!ctype_digit($value)) {
+                        // Old dumps already contain label literals. NULL and
+                        // expressions also pass through without mask decoding.
+                        continue;
+                    }
+                    $row_sql .= substr($sql, $copied_until, $start - $copied_until)
+                        . $this->label_literal($value, $this->members[$column]);
+                    $copied_until = $end;
+                }
+                yield $row_sql . substr($sql, $copied_until, $row_end - $copied_until) . $tail;
+            }
+            return;
+        }
         $replacements = [];
         foreach ($map['column_map'] as [$start, $end, $column]) {
             $value = trim(substr($sql, $start, $end - $start));
@@ -118,43 +161,41 @@ class SqliteSetValueStatementRewriter {
                 $replacements[$start] = [$end - $start, $this->label_literal($value, $this->members[$column])];
             }
         }
-        if (!$insert) {
-            // Chunk UPDATEs compare an exported SET primary key by unsigned
-            // mask. SQLite stores its label, so both sides must change together.
-            // For SET('a','b'), CAST(`wp_sets`.`flags` AS UNSIGNED) = 3
-            // becomes `wp_sets`.`flags` = FROM_BASE64('YSxi'). Keeping the CAST
-            // would compare the numeric conversion of 'a,b' with 3 and miss
-            // the row whose large value the UPDATE is meant to finish.
-            $token_count = count($tokens);
-            for ($index = 0; $index + 9 < $token_count; ++$index) {
-                if ($tokens[$index]->id !== WP_MySQL_Lexer::CAST_SYMBOL ||
-                    $tokens[$index + 1]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL ||
-                    $tokens[$index + 2]->id !== WP_MySQL_Lexer::BACK_TICK_QUOTED_ID ||
-                    $tokens[$index + 2]->get_value() !== $table ||
-                    $tokens[$index + 3]->id !== WP_MySQL_Lexer::DOT_SYMBOL ||
-                    $tokens[$index + 4]->id !== WP_MySQL_Lexer::BACK_TICK_QUOTED_ID ||
-                    $tokens[$index + 5]->id !== WP_MySQL_Lexer::AS_SYMBOL ||
-                    $tokens[$index + 6]->id !== WP_MySQL_Lexer::UNSIGNED_SYMBOL ||
-                    $tokens[$index + 7]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL ||
-                    $tokens[$index + 8]->id !== WP_MySQL_Lexer::EQUAL_OPERATOR) {
-                    continue;
-                }
-                $column = $tokens[$index + 4]->get_value();
-                $value = $tokens[$index + 9]->get_value();
-                if (!isset($this->members[$column]) || !ctype_digit($value)) {
-                    continue;
-                }
-                $start = $tokens[$index]->start;
-                $end = $tokens[$index + 9]->start + $tokens[$index + 9]->length;
-                $identifier = substr($sql, $tokens[$index + 2]->start, $tokens[$index + 4]->start + $tokens[$index + 4]->length - $tokens[$index + 2]->start);
-                $replacements[$start] = [$end - $start, $identifier . ' = ' . $this->label_literal($value, $this->members[$column])];
+        // Chunk UPDATEs compare an exported SET primary key by unsigned
+        // mask. SQLite stores its label, so both sides must change together.
+        // For SET('a','b'), CAST(`wp_sets`.`flags` AS UNSIGNED) = 3
+        // becomes `wp_sets`.`flags` = FROM_BASE64('YSxi'). Keeping the CAST
+        // would compare the numeric conversion of 'a,b' with 3 and miss
+        // the row whose large value the UPDATE is meant to finish.
+        $token_count = count($tokens);
+        for ($index = 0; $index + 9 < $token_count; ++$index) {
+            if ($tokens[$index]->id !== WP_MySQL_Lexer::CAST_SYMBOL ||
+                $tokens[$index + 1]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL ||
+                $tokens[$index + 2]->id !== WP_MySQL_Lexer::BACK_TICK_QUOTED_ID ||
+                $tokens[$index + 2]->get_value() !== $table ||
+                $tokens[$index + 3]->id !== WP_MySQL_Lexer::DOT_SYMBOL ||
+                $tokens[$index + 4]->id !== WP_MySQL_Lexer::BACK_TICK_QUOTED_ID ||
+                $tokens[$index + 5]->id !== WP_MySQL_Lexer::AS_SYMBOL ||
+                $tokens[$index + 6]->id !== WP_MySQL_Lexer::UNSIGNED_SYMBOL ||
+                $tokens[$index + 7]->id !== WP_MySQL_Lexer::CLOSE_PAR_SYMBOL ||
+                $tokens[$index + 8]->id !== WP_MySQL_Lexer::EQUAL_OPERATOR) {
+                continue;
             }
+            $column = $tokens[$index + 4]->get_value();
+            $value = $tokens[$index + 9]->get_value();
+            if (!isset($this->members[$column]) || !ctype_digit($value)) {
+                continue;
+            }
+            $start = $tokens[$index]->start;
+            $end = $tokens[$index + 9]->start + $tokens[$index + 9]->length;
+            $identifier = substr($sql, $tokens[$index + 2]->start, $tokens[$index + 4]->start + $tokens[$index + 4]->length - $tokens[$index + 2]->start);
+            $replacements[$start] = [$end - $start, $identifier . ' = ' . $this->label_literal($value, $this->members[$column])];
         }
         krsort($replacements);
         foreach ($replacements as $start => [$length, $replacement]) {
             $sql = substr_replace($sql, $replacement, $start, $length);
         }
-        return $sql;
+        yield $sql;
     }
 
     /**

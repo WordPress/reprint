@@ -7847,15 +7847,16 @@ class ImportClient
             while ($query_stream->next_query()) {
                 $query = $query_stream->get_query();
                 $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
-                $query = $set_value_rewriter->rewrite($query);
                 $executed_query = $query;
                 try {
-                    $this->execute_db_apply_query(
-                        $connection,
-                        $query,
-                        $stmt_rewriter,
-                        $executed_query,
-                    );
+                    foreach ($set_value_rewriter->rewrite_statements($query) as $row_query) {
+                        $this->execute_db_apply_query(
+                            $connection,
+                            $row_query,
+                            $stmt_rewriter,
+                            $executed_query,
+                        );
+                    }
                 } catch (PDOException $error) {
                     throw new RuntimeException(
                         "SQL execution error at statement " . ( $statement_count + 1 ) . ": " .
