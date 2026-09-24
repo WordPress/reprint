@@ -4569,7 +4569,9 @@ class ImportClient
      * the files are already downloaded to the local location (e.g.
      * filesystem root/wordpress/...).  We just need to create the symlink
      * (e.g. filesystem root/srv/wordpress -> /wordpress) so the directory
-     * layout matches the server.
+     * layout matches the server. Excluded intermediate paths are not recreated.
+     * Neither are links whose targets have no selected index entries and do not
+     * exist locally, as happens when the plugin which led to them was excluded.
      */
     private function recreate_intermediate_symlinks(): void
     {
@@ -4620,6 +4622,14 @@ class ImportClient
                 continue;
             }
 
+            if (!$this->is_selected_for_pulling($remote_absolute_path, true, "link")) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} is excluded from this pull",
+                    false,
+                );
+                continue;
+            }
+
             try {
                 $local_absolute_path = $this->path_mapper()->remote_path_to_local_path(
                     $remote_absolute_path
@@ -4632,6 +4642,12 @@ class ImportClient
                 continue;
             }
 
+            $remote_absolute_target = Utils::resolve_symlink_target_path(
+                $remote_absolute_path,
+                $symlink_target,
+                $this->get_state()->remote_path_format()
+            );
+
             // Repoint through the same seam regular symlink chunks use, so the
             // link targets wherever the content actually landed (filesystem root,
             // remapped, or placed under the local followed symlinks root) instead of the raw source spelling.
@@ -4640,6 +4656,41 @@ class ImportClient
                 $local_absolute_path,
                 $symlink_target
             );
+
+            // Validate that the symlink target doesn't escape the filesystem root.
+            $root = $this->filesystem_root;
+            try {
+                $this->assert_symlink_target_within_root(
+                    dirname($local_absolute_path),
+                    $symlink_target,
+                    $root
+                );
+            } catch (RuntimeException $e) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
+                    true,
+                );
+                continue;
+            }
+
+            // Excluding the plugin link can leave intermediate entries without
+            // the target subtree. A target below an earlier intermediate link
+            // can still exist locally under an alias absent from the index.
+            $local_absolute_target = Utils::resolve_symlink_target_path(
+                $local_absolute_path,
+                $symlink_target,
+                Utils::native_path_format()
+            );
+            if (
+                !$this->next_remote_index_contains_remote_absolute_path_prefix($remote_absolute_target)
+                && !file_exists($local_absolute_target)
+            ) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} target was not downloaded: {$remote_absolute_target}",
+                    false,
+                );
+                continue;
+            }
 
             // Already correct — skip
             if (is_link($local_absolute_path) && readlink($local_absolute_path) === $symlink_target) {
@@ -4672,22 +4723,6 @@ class ImportClient
             if (file_exists($local_absolute_path)) {
                 $this->audit_log(
                     "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} already exists as a real file/dir",
-                    true,
-                );
-                continue;
-            }
-
-            // Validate that the symlink target doesn't escape the filesystem root.
-            $root = $this->filesystem_root;
-            try {
-                $this->assert_symlink_target_within_root(
-                    dirname($local_absolute_path),
-                    $symlink_target,
-                    $root
-                );
-            } catch (RuntimeException $e) {
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
                     true,
                 );
                 continue;
@@ -10708,8 +10743,8 @@ class ImportClient
     }
 
     /**
-     * Checks whether the next remote index contains a remote absolute path or one
-     * of its descendants. Runs a memoized O(N) scan of pull/remote-index.next.jsonl.
+     * Checks whether the next remote index contains a selected remote absolute path
+     * or one of its selected descendants. Runs a memoized O(N) scan of pull/remote-index.next.jsonl.
      */
     private function next_remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
@@ -10742,7 +10777,10 @@ class ImportClient
                 break;
             }
             $next_remote_index_entry_path = $next_remote_index_entry["path"];
-            if (Utils::path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)) {
+            if (
+                Utils::path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)
+                && $this->is_selected_for_pulling($next_remote_index_entry_path, true, $next_remote_index_entry["type"])
+            ) {
                 $path_prefix_found = true;
                 break;
             }
@@ -12052,10 +12090,9 @@ class ImportClient
             return;
         }
 
-        // Try to set the ctime (may not work on all systems)
-        if ($ctime > 0) {
-            @touch($local_absolute_path, $ctime);
-        }
+        // touch() follows the link, changes its target's mtime, and can create
+        // an empty file where a later intermediate symlink needs to go. Keep
+        // the source ctime only in the journal; it cannot be set with touch().
 
         $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
 
