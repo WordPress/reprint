@@ -51,6 +51,23 @@ jobs:
 
       - run: composer install --no-interaction --prefer-dist
 
+      - name: Test floating-point reads with a multibyte decimal separator
+        working-directory: tests
+        run: |
+          sudo locale-gen ps_AF.UTF-8
+          php -r 'if (setlocale(LC_NUMERIC, "ps_AF.UTF-8") === false || strlen(localeconv()["decimal_point"]) < 2) { throw new RuntimeException("ps_AF.UTF-8 must provide a multibyte decimal separator."); }'
+          ../vendor/bin/phpunit MySQLDumpProducer/DatabaseRowsReaderSqliteTest.php
+
+      - name: Test shared database values on MySQL and MariaDB
+        working-directory: tests
+        run: |
+          DB_HOST=127.0.0.1 ../vendor/bin/phpunit MySQLDumpProducer/DatabaseValueRoundTripTest.php
+          DB_HOST='127.0.0.1;port=3307' ../vendor/bin/phpunit MySQLDumpProducer/DatabaseValueRoundTripTest.php
+        env:
+          DB_USER: root
+          DB_PASS: my-secret-pw
+          DB_NAME: test_value_roundtrip
+
       - name: Run tests
         run: composer test
         env:
