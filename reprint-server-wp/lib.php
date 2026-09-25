@@ -382,9 +382,9 @@ function default_authenticate(): void {
 /**
  * Handle an export API request.
  *
- * WordPress is already loaded at this point — DB credentials, $table_prefix,
- * and the database layer (including the SQLite db.php drop-in when present)
- * are all available.
+ * The WordPress route supplies DB credentials, $table_prefix, and its database
+ * layer (including the SQLite db.php drop-in when present). The standalone
+ * route instead supplies credentials and $table_prefix from private host config.
  *
  * The bundled plugin passes the `reprint_server_api_options` filter result here.
  * A direct library embedder supplies the same trusted options array itself.
