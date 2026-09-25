@@ -1167,6 +1167,11 @@ The selector governs progress, lifecycle, and status output. It does not
 reformat a command's data result, such as preflight or pull-metadata JSON,
 files-stats JSON, or SQL written with `--sql-output=stdout`.
 
+The file-download bar in `pull` and `pull-files` uses downloaded bytes divided
+by the selected file byte total, including bytes written for the current file.
+The file count beside it still counts completed paths. When the byte total is
+unknown or zero, downloads show a spinner instead of a percentage.
+
 Use `--progress=compact` to print command starts, stage changes, command results,
 warnings, and errors as JSON lines. During a stage, it prints item and byte
 counters at most once every 30 seconds, only when they changed. These updates

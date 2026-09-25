@@ -3849,8 +3849,7 @@ class ImportClient
                 $total = $this->count_newlines($this->fetch_list_file);
                 $this->progress->set_active_label(null);
                 $this->progress->show_progress_line(
-                    "Downloading — 0 / " . number_format($total) . " files",
-                    0.0
+                    "Downloading — 0 / " . number_format($total) . " files"
                 );
             }
 
@@ -11428,17 +11427,6 @@ class ImportClient
                 ),
                 false,
             );
-
-            $file_progress = $this->progress_reporter->get_file_details($context);
-            $files_done = $file_progress['items']['done'];
-            $files_total = $file_progress['items']['total'];
-            $file_fraction = ($files_total !== null && $files_total > 0)
-                ? $files_done / $files_total
-                : null;
-            $file_progress_message = $files_total !== null
-                ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
-                : sprintf("Downloading — %s files", number_format($files_done));
-            $this->progress->show_progress_line($file_progress_message, $file_fraction);
         }
 
         // Skip body/close for files being preserved
@@ -11607,9 +11595,19 @@ class ImportClient
             $this->get_state()->current_css_cursor = null;
         }
 
-        $this->output_progress(
-            $this->files_pull_progress_record($context, $path, $file_size)
-        );
+        $file_progress = $this->files_pull_progress_record($context, $path, $file_size);
+        $files_done = $file_progress['progress']['items']['done'];
+        $files_total = $file_progress['progress']['items']['total'];
+        $file_bytes_total = $file_progress['progress']['bytes']['total'] ?? null;
+        // Include the open file's bytes and redraw after each chunk, not just when a file starts.
+        $file_fraction = $file_bytes_total !== null && $file_bytes_total > 0
+            ? $file_progress['progress']['bytes']['done'] / $file_bytes_total
+            : null;
+        $file_progress_message = $files_total !== null
+            ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
+            : sprintf("Downloading — %s files", number_format($files_done));
+        $this->progress->show_progress_line($file_progress_message, $file_fraction);
+        $this->output_progress($file_progress);
     }
 
     /**
