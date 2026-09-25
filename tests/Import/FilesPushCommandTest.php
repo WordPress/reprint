@@ -244,7 +244,7 @@ final class FilesPushCommandTest extends TestCase
         );
         $this->assertSame(1, $plainHttp['exit']);
         $this->assertStringContainsString('The remote Reprint API URL you provided uses HTTP.', $plainHttp['output']);
-        $this->assertStringContainsString('--allow-unsafe-http', $plainHttp['output']);
+        $this->assertStringContainsString('--insecure', $plainHttp['output']);
 
         $missingTree = $this->root . '/missing-tree';
         $missingTreeResult = $this->runCli([

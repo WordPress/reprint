@@ -76,7 +76,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--tasks=TASKS', $output);
         $this->assertStringContainsString('--state-dir with successful saved preflight', $output);
         $this->assertStringContainsString('only the named tasks', $output);
-        $this->assertStringContainsString('--allow-unsafe-http', $output);
+        $this->assertStringContainsString('--insecure', $output);
         $this->assertStringNotContainsString('--check-url', $output);
         $this->assertStringNotContainsString('--secret', $output);
         $this->assertStringNotContainsString('--include-host-plugins', $output);
@@ -124,6 +124,18 @@ class CliHelpTest extends TestCase
                 $output
             );
             $this->assertDirectoryDoesNotExist($state_directory);
+        }
+    }
+
+    public function testInsecureHelpHidesLegacyHttpFlags(): void
+    {
+        foreach (array_merge(['--help', 'post-process'], ImportClient::COMMANDS) as $command) {
+            $output = $this->runHelp($command);
+            $this->assertStringContainsString('--insecure', $output, $command);
+            $this->assertDoesNotMatchRegularExpression('/(?:^|[\s,])-k(?:[\s,]|$)/m', $output, $command);
+            $this->assertStringContainsString('REPRINT_INSECURE_TLS=1', $output, $command);
+            $this->assertStringNotContainsString('--force-http', $output, $command);
+            $this->assertStringNotContainsString('--allow-unsafe-http', $output, $command);
         }
     }
 
@@ -325,7 +337,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('--state-dir=DIR', $output);
         $this->assertStringContainsString('--fs-root=DIR', $output);
         $this->assertStringContainsString('--secret=TOKEN', $output);
-        $this->assertStringContainsString('--allow-unsafe-http', $output);
+        $this->assertStringContainsString('--insecure', $output);
         $this->assertStringContainsString('--progress=MODE', $output);
         $this->assertStringContainsString('auto, tty, jsonl, or compact', $output);
         $this->assertStringContainsString('--verbose, -v', $output);
@@ -361,7 +373,7 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString('complete diff from the beginning', $output);
         $this->assertStringNotContainsString('--runtime', $output);
         $this->assertStringNotContainsString('--secret', $output);
-        $this->assertStringContainsString('--allow-unsafe-http', $output);
+        $this->assertStringContainsString('--insecure', $output);
         $this->assertStringNotContainsString('--filter', $output);
         $this->assertStringNotContainsString('--remap', $output);
         $this->assertStringNotContainsString('--only', $output);
@@ -394,7 +406,7 @@ class CliHelpTest extends TestCase
     {
         foreach (ImportClient::COMMANDS as $command) {
             $this->assertStringContainsString(
-                '--allow-unsafe-http',
+                '--insecure',
                 $this->runHelp($command),
                 $command
             );

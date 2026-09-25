@@ -52,7 +52,8 @@ const HTTP_ARGS_BY_IMPORTER = new Map(
             encoding: 'utf-8',
             timeout: 30_000,
         });
-        return [importerPath, help.includes('--allow-unsafe-http') ? ['--allow-unsafe-http'] : []];
+        const httpOption = ['--insecure', '--allow-unsafe-http'].find(option => help.includes(option));
+        return [importerPath, httpOption ? [httpOption] : []];
     }),
 );
 const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'playground-php.sh');

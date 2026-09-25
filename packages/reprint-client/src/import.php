@@ -508,13 +508,18 @@ class ImportClient
      */
     public $exit_code = 0;
 
+    /** @var bool Whether HTTPS certificate checks are disabled for this client. */
+    private bool $insecure = false;
+
     /**
      * @param array $options { Optional client settings. Unknown keys are ignored.
+     *     @type bool        $insecure                        Allow HTTP and skip HTTPS certificate checks. Also enabled by REPRINT_INSECURE_TLS=1.
      *     @type bool        $allow_http                      Permit an HTTP remote Reprint API URL. Default false.
      *     @type string|null $signal_handling_command         Command whose signal handlers to register. Default null.
      *     @type string|null $selected_remote_state_directory Remote state directory override. Default null.
      * }
      * @phpstan-param array{
+     *     insecure?: bool,
      *     allow_http?: bool,
      *     signal_handling_command?: string|null,
      *     selected_remote_state_directory?: string|null
@@ -527,11 +532,15 @@ class ImportClient
         array $options = []
     )
     {
+        $insecure = array_key_exists('insecure', $options) ? $options['insecure'] : false;
         $allow_http = array_key_exists('allow_http', $options) ? $options['allow_http'] : false;
         $signal_handling_command = $options['signal_handling_command'] ?? null;
         $selected_remote_state_directory = $options['selected_remote_state_directory'] ?? null;
 
         // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports CLI/library option types, not HTML.
+        if (!is_bool($insecure)) {
+            throw new InvalidArgumentException('The insecure option must be a boolean; received ' . gettype($insecure) . '.');
+        }
         if (!is_bool($allow_http)) {
             throw new InvalidArgumentException('The allow_http option must be a boolean; received ' . gettype($allow_http) . '.');
         }
@@ -563,7 +572,8 @@ class ImportClient
             }
         }
 
-        self::validate_remote_reprint_api_url_transport($remote_reprint_api_url, $allow_http);
+        $this->insecure = $insecure || '1' === getenv('REPRINT_INSECURE_TLS');
+        self::validate_remote_reprint_api_url_transport($remote_reprint_api_url, $allow_http || $this->insecure);
         $this->remote_reprint_api_url = $remote_reprint_api_url;
         // Some WAFs reject automated requests without User-Agent or Referer.
         // Accept-Language supplies the browser-language context managed hosts
@@ -650,7 +660,7 @@ class ImportClient
             throw new InvalidArgumentException(
                 'The remote Reprint API URL you provided uses HTTP. '
                 . 'HTTP is unencrypted, so transferring a site over it can expose its data, including passwords, to eavesdropping. '
-                . 'Provide an HTTPS URL, or pass --allow-unsafe-http to accept this risk.'
+                . 'Provide an HTTPS URL, or pass --insecure to accept this risk.'
             );
         }
     }
@@ -1819,6 +1829,7 @@ class ImportClient
         ReprintProcessLock $process_lock
     ): void
     {
+        $options['insecure'] = $this->insecure;
         $started_at = hrtime(true) / 1000000000;
         $context = $options['files_push_context'] ?? self::prepare_files_push_context(
             $this->remote_reprint_api_url,
@@ -1858,6 +1869,7 @@ class ImportClient
             'request_context_headers' => $this->request_context_headers,
             'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['allow_http'] ?? false,
+            'insecure' => $this->insecure,
             'chunk_bytes' => $chunk_bytes,
             'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
         ];
@@ -2298,6 +2310,7 @@ class ImportClient
      *     Parsed files-push options.
      *
      *     @type string $secret     HMAC connection token.
+     *     @type bool   $insecure   Allow HTTP and skip HTTPS certificate checks.
      *     @type bool   $allow_http Whether the operator allowed a plain-HTTP target.
      * }
      * @phpstan-param array<string,mixed> $options
@@ -2326,9 +2339,13 @@ class ImportClient
             );
         }
 
+        $allow_http = $options['allow_http'] ?? false;
+        if ( ( $options['insecure'] ?? false ) === true || '1' === getenv('REPRINT_INSECURE_TLS')) {
+            $allow_http = true;
+        }
         self::validate_remote_reprint_api_url_transport(
             $remote_reprint_api_url,
-            $options['allow_http'] ?? false
+            $allow_http
         );
         $push_state_directory = self::resolve_push_state_directory(
             $remote_reprint_api_url,
@@ -2338,12 +2355,11 @@ class ImportClient
         );
         $masked_remote_reprint_api_url =
             self::mask_url_credentials($remote_reprint_api_url);
-        $allow_http = $options['allow_http'] ?? false;
         $scheme = strtolower( (string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME) );
         if ($scheme !== 'https' && !( $scheme === 'http' && $allow_http === true )) {
             throw new InvalidArgumentException(
                 'The files-push remote Reprint API URL must use HTTPS: ' . $masked_remote_reprint_api_url
-                . '. Pass --allow-unsafe-http only for a remote Reprint API URL you trust.'
+                . '. Pass --insecure only for a remote Reprint API URL you trust.'
             );
         }
         $resolved_local_filesystem_root = realpath($filesystem_root);
@@ -6547,6 +6563,7 @@ class ImportClient
         $transport = new MultipartPushStreamClient([
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
             'allow_http' => $options['allow_http'] ?? false,
+            'insecure' => $this->insecure,
             'hmac_client' => new Site_Export_HMAC_Client($options['secret']),
             'request_context_headers' => $this->request_context_headers,
             'request_sizer' => new PushRequestSizer([], $saved['request_sizer'] ?? []),
@@ -12970,7 +12987,7 @@ class ImportClient
 
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
-        apply_curl_ca_bundle($ch);
+        apply_curl_ca_bundle($ch, $this->insecure);
         apply_zipwp_access_cookie($ch, $url);
 
         $headers = [
@@ -13103,7 +13120,7 @@ class ImportClient
 
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
-        apply_curl_ca_bundle($ch);
+        apply_curl_ca_bundle($ch, $this->insecure);
         apply_zipwp_access_cookie($ch, $url);
 
         $parser = null;
@@ -14313,12 +14330,19 @@ if (
             'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
+            'name' => 'insecure',
+            'type' => 'flag',
+            'target' => 'insecure',
+            'help' => 'Allow HTTP and skip HTTPS certificate checks (also REPRINT_INSECURE_TLS=1); an attacker on the connection can read or modify transferred content',
+            'help_section' => 'global',
+            'commands' => array_merge(ImportClient::COMMANDS, ['post-process']),
+        ],
+        [
             'name' => 'allow-unsafe-http',
             'type' => 'flag',
             'target' => 'allow_http',
             'aliases' => ['force-http'],
-            'help' => 'Allow a trusted plain-HTTP target; anyone able to observe or alter the connection can read or modify transferred content',
-            'help_section' => 'global',
+            'help' => null,
             'commands' => array_merge(ImportClient::COMMANDS, ['post-process']),
         ],
         [
@@ -14827,6 +14851,7 @@ if (
         $filesystem_root = null;
         $options = [
             "abort" => false,
+            "insecure" => '1' === getenv('REPRINT_INSECURE_TLS'),
             "verbose" => false,
             "secret" => null,
             "tuning_config" => [],
@@ -14928,6 +14953,10 @@ if (
                 fwrite(STDERR, "Unknown option: {$arg}\n");
                 exit(1);
             }
+        }
+
+        if ($options['insecure']) {
+            $options['allow_http'] = true;
         }
 
         return [$state_dir, $filesystem_root, $options];
@@ -15226,7 +15255,7 @@ if (
                 "--fs-root is the ready-to-run WordPress root containing wp-load.php,\n" .
                 "not the raw download directory. The positional URL selects saved state\n" .
                 "when --state-dir contains multiple remotes. No source API requests\n" .
-                "are made. An explicit HTTP source URL requires --allow-unsafe-http.\n" .
+                "are made. An explicit HTTP source URL requires --insecure.\n" .
                 "Failing-plugin recovery alone needs no migration state.\n\n" .
                 "Prints JSON with per-task results. Exit 0 means all selected tasks\n" .
                 "completed; exit 1 means processing stopped. Uses Reprint's PHP binary.\n" .
@@ -15437,7 +15466,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--allow-unsafe-http] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --secret=TOKEN [--insecure] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -15753,7 +15782,7 @@ if (
             $argv,
             $argument_count,
             $reprint_post_process_has_source ? 3 : 2,
-            array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks', 'allow-unsafe-http'], true))
+            array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks', 'insecure', 'allow-unsafe-http'], true))
         );
         $reprint_post_process_result = PostProcess::run_selected_tasks(
             $reprint_post_process_root ? ( realpath($reprint_post_process_root) ?: $reprint_post_process_root ) : '',
@@ -15815,7 +15844,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--allow-unsafe-http', '--force-http', '--verbose', '-v'],
+                ['--insecure', '--allow-unsafe-http', '--force-http', '--verbose', '-v'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
@@ -15831,7 +15860,7 @@ if (
     } elseif ($command === 'files-diff') {
         foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
             $reprint_files_diff_option_allowed =
-                in_array($reprint_files_diff_command_argument, ['--allow-unsafe-http', '--force-http'], true)
+                in_array($reprint_files_diff_command_argument, ['--insecure', '--allow-unsafe-http', '--force-http'], true)
                 || strpos($reprint_files_diff_command_argument, '--progress=') === 0
                 || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
@@ -15950,6 +15979,7 @@ if (
                 'signal_handling_command' => $command,
                 'selected_remote_state_directory' => $reprint_selected_remote_state_directory,
                 'allow_http' => $options['allow_http'] ?? false,
+                'insecure' => $options['insecure'],
             ]
         );
         $client->audit_log_argv($command, $argv);
