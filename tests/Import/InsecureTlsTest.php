@@ -95,12 +95,24 @@ final class InsecureTlsTest extends TestCase {
         }
     }
 
+    public function testCliRejectsShortInsecureFlag(): void
+    {
+        foreach (['preflight', 'files-push', 'files-diff', 'db-push', 'post-process'] as $command) {
+            $result = $this->run_cli([
+                PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
+                $command, $this->https_url, '-k',
+            ]);
+            $this->assertSame(1, $result['exit_code'], $command);
+            $this->assertSame("Unknown option: -k\n", $result['stderr'], $command);
+        }
+        $this->assertDirectoryDoesNotExist($this->root . '/state');
+    }
+
     public static function cli_options(): array
     {
         return [
             'secure default' => [null, '', false, false],
             'long flag' => ['--insecure', '', true, true],
-            'short flag' => ['-k', '', true, true],
             'flag overrides disabled environment' => ['--insecure', '0', true, true],
             'environment' => [null, '1', true, true],
             'disabled environment' => [null, '0', false, false],
@@ -198,7 +210,7 @@ final class InsecureTlsTest extends TestCase {
 
     public function testDatabasePushAcceptsNewAndLegacyTransportFlags(): void
     {
-        foreach (['--insecure', '-k', '--force-http', '--allow-unsafe-http'] as $flag) {
+        foreach (['--insecure', '--force-http', '--allow-unsafe-http'] as $flag) {
             $result = $this->run_cli([
                 PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
                 'db-push', $this->http_url, '--secret=tls-test-secret', '--cleanup', $flag,
@@ -211,7 +223,7 @@ final class InsecureTlsTest extends TestCase {
 
     public static function insecure_cli_settings(): array
     {
-        return ['long flag' => ['--insecure', ''], 'short flag' => ['-k', ''], 'environment' => [null, '1']];
+        return ['long flag' => ['--insecure', ''], 'environment' => [null, '1']];
     }
 
     public static function insecure_settings(): array

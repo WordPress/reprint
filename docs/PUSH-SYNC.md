@@ -42,7 +42,7 @@ from. The WordPress plugin ships the full package.
 
 ## Transport and authentication
 
-HTTPS is required by default. `--insecure` (`-k`) or `REPRINT_INSECURE_TLS=1`
+HTTPS is required by default. `--insecure` or `REPRINT_INSECURE_TLS=1`
 allows plain HTTP and skips certificate and hostname checks for HTTPS. The
 choice is invocation-only. Over plain HTTP, an observer can read transferred
 content. Over HTTP or unverified HTTPS, an active attacker can read and modify

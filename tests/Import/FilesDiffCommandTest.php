@@ -95,7 +95,7 @@ final class FilesDiffCommandTest extends TestCase
         $this->assertDirectoryDoesNotExist($this->stateDirectory . '/remotes');
 
         $this->writeLocalIndex(array_keys($this->initialFiles));
-        foreach (['--insecure', '-k', '--allow-unsafe-http', '--force-http'] as $httpOption) {
+        foreach (['--insecure', '--allow-unsafe-http', '--force-http'] as $httpOption) {
             $allowedHttp = $this->runFilesDiff(null, [$httpOption]);
             $this->assertSame(0, $allowedHttp['exit'], $allowedHttp['output']);
         }

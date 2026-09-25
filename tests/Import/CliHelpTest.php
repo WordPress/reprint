@@ -132,7 +132,7 @@ class CliHelpTest extends TestCase
         foreach (array_merge(['--help', 'post-process'], ImportClient::COMMANDS) as $command) {
             $output = $this->runHelp($command);
             $this->assertStringContainsString('--insecure', $output, $command);
-            $this->assertStringContainsString('-k', $output, $command);
+            $this->assertDoesNotMatchRegularExpression('/(?:^|[\s,])-k(?:[\s,]|$)/m', $output, $command);
             $this->assertStringContainsString('REPRINT_INSECURE_TLS=1', $output, $command);
             $this->assertStringNotContainsString('--force-http', $output, $command);
             $this->assertStringNotContainsString('--allow-unsafe-http', $output, $command);

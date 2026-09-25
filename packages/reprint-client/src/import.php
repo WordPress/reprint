@@ -14335,7 +14335,6 @@ if (
             'name' => 'insecure',
             'type' => 'flag',
             'target' => 'insecure',
-            'short' => 'k',
             'help' => 'Allow HTTP and skip HTTPS certificate checks (also REPRINT_INSECURE_TLS=1); an attacker on the connection can read or modify transferred content',
             'help_section' => 'global',
             'commands' => array_merge(ImportClient::COMMANDS, ['post-process']),
@@ -15847,7 +15846,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--insecure', '-k', '--allow-unsafe-http', '--force-http', '--verbose', '-v'],
+                ['--insecure', '--allow-unsafe-http', '--force-http', '--verbose', '-v'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
@@ -15863,7 +15862,7 @@ if (
     } elseif ($command === 'files-diff') {
         foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
             $reprint_files_diff_option_allowed =
-                in_array($reprint_files_diff_command_argument, ['--insecure', '-k', '--allow-unsafe-http', '--force-http'], true)
+                in_array($reprint_files_diff_command_argument, ['--insecure', '--allow-unsafe-http', '--force-http'], true)
                 || strpos($reprint_files_diff_command_argument, '--progress=') === 0
                 || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
