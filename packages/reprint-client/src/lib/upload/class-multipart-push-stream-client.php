@@ -71,6 +71,9 @@ class MultipartPushStreamClient
     /** @var string Remote Reprint API URL used for every signed request target. */
     private string $remote_reprint_api_url;
 
+    /** @var bool Whether HTTPS certificate checks are disabled for this client. */
+    private bool $insecure = false;
+
     /** @var array<string,string> Request-context headers shared by pull and push. */
     private array $request_context_headers;
 
@@ -167,19 +170,22 @@ class MultipartPushStreamClient
      *
      * Construction fails on PHP versions whose curl binding cannot pause a
      * read callback without terminating the upload. HTTP is rejected unless
-     * `allow_http` is explicitly true.
+     * `allow_http` or `insecure` is true, or REPRINT_INSECURE_TLS=1 is set.
      *
-     * Null optional values are treated as absent by the constructor's defaults.
+     * The insecure option must be a boolean when supplied. Other null optional
+     * values are treated as absent by the constructor's defaults.
      *
      * @param array<string,mixed> $options {
      *     Transport, authentication, and limit options.
      *
      *     @type string $remote_reprint_api_url Required remote Reprint API URL. Must use HTTPS
-     *         unless `allow_http` is true.
+     *         unless `allow_http` or `insecure` is true, or REPRINT_INSECURE_TLS=1 is set.
      *     @type array<string,string> $request_context_headers Required non-empty
      *         header-name-to-value map selected by ImportClient.
      *     @type Site_Export_HMAC_Client $hmac_client Required signer for the
      *         exact method and request URL.
+     *     @type bool $insecure Allow HTTP and skip HTTPS certificate checks.
+     *         Default false; REPRINT_INSECURE_TLS=1 also enables this.
      *     @type bool $allow_http Whether to permit an explicit HTTP remote Reprint API URL.
      *         Default false.
      *     @type PushRequestSizer $request_sizer Request-body sizing state to
@@ -213,10 +219,15 @@ class MultipartPushStreamClient
             throw new InvalidArgumentException('MultipartPushStreamClient requires a non-empty remote_reprint_api_url option.');
         }
         $scheme = strtolower((string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME));
+        $insecure = array_key_exists('insecure', $options) ? $options['insecure'] : false;
+        if (!is_bool($insecure)) {
+            throw new InvalidArgumentException('The insecure option must be a boolean; received ' . gettype($insecure) . '.');
+        }
+        $this->insecure = $insecure || '1' === getenv('REPRINT_INSECURE_TLS');
         $allow_http = $options['allow_http'] ?? false;
-        if (!is_bool($allow_http) || ($scheme !== 'https' && $scheme !== 'http') || ($scheme === 'http' && !$allow_http)) {
+        if (!is_bool($allow_http) || ($scheme !== 'https' && $scheme !== 'http') || ($scheme === 'http' && !$allow_http && !$this->insecure)) {
             throw new InvalidArgumentException(
-                'Push remote Reprint API URL must be https://, unless allow_http is true for an explicit http:// remote Reprint API URL.'
+                'Push remote Reprint API URL must be https://, unless allow_http is true, insecure is true, or REPRINT_INSECURE_TLS=1 is set for an explicit http:// remote Reprint API URL.'
             );
         }
         $hmac_client = $options['hmac_client'] ?? null;
@@ -314,7 +325,7 @@ class MultipartPushStreamClient
             apply_curl_proxy_from_environment($this->curl_handle);
         }
         if (function_exists('Reprint\\Importer\\apply_curl_ca_bundle')) {
-            apply_curl_ca_bundle($this->curl_handle);
+            apply_curl_ca_bundle($this->curl_handle, $this->insecure);
         }
         curl_setopt_array($this->curl_handle, [
             CURLOPT_UPLOAD => true,
@@ -863,7 +874,7 @@ class MultipartPushStreamClient
             apply_curl_proxy_from_environment($handle);
         }
         if (function_exists('Reprint\\Importer\\apply_curl_ca_bundle')) {
-            apply_curl_ca_bundle($handle);
+            apply_curl_ca_bundle($handle, $this->insecure);
         }
         $response_body = '';
         $response_too_large = false;

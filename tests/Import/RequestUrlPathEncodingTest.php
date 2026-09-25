@@ -58,7 +58,7 @@ final class RequestUrlPathEncodingTest extends TestCase
                 $this->fail('An HTTP remote Reprint API URL requires explicit permission.');
             } catch (\InvalidArgumentException $error) {
                 $this->assertStringContainsString('The remote Reprint API URL you provided uses HTTP.', $error->getMessage());
-                $this->assertStringContainsString('--allow-unsafe-http', $error->getMessage());
+                $this->assertStringContainsString('--insecure', $error->getMessage());
             }
             $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
         }
@@ -67,6 +67,9 @@ final class RequestUrlPathEncodingTest extends TestCase
     public function testConstructorRejectsInvalidOptionsBeforeCreatingRemoteState(): void
     {
         foreach ([
+            [['insecure' => 'false'], 'insecure option must be a boolean'],
+            [['insecure' => 1], 'insecure option must be a boolean'],
+            [['insecure' => null], 'insecure option must be a boolean'],
             [['allow_http' => 'false'], 'allow_http option must be a boolean'],
             [['allow_http' => 1], 'allow_http option must be a boolean'],
             [['allow_http' => null], 'allow_http option must be a boolean'],

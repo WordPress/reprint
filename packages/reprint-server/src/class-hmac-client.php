@@ -93,7 +93,7 @@ class Site_Export_HMAC_Client {
      * request target instead of a body hash, so a body of any size streams
      * through without either side hashing it, and captured auth headers still cannot be reused for a
      * different endpoint or method. Protecting the body from tampering is
-     * TLS's job — over --allow-unsafe-http a tampered body would be accepted,
+     * TLS's job — with --insecure a tampered body would be accepted,
      * which is what that flag's help text warns about.
      *
      * Signature = HMAC-SHA256(nonce + timestamp + "UNSIGNED-PAYLOAD\n" + METHOD + "\n" + target, secret)

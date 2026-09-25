@@ -258,6 +258,7 @@ final class PushFilesSender
      *     @type array<string,string>    $request_context_headers Required header-name-to-value map selected by ImportClient.
      *     @type Site_Export_HMAC_Client $hmac_client             Required envelope signer.
      *     @type string[]                $excluded_paths          Additional document-root-relative paths this push must not change. Default empty.
+     *     @type bool                    $insecure                Allow HTTP and skip HTTPS certificate checks. Default false; REPRINT_INSECURE_TLS=1 also enables this.
      *     @type bool                    $allow_http              Explicit plain-HTTP opt-in. Default false.
      *     @type int|float|string        $chunk_bytes             Maximum bytes read from one local file. Default 4 MiB.
      *     @type int|float|string        $connect_timeout         Connect phase seconds. Default 30.
@@ -387,7 +388,7 @@ final class PushFilesSender
             'hmac_client' => $options['hmac_client'] ?? null,
             'allow_http' => $options['allow_http'] ?? false,
         ];
-        foreach (['chunk_bytes', 'connect_timeout', 'stall_timeout', 'response_timeout'] as $option_name) {
+        foreach (['insecure', 'chunk_bytes', 'connect_timeout', 'stall_timeout', 'response_timeout'] as $option_name) {
             if (array_key_exists($option_name, $options)) {
                 $push_stream_client_options[$option_name] = $options[$option_name];
             }
