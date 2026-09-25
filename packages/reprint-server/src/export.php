@@ -675,6 +675,130 @@ function normalize_path_list(array $paths): array
 }
 
 /**
+ * Estimate the bytes files-pull would transfer from these directories, or null when unknown.
+ *
+ * @param array<string|null>  $roots
+ * @param ResourceBudget|null $budget
+ * @return int|null
+ */
+function estimate_directory_bytes(array $roots, $budget = null)
+{
+    $bytes = 0;
+    $visited = [];
+    try {
+        $pending = [];
+        foreach (array_filter($roots, "is_string") as $root) {
+            $real = @Utils::source_realpath($root);
+            if (is_string($real)) {
+                $pending[] = $real;
+            }
+        }
+
+        // Start with the parent directories before any children.
+        sort($pending);
+
+        // Each pending entry is the top of a tree to walk: a root, or a followed symlink's target.
+        while (!empty($pending)) {
+            $root = array_shift($pending);
+
+            // Already counted inside a tree walked earlier.
+            if (Utils::path_is_same_as_or_descendant_of($root, array_keys($visited))) {
+                continue;
+            }
+
+            if (!@is_dir(Utils::source_io_path($root)) || !@is_readable(Utils::source_io_path($root))) {
+                continue;
+            }
+
+            $visited[$root] = true;
+
+            // This tree's directories still to list. Only one directory's listing is held at a time.
+            $directories = [$root];
+            while (!empty($directories)) {
+                $directory = array_pop($directories);
+                $entries = @scandir(Utils::source_io_path($directory));
+                if (!is_array($entries)) {
+                    continue;
+                }
+
+                foreach ($entries as $entry) {
+                    // Stop if we're running out of time/memory.
+                    if ($budget !== null && !$budget->has_remaining()) {
+                        return null;
+                    }
+
+                    if ($entry === "." || $entry === "..") {
+                        continue;
+                    }
+
+                    $path = Utils::wp_join_unix_paths($directory, $entry);
+                    $stat = @Utils::source_lstat($path);
+                    if (!is_array($stat)) {
+                        continue;
+                    }
+
+                    // The mode's high bits hold the entry type (file, directory, link); the mask drops
+                    // the permission bits. One lstat() answers all three without following links.
+                    $type = $stat["mode"] & STAT_TYPE_MASK;
+
+                    // Leave out what files-pull leaves out: caches, VCS metadata, backup archives.
+                    if (FileIndexProcessor::path_is_default_skipped($path, $type === STAT_TYPE_FILE)) {
+                        continue;
+                    }
+
+                    if ($type === STAT_TYPE_FILE) {
+                        $bytes += (int) $stat["size"];
+                    } elseif ($type === STAT_TYPE_DIR) {
+                        if (!isset($visited[$path])) {
+                            $directories[] = $path;
+                        }
+                    } elseif ($type === STAT_TYPE_LINK) {
+                        // Followed once as its own tree, like files-pull does.
+                        $target = @Utils::source_realpath($path);
+                        if (is_string($target) && @is_dir(Utils::source_io_path($target))) {
+                            $pending[] = $target;
+                        }
+                    }
+                }
+            }
+        }
+    } catch (Throwable $e) {
+        // Anything unexpected, e.g. a filesystem function the host disabled, or a Windows name
+        // PHP can't read, makes the size unknown instead of failing preflight.
+        return null;
+    }
+
+    return empty($visited) ? null : $bytes;
+}
+
+/**
+ * Estimate the size of db-pull's dump: the SQLite file, or the tables' Data_length summed over
+ * the whole schema. Index_length is left out because the dump holds CREATE TABLE and rows, not
+ * index contents. A multisite network counts every site, since the client picks the site later.
+ *
+ * @param PDO $database Open source connection.
+ * @return int|null
+ */
+function estimate_database_bytes($database, string $engine)
+{
+    try {
+        if ($engine === "sqlite") {
+            $size = defined("FQDB") ? @filesize(FQDB) : false;
+        } else {
+            $size = $database->query(
+                "SELECT SUM(DATA_LENGTH) FROM INFORMATION_SCHEMA.TABLES " .
+                    "WHERE TABLE_SCHEMA = DATABASE()"
+            )->fetchColumn();
+        }
+    } catch (Throwable $e) {
+        // Unknown rather than failing preflight.
+        $size = false;
+    }
+
+    return is_numeric($size) ? (int) $size : null;
+}
+
+/**
  * Walks parent directories upward from each start path to find WordPress installations.
  */
 function detect_wp_roots(array $start_paths): array
@@ -1585,6 +1709,14 @@ function file_index_parent_symlink(string $requested_path): ?array
  */
 function endpoint_preflight(array $config): array
 {
+    // Preflight's time and memory budget, started with the request.
+    // The (optional) wp-content size estimate uses this so it can abort early if needed.
+    // PHP's own clock started before preflight did, so stop 2 seconds short of its limit.
+    $ini_max_execution_time = (int) ini_get("max_execution_time");
+    $budget = ResourceBudget::from_ini(
+        $ini_max_execution_time > 0 ? max(1, min(15, $ini_max_execution_time - 2)) : 15
+    );
+
     // The dispatcher has resolved GET, form and JSON parameters here.
     // Collect only for preflight, and fail the request if this query fails:
     // an incomplete child-path list could rewrite another site's links.
@@ -1880,6 +2012,7 @@ function endpoint_preflight(array $config): array
         "server_collation" => null,
         "table_listable" => null,
         "table_list_error" => null,
+        "estimated_bytes" => null,
         "wp" => [
             "wp_config_path" => null,
             "wp_load_path" => null,
@@ -1958,6 +2091,8 @@ function endpoint_preflight(array $config): array
                     // SQLite and older compatible adapters have no MySQL SRS registry.
                     $db["uses_spatial_reference_definitions"] = null;
                 }
+
+                $db["estimated_bytes"] = estimate_database_bytes($mysql, $db_engine);
 
                 $table_prefix = $db["wp"]["table_prefix"];
                 if ($table_prefix === null || $table_prefix === "") {
@@ -2489,6 +2624,21 @@ function endpoint_preflight(array $config): array
 
         $wp_content["roots"][] = $root_entry;
     }
+
+    $content_paths = $wp_paths_to_scan[0] ?? [];
+    $content_dir = $content_paths["content_dir"] ?? null;
+    if ($content_dir === null && isset($content_paths["root"])) {
+        $content_dir = Utils::wp_join_unix_paths($content_paths["root"], "wp-content");
+    }
+
+    // The estimated bytes that a files-pull of ":wp-content:" transfers. This is wp-content,
+    // plus the plugins, mu-plugins, and uploads directories (in case they are outside at a custom location).
+    $wp_content["estimated_bytes"] = estimate_directory_bytes([
+        $content_dir,
+        $content_paths["plugins_dir"] ?? null,
+        $content_paths["mu_plugins_dir"] ?? null,
+        $db["wp"]["paths_urls"]["uploads"]["basedir"] ?? null,
+    ], $budget);
 
     $environment_variables = [];
     if (PHP_VERSION_ID >= 70100) {

@@ -460,13 +460,6 @@ final class HTTPServer {
             1,
             60
         );
-        $ini_max_execution_time = (int) ini_get('max_execution_time');
-        if ($ini_max_execution_time > 0) {
-            $max_execution_time = min(
-                $max_execution_time,
-                $ini_max_execution_time
-            );
-        }
         $memory_threshold = require_float_range(
             'memory_threshold',
             (float) ($config['memory_threshold'] ?? 0.8),
@@ -474,15 +467,7 @@ final class HTTPServer {
             0.95
         );
 
-        $memory_limit = ini_get('memory_limit');
-        $max_memory = $memory_limit === '-1' ? PHP_INT_MAX : Utils::parse_size((string) $memory_limit);
-
-        return new ResourceBudget(
-            microtime(true),
-            $max_execution_time,
-            $max_memory,
-            $memory_threshold
-        );
+        return ResourceBudget::from_ini($max_execution_time, $memory_threshold);
     }
 
     private function get_valid_endpoints_message(): string {
