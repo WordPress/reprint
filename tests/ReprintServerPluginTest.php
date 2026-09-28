@@ -1175,6 +1175,31 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('id="reprint-server-api-url"', $html);
     }
 
+    /** The token's push checkbox reflects the token's own grant, never a key's. */
+    public function testKeyHostTokenPushCheckboxIgnoresAKeyPushGrant(): void
+    {
+        update_option(CONNECTION_TOKEN_OPTION, 'current-token');
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = true;
+        update_option_public_keys([$entry]);
+
+        $this->assertTrue(get_configuration_state()['push_enabled']);
+        $html = $this->renderAdminPage();
+        $this->assertMatchesRegularExpression('/name="reprint_server_push_enabled"\s+value="1"\s*\/>/', $html);
+    }
+
+    /** Without a token there is no token grant to change; key grants live in the key table. */
+    public function testKeyHostWithoutATokenHasNoTokenPushForm(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = true;
+        update_option_public_keys([$entry]);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringNotContainsString('name="reprint_server_push_enabled"', $html);
+        $this->assertStringContainsString('name="reprint_server_key_push_enabled"', $html);
+    }
+
     public function testKeyHostWithANonPushingKeyIsConnectedForDownloadsOnly(): void
     {
         update_option_public_keys([$this->sampleKeyEntry()]);

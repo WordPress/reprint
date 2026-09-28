@@ -274,6 +274,7 @@ class SettingsPage {
         }
 
         $configuration = get_configuration_state();
+        $connection_token = get_connection_token();
         $remote_reprint_api_url = home_url('?reprint-api');
         ?>
         <div class="wrap">
@@ -302,17 +303,19 @@ class SettingsPage {
             <?php $this->render_public_keys_section($configuration); ?>
 
             <?php if ($configuration['is_configured']): ?>
-                <hr />
-                <h2><?php echo esc_html__('Push access', 'reprint'); ?></h2>
-                <p>
-                <?php
-                echo esc_html__(
-                    'You do not need push access when moving this site to another host.',
-                    'reprint'
-                );
-                ?>
-                </p>
-                <?php $this->render_push_access_form($configuration); ?>
+                <?php if ($connection_token !== null && $connection_token !== ''): ?>
+                    <hr />
+                    <h2><?php echo esc_html__('Push access', 'reprint'); ?></h2>
+                    <p>
+                    <?php
+                    echo esc_html__(
+                        'You do not need push access when moving this site to another host.',
+                        'reprint'
+                    );
+                    ?>
+                    </p>
+                    <?php $this->render_push_access_form($configuration); ?>
+                <?php endif; ?>
 
                 <hr />
                 <h2><?php echo esc_html__('Remote Reprint API URL', 'reprint'); ?></h2>
@@ -474,8 +477,12 @@ class SettingsPage {
         <?php
     }
 
-    /** Render the push-access form or its read-only state. */
+    /**
+     * Render the connection token's push-access form or its read-only state.
+     * The checkbox shows the token's own grant; push_enabled also counts key grants.
+     */
     private function render_push_access_form(array $configuration): void {
+        $token_push_enabled = is_push_authorized();
         if (!$configuration['push_supported']) {
             $unsupported_message = sprintf(
                 /* translators: %s: Current PHP version. */
@@ -493,7 +500,7 @@ class SettingsPage {
             ?>
             <label>
                 <input type="checkbox"
-                       value="1"<?php checked($configuration['push_enabled']); ?><?php disabled(true); ?> />
+                       value="1"<?php checked($token_push_enabled); ?><?php disabled(true); ?> />
                 <?php echo esc_html__('Allow push to change files on this site', 'reprint'); ?>
             </label>
             <p class="description">
@@ -523,7 +530,7 @@ class SettingsPage {
             <label>
                 <input type="checkbox"
                        name="reprint_server_push_enabled"
-                       value="1"<?php checked($configuration['push_enabled']); ?> />
+                       value="1"<?php checked($token_push_enabled); ?> />
                 <?php echo esc_html__('Allow push to change files on this site', 'reprint'); ?>
             </label>
             <p class="description">
