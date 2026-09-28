@@ -25,6 +25,7 @@ use Reprint\Importer\ProgressReporter;
 use Reprint\Importer\Pull\PullFailureReportedException;
 use Reprint\Importer\RetryLaterException;
 use Reprint\Importer\SpatialSridGuard;
+use Reprint\Importer\SqliteSetValueStatementRewriter;
 use Reprint\Importer\MultisiteTarget;
 use Reprint\Importer\State\DatabaseApplyCommandState;
 use Reprint\Importer\State\DatabaseUrlRewriteCommandState;
@@ -7834,6 +7835,7 @@ class ImportClient
             return $statement_count;
         }
 
+        $set_value_rewriter = new SqliteSetValueStatementRewriter($connection);
         $connection->beginTransaction();
         try {
             // The fast parser falls back to the lexer-based parser if one
@@ -7847,12 +7849,14 @@ class ImportClient
                 $query = $nullable_spatial_column_rewriter->rewrite($query) ?? $query;
                 $executed_query = $query;
                 try {
-                    $this->execute_db_apply_query(
-                        $connection,
-                        $query,
-                        $stmt_rewriter,
-                        $executed_query,
-                    );
+                    foreach ($set_value_rewriter->rewrite_statements($query) as $row_query) {
+                        $this->execute_db_apply_query(
+                            $connection,
+                            $row_query,
+                            $stmt_rewriter,
+                            $executed_query,
+                        );
+                    }
                 } catch (PDOException $error) {
                     throw new RuntimeException(
                         "SQL execution error at statement " . ( $statement_count + 1 ) . ": " .
@@ -12214,10 +12218,9 @@ class ImportClient
         // Keep the source export protocol value accepted by existing servers.
         // It selects one source site; the target boots as single-site WordPress.
         $params["multisite_mode"] = "one-site-network-v1";
-        if ($endpoint === "sql_chunk" && $this->sql_output_mode === "mysql") {
-            // Portable dumps may later go into SQLite, which stores SET labels.
-            // Only direct MySQL output can import masks without a label converter.
-            // Older servers ignore this parameter and continue sending labels.
+        if ($endpoint === "sql_chunk") {
+            // The SQLite importer can decode masks; older servers ignore this
+            // parameter and return labels, which the importer also accepts.
             $params["set_value_format"] = "unsigned";
         }
         if ($cursor !== null) {

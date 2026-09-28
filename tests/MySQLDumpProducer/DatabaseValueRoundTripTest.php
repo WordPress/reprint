@@ -149,7 +149,7 @@ class DatabaseValueRoundTripTest extends MySQLDumpProducerTestBase {
     }
 
     public static function setValueFormatProvider(): array {
-        return [['label', '?'], ['label', '🙂']];
+        return [['label', '?'], ['unsigned', '?'], ['label', '🙂']];
     }
 
     public function testLegacySetLabelCursorRequiresANewTransfer(): void {

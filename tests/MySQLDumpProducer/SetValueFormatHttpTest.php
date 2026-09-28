@@ -64,7 +64,7 @@ class SetValueFormatHttpTest extends MySQLDumpProducerTestBase {
             // without a mask-to-label rewriter. Keep that wire format usable.
             unset($params['set_value_format']);
         }
-        $unsigned = $mode === 'mysql' && !$legacy_client;
+        $unsigned = !$legacy_client;
         self::assertSame($unsigned ? 'unsigned' : null, $params['set_value_format'] ?? null);
         $body = http_build_query($params);
         $curl = curl_init($request['url']);
@@ -97,7 +97,6 @@ class SetValueFormatHttpTest extends MySQLDumpProducerTestBase {
             // though both have the same displayed label.
             $target = $this->executeDumpInNewDatabase($sql);
             self::assertSame(['0', '1', '6', null], $target->query('SELECT CAST(CAST(flags AS UNSIGNED) AS CHAR) FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
-            return;
         }
         $sqlite = new WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=:memory:;dbname=wordpress');
         $connection = new \Reprint\Importer\Database\PdoDatabaseConnection($sqlite, $sqlite->get_connection()->get_pdo());
