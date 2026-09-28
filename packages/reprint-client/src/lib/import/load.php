@@ -11,4 +11,3 @@ require_once __DIR__ . '/class-myisam-auto-increment-statement-rewriter.php';
 require_once __DIR__ . '/class-nullable-spatial-column-statement-rewriter.php';
 require_once __DIR__ . '/class-spatial-srid-guard.php';
 require_once __DIR__ . '/class-progress-reporter.php';
-require_once __DIR__ . '/class-sqlite-set-value-statement-rewriter.php';

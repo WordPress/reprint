@@ -52,17 +52,20 @@ class SetValueFormatHttpTest extends MySQLDumpProducerTestBase {
     }
 
     /** @dataProvider clientFormatProvider */
-    public function testSetFormatMatchesTheRequestingClient(bool $unsigned): void {
+    public function testSetFormatMatchesTheRequestingClient(string $mode, bool $legacy_client): void {
         $this->receiver->exec("CREATE TABLE wp_sets (id INT PRIMARY KEY, flags SET('', 'a', 'b'), payload LONGTEXT) ENGINE=InnoDB");
         $this->receiver->exec("INSERT INTO wp_sets VALUES (1,0,''), (2,1,''), (3,6,''), (4,NULL,'')");
         $client = new ImportClient($this->remote_reprint_api_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
+        ( new ReflectionProperty($client, 'sql_output_mode') )->setValue($client, $mode);
         $request = (new ReflectionMethod($client, 'build_request'))->invoke($client, 'sql_chunk', null);
         $params = $request['params'];
-        if (!$unsigned) {
+        if ($legacy_client) {
             // Old clients never advertised SET masks and executed the SQL
             // without a mask-to-label rewriter. Keep that wire format usable.
             unset($params['set_value_format']);
         }
+        $unsigned = $mode === 'mysql' && !$legacy_client;
+        self::assertSame($unsigned ? 'unsigned' : null, $params['set_value_format'] ?? null);
         $body = http_build_query($params);
         $curl = curl_init($request['url']);
         curl_setopt_array($curl, [
@@ -89,23 +92,26 @@ class SetValueFormatHttpTest extends MySQLDumpProducerTestBase {
         });
         $parser->feed($response);
         self::assertNotSame('', $sql);
+        if ($unsigned) {
+            // A MySQL target must still distinguish masks 0 and 1 even
+            // though both have the same displayed label.
+            $target = $this->executeDumpInNewDatabase($sql);
+            self::assertSame(['0', '1', '6', null], $target->query('SELECT CAST(CAST(flags AS UNSIGNED) AS CHAR) FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
+            return;
+        }
         $sqlite = new WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=:memory:;dbname=wordpress');
         $connection = new \Reprint\Importer\Database\PdoDatabaseConnection($sqlite, $sqlite->get_connection()->get_pdo());
         try {
-            if ($unsigned) {
-                // A MySQL target must still distinguish masks 0 and 1 even
-                // though both have the same displayed label.
-                $target = $this->executeDumpInNewDatabase($sql);
-                self::assertSame(['0', '1', '6', null], $target->query('SELECT CAST(CAST(flags AS UNSIGNED) AS CHAR) FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
-                (new ReflectionMethod($client, 'create_database_import_position_table'))->invoke($client, $connection);
-                (new ReflectionMethod($client, 'execute_database_import_group'))->invoke($client, $connection, $sql, hash('sha256', 'set-http'), 'next-cursor', null, 'sqlite');
-            } else {
+            if ($legacy_client) {
                 $stream = new \WP_MySQL_FastQueryStream();
                 $stream->append_sql($sql);
                 $stream->mark_input_complete();
                 while ($stream->next_query()) {
                     $sqlite->exec($stream->get_query());
                 }
+            } else {
+                (new ReflectionMethod($client, 'create_database_import_position_table'))->invoke($client, $connection);
+                (new ReflectionMethod($client, 'execute_database_import_group'))->invoke($client, $connection, $sql, hash('sha256', 'set-http'), 'next-cursor', null, 'sqlite');
             }
             self::assertSame(['', '', 'a,b', null], $sqlite->query('SELECT flags FROM wp_sets ORDER BY id')->fetchAll(PDO::FETCH_COLUMN));
         } finally {
@@ -114,6 +120,11 @@ class SetValueFormatHttpTest extends MySQLDumpProducerTestBase {
     }
 
     public static function clientFormatProvider(): array {
-        return ['old client' => [false], 'new client' => [true]];
+        return [
+            'old client' => ['mysql', true],
+            'portable file' => ['file', false],
+            'portable stdout' => ['stdout', false],
+            'direct mysql' => ['mysql', false],
+        ];
     }
 }

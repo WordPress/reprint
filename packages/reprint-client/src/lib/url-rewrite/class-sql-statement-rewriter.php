@@ -177,7 +177,7 @@ class SqlStatementRewriter
         // Slow path: lex once, share the token array between the column
         // map walker and Base64ValueScanner.
         $tokens = self::significant_tokens($sql);
-        $value_to_column_map = self::map_values_to_columns_from_tokens($tokens);
+        $value_to_column_map = $this->map_values_to_columns_from_tokens($tokens);
         $scanner = new Base64ValueScanner($sql, $tokens);
         return $this->rewrite_with_scanner($scanner, $value_to_column_map);
     }
@@ -304,12 +304,9 @@ class SqlStatementRewriter
     }
 
     /**
-     * Maps INSERT/REPLACE values and UPDATE assignments to their columns.
-     *
-     * For INSERT INTO `t` (`flags`,`count`) VALUES (3,3), the ranges distinguish
-     * the SET mask in flags from the ordinary number in count. Both SQLite SET
-     * import and URL content-type hints use this column map.
-     * UPDATE WHERE expressions are not assignments and are not in the map.
+     * Walk the lexer output to recover, for an INSERT or UPDATE statement,
+     * the byte-offset→column map needed to give each FROM_BASE64() value
+     * the right content-type hint.
      *
      * Recognised shapes:
      *
@@ -328,13 +325,10 @@ class SqlStatementRewriter
      *
      * Anything else — INSERT … SELECT, INSERT … SET col=v, INSERT without a
      * column list, qualified names like `db`.`t`, multi-table UPDATE — returns
-     * null. The URL rewriter treats null the same as an empty column_map: every
+     * null. The caller treats null the same as an empty column_map: every
      * FROM_BASE64() value falls through to plain-text URL rewriting, which
      * is the safe default. URL rewriting still happens; only the
      * block_markup hint (relevant for ~5 WordPress core columns) is lost.
-     * SQLite SET import requires a map for the INSERT/UPDATE it passes here.
-     * It treats null as an error because guessing which numbers are SET masks
-     * could change values in other columns.
      *
      * The lexer already handles strings, comments, escaped backticks, hex /
      * binary / null literals and so on, so the walker only needs to track
@@ -342,20 +336,28 @@ class SqlStatementRewriter
      * contain `(`, `)`, `,` etc. arrive as a single token and never affect
      * depth.
      *
-     * Consumes a pre-lexed token array. Lets callers that already lexed the
-     * statement avoid a second WP_MySQL_Lexer pass.
-     *
-     * @param WP_MySQL_Token[] $tokens Significant tokens with EOF removed.
      * @return array|null {
      *     Table and column ranges, or null when the statement shape is unknown.
      *
      *     @type string $table      Table name.
-     *     @type array  $column_map Tuples of start byte, exclusive end byte, and column name.
-     *     @type array  $row_ranges INSERT tuple byte ranges, including parentheses; absent for UPDATE.
+     *     @type array  $column_map Value ranges mapped to column names.
      * }
-     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>, row_ranges?: list<array{int, int}>}|null
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
      */
-    public static function map_values_to_columns_from_tokens(array $tokens): ?array
+    /**
+     * Consumes a pre-lexed token array. Lets callers that already lexed the
+     * statement avoid a second WP_MySQL_Lexer pass.
+     *
+     * @param WP_MySQL_Token[] $tokens
+     * @return array|null {
+     *     Table and column ranges, or null when the statement shape is unknown.
+     *
+     *     @type string $table      Table name.
+     *     @type array  $column_map Value ranges mapped to column names.
+     * }
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
+     */
+    private function map_values_to_columns_from_tokens(array $tokens): ?array
     {
         $token_count = count($tokens);
         if ($token_count < 4) {
@@ -389,9 +391,8 @@ class SqlStatementRewriter
      *
      *     @type string $table      Table name.
      *     @type array  $column_map Value ranges mapped to column names.
-     *     @type array  $row_ranges INSERT tuple byte ranges, including parentheses.
      * }
-     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>, row_ranges: list<array{int, int}>}|null
+     * @phpstan-return array{table: string, column_map: list<array{int, int, string}>}|null
      */
     private static function walk_insert(array $tokens, int $token_count, int $cursor): ?array
     {
@@ -481,7 +482,6 @@ class SqlStatementRewriter
 
         $column_count = count($column_names);
         $column_map = [];
-        $row_ranges = [];
         while ($cursor < $token_count) {
             // Optional ROW prefix (MySQL 8.0+ explicit row constructor).
             if ($tokens[$cursor]->id === WP_MySQL_Lexer::ROW_SYMBOL) {
@@ -494,7 +494,6 @@ class SqlStatementRewriter
             if ($tokens[$cursor]->id !== WP_MySQL_Lexer::OPEN_PAR_SYMBOL) {
                 return null;
             }
-            $row_start = $tokens[$cursor]->start;
             $cursor++; // step past `(`
 
             $column_index_in_row = 0;
@@ -538,7 +537,6 @@ class SqlStatementRewriter
             if (!$tuple_was_closed) {
                 return null;
             }
-            $row_ranges[] = [$row_start, $tokens[$cursor]->start + $tokens[$cursor]->length];
             $cursor++; // step past `)`
 
             // Another tuple, statement terminator, or trailer keyword.
@@ -561,7 +559,7 @@ class SqlStatementRewriter
             break;
         }
 
-        return ['table' => $table_name, 'column_map' => $column_map, 'row_ranges' => $row_ranges];
+        return ['table' => $table_name, 'column_map' => $column_map];
     }
 
     /**
