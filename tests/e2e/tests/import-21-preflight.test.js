@@ -91,6 +91,11 @@ describe('Import: Preflight Endpoint', () => {
         );
     });
 
+    it('estimates the database size', () => {
+        const bytes = preflight.database.estimated_bytes;
+        assert.ok(Number.isInteger(bytes) && bytes > 0, `Expected a positive database size, got ${JSON.stringify(bytes)}`);
+    });
+
     it('reports the charset/collation WordPress connects with from wpdb', () => {
         assert.ok(preflight.database.wp, 'Expected database.wp section');
         assert.equal(
