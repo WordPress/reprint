@@ -20,15 +20,30 @@ final class HMACServer {
      */
     public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
+    public const REASON_AUTH_FAILED = 'auth_failed';
+
     /** @var string */
     private $secret;
 
     /** @var int */
     private $timestamp_tolerance;
 
+    /** @var string|null */
+    private $last_error_reason = null;
+
     public function __construct(string $secret, int $timestamp_tolerance = 300) {
         $this->secret = $secret;
         $this->timestamp_tolerance = $timestamp_tolerance;
+    }
+
+    /** Stable reason code for the last error, or null after success. */
+    public function last_error_reason(): ?string {
+        return $this->last_error_reason;
+    }
+
+    private function fail(string $message): string {
+        $this->last_error_reason = self::REASON_AUTH_FAILED;
+        return $message;
     }
 
     /**
@@ -41,6 +56,8 @@ final class HMACServer {
      * contents rather than $body so multipart uploads verify consistently.
      */
     public function verify(array $headers = [], ?string $body = null, array $files = [], ?float $now = null): ?string {
+        $this->last_error_reason = null;
+
         $auth = $this->collect_auth_headers($headers);
         $auth_error = $this->verify_auth_headers($auth, $now);
         if ($auth_error !== null) {
@@ -50,11 +67,11 @@ final class HMACServer {
         try {
             $actual_content_hash = $this->compute_received_content_hash($body, $files);
         } catch (RuntimeException $e) {
-            return $e->getMessage();
+            return $this->fail($e->getMessage());
         }
 
         if (!hash_equals($auth['content_hash'], $actual_content_hash)) {
-            return 'Content hash mismatch: body was modified in transit';
+            return $this->fail('Content hash mismatch: body was modified in transit');
         }
 
         return null;
@@ -80,9 +97,11 @@ final class HMACServer {
      * @param string $request_target The "path?query" form of the request URL.
      */
     public function verify_envelope(array $headers, string $method, string $request_target, ?float $now = null): ?string {
+        $this->last_error_reason = null;
+
         $auth = $this->collect_auth_headers($headers);
         if ($auth['content_hash'] !== self::UNSIGNED_PAYLOAD) {
-            return 'Envelope verification requires the literal UNSIGNED-PAYLOAD content hash';
+            return $this->fail('Envelope verification requires the literal UNSIGNED-PAYLOAD content hash');
         }
 
         $freshness_error = $this->verify_freshness($auth, $now);
@@ -93,7 +112,7 @@ final class HMACServer {
         $message = $auth['nonce'] . $auth['timestamp'] . self::UNSIGNED_PAYLOAD . "\n" . strtoupper($method) . "\n" . $request_target;
         $expected_signature = hash_hmac('sha256', $message, $this->secret);
         if (!hash_equals($expected_signature, $auth['signature'])) {
-            return 'HMAC signature verification failed';
+            return $this->fail('HMAC signature verification failed');
         }
 
         return null;
@@ -131,7 +150,7 @@ final class HMACServer {
 
         $expected_signature = hash_hmac('sha256', $auth['nonce'] . $auth['timestamp'] . $auth['content_hash'], $this->secret);
         if (!hash_equals($expected_signature, $auth['signature'])) {
-            return 'HMAC signature verification failed';
+            return $this->fail('HMAC signature verification failed');
         }
 
         return null;
@@ -149,20 +168,20 @@ final class HMACServer {
         $timestamp = $auth['timestamp'];
         $signed_content_hash = $auth['content_hash'];
         if ($signature === null) {
-            return 'Missing X-Auth-Signature header';
+            return $this->fail('Missing X-Auth-Signature header');
         }
         if ($nonce === null) {
-            return 'Missing X-Auth-Nonce header';
+            return $this->fail('Missing X-Auth-Nonce header');
         }
         if ($timestamp === null) {
-            return 'Missing X-Auth-Timestamp header';
+            return $this->fail('Missing X-Auth-Timestamp header');
         }
         if ($signed_content_hash === null) {
-            return 'Missing X-Auth-Content-Hash header';
+            return $this->fail('Missing X-Auth-Content-Hash header');
         }
 
         if (!is_numeric($timestamp)) {
-            return 'Invalid timestamp format';
+            return $this->fail('Invalid timestamp format');
         }
 
         $request_time = (float) $timestamp;
@@ -170,15 +189,15 @@ final class HMACServer {
         $time_diff = abs($current_time - $request_time);
 
         if ($time_diff > $this->timestamp_tolerance) {
-            return sprintf(
+            return $this->fail(sprintf(
                 'Request timestamp expired. Difference: %.2f seconds, max allowed: %d seconds',
                 $time_diff,
                 $this->timestamp_tolerance
-            );
+            ));
         }
 
         if (strlen($nonce) < 16) {
-            return 'Nonce must be at least 16 characters';
+            return $this->fail('Nonce must be at least 16 characters');
         }
 
         return null;
