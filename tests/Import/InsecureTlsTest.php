@@ -156,7 +156,7 @@ final class InsecureTlsTest extends TestCase {
         $client = new \MultipartPushStreamClient([
             'remote_reprint_api_url' => $this->https_url,
             'request_context_headers' => ['User-Agent' => 'Reprint/1.0'],
-            'hmac_client' => new \Site_Export_HMAC_Client('tls-test-secret'),
+            'envelope_signer' => new \Site_Export_HMAC_Client('tls-test-secret'),
             'insecure' => $insecure,
             'connect_timeout' => 2, 'stall_timeout' => 2, 'response_timeout' => 2,
         ]);

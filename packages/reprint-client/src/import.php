@@ -1867,7 +1867,7 @@ class ImportClient
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'request_context_headers' => $this->request_context_headers,
-            'hmac_client' => new \Site_Export_HMAC_Client($options['secret']),
+            'envelope_signer' => new \Site_Export_HMAC_Client($options['secret']),
             'allow_http' => $options['allow_http'] ?? false,
             'insecure' => $this->insecure,
             'chunk_bytes' => $chunk_bytes,
@@ -6564,7 +6564,7 @@ class ImportClient
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
             'allow_http' => $options['allow_http'] ?? false,
             'insecure' => $this->insecure,
-            'hmac_client' => new Site_Export_HMAC_Client($options['secret']),
+            'envelope_signer' => new Site_Export_HMAC_Client($options['secret']),
             'request_context_headers' => $this->request_context_headers,
             'request_sizer' => new PushRequestSizer([], $saved['request_sizer'] ?? []),
         ]);
