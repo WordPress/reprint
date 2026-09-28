@@ -30,6 +30,9 @@ if (!defined('REPRINT_SERVER_TEST_PLUGIN_DIR')) {
 if (!defined('REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE')) {
     define('REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE', REPRINT_SERVER_TEST_PLUGIN_DIR . 'secret.php');
 }
+if (!defined('REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE')) {
+    define('REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE', REPRINT_SERVER_TEST_PLUGIN_DIR . 'public-keys.php');
+}
 
 // Seed the canonical namespaced constants lib.php would otherwise derive, so
 // the plugin boots without compat.php adopting any SITE_EXPORT_* name.
@@ -42,6 +45,9 @@ if (!defined('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE')) {
         REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE
     );
 }
+if (!defined('WordPress\\Reprint\\Server\\Plugin\\PUBLIC_KEYS_FILE')) {
+    define('WordPress\\Reprint\\Server\\Plugin\\PUBLIC_KEYS_FILE', REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE);
+}
 
 $GLOBALS['reprint_server_test_options'] = [];
 $GLOBALS['reprint_server_registered_settings'] = [];
@@ -52,7 +58,9 @@ $GLOBALS['reprint_server_test_menu'] = null;
 $GLOBALS['reprint_server_test_sections'] = [];
 $GLOBALS['reprint_server_test_fields'] = [];
 $GLOBALS['reprint_server_test_scripts'] = [];
+$GLOBALS['reprint_server_test_styles'] = [];
 $GLOBALS['reprint_server_fail_option_updates'] = [];
+$GLOBALS['reprint_server_test_redirect'] = null;
 
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound,Generic.CodeAnalysis.UnusedFunctionParameter.Found,Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed,Universal.NamingConventions.NoReservedKeywordParameterNames.defaultFound,WordPress.Security.EscapeOutput.OutputNotEscaped -- WordPress test stubs.
 if (!function_exists('plugin_dir_path')) {
@@ -248,7 +256,18 @@ if (!function_exists('delete_transient')) {
 }
 
 if (!function_exists('wp_safe_redirect')) {
-    function wp_safe_redirect(...$args): void {}
+    /** Records the redirect target and throws so the handler's exit is never reached. */
+    function wp_safe_redirect(string $location, ...$args): void {
+        $GLOBALS['reprint_server_test_redirect'] = $location;
+        throw new RuntimeException('redirect');
+    }
+}
+
+if (!function_exists('wp_die')) {
+    /** Throws so a handler test fails loudly instead of ending the PHPUnit process. */
+    function wp_die(string $message = '', ...$args): void {
+        throw new RuntimeException('wp_die: ' . esc_html($message));
+    }
 }
 
 if (!function_exists('__')) {
@@ -271,6 +290,9 @@ if (!function_exists('esc_attr__')) {
 
 if (!function_exists('current_user_can')) {
     function current_user_can(string $capability): bool {
+        if ($capability === 'manage_network_options') {
+            return !empty($GLOBALS['reprint_server_test_user_can_manage_network']);
+        }
         return $capability === 'manage_options';
     }
 }
@@ -281,6 +303,12 @@ if (!function_exists('check_admin_referer')) {
 
 if (!function_exists('sanitize_text_field')) {
     function sanitize_text_field($value): string {
+        return trim( (string) $value );
+    }
+}
+
+if (!function_exists('sanitize_textarea_field')) {
+    function sanitize_textarea_field($value): string {
         return trim( (string) $value );
     }
 }
@@ -347,10 +375,15 @@ if (!function_exists('submit_button')) {
         string $text = 'Save Changes',
         string $type = 'primary',
         string $name = 'submit',
-        bool $wrap = true
+        bool $wrap = true,
+        array $other_attributes = []
     ): void {
+        $attributes = '';
+        foreach ($other_attributes as $attribute => $value) {
+            $attributes .= ' ' . esc_attr($attribute) . '="' . esc_attr($value) . '"';
+        }
         $button = '<input type="submit" name="' . esc_attr($name) . '" class="button button-'
-            . esc_attr($type) . '" value="' . esc_attr($text) . '" />';
+            . esc_attr($type) . '" value="' . esc_attr($text) . '"' . $attributes . ' />';
         echo $wrap ? '<p class="submit">' . $button . '</p>' : $button;
     }
 }
@@ -364,6 +397,26 @@ if (!function_exists('home_url')) {
 if (!function_exists('admin_url')) {
     function admin_url(string $path = ''): string {
         return 'https://example.test/wp-admin/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('network_admin_url')) {
+    function network_admin_url(string $path = ''): string {
+        return 'https://example.test/wp-admin/network/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('add_query_arg')) {
+    /** Accepts both core call shapes: (array $query, string $url) and (string $key, string $value, string $url). */
+    function add_query_arg(...$args): string {
+        if (is_array($args[0])) {
+            $query = $args[0];
+            $url = $args[1];
+        } else {
+            $query = [$args[0] => $args[1]];
+            $url = $args[2];
+        }
+        return $url . ( strpos($url, '?') === false ? '?' : '&' ) . http_build_query($query);
     }
 }
 
@@ -407,6 +460,12 @@ if (!function_exists('wp_enqueue_script')) {
             'version',
             'in_footer'
         );
+    }
+}
+
+if (!function_exists('wp_enqueue_style')) {
+    function wp_enqueue_style($handle, $src, $dependencies, $version): void {
+        $GLOBALS['reprint_server_test_styles'][$handle] = compact('src', 'dependencies', 'version');
     }
 }
 
@@ -484,6 +543,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $this->original_reprint_server_push_enabled_environment = getenv('REPRINT_SERVER_PUSH_ENABLED');
 
         $GLOBALS['reprint_server_test_multisite'] = false;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = false;
         $GLOBALS['reprint_server_test_network_options'] = [];
         $GLOBALS['reprint_server_test_options'] = [];
         $GLOBALS['reprint_server_registered_settings'] = [];
@@ -493,7 +553,9 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $GLOBALS['reprint_server_test_sections'] = [];
         $GLOBALS['reprint_server_test_fields'] = [];
         $GLOBALS['reprint_server_test_scripts'] = [];
+        $GLOBALS['reprint_server_test_styles'] = [];
         $GLOBALS['reprint_server_fail_option_updates'] = [];
+        $GLOBALS['reprint_server_test_redirect'] = null;
         $_SERVER = [];
         $_FILES = [];
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Test resets request globals.
@@ -504,12 +566,18 @@ abstract class ReprintServerPluginTestCase extends TestCase
         if (file_exists(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE)) {
             unlink(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE);
         }
+        if (file_exists(REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE)) {
+            unlink(REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE);
+        }
     }
 
     protected function tearDown(): void
     {
         if (file_exists(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE)) {
             unlink(REPRINT_SERVER_TEST_CONNECTION_TOKEN_FILE);
+        }
+        if (file_exists(REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE)) {
+            unlink(REPRINT_SERVER_TEST_PUBLIC_KEYS_FILE);
         }
 
         if (is_dir(REPRINT_SERVER_TEST_PLUGIN_DIR)) {
@@ -527,6 +595,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         }
 
         $GLOBALS['reprint_server_test_multisite'] = false;
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(null);
         parent::tearDown();
     }
 
