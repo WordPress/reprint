@@ -74,6 +74,7 @@ class PullSymlinkTest extends TestCase
         $symlinkPath = $this->tempDir . '/fs-root/test/link';
         $this->assertTrue(is_link($symlinkPath), 'Symlink should be created');
         $this->assertEquals('target', readlink($symlinkPath), 'Symlink target should match');
+        $this->assertFileDoesNotExist(dirname($symlinkPath) . '/target', 'Creating a dangling link must not create its target.');
     }
 
     public function testSymlinkTargetBesideVisitedRootRemainsQueued()

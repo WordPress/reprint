@@ -172,6 +172,100 @@ final class UnixSymlinkPathTest extends TestCase {
     }
 
     /**
+     * Host-plugin filtering must not leave a link to a package it did not download.
+     *
+     * @dataProvider host_plugin_links
+     * @param bool $include_host_plugins Whether to include the source-host plugin.
+     * @param bool $shared_target Whether another selected link needs the same package.
+     */
+    public function testHostPluginExclusionDoesNotLeaveDanglingIntermediateLinks(bool $include_host_plugins, bool $shared_target): void
+    {
+        $package = $this->root . '/shared/wpcomsh';
+        mkdir($package . '/10.0.0-alpha', 0700, true);
+        file_put_contents($package . '/10.0.0-alpha/plugin.php', '<?php // Host plugin');
+        symlink('10.0.0-alpha', $package . '/latest');
+        mkdir($this->source . '/wp-content/mu-plugins', 0700, true);
+        symlink($package . '/latest', $this->source . '/wp-content/mu-plugins/wpcomsh');
+        file_put_contents($this->source . '/index.php', '<?php // Site');
+        if ($shared_target) {
+            symlink($package . '/latest', $this->source . '/shared-plugin');
+        }
+
+        $arguments = ['--include=' . $this->source, '--remap', $this->source, ':fs-root:/site',
+            '--remap', $this->root . '/shared', ':fs-root:/shared',
+            $include_host_plugins ? '--include-host-plugins' : '--exclude-host-plugins'];
+        foreach ([false, true] as $second_pull) {
+            if ($second_pull) {
+                $this->pull_files(array_merge($arguments, ['--abort']));
+            }
+            $this->pull_files($arguments);
+            $local_package = $this->root . '/files/shared/wpcomsh';
+            $this->assertSame('<?php // Site', file_get_contents($this->root . '/files/site/index.php'));
+            $this->assertSame($include_host_plugins, is_link($this->root . '/files/site/wp-content/mu-plugins/wpcomsh'));
+            if ($include_host_plugins || $shared_target) {
+                $this->assertSame('<?php // Host plugin', file_get_contents($local_package . '/latest/plugin.php'));
+            } else {
+                $this->assertFalse(is_link($local_package . '/latest'), 'An excluded package must not leave a dangling intermediate link.');
+                $this->assertFileDoesNotExist($local_package . '/10.0.0-alpha/plugin.php');
+                $audit_log = file_get_contents($this->root . '/state/audit.log');
+                $this->assertStringContainsString('target was not downloaded: ' . $package . '/10.0.0-alpha', $audit_log);
+                $this->assertStringNotContainsString('escapes filesystem root', $audit_log);
+            }
+        }
+    }
+
+    /** @return array[] Whether host plugins are included and another link uses their target. */
+    public static function host_plugin_links(): array
+    {
+        return [
+            'excluded host plugin' => [false, false],
+            'included host plugin' => [true, false],
+            'target used by another link' => [false, true],
+        ];
+    }
+
+    /** A link below another link may name its target through that parent's alias. */
+    public function testIntermediateTargetBelowAnotherLinkRemainsReadable(): void
+    {
+        mkdir($this->root . '/shared/version', 0700, true);
+        file_put_contents($this->root . '/shared/version/plugin.php', '<?php // Plugin');
+        symlink('version', $this->root . '/shared/latest');
+        symlink('shared', $this->root . '/bridge');
+        symlink($this->root . '/bridge/latest', $this->source . '/plugin');
+
+        $this->pull_files(['--include=' . $this->source]);
+
+        $this->assertSame('<?php // Plugin', file_get_contents($this->root . '/files' . $this->source . '/plugin/plugin.php'));
+    }
+
+    /**
+     * Intermediate links must respect explicit exclusions just like downloaded paths.
+     *
+     * @dataProvider intermediate_exclusions
+     * @param string $excluded_path Relative path excluded from the shared package.
+     */
+    public function testIntermediateLinksRespectExplicitExclusions(string $excluded_path): void
+    {
+        mkdir($this->root . '/shared/version', 0700, true);
+        file_put_contents($this->root . '/shared/version/plugin.php', '<?php // Plugin');
+        symlink('version', $this->root . '/shared/latest');
+        symlink($this->root . '/shared/latest', $this->source . '/plugin');
+
+        $this->pull_files(['--include=' . $this->source,
+            '--exclude=' . $this->root . '/shared/' . $excluded_path,
+            '--remap', $this->root . '/shared', ':fs-root:/shared']);
+
+        $this->assertFalse(is_link($this->root . '/files/shared/latest'));
+        $this->assertSame($excluded_path === 'latest', file_exists($this->root . '/files/shared/version/plugin.php'));
+    }
+
+    /** @return array[] Exclude either the intermediate link itself or its target contents. */
+    public static function intermediate_exclusions(): array
+    {
+        return [['latest'], ['version'], ['version/plugin.php']];
+    }
+
+    /**
      * Seed file-only preflight metadata, then run the real CLI, index endpoint, and file endpoint.
      *
      * @param string[] $arguments Additional CLI path selections and remaps.
@@ -182,7 +276,7 @@ final class UnixSymlinkPathTest extends TestCase {
         if (!is_dir($state_directory)) {
             $client = new \ImportClient($this->url, $state_directory, $this->root . '/files', ['allow_http' => true]);
             \write_current_pull_state($client, [
-                'preflight' => ['data' => ['ok' => true, 'path_format' => 'unix', 'wp_detect' => ['roots' => [['path' => $this->source]]]], 'http_code' => 200],
+                'preflight' => ['data' => ['ok' => true, 'path_format' => 'unix', 'database' => ['wp' => ['paths_urls' => ['abspath' => $this->source]]], 'wp_detect' => ['roots' => [['path' => $this->source]]]], 'http_code' => 200],
             ]);
         }
         $command = array_merge([PHP_BINARY, dirname(__DIR__, 2) . '/packages/reprint-client/src/import.php',

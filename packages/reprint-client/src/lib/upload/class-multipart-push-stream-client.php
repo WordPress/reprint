@@ -71,6 +71,9 @@ class MultipartPushStreamClient
     /** @var string Remote Reprint API URL used for every signed request target. */
     private string $remote_reprint_api_url;
 
+    /** @var bool Whether HTTPS certificate checks are disabled for this client. */
+    private bool $insecure = false;
+
     /** @var array<string,string> Request-context headers shared by pull and push. */
     private array $request_context_headers;
 
@@ -167,19 +170,22 @@ class MultipartPushStreamClient
      *
      * Construction fails on PHP versions whose curl binding cannot pause a
      * read callback without terminating the upload. HTTP is rejected unless
-     * `allow_http` is explicitly true.
+     * `allow_http` or `insecure` is true, or REPRINT_INSECURE_TLS=1 is set.
      *
-     * Null optional values are treated as absent by the constructor's defaults.
+     * The insecure option must be a boolean when supplied. Other null optional
+     * values are treated as absent by the constructor's defaults.
      *
      * @param array<string,mixed> $options {
      *     Transport, authentication, and limit options.
      *
      *     @type string $remote_reprint_api_url Required remote Reprint API URL. Must use HTTPS
-     *         unless `allow_http` is true.
+     *         unless `allow_http` or `insecure` is true, or REPRINT_INSECURE_TLS=1 is set.
      *     @type array<string,string> $request_context_headers Required non-empty
      *         header-name-to-value map selected by ImportClient.
      *     @type \WordPress\Reprint\Server\EnvelopeSigner $envelope_signer Required signer for the
      *         exact method and request URL.
+     *     @type bool $insecure Allow HTTP and skip HTTPS certificate checks.
+     *         Default false; REPRINT_INSECURE_TLS=1 also enables this.
      *     @type bool $allow_http Whether to permit an explicit HTTP remote Reprint API URL.
      *         Default false.
      *     @type PushRequestSizer $request_sizer Request-body sizing state to
@@ -213,10 +219,15 @@ class MultipartPushStreamClient
             throw new InvalidArgumentException('MultipartPushStreamClient requires a non-empty remote_reprint_api_url option.');
         }
         $scheme = strtolower((string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME));
+        $insecure = array_key_exists('insecure', $options) ? $options['insecure'] : false;
+        if (!is_bool($insecure)) {
+            throw new InvalidArgumentException('The insecure option must be a boolean; received ' . gettype($insecure) . '.');
+        }
+        $this->insecure = $insecure || '1' === getenv('REPRINT_INSECURE_TLS');
         $allow_http = $options['allow_http'] ?? false;
-        if (!is_bool($allow_http) || ($scheme !== 'https' && $scheme !== 'http') || ($scheme === 'http' && !$allow_http)) {
+        if (!is_bool($allow_http) || ($scheme !== 'https' && $scheme !== 'http') || ($scheme === 'http' && !$allow_http && !$this->insecure)) {
             throw new InvalidArgumentException(
-                'Push remote Reprint API URL must be https://, unless allow_http is true for an explicit http:// remote Reprint API URL.'
+                'Push remote Reprint API URL must be https://, unless allow_http is true, insecure is true, or REPRINT_INSECURE_TLS=1 is set for an explicit http:// remote Reprint API URL.'
             );
         }
         $envelope_signer = $options['envelope_signer'] ?? null;
@@ -258,6 +269,7 @@ class MultipartPushStreamClient
      * timeout before any body bytes move.
      *
      * @param string $push_session_id Target-issued 32-character hexadecimal push session ID.
+     * @param string $endpoint File or database streaming upload endpoint.
      *
      * @return bool False when connection setup failed; get_last_error()
      *     explains why.
@@ -265,7 +277,7 @@ class MultipartPushStreamClient
      * @throws InvalidArgumentException If the push session ID is malformed.
      * @throws RuntimeException If another upload request is already open.
      */
-    public function start_upload_request(string $push_session_id): bool
+    public function start_upload_request(string $push_session_id, string $endpoint = 'push_upload'): bool
     {
         if ($this->curl_handle !== null) {
             throw new RuntimeException('An upload request is already open; call finish_request() first.');
@@ -289,7 +301,10 @@ class MultipartPushStreamClient
         $this->response_body = '';
         $this->response_too_large = false;
 
-        $request_url = $this->endpoint_url('push_upload', ['push_session_id' => $push_session_id]);
+        if (!in_array($endpoint, ['push_upload', 'push_db_upload'], true)) {
+            throw new InvalidArgumentException('Unknown push upload endpoint: ' . $endpoint);
+        }
+        $request_url = $this->endpoint_url($endpoint, ['push_session_id' => $push_session_id]);
         $headers = $this->request_context_headers;
         foreach ($this->envelope_signer->get_envelope_auth_headers('POST', $request_url) as $name => $value) {
             $headers[$name] = $value;
@@ -310,7 +325,7 @@ class MultipartPushStreamClient
             apply_curl_proxy_from_environment($this->curl_handle);
         }
         if (function_exists('Reprint\\Importer\\apply_curl_ca_bundle')) {
-            apply_curl_ca_bundle($this->curl_handle);
+            apply_curl_ca_bundle($this->curl_handle, $this->insecure);
         }
         curl_setopt_array($this->curl_handle, [
             CURLOPT_UPLOAD => true,
@@ -397,14 +412,15 @@ class MultipartPushStreamClient
      * @param array<string,mixed> $part {
      *     One multipart part to send.
      *
-     *     @type string $type Required. `file`, `directory`, `symlink`, or
+     *     @type string $type Required. `file`, `directory`, `symlink`, `database`, or
      *         `delete-list`.
      *     @type string $payload Required raw body bytes. Must be empty for a
      *         directory or symlink.
      *     @type string $path Required target-relative path for a file,
      *         directory, or symlink.
-     *     @type int $total_bytes Required complete local file size.
-     *     @type int $offset Required target-confirmed byte offset for a file or
+     *     @type int $record_number Required zero-based record number for database parts.
+     *     @type int $total_bytes Required complete local file or encoded database record size.
+     *     @type int $offset Required byte offset for a file, database record, or
      *         delete list.
      *     @type string $target Required raw link target for a symlink. Must be
      *         non-empty and contain no NUL byte.
@@ -512,6 +528,18 @@ class MultipartPushStreamClient
         ]);
     }
 
+    /** Maximum bytes for the next piece of one encoded database record. */
+    public function next_database_body_bytes(int $record_number, int $total_bytes, int $offset): int
+    {
+        return $this->next_body_bytes([
+            'type' => 'database',
+            'record_number' => $record_number,
+            'total_bytes' => $total_bytes,
+            'offset' => $offset,
+            'payload' => '',
+        ]);
+    }
+
     /**
      * Returns the safe maximum for the next raw delete-stream read.
      *
@@ -533,16 +561,17 @@ class MultipartPushStreamClient
     }
 
     /**
-     * Calculates body capacity from an empty file or delete-list descriptor.
+     * Calculates body capacity from an empty file, database, or delete-list descriptor.
      *
      * @param array<string,mixed> $part {
      *     Header fields for the next body whose payload has not been read.
      *
-     *     @type string $type Required. `file` or `delete-list`.
+     *     @type string $type Required. `file`, `database`, or `delete-list`.
      *     @type string $payload Required empty string used only for header sizing.
      *     @type string $path Required target-relative path for a file.
-     *     @type int $total_bytes Required complete local file size.
-     *     @type int $offset Required target-confirmed byte offset.
+     *     @type int $total_bytes Required complete local file or encoded database record size.
+     *     @type int $record_number Required zero-based database record number for database parts.
+     *     @type int $offset Required byte offset within the file, encoded record, or delete list.
      * }
      * @return int Maximum body bytes allowed after MIME overhead and the close.
      */
@@ -845,7 +874,7 @@ class MultipartPushStreamClient
             apply_curl_proxy_from_environment($handle);
         }
         if (function_exists('Reprint\\Importer\\apply_curl_ca_bundle')) {
-            apply_curl_ca_bundle($handle);
+            apply_curl_ca_bundle($handle, $this->insecure);
         }
         $response_body = '';
         $response_too_large = false;
@@ -1050,10 +1079,11 @@ class MultipartPushStreamClient
      *
      * `$part` supports the following keys:
      *
-     * - `type`: required `file`, `directory`, `symlink`, or `delete-list`.
+     * - `type`: required `file`, `directory`, `symlink`, `database`, or `delete-list`.
      * - `path`: required for file, directory, and symlink parts.
-     * - `total_bytes`: required complete local file size.
-     * - `offset`: required target-confirmed offset for a file or delete list.
+     * - `total_bytes`: required complete local file or encoded database record size.
+     * - `record_number`: required zero-based database record number.
+     * - `offset`: required byte offset within a file, database record, or delete list.
      * - `target`: required raw link target for a symlink.
      * - `complete`: optional delete-list completion declaration.
      * - `payload`: supplied by send_part(); only its separately computed byte
@@ -1064,6 +1094,7 @@ class MultipartPushStreamClient
      * directories add `X-Directory-Path`; symlinks add `X-Symlink-Path` and
      * `X-Symlink-Target`; delete lists add `X-Delete-Offset`, optionally
      * `X-Delete-Complete`, and an octet-stream `Content-Type`.
+     * Database parts add `X-Record-Number`, `X-Record-Size`, and `X-Chunk-Offset`.
      *
      * @param array<string,mixed> $part Part descriptor using the keys above.
      * @param int $payload_bytes Exact strlen() of its payload.
@@ -1080,11 +1111,21 @@ class MultipartPushStreamClient
             );
         }
         $type = $part['type'] ?? null;
-        if (!is_string($type) || !in_array($type, ['file', 'directory', 'symlink', 'delete-list'], true)) {
-            throw new InvalidArgumentException('Multipart push part type must be file, directory, symlink, or delete-list.');
+        if (!is_string($type) || !in_array($type, ['file', 'directory', 'symlink', 'delete-list', 'database'], true)) {
+            throw new InvalidArgumentException('Multipart push part type must be file, directory, symlink, delete-list, or database.');
         }
         $headers = ['X-Chunk-Type' => $type];
-        if ($type === 'file') {
+        if ($type === 'database') {
+            $record_number = $part['record_number'] ?? null;
+            $total = $part['total_bytes'] ?? null;
+            $offset = $part['offset'] ?? null;
+            if (!is_int($record_number) || $record_number < 0 || !is_int($total) || $total <= 0 || !is_int($offset) || $offset < 0 || $offset + $payload_bytes > $total) {
+                throw new InvalidArgumentException('Database part requires a non-negative record number and byte offset within its positive total_bytes.');
+            }
+            $headers['X-Record-Number'] = (string) $record_number;
+            $headers['X-Record-Size'] = (string) $total;
+            $headers['X-Chunk-Offset'] = (string) $offset;
+        } elseif ($type === 'file') {
             $path = $this->non_empty_string_part_field($part, 'path', 'file');
             $total = $part['total_bytes'] ?? null;
             $offset = $part['offset'] ?? null;

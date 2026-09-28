@@ -244,7 +244,7 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
         assert.equal(existsSync(join(pluginsDirectory, 'hostinger')), false);
     });
 
-    it.each(['--allow-unsafe-http', '--force-http'])('requires explicit HTTP source permission through %s', (httpOption) => {
+    it.each(['--insecure', '--allow-unsafe-http', '--force-http'])('requires explicit HTTP source permission through %s', (httpOption) => {
         const httpSourceUrl = sourceUrl.replace('https:', 'http:');
         const stateFile = savePreflightFixture(httpSourceUrl);
         const savedState = readFileSync(stateFile, 'utf8');
@@ -253,7 +253,7 @@ describe('Recover: load WordPress and deactivate fatal plugins', () => {
 
         const rejected = runPostProcessCommand(arguments_);
         assert.equal(rejected.exitCode, 1);
-        assert.match(rejected.report.message, /--allow-unsafe-http/);
+        assert.match(rejected.report.message, /--insecure/);
         assert.ok(existsSync(join(pluginsDirectory, 'hostinger/main.php')));
         assert.equal(readFileSync(stateFile, 'utf8'), savedState);
 

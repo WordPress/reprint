@@ -390,10 +390,15 @@ class DatabaseRowsReader {
      * Return control so the producer can emit a checkpoint and stop or resume.
      * Other reads open the next LIMIT query when the previous one is consumed.
      *
+     * @param array<string,string>|null $column_expressions Trusted SQL expressions
+     *     keyed by result column. Push uses these to bound row bytes and export
+     *     ENUM indexes and WKB. Raw primary keys are read separately for the
+     *     cursor, so an encoded value never changes pagination. Null uses the
+     *     normal pull projection. Keep the projection unchanged within a table.
      * @return bool|null True for a row, null after a selected-user batch was
      *                   consumed without a row, false when no candidates remain.
      */
-    public function next_record()
+    public function next_record(?array $column_expressions = null)
     {
         $this->current_row_ends_query_batch = false;
         if (!$this->current_result_set) {
@@ -411,7 +416,7 @@ class DatabaseRowsReader {
             }
             $query = $this->multisite_selection !== null && $this->multisite_selection->is_shared_user_table($this->current_table)
                 ? $this->read_candidate_ids_and_build_row_query()
-                : $this->build_select_query();
+                : $this->build_select_query($column_expressions === null ? null : $this->build_custom_projection($column_expressions));
             if ($query === null) {
                 return false;
             }
@@ -438,11 +443,20 @@ class DatabaseRowsReader {
                 return false;
             }
             if ($this->last_pk_values !== null || $this->current_offset > 0) {
-                return $this->next_record();
+                return $this->next_record($column_expressions);
             }
             return false;
         }
 
+        $primary_key_values = $record;
+        if ($column_expressions !== null) {
+            $primary_key_values = [];
+            foreach ($this->current_pk_columns ?? [] as $index => $column) {
+                $alias = $this->get_custom_primary_key_alias($index, $column_expressions);
+                $primary_key_values[$column] = $record[$alias];
+                unset($record[$alias]);
+            }
+        }
         $record = $this->check_saved_user_reference($record);
         $record = $this->extract_spatial_value_metadata($record);
         ++$this->rows_fetched_from_current_query;
@@ -453,13 +467,13 @@ class DatabaseRowsReader {
         if ($this->current_pk_columns && count($this->current_pk_columns) > 0) {
             $this->last_pk_values = [];
             foreach ($this->current_pk_columns as $column) {
-                if (!array_key_exists($column, $record)) {
+                if (!array_key_exists($column, $primary_key_values)) {
                     throw new \RuntimeException(
                         "Primary key column '{$column}' missing from SELECT result for table " .
                         $this->quote_identifier($this->current_table)
                     );
                 }
-                $this->last_pk_values[$column] = $record[$column];
+                $this->last_pk_values[$column] = $primary_key_values[$column];
             }
         } else {
             ++$this->current_offset;
@@ -473,6 +487,33 @@ class DatabaseRowsReader {
             $this->current_query_last_candidate_id = null;
         }
         return true;
+    }
+
+    /** @param array<string,string> $column_expressions Trusted result expressions. */
+    private function build_custom_projection(array $column_expressions): string
+    {
+        $expressions = [];
+        foreach ($column_expressions as $column => $expression) {
+            $expressions[] = $expression . ' AS ' . $this->quote_identifier($column);
+        }
+        foreach ($this->current_pk_columns ?? [] as $index => $column) {
+            $identifier = $this->quote_identifier($column);
+            $data_type = $this->get_data_type($column);
+            $value = strtoupper($data_type) === 'BIT' ? 'CAST(' . $identifier . ' AS UNSIGNED)'
+                : ( $this->is_numeric_type($data_type) ? $identifier : 'CAST(' . $identifier . ' AS BINARY)' );
+            $expressions[] = $value . ' AS ' . $this->quote_identifier($this->get_custom_primary_key_alias($index, $column_expressions));
+        }
+        return implode(',', $expressions);
+    }
+
+    /** @param array<string,string> $column_expressions Result names to avoid. */
+    private function get_custom_primary_key_alias(int $index, array $column_expressions): string
+    {
+        $alias = '__reprint_primary_key_' . $index;
+        while (array_key_exists($alias, $column_expressions)) {
+            $alias = '_' . $alias;
+        }
+        return $alias;
     }
 
     /**

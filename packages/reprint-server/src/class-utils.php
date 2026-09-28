@@ -92,6 +92,35 @@ final class Utils
         return intval($dividend / $divisor);
     }
 
+    /** @return array<string,string> PDO DSN fields, including escaped semicolons. */
+    public static function parse_pdo_dsn(string $dsn): array {
+        $settings = [];
+        $parts = explode(':', $dsn, 2);
+        foreach (explode(';', str_replace(';;', "\0", $parts[1] ?? '')) as $setting) {
+            $pair = explode('=', str_replace("\0", ';', $setting), 2);
+            if (count($pair) === 2) {
+                $settings[ltrim($pair[0])] = $pair[1];
+            }
+        }
+        return $settings;
+    }
+
+    /**
+     * Opens a dedicated connection without booting WordPress or sharing $wpdb.
+     *
+     * @param array<int,mixed> $options PDO options used when pdo_mysql is available.
+     * @return \PDO|MysqliDriverPDO Dedicated MySQL connection.
+     */
+    public static function connect_mysql(string $dsn, string $user, string $password, array $options = []) {
+        if (extension_loaded('pdo_mysql')) {
+            return new \PDO($dsn, $user, $password, $options + [\PDO::ATTR_ERRMODE => \PDO::ERRMODE_EXCEPTION]);
+        }
+        if (!extension_loaded('mysqli')) {
+            throw new \RuntimeException('A dedicated MySQL connection requires either pdo_mysql or mysqli.');
+        }
+        return new MysqliDriverPDO($dsn, $user, $password);
+    }
+
     /**
      * Builds a PDO DSN string from a WordPress DB_HOST value.
      *

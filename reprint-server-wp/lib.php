@@ -25,7 +25,7 @@ require_once __DIR__ . '/compat.php';
 \reprint_server_compat_adopt_legacy_constants();
 
 if (!defined(__NAMESPACE__ . '\\VERSION')) {
-    define(__NAMESPACE__ . '\\VERSION', '0.10.10-dev');
+    define(__NAMESPACE__ . '\\VERSION', '0.10.11-dev');
 }
 if (!defined(__NAMESPACE__ . '\\PLUGIN_DIR')) {
     define(__NAMESPACE__ . '\\PLUGIN_DIR', plugin_dir_path(__FILE__));
@@ -583,6 +583,9 @@ function default_authenticate(): void {
  * @param array $options {
  *     Optional endpoint configuration overrides.
  *
+ *     @type bool $database_push Optional. Enable full database overwrite only
+ *                              on a host-configured standalone route whose
+ *                              authentication survives replacement of wp_options.
  *     @type callable $authenticate Optional. Authenticates the request and
  *                                  owns the whole decision. Defaults to
  *                                  RequestAuthenticator with the stored
@@ -608,6 +611,7 @@ function default_authenticate(): void {
  *                                       to 256.
  * }
  * @phpstan-param array{
+ *     database_push?:bool,
  *     authenticate?:callable,
  *     exit?:callable,
  *     docroot?:string,
@@ -901,6 +905,14 @@ function handle_api_request(array $options = []): void {
                 $push_options['commit_start_denial_detail'] = $push_authorization_error;
             }
             $server_options['push'] = $push_options;
+            if (strpos($endpoint, 'push_db_') === 0) {
+                // Hosts must provide a route and authentication which survive
+                // replacement of wp_options and deactivation of this plugin.
+                if (( $options['database_push'] ?? false ) !== true || isset($server_options['multisite'])) {
+                    push_error(403, 'push_disabled', 'Full database push requires a host-configured standalone API route; multisite is not supported.');
+                }
+                $server_options['database_push'] = $push_options;
+            }
         }
         HTTPServer::serve($server_options);
     } catch (Exception $e) {

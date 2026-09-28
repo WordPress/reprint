@@ -42,10 +42,12 @@ from. The WordPress plugin ships the full package.
 
 ## Transport and authentication
 
-HTTPS is required. `--allow-unsafe-http` opts out explicitly, and its help text says
-what it gives up: over plain HTTP an active attacker can read and modify
-transferred content; the flag only keeps the shared secret off the wire and
-limits replay.
+HTTPS is required by default. `--insecure` or `REPRINT_INSECURE_TLS=1`
+allows plain HTTP and skips certificate and hostname checks for HTTPS. The
+choice is invocation-only. Over plain HTTP, an observer can read transferred
+content. Over HTTP or unverified HTTPS, an active attacker can read and modify
+it. HMAC keeps the shared secret off the wire and limits replay, but does not
+replace server verification.
 
 Every request carries an HMAC signature over exactly four values — the
 HTTP method, the URL's path and query, a timestamp, and a random nonce. Payloads are not signed and not hashed: TLS already
@@ -474,7 +476,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 the resolved filesystem root named by `--fs-root`. It removes that local prefix when producing document-root-relative paths and excludes local paths
 outside the document root from push and delete work. It requires `--state-dir`,
 `--fs-root`, `--secret`, and saved preflight data; HTTPS is required unless the
-operator passes `--allow-unsafe-http`. It reads but never writes
+operator passes `--insecure` or sets `REPRINT_INSECURE_TLS=1`. It reads but never writes
 `<remote-state-directory>/pull/state.json`. It does not run preflight itself,
 show a plan, ask for confirmation, transfer a database, retry a failed request,
 or start a replacement sender after a `restart` outcome.
@@ -630,7 +632,8 @@ Order:
    intact, so an interrupted commit can never leave the site down for good.
 3. **Commit:** consume `work/deletes`, then `work/files`, with the durable
    `commit.json` checkpoint written before each document-root mutation. The
-   future database batch and symlink updates follow the same bounded cursor.
+   symlink updates follow the same bounded cursor. Database overwrite uses
+   the separate workflow described below.
 4. **Maintenance off:** commit releases its `commit-state` ownership after
    completion; the driver saves the local index and previously pushed rows for
    that remote Reprint API URL after the target confirms commit.
@@ -654,27 +657,52 @@ The driver falls back to it automatically when the normal route stops
 answering sensibly. This is what makes commit failures recoverable from the
 outside instead of requiring SSH.
 
-## Database diff (phase two)
+## Full database overwrite
 
-The database is pushed as a diff — INSERT, UPDATE, DELETE — never as a dump
-that replaces tables. The mechanics mirror the file design:
+`db-push` stages a complete local MySQL or WordPress SQLite database in private
+incoming InnoDB tables. Source reads do not require the hosted database
+version needed for a crash-safe swap. MySQL connections may use `mysqli`
+instead of `pdo_mysql`; URL and schema rewriting remain on the client.
+URL rewriting happens in the client. Staging returns a table list and review
+token; a separate confirmed command exchanges the live and incoming tables
+with one multi-table rename. Production-only prefixed tables are moved aside
+too. `--include-table=plugin_orders` also selects an exact non-prefix table for
+full replacement; unlisted non-prefix tables stay untouched.
+No row diff is computed. Old tables remain until explicit cleanup.
 
-- A **row index** — `(table, primary key, row hash)` — plays the role
-  `(path, type, ctime, size)` plays for files. The local machine keeps the row
-  index from the last push as `previously_pushed_rows`; diffing against it
-  yields the upsert and delete sets.
-- Push is local-wins for rows too. Rows changed on the remote outside Reprint
-  are overwritten when the local diff touches the same primary key.
-- The diff stream passes through the URL rewriter in the local-to-remote
-  direction before work.
-- Volatile rows are excluded by default (transients, sessions, cron), the
-  same way volatile files are handled in pull.
-- The batch executes inside the commit maintenance window, bounded and
-  resumable like every other step.
+Rows stream without a full local or hosted archive. The target commits each row
+with its source cursor. Resume uses pull's row reader, without a frozen source
+snapshot: copied rows stay as they were, later reads may see changes, and unkeyed
+tables use OFFSET pagination. Keep the source still for a consistent copy.
+
+Triggers are outside the database push scope. The table review always warns
+that the new live tables will have no triggers. Existing target triggers stay
+with the retained old tables until cleanup; source triggers and triggers on
+unselected tables are left alone.
+
+This command is separate from file commit. It requires a host-configured
+standalone API route, an operator-controlled stop of all writers, and manual
+cache clearing and site inspection before reopening. The first version has
+explicit engine, schema, and row-size limits. See [Full database push](DATABASE-PUSH.md)
+for setup, commands, recovery, and current restrictions.
+
+## Selective database changes (future work)
+
+This mode applies reviewed local INSERT, UPDATE, and DELETE operations rather
+than overwriting the database. The plan is tracked in [issue #827](https://github.com/WordPress/reprint/issues/827).
+
+Retain a baseline and the pull selection. Identify local changes from that
+baseline, then request only the affected production rows for conflict checks.
+A row absent because it was excluded during pull is not a local deletion.
+There is no automatic reconciliation and no automatic local-wins rule for
+conflicting rows. Users review grouped changes, choose what to push, and can
+skip, replace explicitly, or revise a conflicting group. Production values
+must be checked again when applying the approved changes.
 
 ## Accepted limitations
 
-Stated here so nobody rediscovers them as surprises:
+These file-push limits do not replace the database overwrite requirement to
+stop all writers:
 
 - **Same-size corruption is invisible.** Transfers are verified by byte
   count only. Corruption that preserves length passes. We decided detection
@@ -687,7 +715,7 @@ Stated here so nobody rediscovers them as surprises:
   blocks web requests; it cannot block SSH or system cron.
 ## Delivery plan
 
-Files first, database second, each PR small and stacked in this order:
+Files first, followed by full database overwrite and then selective database changes. Keep each PR focused:
 
 1. **Design doc** — this file.
 2. **Envelope auth** — headers-only HMAC for data routes: the
@@ -703,7 +731,7 @@ Files first, database second, each PR small and stacked in this order:
    path lists for the sender.
 6. **Push stream endpoint** — the store's HTTP surface plus a sender that
    sends one resumable multipart part per step; deletion work received;
-   `--allow-unsafe-http` with honest help text (the first
+   `--insecure` with honest help text (the first
    push networking this flag can gate). Decisions this slice locked in:
    sending streams through libcurl's pause mechanism, which PHP's curl
    extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull
@@ -719,8 +747,13 @@ Files first, database second, each PR small and stacked in this order:
    `work/files` into the document root with the whitelisted maintenance file
    and resumable `commit.json` cursor.
 9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
-10. **Row index and database diff** — the local row index, previously pushed
-    rows, diff generation and URL rewrite, the commit batch.
+10. **Full database overwrite, then selective changes** — `db-push` first
+    streams and rewrites local rows, stages incoming tables, and
+    exchanges them only after explicit review. The client prepares table DDL,
+    row inserts for generated/spatial columns, and deferred foreign keys. The
+    opt-in server currently trusts that SQL without a parser. The later selective mode
+    retains a baseline and pull selection, requests candidate production
+    rows, and applies only approved changes with a final conflict check.
 11. **`reprint files-push`** — the low-level, files-only caller that retains
     one sender per process, applies caller time and memory admission budgets,
     and reports completion, continuation, restart, or failure without retrying.

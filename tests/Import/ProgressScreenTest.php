@@ -150,6 +150,84 @@ class ProgressScreenTest extends TestCase {
         return [['jsonl'], ['compact']];
     }
 
+    /** @dataProvider terminal_file_sizes */
+    public function testTerminalPercentageTracksBytesWithinTheCurrentFile(?int $large_file_size): void
+    {
+        $client = $this->make_client();
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('progress_output_mode')->setValue($client, 'tty');
+        $list_file = $client->pull_state_directory . '/fetch-list.jsonl';
+        $small_file_size = $large_file_size === 0 ? 0 : 100;
+        foreach (['/small.bin' => $small_file_size, '/large.bin' => $large_file_size] as $path => $size) {
+            file_put_contents($list_file, json_encode([
+                'path' => base64_encode($path), 'size' => $size,
+            ]) . "\n", FILE_APPEND);
+        }
+        $reflection->getProperty('progress_reporter')->getValue($client)
+            ->load_file_list($list_file, $client->get_state()->fetch);
+        $reflection->getProperty('remote_to_local_path_mapper')->setValue(
+            $client,
+            new \RemoteToLocalPathMapper( (string) realpath($this->filesystem_root), 'unix', ['/'])
+        );
+        $stream = fopen('php://memory', 'w+b');
+        $terminal = new class(true, $stream) extends \TerminalProgress {
+            protected function get_terminal_width_override(): ?int
+            {
+                return 120;
+            }
+        };
+        $terminal->set_mode('pipeline');
+        $reflection->getProperty('progress')->setValue($client, $terminal);
+        $handle_chunk = $reflection->getMethod('handle_file_chunk');
+        $context = new StreamingContext();
+
+        try {
+            $chunks = $large_file_size === 0
+                ? [
+                    ['/small.bin', 0, 0, true, true, null, 1],
+                    ['/large.bin', 0, 0, true, true, null, 2],
+                ]
+                : [
+                    ['/small.bin', 100, 100, true, true, 10, 1],
+                    ['/large.bin', 900, 400, true, false, 50, 1],
+                    ['/large.bin', 900, 500, false, true, 100, 2],
+                ];
+            foreach ($chunks as [$path, $size, $chunk_bytes, $first, $last, $percentage, $completed_files]) {
+                // Let each chunk produce a redraw independently of the terminal throttle.
+                usleep(60000);
+                $output_start = ftell($stream);
+                $handle_chunk->invoke($client, [
+                    'headers' => [
+                        'x-file-path' => base64_encode($path),
+                        'x-file-size' => (string) $size,
+                        'x-file-ctime' => '1234',
+                        'x-first-chunk' => $first ? '1' : '0',
+                        'x-last-chunk' => $last ? '1' : '0',
+                    ],
+                    'body' => str_repeat('a', $chunk_bytes),
+                ], $context);
+                fseek($stream, $output_start);
+                $output = stream_get_contents($stream);
+                if ($large_file_size !== null && $large_file_size > 0) {
+                    $this->assertStringContainsString("{$percentage}% Downloading", $output);
+                } else {
+                    $this->assertStringNotContainsString('%', $output, 'An unknown or zero byte total must not display a file-count percentage.');
+                }
+                $this->assertStringContainsString("Downloading — {$completed_files} / 2 files", $output);
+            }
+        } finally {
+            if (is_resource($context->file_handle)) {
+                fclose($context->file_handle);
+            }
+            fclose($stream);
+        }
+    }
+
+    public static function terminal_file_sizes(): array
+    {
+        return ['known bytes' => [900], 'unknown bytes' => [null], 'empty files' => [0]];
+    }
+
     public function testStreamedProgressFileUpdatesAreLimitedToOncePerSecond(): void
     {
         $client = $this->make_client();

@@ -111,7 +111,7 @@ function apply_zipwp_access_cookie($curl_handle, string $remote_reprint_api_url)
  * anyway). Reading the ini value in PHP and passing the path via a
  * per-handle option is the only knob that works there.
  *
- * No-op when `openssl.cafile` is empty (the typical Linux case —
+ * With verification enabled, no-op when `openssl.cafile` is empty (the typical Linux case —
  * curl uses its compile-time default). When it's set and points at
  * a readable file, we mirror it; if `curl.cainfo` was also set to
  * the same path PHP's curl extension already applied it to the
@@ -121,9 +121,10 @@ function apply_zipwp_access_cookie($curl_handle, string $remote_reprint_api_url)
  * resolves `openssl.cafile` natively inside its WASM curl bundle.
  *
  * @param resource $curl_handle cURL handle to configure.
+ * @param bool     $insecure Skip certificate and hostname verification.
  * @return string|null Applied CA path, "(insecure)", or null when unchanged.
  */
-function apply_curl_ca_bundle($curl_handle): ?string
+function apply_curl_ca_bundle($curl_handle, bool $insecure = false): ?string
 {
 	// Insecure-TLS escape hatch for environments where neither
 	// CURLOPT_CAINFO nor any other knob persuades the TLS layer to
@@ -131,9 +132,10 @@ function apply_curl_ca_bundle($curl_handle): ?string
 	// browser, where networking goes through a JS TLS library running
 	// inside the page (not libcurl's TLS) and that library may have
 	// a CA store that pre-dates the Let's Encrypt intermediate the
-	// source's cert is signed by. The wizard sets this env when it
-	// hands off; we never set it for any other caller.
-	if ('1' === getenv('REPRINT_INSECURE_TLS')) {
+	// source's cert is signed by. The wizard can set this env when it
+	// hands off; --insecure passes the same choice per client without
+	// changing the process environment.
+	if ($insecure || '1' === getenv('REPRINT_INSECURE_TLS')) {
 		curl_setopt($curl_handle, CURLOPT_SSL_VERIFYPEER, false);
 		curl_setopt($curl_handle, CURLOPT_SSL_VERIFYHOST, 0);
 

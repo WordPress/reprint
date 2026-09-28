@@ -119,6 +119,11 @@ class TerminalProgress
             return;
         }
         if ($this->is_mode('pipeline')) {
+            // Remember raw content so tick_spinner can redraw with an
+            // updated frame without flickering back to the bare label.
+            // Throttle terminal writes, not updates to the retained message.
+            $this->last_progress_message = $message;
+            $this->last_progress_fraction = $fraction;
             // Rate-limit in pull mode to avoid flooding the terminal.
             // Hundreds of updates per second cause visual artifacts
             // because the terminal can't redraw fast enough — \r writes
@@ -129,10 +134,6 @@ class TerminalProgress
             }
             $this->spinner_tick++;
             $this->spinner_last_draw = $now;
-            // Remember raw content so tick_spinner can redraw with an
-            // updated frame without flickering back to the bare label.
-            $this->last_progress_message = $message;
-            $this->last_progress_fraction = $fraction;
             $message = $this->decorate($message, $fraction);
         }
 

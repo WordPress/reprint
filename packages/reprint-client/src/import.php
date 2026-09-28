@@ -177,6 +177,7 @@ class ImportClient
         "files-index",
         "files-stats",
         "db-pull",
+        "db-push",
         "db-index",
         "db-apply",
         "db-rewrite-urls",
@@ -528,13 +529,18 @@ class ImportClient
      */
     public $exit_code = 0;
 
+    /** @var bool Whether HTTPS certificate checks are disabled for this client. */
+    private bool $insecure = false;
+
     /**
      * @param array $options { Optional client settings. Unknown keys are ignored.
+     *     @type bool        $insecure                        Allow HTTP and skip HTTPS certificate checks. Also enabled by REPRINT_INSECURE_TLS=1.
      *     @type bool        $allow_http                      Permit an HTTP remote Reprint API URL. Default false.
      *     @type string|null $signal_handling_command         Command whose signal handlers to register. Default null.
      *     @type string|null $selected_remote_state_directory Remote state directory override. Default null.
      * }
      * @phpstan-param array{
+     *     insecure?: bool,
      *     allow_http?: bool,
      *     signal_handling_command?: string|null,
      *     selected_remote_state_directory?: string|null
@@ -547,11 +553,15 @@ class ImportClient
         array $options = []
     )
     {
+        $insecure = array_key_exists('insecure', $options) ? $options['insecure'] : false;
         $allow_http = array_key_exists('allow_http', $options) ? $options['allow_http'] : false;
         $signal_handling_command = $options['signal_handling_command'] ?? null;
         $selected_remote_state_directory = $options['selected_remote_state_directory'] ?? null;
 
         // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports CLI/library option types, not HTML.
+        if (!is_bool($insecure)) {
+            throw new InvalidArgumentException('The insecure option must be a boolean; received ' . gettype($insecure) . '.');
+        }
         if (!is_bool($allow_http)) {
             throw new InvalidArgumentException('The allow_http option must be a boolean; received ' . gettype($allow_http) . '.');
         }
@@ -575,15 +585,16 @@ class ImportClient
             } elseif ($signal_handling_command === 'db-rewrite-urls') {
                 pcntl_signal(SIGINT, [$this, 'handle_database_url_rewrite_shutdown']);
                 pcntl_signal(SIGTERM, [$this, 'handle_database_url_rewrite_shutdown']);
-            } elseif (!in_array($signal_handling_command, ['files-diff', 'post-process'], true)) {
-                // files-diff and post-process must not save the pull command's
+            } elseif (!in_array($signal_handling_command, ['files-diff', 'post-process', 'db-push'], true)) {
+                // files-diff, post-process, and db-push must not save the pull command's
                 // state from a shutdown handler; default signal behavior ends them.
                 pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
                 pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
             }
         }
 
-        self::validate_remote_reprint_api_url_transport($remote_reprint_api_url, $allow_http);
+        $this->insecure = $insecure || '1' === getenv('REPRINT_INSECURE_TLS');
+        self::validate_remote_reprint_api_url_transport($remote_reprint_api_url, $allow_http || $this->insecure);
         $this->remote_reprint_api_url = $remote_reprint_api_url;
         // Some WAFs reject automated requests without User-Agent or Referer.
         // Accept-Language supplies the browser-language context managed hosts
@@ -671,7 +682,7 @@ class ImportClient
             throw new InvalidArgumentException(
                 'The remote Reprint API URL you provided uses HTTP. '
                 . 'HTTP is unencrypted, so transferring a site over it can expose its data, including passwords, to eavesdropping. '
-                . 'Provide an HTTPS URL, or pass --allow-unsafe-http to accept this risk.'
+                . 'Provide an HTTPS URL, or pass --insecure to accept this risk.'
             );
         }
     }
@@ -817,7 +828,7 @@ class ImportClient
         $masked = $argv;
         if (isset($masked[2]) && strpos($masked[2], '-') !== 0) {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
-            if ($command === 'files-push') {
+            if (in_array($command, ['files-push', 'db-push'], true)) {
                 $masked[2] = self::mask_url_credentials($masked[2]);
             }
         }
@@ -827,6 +838,9 @@ class ImportClient
             }
             if (strpos($argument, '--secret=') === 0) {
                 $masked[$argument_index] = '--secret=***';
+            }
+            if (strpos($argument, '--source-pass=') === 0) {
+                $masked[$argument_index] = '--source-pass=***';
             }
             if (strpos($argument, '--target-pass=') === 0) {
                 $masked[$argument_index] = '--target-pass=***';
@@ -1059,6 +1073,11 @@ class ImportClient
             }
             $this->state = $this->load_state();
             $this->run_files_diff($options);
+            return;
+        }
+        if ($command === "db-push") {
+            $this->state = $this->load_state_with_request_context();
+            $this->run_db_push($options);
             return;
         }
         if ($command === "files-push") {
@@ -1866,6 +1885,7 @@ class ImportClient
         ReprintProcessLock $process_lock
     ): void
     {
+        $options['insecure'] = $this->insecure;
         $started_at = hrtime(true) / 1000000000;
         $context = $options['files_push_context'] ?? self::prepare_files_push_context(
             $this->remote_reprint_api_url,
@@ -1910,6 +1930,7 @@ class ImportClient
                 $this->remote_state_directory
             ),
             'allow_http' => $options['allow_http'] ?? false,
+            'insecure' => $this->insecure,
             'chunk_bytes' => $chunk_bytes,
             'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
         ];
@@ -2350,6 +2371,7 @@ class ImportClient
      *     Parsed files-push options.
      *
      *     @type string $secret     HMAC connection token.
+     *     @type bool   $insecure   Allow HTTP and skip HTTPS certificate checks.
      *     @type bool   $allow_http Whether the operator allowed a plain-HTTP target.
      * }
      * @phpstan-param array<string,mixed> $options
@@ -2381,9 +2403,13 @@ class ImportClient
             );
         }
 
+        $allow_http = $options['allow_http'] ?? false;
+        if ( ( $options['insecure'] ?? false ) === true || '1' === getenv('REPRINT_INSECURE_TLS')) {
+            $allow_http = true;
+        }
         self::validate_remote_reprint_api_url_transport(
             $remote_reprint_api_url,
-            $options['allow_http'] ?? false
+            $allow_http
         );
         $push_state_directory = self::resolve_push_state_directory(
             $remote_reprint_api_url,
@@ -2393,12 +2419,11 @@ class ImportClient
         );
         $masked_remote_reprint_api_url =
             self::mask_url_credentials($remote_reprint_api_url);
-        $allow_http = $options['allow_http'] ?? false;
         $scheme = strtolower( (string) parse_url($remote_reprint_api_url, PHP_URL_SCHEME) );
         if ($scheme !== 'https' && !( $scheme === 'http' && $allow_http === true )) {
             throw new InvalidArgumentException(
                 'The files-push remote Reprint API URL must use HTTPS: ' . $masked_remote_reprint_api_url
-                . '. Pass --allow-unsafe-http only for a remote Reprint API URL you trust.'
+                . '. Pass --insecure only for a remote Reprint API URL you trust.'
             );
         }
         $resolved_local_filesystem_root = realpath($filesystem_root);
@@ -2665,7 +2690,7 @@ class ImportClient
     }
 
     /**
-     * Builds the signer files-push hands to its stream client, from the same resolution every command uses.
+     * Builds the signer files-push and db-push hand to their stream client, from the same resolution every command uses.
      *
      * @param array  $options                Parsed CLI options; reads `secret` and `private_key`.
      * @param string $remote_reprint_api_url Remote Reprint API URL, named in the no-credential message.
@@ -4144,8 +4169,7 @@ class ImportClient
                 $total = $this->count_newlines($this->fetch_list_file);
                 $this->progress->set_active_label(null);
                 $this->progress->show_progress_line(
-                    "Downloading — 0 / " . number_format($total) . " files",
-                    0.0
+                    "Downloading — 0 / " . number_format($total) . " files"
                 );
             }
 
@@ -4864,7 +4888,9 @@ class ImportClient
      * the files are already downloaded to the local location (e.g.
      * filesystem root/wordpress/...).  We just need to create the symlink
      * (e.g. filesystem root/srv/wordpress -> /wordpress) so the directory
-     * layout matches the server.
+     * layout matches the server. Excluded intermediate paths are not recreated.
+     * Neither are links whose targets have no selected index entries and do not
+     * exist locally, as happens when the plugin which led to them was excluded.
      */
     private function recreate_intermediate_symlinks(): void
     {
@@ -4915,6 +4941,14 @@ class ImportClient
                 continue;
             }
 
+            if (!$this->is_selected_for_pulling($remote_absolute_path, true, "link")) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} is excluded from this pull",
+                    false,
+                );
+                continue;
+            }
+
             try {
                 $local_absolute_path = $this->path_mapper()->remote_path_to_local_path(
                     $remote_absolute_path
@@ -4927,6 +4961,12 @@ class ImportClient
                 continue;
             }
 
+            $remote_absolute_target = Utils::resolve_symlink_target_path(
+                $remote_absolute_path,
+                $symlink_target,
+                $this->get_state()->remote_path_format()
+            );
+
             // Repoint through the same seam regular symlink chunks use, so the
             // link targets wherever the content actually landed (filesystem root,
             // remapped, or placed under the local followed symlinks root) instead of the raw source spelling.
@@ -4935,6 +4975,41 @@ class ImportClient
                 $local_absolute_path,
                 $symlink_target
             );
+
+            // Validate that the symlink target doesn't escape the filesystem root.
+            $root = $this->filesystem_root;
+            try {
+                $this->assert_symlink_target_within_root(
+                    dirname($local_absolute_path),
+                    $symlink_target,
+                    $root
+                );
+            } catch (RuntimeException $e) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
+                    true,
+                );
+                continue;
+            }
+
+            // Excluding the plugin link can leave intermediate entries without
+            // the target subtree. A target below an earlier intermediate link
+            // can still exist locally under an alias absent from the index.
+            $local_absolute_target = Utils::resolve_symlink_target_path(
+                $local_absolute_path,
+                $symlink_target,
+                Utils::native_path_format()
+            );
+            if (
+                !$this->next_remote_index_contains_remote_absolute_path_prefix($remote_absolute_target)
+                && !file_exists($local_absolute_target)
+            ) {
+                $this->audit_log(
+                    "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} target was not downloaded: {$remote_absolute_target}",
+                    false,
+                );
+                continue;
+            }
 
             // Already correct — skip
             if (is_link($local_absolute_path) && readlink($local_absolute_path) === $symlink_target) {
@@ -4967,22 +5042,6 @@ class ImportClient
             if (file_exists($local_absolute_path)) {
                 $this->audit_log(
                     "INTERMEDIATE SYMLINK SKIP: {$remote_absolute_path} already exists as a real file/dir",
-                    true,
-                );
-                continue;
-            }
-
-            // Validate that the symlink target doesn't escape the filesystem root.
-            $root = $this->filesystem_root;
-            try {
-                $this->assert_symlink_target_within_root(
-                    dirname($local_absolute_path),
-                    $symlink_target,
-                    $root
-                );
-            } catch (RuntimeException $e) {
-                $this->audit_log(
-                    "INTERMEDIATE SYMLINK SKIP: " . $e->getMessage(),
                     true,
                 );
                 continue;
@@ -6780,6 +6839,110 @@ class ImportClient
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors are never HTML.
+    /**
+     * Stages a complete local database, or explicitly commits/cleans a staged push.
+     *
+     * @param array<string,mixed> $options Parsed db-push command options.
+     */
+    public function run_db_push(array $options): void
+    {
+        require_once __DIR__ . '/lib/database-push/class-database-push-processor.php';
+        if (strpos($this->remote_reprint_api_url, 'SECRET_KEY=') !== false
+            || parse_url($this->remote_reprint_api_url, PHP_URL_USER) !== null
+            || parse_url($this->remote_reprint_api_url, PHP_URL_PASS) !== null) {
+            throw new InvalidArgumentException('db-push takes its credential from --secret or --private-key, never from the URL.');
+        }
+        if (count(array_filter([$options['commit'] ?? null, $options['cleanup'] ?? null, $options['abort'] ?? null])) > 1) {
+            throw new InvalidArgumentException('db-push accepts only one of --commit, --cleanup, or --abort.');
+        }
+        if (array_key_exists('commit', $options) && !preg_match('/^[a-f0-9]{64}$/D', $options['commit'])) {
+            throw new InvalidArgumentException('db-push --commit requires the 64-character review token from staging.');
+        }
+        if (array_key_exists('source_dsn', $options) && $options['source_dsn'] === '') {
+            throw new InvalidArgumentException('db-push --source-dsn must not be empty.');
+        }
+        $json_flags = JSON_UNESCAPED_SLASHES | ( $this->progress_output_mode === 'jsonl' ? 0 : JSON_PRETTY_PRINT );
+        $state_dir = dirname($this->pull_state_directory) . '/push/database';
+        $saved = is_file($state_dir . '/state.json') ? json_decode(file_get_contents($state_dir . '/state.json'), true) : [];
+        $transport = new MultipartPushStreamClient([
+            'remote_reprint_api_url' => $this->remote_reprint_api_url,
+            'allow_http' => $options['allow_http'] ?? false,
+            'insecure' => $this->insecure,
+            'envelope_signer' => self::build_envelope_signer(
+                $options,
+                $this->remote_reprint_api_url,
+                $this->state_dir,
+                $this->remote_state_directory
+            ),
+            'request_context_headers' => $this->request_context_headers,
+            'request_sizer' => new PushRequestSizer([], $saved['request_sizer'] ?? []),
+        ]);
+        try {
+            if (!empty($options['commit']) || !empty($options['cleanup']) || !empty($options['abort'])) {
+                if (empty($saved['push_session_id'])) {
+                    throw new RuntimeException('Stage a database with db-push before committing or cleaning it.');
+                }
+                $parameters = ['push_session_id' => $saved['push_session_id']];
+                $endpoint = !empty($options['abort']) ? 'push_db_discard' : 'push_db_cleanup';
+                if (!empty($options['commit'])) {
+                    if (empty($options['writers_stopped'])) {
+                        throw new InvalidArgumentException('Before --commit, stop and drain web requests, cron, queues, and other writers; then pass --writers-stopped.');
+                    }
+                    $parameters['review'] = $options['commit'];
+                    $parameters['writers_stopped'] = 'yes';
+                    $endpoint = 'push_db_commit';
+                }
+                do {
+                    $result = $transport->send_push_request('POST', $endpoint, $parameters, ['accepted']);
+                    if ($result['status'] !== 'complete') {
+                        throw new RuntimeException($result['detail'] ?? 'Database push control request failed.');
+                    }
+                    $response = $result['response'];
+                } while ($endpoint !== 'push_db_commit' && !in_array($response['phase'], ['complete', 'discarded'], true));
+                echo json_encode($response, $json_flags) . "\n";
+                return;
+            }
+            $source = [
+                'dsn' => $options['source_dsn'] ?? '',
+                'user' => $options['source_user'] ?? '',
+                'pass' => $options['source_pass'] ?? '',
+            ];
+            if ($source['dsn'] === '') {
+                $target = $this->get_local_site_database_target();
+                if (!in_array($target['engine'], ['mysql', 'sqlite'], true)) {
+                    throw new InvalidArgumentException('db-push requires a recorded local database or --source-dsn.');
+                }
+                if ($target['engine'] === 'sqlite') {
+                    $source['dsn'] = 'mysql-on-sqlite:path=' . $this->escape_pdo_dsn_value($target['sqlite_path']) . ';dbname=' . $this->escape_pdo_dsn_value($target['db']);
+                } else {
+                    $source = [
+                        'dsn' => 'mysql:host=' . $target['host'] . ';port=' . $target['port'] . ';dbname=' . $target['db'] . ';charset=utf8mb4',
+                        'user' => $target['user'],
+                        'pass' => $target['pass'],
+                    ];
+                }
+            }
+            $url_mapping = [];
+            foreach ($options['rewrite_url'] ?? [] as [$local_url, $hosted_url]) {
+                $url_mapping[$local_url] = $hosted_url;
+            }
+            $factory = is_file($state_dir . '/state.json') ? 'resume' : 'start';
+            $processor = DatabasePushProcessor::$factory($transport, $state_dir, $source, $options['table_prefix'] ?? 'wp_', $url_mapping, $options['include_table'] ?? []);
+            try {
+                // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedWhile -- The processor performs the work; the command owns the whole-operation loop.
+                while ($processor->next_step()) {
+                    // The command owns the whole-operation loop. Each processor
+                    // step prepares one record, sends one chunk, or changes phase.
+                }
+                echo json_encode($processor->get_status(), $json_flags) . "\n";
+            } finally {
+                $processor->close();
+            }
+        } finally {
+            $transport->close();
+        }
+    }
+
     /** Rewrite URL-bearing values in an existing database one record at a time. */
     public function run_db_rewrite_urls(array $options): void
     {
@@ -10905,8 +11068,8 @@ class ImportClient
     }
 
     /**
-     * Checks whether the next remote index contains a remote absolute path or one
-     * of its descendants. Runs a memoized O(N) scan of pull/remote-index.next.jsonl.
+     * Checks whether the next remote index contains a selected remote absolute path
+     * or one of its selected descendants. Runs a memoized O(N) scan of pull/remote-index.next.jsonl.
      */
     private function next_remote_index_contains_remote_absolute_path_prefix(
         string $remote_absolute_path
@@ -10939,7 +11102,10 @@ class ImportClient
                 break;
             }
             $next_remote_index_entry_path = $next_remote_index_entry["path"];
-            if (Utils::path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)) {
+            if (
+                Utils::path_is_same_as_or_descendant_of($next_remote_index_entry_path, $remote_absolute_path)
+                && $this->is_selected_for_pulling($next_remote_index_entry_path, true, $next_remote_index_entry["type"])
+            ) {
                 $path_prefix_found = true;
                 break;
             }
@@ -11587,17 +11753,6 @@ class ImportClient
                 ),
                 false,
             );
-
-            $file_progress = $this->progress_reporter->get_file_details($context);
-            $files_done = $file_progress['items']['done'];
-            $files_total = $file_progress['items']['total'];
-            $file_fraction = ($files_total !== null && $files_total > 0)
-                ? $files_done / $files_total
-                : null;
-            $file_progress_message = $files_total !== null
-                ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
-                : sprintf("Downloading — %s files", number_format($files_done));
-            $this->progress->show_progress_line($file_progress_message, $file_fraction);
         }
 
         // Skip body/close for files being preserved
@@ -11766,9 +11921,19 @@ class ImportClient
             $this->get_state()->current_css_cursor = null;
         }
 
-        $this->output_progress(
-            $this->files_pull_progress_record($context, $path, $file_size)
-        );
+        $file_progress = $this->files_pull_progress_record($context, $path, $file_size);
+        $files_done = $file_progress['progress']['items']['done'];
+        $files_total = $file_progress['progress']['items']['total'];
+        $file_bytes_total = $file_progress['progress']['bytes']['total'] ?? null;
+        // Include the open file's bytes and redraw after each chunk, not just when a file starts.
+        $file_fraction = $file_bytes_total !== null && $file_bytes_total > 0
+            ? $file_progress['progress']['bytes']['done'] / $file_bytes_total
+            : null;
+        $file_progress_message = $files_total !== null
+            ? sprintf("Downloading — %s / %s files", number_format($files_done), number_format($files_total))
+            : sprintf("Downloading — %s files", number_format($files_done));
+        $this->progress->show_progress_line($file_progress_message, $file_fraction);
+        $this->output_progress($file_progress);
     }
 
     /**
@@ -12249,10 +12414,9 @@ class ImportClient
             return;
         }
 
-        // Try to set the ctime (may not work on all systems)
-        if ($ctime > 0) {
-            @touch($local_absolute_path, $ctime);
-        }
+        // touch() follows the link, changes its target's mtime, and can create
+        // an empty file where a later intermediate symlink needs to go. Keep
+        // the source ctime only in the journal; it cannot be set with touch().
 
         $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
 
@@ -13208,7 +13372,7 @@ class ImportClient
 
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
-        apply_curl_ca_bundle($ch);
+        apply_curl_ca_bundle($ch, $this->insecure);
         apply_zipwp_access_cookie($ch, $url);
 
         $headers = [
@@ -13341,7 +13505,7 @@ class ImportClient
 
         $ch = curl_init($url);
         apply_curl_proxy_from_environment($ch);
-        apply_curl_ca_bundle($ch);
+        apply_curl_ca_bundle($ch, $this->insecure);
         apply_zipwp_access_cookie($ch, $url);
 
         $parser = null;
@@ -14556,7 +14720,15 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC connection token for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+        ],
+        [
+            'name' => 'insecure',
+            'type' => 'flag',
+            'target' => 'insecure',
+            'help' => 'Allow HTTP and skip HTTPS certificate checks (also REPRINT_INSECURE_TLS=1); an attacker on the connection can read or modify transferred content',
+            'help_section' => 'global',
+            'commands' => array_merge(ImportClient::COMMANDS, ['post-process']),
         ],
         [
             'name' => 'private-key',
@@ -14565,7 +14737,7 @@ if (
             'placeholder' => 'PATH',
             'help' => 'RSA private key file for export API authentication; overrides the key stored in the state directory',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'out',
@@ -14587,8 +14759,7 @@ if (
             'type' => 'flag',
             'target' => 'allow_http',
             'aliases' => ['force-http'],
-            'help' => 'Allow a trusted plain-HTTP target; anyone able to observe or alter the connection can read or modify transferred content',
-            'help_section' => 'global',
+            'help' => null,
             'commands' => array_merge(ImportClient::COMMANDS, ['post-process']),
         ],
         [
@@ -14605,9 +14776,9 @@ if (
             'name' => 'abort',
             'type' => 'flag',
             'target' => 'abort',
-            'help' => 'Abort current sync and exit (preserves downloaded files)',
+            'help' => 'Abort current sync (preserves downloads). For db-push, discard staged tables without changing live tables',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'verbose',
@@ -14616,7 +14787,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
         ],
         [
             'name' => 'exclude-host-plugins',
@@ -14739,6 +14910,64 @@ if (
             'commands' => ['pull-files', 'files-pull', 'files-index'],
         ],
 
+        [
+            'name' => 'source-dsn',
+            'type' => 'value',
+            'target' => 'source_dsn',
+            'help' => 'Local mysql: or mysql-on-sqlite: DSN (otherwise uses the recorded db-apply target)',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'source-user',
+            'type' => 'value',
+            'target' => 'source_user',
+            'help' => 'Local MySQL username',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'source-pass',
+            'type' => 'value',
+            'target' => 'source_pass',
+            'help' => 'Local MySQL password',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'table-prefix',
+            'type' => 'value',
+            'target' => 'table_prefix',
+            'help' => 'Identical local and hosted table prefix (default wp_)',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'include-table',
+            'type' => 'value-or-next',
+            'target' => 'include_table',
+            'placeholder' => 'TABLE',
+            'repeatable' => true,
+            'help' => 'Also overwrite this exact table outside the WordPress prefix; repeat for several',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'commit',
+            'type' => 'value',
+            'target' => 'commit',
+            'help' => 'Overwrite production using the staged review token; deletes production-only site rows and tables',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'writers-stopped',
+            'type' => 'flag',
+            'target' => 'writers_stopped',
+            'help' => 'Confirm all web requests, cron, queues, and other database writers have been stopped and drained',
+            'commands' => ['db-push'],
+        ],
+        [
+            'name' => 'cleanup',
+            'type' => 'flag',
+            'target' => 'cleanup',
+            'help' => 'Delete retained old tables after inspection and cache clearing',
+            'commands' => ['db-push'],
+        ],
         // ── db-pull options ──────────────────────────────────────
         [
             'name' => 'max-allowed-packet',
@@ -14862,7 +15091,7 @@ if (
             'target' => 'rewrite_url',
             'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'db-push'],
         ],
         [
             'name' => 'site-admin',
@@ -15039,6 +15268,7 @@ if (
         $filesystem_root = null;
         $options = [
             "abort" => false,
+            "insecure" => '1' === getenv('REPRINT_INSECURE_TLS'),
             "verbose" => false,
             "secret" => null,
             "tuning_config" => [],
@@ -15047,6 +15277,7 @@ if (
         for ($i = $start; $i < $argc; $i++) {
             $arg = $argv[$i];
             $matched = false;
+            $def = [];
 
             foreach ($option_defs as $def) {
                 $names = [$def['name']];
@@ -15127,10 +15358,22 @@ if (
                 }
             }
 
+            // Full overwrite must never silently ignore pull selections. Use
+            // the same command declarations as help, not a second option list.
+            if ($matched && ( $argv[1] ?? null ) === 'db-push'
+                && $def['name'] !== 'state-dir'
+                && !in_array('db-push', $def['commands'] ?? [], true)) {
+                fwrite(STDERR, "Error: db-push does not accept --{$def['name']}. Full overwrite includes every site table.\n");
+                exit(1);
+            }
             if (!$matched) {
                 fwrite(STDERR, "Unknown option: {$arg}\n");
                 exit(1);
             }
+        }
+
+        if ($options['insecure']) {
+            $options['allow_http'] = true;
         }
 
         return [$state_dir, $filesystem_root, $options];
@@ -15436,7 +15679,7 @@ if (
                 "--fs-root is the ready-to-run WordPress root containing wp-load.php,\n" .
                 "not the raw download directory. The positional URL selects saved state\n" .
                 "when --state-dir contains multiple remotes. No source API requests\n" .
-                "are made. An explicit HTTP source URL requires --allow-unsafe-http.\n" .
+                "are made. An explicit HTTP source URL requires --insecure.\n" .
                 "Failing-plugin recovery alone needs no migration state.\n\n" .
                 "Prints JSON with per-task results. Exit 0 means all selected tasks\n" .
                 "completed; exit 1 means processing stopped. Uses Reprint's PHP binary.\n" .
@@ -15672,7 +15915,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [--allow-unsafe-http] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -15727,6 +15970,13 @@ if (
                 "Output is JSON with 'indexed' and 'pending' sections.\n" .
                 "Requires a prior files-index or files-pull run.\n",
             "extra" => null,
+        ],
+        "db-push" => [
+            "level" => "low",
+            "short" => "Stage a full database overwrite for explicit confirmation",
+            "usage" => "reprint db-push <remote-reprint-api-url> --state-dir=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [options]",
+            "description" => "Streams local database rows into private hosted tables, rewriting URLs on the client without a full dump or frozen snapshot. Prints the table list and review token without changing live tables.\nRequires a host-configured standalone API route. Stop all writers before --commit. Clear caches and verify the site before --cleanup.\n",
+            "extra" => "Initial limits: InnoDB target tables, 256 tables, 128 columns per table, 1 MiB per row before and after rewriting. No multisite, foreign keys crossing the selected site boundary, triggers, events, or routines.\n",
         ],
         "db-pull" => [
             "level" => "low",
@@ -15981,7 +16231,7 @@ if (
             $argv,
             $argument_count,
             $reprint_post_process_has_source ? 3 : 2,
-            array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks', 'allow-unsafe-http'], true))
+            array_filter($option_defs, static fn($definition) => in_array($definition['name'], ['fs-root', 'state-dir', 'tasks', 'insecure', 'allow-unsafe-http'], true))
         );
         $reprint_post_process_result = PostProcess::run_selected_tasks(
             $reprint_post_process_root ? ( realpath($reprint_post_process_root) ?: $reprint_post_process_root ) : '',
@@ -16043,7 +16293,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--allow-unsafe-http', '--force-http', '--verbose', '-v'],
+                ['--insecure', '--allow-unsafe-http', '--force-http', '--verbose', '-v'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
@@ -16060,7 +16310,7 @@ if (
     } elseif ($command === 'files-diff') {
         foreach ($reprint_files_command_arguments as $reprint_files_diff_command_argument) {
             $reprint_files_diff_option_allowed =
-                in_array($reprint_files_diff_command_argument, ['--allow-unsafe-http', '--force-http'], true)
+                in_array($reprint_files_diff_command_argument, ['--insecure', '--allow-unsafe-http', '--force-http'], true)
                 || strpos($reprint_files_diff_command_argument, '--progress=') === 0
                 || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
@@ -16132,7 +16382,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "keygen"], true)) {
+    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "keygen", "db-push"], true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
@@ -16198,6 +16448,7 @@ if (
                 'signal_handling_command' => $command,
                 'selected_remote_state_directory' => $reprint_selected_remote_state_directory,
                 'allow_http' => $options['allow_http'] ?? false,
+                'insecure' => $options['insecure'],
             ]
         );
         $client->audit_log_argv($command, $argv);
