@@ -362,9 +362,10 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-client",
-                "reference": "ad20e466bc2ea77ee5eff93f5a02d810a64ee23a"
+                "reference": "134e282491534c57a254ea708308decadbf6e89b"
             },
             "require": {
+                "ext-openssl": "*",
                 "ext-pdo": "*",
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.10.1",

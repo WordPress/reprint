@@ -22,11 +22,12 @@ compatibility change.
 
 ```bash
 php reprint.phar pull https://example.com \
-  --secret=YOUR_SECRET \
   --state-dir=./state --fs-root=./files
 ```
 
-That's it. Reprint will:
+The first run has nothing to authenticate with, so it generates a key beside the state, prints the public half, and stops with exit code 4. Enroll that key on the source site under **Tools → Reprint Server**, then run the same command again. On a source host without OpenSSL, pass `--secret=TOKEN` instead; see [Authentication](#authentication).
+
+From the second run on, Reprint will:
 
 1. **Preflight** the remote site (check connectivity, detect WordPress version and hosting environment)
 2. **Download all files** (themes, plugins, uploads, core) into `--fs-root`
@@ -69,13 +70,13 @@ Pulling example.com
 
 ```bash
 # MySQL
-php reprint.phar pull https://example.com --secret=TOKEN \
+php reprint.phar pull https://example.com \
   --state-dir=./state --fs-root=./files \
   --target-user=root --target-db=wp_local \
   --new-site-url=http://localhost:8881
 
 # SQLite (no MySQL needed)
-php reprint.phar pull https://example.com --secret=TOKEN \
+php reprint.phar pull https://example.com \
   --state-dir=./state --fs-root=./files \
   --target-engine=sqlite \
   --new-site-url=http://localhost:8881
@@ -269,14 +270,44 @@ Download the latest release artifacts from [GitHub Releases](../../releases):
 * **`reprint.phar`** — a self-contained PHP archive that runs on the **migration target** (the hosting account you are migrating to). No cloning or `composer install` needed.
 * **`reprint-exporter-wp.zip`** — install this on the **migration source** (the remote WordPress site you want to migrate).
 
-Both must share the same secret string. The plugin has a UI screen where the user can paste the secret, and then
-the importer must be fed the same secret string (more details below). Alternatively, the plugin
-can be pre-packaged with a `./reprint-exporter-wp/secret.php` file where a pre-determined secret is shipped:
+### Authentication
+
+The source host decides how the importer authenticates, and nothing configures this. Where PHP has the OpenSSL
+extension (`openssl_verify` exists) the plugin accepts only signatures made with an enrolled public key; a
+connection token sent to such a host is refused with `requires_key_auth`. Where OpenSSL is missing the plugin
+accepts only a connection token shared by both sides, and a key signature is refused with `requires_token_auth`.
+The settings page under **Tools → Reprint Server** (the network settings page on multisite) says which of the two
+the host accepts. The importer never retries with the other scheme.
+
+**Public keys.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 2048-bit RSA key, stores
+the private half at `<state-dir>/remotes/<md5-of-url>/key.pem` with mode `0600`, and prints the key id and the
+public key as one line. Paste that line into the enrollment form under Tools → Reprint Server. Every later command
+against that site finds the key in the state directory, so no credential flag is needed. `reprint pull` with no
+credential does the same generation itself, prints the key, and exits with code 4: enrollment is needed, nothing
+failed, and running the same command again after enrolling continues. Every other remote command refuses with a
+message naming `reprint keygen` and `--secret`. `--private-key=PATH` uses a key stored elsewhere (`keygen --out=PATH`
+writes one there) instead of the state directory. Deleting the state directory destroys the private half, so the
+enrolled public key stops working; the plugin's key table also has a Remove button for each key. A site that only has
+a connection token answers `not_configured` (HTTP 503) on an OpenSSL host until a key is enrolled.
+
+Instead of enrolling keys on the settings page, the plugin can be pre-packaged with a
+`./reprint-exporter-wp/public-keys.php` file returning a list of PEM or one-line public keys. When that file exists
+it is the only key source; the settings page shows its keys read-only and refuses enrollment. Keys from the file
+cannot be granted push access individually, so a platform that pushes to such sites sets
+`REPRINT_SERVER_PUSH_ENABLED` (see the plugin README).
+
+**Connection tokens.** On a host without OpenSSL both sides must share the same secret string. The plugin has a UI
+screen where the user can paste the secret, and then the importer must be fed the same string through
+`--secret=TOKEN` (more details below). Alternatively, the plugin can be pre-packaged with a
+`./reprint-exporter-wp/secret.php` file where a pre-determined secret is shipped:
 
 ```php
 <?php
 return 'MY_SECRET_STRING';
 ```
+
+A token stored on a site whose host has OpenSSL is kept but not accepted; the settings page says so and offers to
+remove it.
 
 ### Migrating the data
 
@@ -295,6 +326,10 @@ STATE_DIR="./local-directory-where-the-migration-state-will-be-tracked"
 FS_ROOT="./local-directory-where-the-remote-site-files-will-be-recreated"
 SECRET="your-shared-secret"
 ```
+
+`$SECRET` applies to a source host without OpenSSL. On a host with OpenSSL, run
+`php reprint.phar keygen "$URL" --state-dir="$STATE_DIR"` once, enroll the printed key under Tools → Reprint Server,
+and omit `--secret="$SECRET"` from every command below; the key is read from `$STATE_DIR`.
 
 #### Step 1 — Preflight.
 
