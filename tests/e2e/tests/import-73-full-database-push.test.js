@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
     createMysqlConnection, createTempDir, getDbName,
-    getSiteDir, getSiteUrl, getSiteSecret, runImporter,
+    getHarnessKey, getSiteDir, getSiteUrl, getSiteSecret, runImporter,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { createSqlFidelityData } from '../lib/sql-fidelity-data.js';
@@ -27,7 +27,8 @@ const targetApi = `${targetOrigin}/database-push.php`;
 const projectRoot = join(import.meta.dirname, '..', '..', '..');
 const clientPath = process.env.CLIENT_PATH || join(projectRoot, 'packages/reprint-client/bin/reprint-client');
 const phpBinary = process.env.PHP_BINARY || 'php';
-const secret = 'database-push-e2e-independent-token';
+// The push route enrolls this key from a host file, so it survives replacement of wp_options.
+const pushKey = getHarnessKey('database-push-e2e-independent-key');
 const mysqlArguments = ['-h127.0.0.1', '-ue2e_admin', '-pe2e_password'];
 let directory;
 let sourceBaseline;
@@ -46,7 +47,7 @@ describeNative('Full database push: pull fixtures and live WordPress', { timeout
         const privateDirectory = join(directory, 'host');
         mkdirSync(privateDirectory, { recursive: true });
         writeFileSync(join(privateDirectory, 'requests'), '');
-        writeFileSync(join(privateDirectory, 'secret.php'), `<?php return '${secret}';`);
+        writeFileSync(join(privateDirectory, 'public-keys.php'), `<?php return ['${pushKey.publicKey}'];`);
         // PHP-FPM reads the installed bundle, not the runner's private checkout.
         const targetPluginDirectory = join(getSiteDir(targetSite), 'wp-content/plugins/reprint-server');
         const targetRoute = `<?php
@@ -58,7 +59,7 @@ define('DB_USER', 'e2e_admin');
 define('DB_PASSWORD', 'e2e_password');
 $GLOBALS['table_prefix'] = 'wp_';
 define('WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\PLUGIN_DIR', '${targetPluginDirectory}/');
-define('WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\CONNECTION_TOKEN_FILE', '${privateDirectory}/secret.php');
+define('WordPress\\\\Reprint\\\\Server\\\\Plugin\\\\PUBLIC_KEYS_FILE', '${privateDirectory}/public-keys.php');
 define('REPRINT_SERVER_PUSH_ENABLED', true);
 register_shutdown_function(static function () {
     file_put_contents('${privateDirectory}/requests', ($_GET['endpoint'] ?? '') . "\\n", FILE_APPEND);
@@ -266,7 +267,7 @@ async function exercisePush(createData, { builder = false } = {}) {
 
 function push(stateDirectory, arguments_) {
     return spawnSync(phpBinary, ['-d', 'memory_limit=128M', clientPath, 'db-push', targetApi,
-        `--state-dir=${stateDirectory}`, `--secret=${secret}`, '--force-http', '--progress=jsonl', ...arguments_],
+        `--state-dir=${stateDirectory}`, `--private-key=${pushKey.privateKeyPath}`, '--force-http', '--progress=jsonl', ...arguments_],
     { encoding: 'utf8', timeout: 600000, maxBuffer: 4 * 1024 * 1024 });
 }
 

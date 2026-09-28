@@ -82,6 +82,16 @@ $config = <<<'PHP'
 PHP;
 file_put_contents($site_directory . '/wp-config.php', $config);
 file_put_contents($site_directory . '/wp-content/plugins/reprint-server/secret.php', "<?php return 'windows-migration-secret';\n");
+// Windows PHP has OpenSSL, so the source accepts key signatures only. The key
+// is generated with the shipped client code so a Windows build without a
+// default openssl.cnf is exercised too; the private half reaches the Linux
+// client through the manifest.
+require $site_directory . '/wp-content/plugins/reprint-server/vendor/autoload.php';
+[$private_key_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+file_put_contents(
+    $site_directory . '/wp-content/plugins/reprint-server/public-keys.php',
+    "<?php return [\n    " . var_export($public_key, true) . ",\n];\n"
+);
 define('WP_INSTALLING', true);
 $_SERVER['HTTP_HOST'] = parse_url($site_url, PHP_URL_HOST) . ':8081';
 require $site_directory . '/wp-load.php';
@@ -156,5 +166,5 @@ foreach ($files as $file) {
         $hashes[$relative_path] = hash_file('sha256', $file->getPathname());
     }
 }
-file_put_contents($manifest_path, json_encode(['os' => PHP_OS_FAMILY, 'files' => $hashes, 'path_cases' => $path_cases], JSON_THROW_ON_ERROR));
+file_put_contents($manifest_path, json_encode(['os' => PHP_OS_FAMILY, 'files' => $hashes, 'path_cases' => $path_cases, 'private_key_pem' => $private_key_pem], JSON_THROW_ON_ERROR));
 printf("Prepared %d files on %s at %s\n", count($hashes), PHP_OS_FAMILY, ABSPATH);

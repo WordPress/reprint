@@ -254,6 +254,24 @@
     "multisite-plugin-tables": {
       "port": 8181
     },
+    "keygen-command": {
+      "port": 8155
+    },
+    "pull-generates-key": {
+      "port": 8156
+    },
+    "granular-refuse": {
+      "port": 8157
+    },
+    "public-key-pull": {
+      "port": 8158
+    },
+    "private-key-override": {
+      "port": 8161
+    },
+    "unknown-key": {
+      "port": 8162
+    },
     "recover": {
       "port": 8182
     }
