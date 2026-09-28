@@ -675,6 +675,33 @@ function normalize_path_list(array $paths): array
 }
 
 /**
+ * Estimate the size of db-pull's dump: the SQLite file, or the tables' Data_length summed over
+ * the whole schema. Index_length is left out because the dump holds CREATE TABLE and rows, not
+ * index contents. A multisite network counts every site, since the client picks the site later.
+ *
+ * @param PDO $database Open source connection.
+ * @return int|null
+ */
+function estimate_database_bytes($database, string $engine)
+{
+    try {
+        if ($engine === "sqlite") {
+            $size = defined("FQDB") ? @filesize(FQDB) : false;
+        } else {
+            $size = $database->query(
+                "SELECT SUM(DATA_LENGTH) FROM INFORMATION_SCHEMA.TABLES " .
+                    "WHERE TABLE_SCHEMA = DATABASE()"
+            )->fetchColumn();
+        }
+    } catch (Throwable $e) {
+        // Unknown rather than failing preflight.
+        $size = false;
+    }
+
+    return is_numeric($size) ? (int) $size : null;
+}
+
+/**
  * Walks parent directories upward from each start path to find WordPress installations.
  */
 function detect_wp_roots(array $start_paths): array
@@ -1886,6 +1913,7 @@ function endpoint_preflight(array $config): array
         "server_collation" => null,
         "table_listable" => null,
         "table_list_error" => null,
+        "estimated_bytes" => null,
         "wp" => [
             "wp_config_path" => null,
             "wp_load_path" => null,
@@ -1964,6 +1992,8 @@ function endpoint_preflight(array $config): array
                     // SQLite and older compatible adapters have no MySQL SRS registry.
                     $db["uses_spatial_reference_definitions"] = null;
                 }
+
+                $db["estimated_bytes"] = estimate_database_bytes($mysql, $db_engine);
 
                 $table_prefix = $db["wp"]["table_prefix"];
                 if ($table_prefix === null || $table_prefix === "") {
