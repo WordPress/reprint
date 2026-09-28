@@ -195,15 +195,13 @@ rows are never updated. Pull and push share numeric reads: native floating-point
 values become 17-digit scientific-notation strings before PHP string conversion
 or cursor storage. The formatter always uses a decimal dot, regardless of locale.
 Push reads MySQL SET values as unsigned masks, preserving empty members and all
-64 bits. Direct MySQL output (`db-pull --sql-output=mysql`) requests the same
-format with `set_value_format=unsigned`. Older servers ignore the parameter and
-still send labels.
-
-Portable SQL downloads (`file` and `stdout`), including `pull` and `pull-db`,
-keep SET labels so they remain usable by the unchanged SQLite importer. Even
-when applied to MySQL, those dumps cannot preserve the distinction between an
-empty SET member and no member. Numeric portable dumps and SQLite mask-to-label
-conversion are a separate follow-up. SQLite sources still use their stored text.
+64 bits. New pull clients request the same format with `set_value_format=unsigned`.
+Without that request, the server keeps the label format used by older clients.
+Older servers ignore the parameter and still send labels.
+When pulling into SQLite, the client converts masks back to
+labels using the column definition. SQLite stores labels rather than masks; it
+cannot retain the distinction between an empty member and no member. Exact SET
+mask round-trips require MySQL or MariaDB.
 
 MySQL and MariaDB can store `SET('🙂','ok')` while exporting its definition as
 `SET('?','ok')`. Applying the numeric mask would silently change `🙂` to `?`.

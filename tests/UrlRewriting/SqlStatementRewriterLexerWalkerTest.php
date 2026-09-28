@@ -519,6 +519,19 @@ class SqlStatementRewriterLexerWalkerTest extends TestCase
         return $method->invoke($rewriter, $tokens);
     }
 
+    public function testInsertRowRangesExcludeNestedParenthesesAndDuplicateClause(): void
+    {
+        $rows = ["(1, CONCAT('),(', FROM_BASE64('YQ==')))", "(2, /* ),( */ CONVERT(FROM_BASE64('Yg==') USING utf8mb4))"];
+        $sql = 'INSERT INTO `wp_)posts` (`ID`,`post_content`) VALUES ' . implode(', ', $rows)
+            . ' ON DUPLICATE KEY UPDATE `ID` = `ID`;';
+        $parsed = $this->invokeMapValuesToColumns($sql);
+        $this->assertSame($rows, array_map(
+            static fn($range) => substr($sql, $range[0], $range[1] - $range[0]),
+            $parsed['row_ranges']
+        ));
+        $this->assertCount(4, $parsed['column_map']);
+    }
+
     public function testWalkerEngagesOnCanonicalDumpedInsert(): void
     {
         $sql = sprintf(
