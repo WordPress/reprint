@@ -765,7 +765,6 @@ class BatchCapturingClient extends \ImportClient
 
     protected function fetch_streaming(
         string $url,
-        ?string $cursor,
         StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null

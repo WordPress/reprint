@@ -306,7 +306,6 @@ class FileBodyStreamingTest extends TestCase
             $reflection->getMethod('fetch_streaming')->invoke(
                 $client,
                 'http://' . $address . '/stream',
-                null,
                 $context
             );
         } finally {

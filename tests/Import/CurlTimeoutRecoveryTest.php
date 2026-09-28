@@ -1038,7 +1038,7 @@ PHP);
                     fclose($listener);
                     exit(4);
                 }
-                if (stripos($request, "X-Export-Cursor: {$cursor}\r\n") === false) {
+                if (( $params['cursor'] ?? '' ) !== $cursor) {
                     fclose($connection);
                     fclose($listener);
                     exit(5);
@@ -1116,7 +1116,6 @@ class TimeoutTestClient extends \ImportClient
 
     protected function fetch_streaming(
         string $url,
-        ?string $cursor,
         StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
@@ -1137,7 +1136,6 @@ class InterruptedAfterStreamedPartCloseClient extends \ImportClient
 {
     protected function fetch_streaming(
         string $url,
-        ?string $cursor,
         StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
@@ -1182,7 +1180,6 @@ class SuccessTestClient extends \ImportClient
 
     protected function fetch_streaming(
         string $url,
-        ?string $cursor,
         StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
