@@ -150,10 +150,10 @@ class DataTypesTest extends MySQLDumpProducerTestBase
             ('')
         ");
 
-        $sql = $this->getDumpSQL();
+        $sql = $this->getDumpSQL(['set_value_format' => 'unsigned']);
 
-        // SET values should be base64-encoded
-        $this->assertSQLContains('FROM_BASE64', $sql);
+        // Numeric masks preserve an empty member separately from no members.
+        $this->assertStringNotContainsString('FROM_BASE64', $sql);
 
         // Round-trip test
         $importPdo = $this->executeDumpInNewDatabase($sql);

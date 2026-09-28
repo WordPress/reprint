@@ -784,6 +784,12 @@ function endpoint_sql_chunk(
         "create_table_query" => $config["create_table_query"] ?? true,
     ];
 
+    // SQLite clients execute SET literals as text. Keep labels unless the
+    // client asks for masks, which require MySQL or a label converter.
+    if (array_key_exists("set_value_format", $config)) {
+        $producer_options["set_value_format"] = $config["set_value_format"];
+    }
+
     if (isset($config['_multisite'])) {
         $selection = $config['_multisite'];
         $producer_options['multisite_selection'] = new MultisiteDatabaseSelection(

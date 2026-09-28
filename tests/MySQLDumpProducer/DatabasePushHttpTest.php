@@ -810,6 +810,42 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
     }
 
+    public function testLossySetLabelStopsUploadAndResumeWithoutReplacingLiveTables(): void {
+        $this->pdo->exec("CREATE TABLE wp_options (id INT PRIMARY KEY, value LONGTEXT, flags SET('ok', '🙂')) ENGINE=InnoDB");
+        $this->pdo->exec("INSERT INTO wp_options VALUES (1,REPEAT('x',50000),1), (2,'unsafe',2)");
+        $client = $this->client();
+        $processor = null;
+        try {
+            for ($attempt = 0; $attempt < 2; ++$attempt) {
+                $processor = $this->processor($client);
+                $failure = null;
+                try {
+                    while ($processor->next_step()) {
+                        self::assertSame('in_progress', $processor->get_status()['status']);
+                    }
+                } catch (RuntimeException $error) {
+                    $failure = $error;
+                }
+                self::assertInstanceOf(RuntimeException::class, $failure);
+                self::assertStringContainsString('Cannot export numeric SET values from `wp_options`.`flags`', $failure->getMessage());
+                self::assertSame('failed', $processor->get_status()['phase']);
+                $parameters = ['push_session_id' => $processor->get_status()['push_session_id']];
+                $processor->close();
+                $observed = $client->send_push_request('GET', 'push_db_status', $parameters, ['accepted']);
+                self::assertSame('complete', $observed['status'], json_encode($observed));
+                self::assertSame('importing', $observed['response']['phase']);
+                self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
+                self::assertSame('wp_orders', $this->receiver->query("SHOW TABLES LIKE 'wp_orders'")->fetchColumn());
+                self::assertSame('🙂', $this->pdo->query('SELECT flags FROM wp_options WHERE id=2')->fetchColumn());
+            }
+        } finally {
+            if ($processor !== null) {
+                $processor->close();
+            }
+            $client->close();
+        }
+    }
+
     public function testUniqueValueRewriteFailureKeepsConfirmedRowsAndCanBeDiscarded(): void {
         $this->pdo->exec('CREATE TABLE wp_links (id int PRIMARY KEY, link varchar(255) UNIQUE) ENGINE=InnoDB');
         $this->pdo->exec("INSERT INTO wp_links VALUES (1, 'https://local.test/a'), (2, 'https://production.example.com/a')");

@@ -110,6 +110,15 @@ class DatabaseRowsReader {
     /** @var int */
     private $batch_size;
 
+    /** @var string SET labels by default; unsigned masks only when requested. */
+    private $set_value_format;
+
+    /** @var string|null Character set MySQL uses for table definitions. */
+    private $metadata_character_set = null;
+
+    /** @var string|null Hidden SELECT field naming a SET column whose label cannot be exported. */
+    private $invalid_set_column_alias = null;
+
     /** @var int|null */
     private $query_time_limit_ms = null;
 
@@ -179,6 +188,7 @@ class DatabaseRowsReader {
      *     Reader options.
      *
      *     @type array|null $tables_to_process   Tables to read, or null to discover them.
+     *     @type string     $set_value_format    label (default) or unsigned; SQLite always reads labels.
      *     @type int        $batch_size          Maximum records per query.
      *     @type int|null   $query_time_limit_ms Maximum query duration in milliseconds.
      *     @type int|null   $maximum_inline_spatial_bytes Largest spatial value returned inline.
@@ -190,6 +200,12 @@ class DatabaseRowsReader {
     public function __construct($db, $options = [])
     {
         $this->db = $db;
+        $this->set_value_format = array_key_exists("set_value_format", $options) ? $options["set_value_format"] : "label";
+        if (!in_array($this->set_value_format, ["label", "unsigned"], true)) {
+            throw new \InvalidArgumentException(
+                "set_value_format must be label or unsigned; received " . json_encode($this->set_value_format) . "."
+            );
+        }
         $this->multisite_selection = $options["multisite_selection"] ?? null;
         if ($this->multisite_selection !== null && !$this->multisite_selection instanceof MultisiteDatabaseSelection) {
             throw new \InvalidArgumentException("multisite_selection must be a trusted MultisiteDatabaseSelection object.");
@@ -448,6 +464,8 @@ class DatabaseRowsReader {
             return false;
         }
 
+        $record = $this->check_set_labels($record);
+        $record = $this->preserve_floating_point_values($record);
         $primary_key_values = $record;
         if ($column_expressions !== null) {
             $primary_key_values = [];
@@ -499,9 +517,12 @@ class DatabaseRowsReader {
         foreach ($this->current_pk_columns ?? [] as $index => $column) {
             $identifier = $this->quote_identifier($column);
             $data_type = $this->get_data_type($column);
-            $value = strtoupper($data_type) === 'BIT' ? 'CAST(' . $identifier . ' AS UNSIGNED)'
-                : ( $this->is_numeric_type($data_type) ? $identifier : 'CAST(' . $identifier . ' AS BINARY)' );
+            $value = $this->is_numeric_type($data_type) ? $this->get_numeric_value_expression($column) : 'CAST(' . $identifier . ' AS BINARY)';
             $expressions[] = $value . ' AS ' . $this->quote_identifier($this->get_custom_primary_key_alias($index, $column_expressions));
+        }
+        $set_label_check = $this->get_set_label_check_expression(array_keys($column_expressions));
+        if ($set_label_check !== null) {
+            $expressions[] = $set_label_check;
         }
         return implode(',', $expressions);
     }
@@ -668,11 +689,62 @@ class DatabaseRowsReader {
             );
         }
 
+        $record = $this->check_set_labels($record);
+        $record = $this->preserve_floating_point_values($record);
         $record = $this->check_saved_user_reference($record);
         $record = $this->extract_spatial_value_metadata($record);
 
         $this->current_row = $record;
         $this->current_row_ends_query_batch = false;
+    }
+
+    /**
+     * Stops lossy SET masks before they enter row data or the saved cursor.
+     *
+     * @param array<string,mixed> $record Fetched row, including the private SET check.
+     * @return array<string,mixed> Row without the private check field.
+     */
+    private function check_set_labels(array $record): array
+    {
+        if ($this->invalid_set_column_alias !== null) {
+            $column = $record[$this->invalid_set_column_alias];
+            unset($record[$this->invalid_set_column_alias]);
+            if ($column !== null) {
+                throw new \RuntimeException(
+                    "Cannot export numeric SET values from " . $this->quote_identifier($this->current_table) . "." .
+                    $this->quote_identifier($column) . ": MySQL replaces characters in a source label when exporting its " .
+                    $this->metadata_character_set . " table definition. Export stopped to avoid copying a different value."
+                );
+            }
+        }
+        return $record;
+    }
+
+    /**
+     * Keep values and primary-key cursors independent of PHP's precision settings.
+     *
+     * With precision=3, casting the float 1.2345678901234567 to a string gives
+     * '1.23'. JSON can shorten it too when serialize_precision is low. Convert
+     * native floats to strings with 17 significant digits before either,
+     * including hidden primary-key fields and rows reloaded after resume.
+     * Otherwise the copied value changes, and a rounded resume key can select
+     * the same row again or skip a nearby key. Already-string values stay intact.
+     *
+     * @param array<string,mixed> $record Fetched row, including hidden key fields.
+     * @return array<string,mixed> Row with native floats written as round-trip decimals.
+     */
+    private function preserve_floating_point_values(array $record): array
+    {
+        foreach ($record as $column => $value) {
+            if (is_float($value)) {
+                // One digit before the point plus 16 after it round-trip binary64.
+                // Unlike %g, %e always uses a dot, including on PHP 7.2. Replacing
+                // commas is insufficient: some locales use a multibyte separator,
+                // and %g emits only its first byte (invalid UTF-8).
+                $record[$column] = sprintf('%.16e', $value);
+            }
+        }
+        return $record;
     }
 
     /**
@@ -730,6 +802,7 @@ class DatabaseRowsReader {
      *     @type int         $tables_before_current SQL tables before this table, excluding ID-only reads.
      *     @type int         $tables_total        Number of tables selected for export.
      *     @type array|null  $current_row         Encoded retained record.
+     *     @type string      $set_value_format    unsigned when requested on MySQL; otherwise label.
      *     @type bool        $current_row_ends_query_batch Whether the retained record ends its query batch.
      *     @type array|null  $current_column_names Current column names.
      *     @type string|null $multisite_selection Rule version, base prefix, network ID and site ID; null without selected-site rules.
@@ -748,6 +821,7 @@ class DatabaseRowsReader {
             "table_group" => $this->table_group,
             "last_scanned_usermeta_id" => $this->last_scanned_usermeta_id,
             "current_table" => $this->current_table,
+            "set_value_format" => $this->is_numeric_type("SET") ? "unsigned" : "label",
             "current_pk_columns" => $this->current_pk_columns,
             "last_pk_values" => $this->encode_database_values_for_cursor($this->last_pk_values),
             "current_offset" => $this->current_offset,
@@ -863,6 +937,23 @@ class DatabaseRowsReader {
                 );
             }
             $this->current_column_types = $this->get_column_types($this->current_table);
+            $set_value_format = $this->is_numeric_type("SET") ? "unsigned" : "label";
+            $cursor_set_value_format = $cursor_data["set_value_format"] ?? "label";
+            if ($cursor_set_value_format !== $set_value_format) {
+                foreach ($this->current_column_types as $column => $metadata) {
+                    if (strtoupper($metadata["data_type"]) === "SET" &&
+                        ( isset($this->last_pk_values[$column]) || isset($this->current_row[$column]) )) {
+                        // For SET('2','1'), label '2' means mask 1. Changing
+                        // formats would skip or repeat rows. Old cursors have
+                        // no marker and contain labels, even if they look numeric.
+                        throw new \RuntimeException(
+                            "Cannot resume table " . $this->quote_identifier($this->current_table) .
+                            ": SET value format changed from " . $cursor_set_value_format . " to " . $set_value_format .
+                            ". Abort this database transfer and start again."
+                        );
+                    }
+                }
+            }
             if (empty($this->current_column_types)) {
                 throw new \RuntimeException(
                     "Table " . $this->quote_identifier($this->current_table) . " was dropped between export requests " .
@@ -949,28 +1040,24 @@ class DatabaseRowsReader {
                         " THEN LEFT({$binary_value}, 4) ELSE NULL END AS {$quoted_prefix_alias}";
                     continue;
                 }
-                if (strtoupper($column_info["data_type"]) === "BIT") {
-                    // Drivers may return native BIT results as packed bytes. Ask
-                    // the server for an unsigned number instead, keeping SQL
-                    // values and cursor comparisons numeric without a PHP cast
-                    // that could lose the upper half of BIT(64)'s range.
-                    $select_parts[] = "CAST({$quoted_column} AS UNSIGNED) AS {$quoted_column}";
-                } elseif ($this->db instanceof SqliteDriverPDO && PHP_VERSION_ID < 80100
-                    && !$this->is_numeric_type($column_info["data_type"])) {
+                if ($this->is_numeric_type($column_info["data_type"])) {
+                    $select_parts[] = $this->get_numeric_value_expression($column) . " AS {$quoted_column}";
+                } elseif ($this->db instanceof SqliteDriverPDO && PHP_VERSION_ID < 80100) {
                     // Before PHP 8.1, PDO SQLite returns an empty BLOB as NULL.
                     // For example, CAST(permalink_structure AS BINARY) loses an
                     // empty option value. Return SQL text '' for zero bytes, but
                     // keep real NULLs and non-empty binary bytes unchanged.
                     $select_parts[] = "CASE WHEN LENGTH(CAST({$quoted_column} AS BINARY)) = 0 THEN '' " .
                         "ELSE CAST({$quoted_column} AS BINARY) END AS {$quoted_column}";
-                } elseif (
-                    $this->is_numeric_type($column_info["data_type"]) ||
-                    $this->is_binary_type($column_info["data_type"])
-                ) {
+                } elseif ($this->is_binary_type($column_info["data_type"])) {
                     $select_parts[] = $quoted_column;
                 } else {
                     $select_parts[] = "CAST({$quoted_column} AS BINARY) AS {$quoted_column}";
                 }
+            }
+            $set_label_check = $this->get_set_label_check_expression(array_keys($this->current_column_types));
+            if ($set_label_check !== null) {
+                $select_parts[] = $set_label_check;
             }
             if ($this->multisite_selection !== null) {
                 $reference_check = $this->multisite_selection->get_user_reference_check($this->current_table);
@@ -988,6 +1075,51 @@ class DatabaseRowsReader {
         }
 
         return $query;
+    }
+
+    /**
+     * Checks SET labels in the existing row query, without another table scan.
+     *
+     * MySQL and MariaDB can store SET('🙂','ok') but expose SET('?','ok') in
+     * SHOW CREATE TABLE: definitions use the server's metadata character set,
+     * not character_set_results. Copying mask 1 would then silently store '?'.
+     * Round-trip each selected label through that encoding and return only the
+     * first affected column name. NULL and literal '?' labels remain valid.
+     * This checks selected rows, not unused members of the table definition.
+     *
+     * @param string[] $result_columns Selected column names; also used to avoid alias collisions.
+     * @return string|null Hidden check expression, or null without numeric SET columns.
+     */
+    private function get_set_label_check_expression(array $result_columns): ?string
+    {
+        $this->invalid_set_column_alias = null;
+        if (!$this->is_numeric_type("SET")) {
+            return null;
+        }
+        $checks = [];
+        foreach ($result_columns as $column) {
+            if (!isset($this->current_column_types[$column]) || strtoupper($this->get_data_type($column)) !== "SET") {
+                continue;
+            }
+            if ($this->metadata_character_set === null) {
+                $this->metadata_character_set = $this->db->query("SELECT @@character_set_system")->fetchColumn();
+            }
+            $identifier = $this->quote_identifier($column);
+            $metadata_character_set = $this->quote_identifier($this->metadata_character_set);
+            $label = "CONVERT({$identifier} USING utf8mb4)";
+            $round_tripped_label = "CONVERT(CONVERT({$identifier} USING {$metadata_character_set}) USING utf8mb4)";
+            $checks[] = "WHEN BINARY {$label} <> BINARY {$round_tripped_label} THEN X'" . bin2hex($column) . "'";
+        }
+        if ($checks === []) {
+            return null;
+        }
+        $alias = "__reprint_invalid_set_column";
+        $lowercase_columns = array_map("strtolower", $result_columns);
+        while (in_array(strtolower($alias), $lowercase_columns, true)) {
+            $alias = "_" . $alias;
+        }
+        $this->invalid_set_column_alias = $alias;
+        return "CASE " . implode(" ", $checks) . " END AS " . $this->quote_identifier($alias);
     }
 
     /** Returns an internal SELECT alias which cannot collide with a real column. */
@@ -1188,14 +1320,17 @@ class DatabaseRowsReader {
      * database can use a primary-key range scan. FROM_BASE64() and UNHEX() have higher
      * coercibility than the column, so MySQL applies the column's character set
      * and collation without reading cursor bytes through the connection
-     * character set. ENUM and SET use a binary cast because their index
-     * positions and fetched string values differ.
+     * character set. ENUM uses a binary cast because its index position and
+     * fetched label differ. MySQL SET compares and sorts the exported mask.
      */
     private function build_primary_key_column_expression($column)
     {
         $qualified_column = $this->quote_identifier($this->current_table) . "." .
             $this->quote_identifier($column);
         $data_type = strtoupper($this->get_data_type($column));
+        if ($data_type === "SET" && $this->is_numeric_type($data_type)) {
+            return "CAST({$qualified_column} AS UNSIGNED)";
+        }
         if ($this->is_numeric_type($data_type) || $this->is_binary_type($data_type)) {
             return $qualified_column;
         }
@@ -1380,10 +1515,48 @@ class DatabaseRowsReader {
         return $columns;
     }
 
+    /**
+     * Returns the SELECT expression used by pull and push to read numeric values.
+     *
+     * MySQL SET('','a') displays both mask 0 and mask 1 as ''. Reading the
+     * unsigned mask when requested keeps them distinct, including when the
+     * column is a primary key. SQLite has only the label, so its SET columns
+     * remain text.
+     *
+     * FLOAT needs promotion on the database side, before the driver's text
+     * protocol can round it. Adding 0e0 requests a DOUBLE result without adding
+     * precision to the stored value. preserve_floating_point_values() then
+     * prevents a second loss of digits when PHP converts a native float.
+     *
+     * Other types return their quoted identifier unchanged. Callers may pass
+     * every column; this method does not turn text or spatial values into numbers.
+     */
+    public function get_numeric_value_expression(string $column): string
+    {
+        $identifier = $this->quote_identifier($column);
+        $data_type = strtoupper($this->get_data_type($column));
+        if ($data_type === "BIT" || ( $data_type === "SET" && $this->is_numeric_type($data_type) )) {
+            // Packed BIT bytes vary by driver. SET labels cannot distinguish
+            // mask 0 from an empty-string member. Never cast either to PHP int:
+            // both types can use the full unsigned 64-bit range.
+            return "CAST({$identifier} AS UNSIGNED)";
+        }
+        if (in_array($data_type, ["FLOAT", "DOUBLE", "REAL"], true)) {
+            // Promote FLOAT before transport: the text protocol can otherwise
+            // return only six significant digits of its stored binary value.
+            return "({$identifier} + 0e0)";
+        }
+        return $identifier;
+    }
+
     /** Identifies numeric types which the dump emits as bare literals. */
     public function is_numeric_type($data_type)
     {
         $data_type = strtoupper($data_type);
+        if ($data_type === "SET") {
+            // Both SQLite adapters store labels, without a MySQL SET bitmask.
+            return $this->set_value_format === "unsigned" && !$this->db instanceof SqliteDriverPDO && !$this->db instanceof \WP_PDO_MySQL_On_SQLite;
+        }
         foreach (["TINYINT", "SMALLINT", "MEDIUMINT", "INTEGER", "INT", "BIGINT", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "BIT", "YEAR"] as $type) {
             if (strpos($data_type, $type) === 0) {
                 return true;

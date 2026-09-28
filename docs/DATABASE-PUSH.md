@@ -191,7 +191,40 @@ PHP lengths and structured WordPress content. Binary columns are copied unchange
 ENUM index zero is distinct from a declared empty label or the label `0`.
 Restoring that legacy value accepts only the server warnings naming its columns;
 other warnings roll the row back. Rewriting a primary key is rejected. Source
-rows are never updated. MySQL source connections use UTC so TIMESTAMP values
+rows are never updated. Pull and push share numeric reads: native floating-point
+values become 17-digit scientific-notation strings before PHP string conversion
+or cursor storage. The formatter always uses a decimal dot, regardless of locale.
+Push reads MySQL SET values as unsigned masks, preserving empty members and all
+64 bits. Direct MySQL output (`db-pull --sql-output=mysql`) requests the same
+format with `set_value_format=unsigned`. Older servers ignore the parameter and
+still send labels.
+
+Portable SQL downloads (`file` and `stdout`), including `pull` and `pull-db`,
+keep SET labels so they remain usable by the unchanged SQLite importer. Even
+when applied to MySQL, those dumps cannot preserve the distinction between an
+empty SET member and no member. Numeric portable dumps and SQLite mask-to-label
+conversion are a separate follow-up. SQLite sources still use their stored text.
+
+MySQL and MariaDB can store `SET('🙂','ok')` while exporting its definition as
+`SET('?','ok')`. Applying the numeric mask would silently change `🙂` to `?`.
+Numeric SET exports now stop when a selected row's label cannot survive the
+server's table-definition encoding. The check runs in the existing row query,
+before returning that row or advancing its cursor; it does not scan the table
+again. Push cannot reach review or replace live tables after this rejection.
+This checks selected values, not unused SET members, and does not repair lossy
+schema metadata. Legacy label-format exports remain unchanged.
+
+A saved cursor containing SET values cannot resume in a different format; abort
+that transfer and start again after upgrading. Old clients can still resume
+their label-format cursors after a server upgrade.
+
+Spatial type detection is shared, but the formats remain different. Push uses
+the source engine's WKB conversion plus SRID; pull retains its raw spatial bytes,
+large-value streaming, and cross-engine axis-order guard. Sharing the spatial
+format would require changing the SQL dump and importer together, not just
+moving the push expression into a helper.
+
+MySQL source connections use UTC so TIMESTAMP values
 keep their meaning on the target. SQLite sources are opened read-only, using the
 integration's stored MySQL schema. Plain SQLite databases and integration
 metadata requiring an upgrade are not supported.

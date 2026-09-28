@@ -243,6 +243,33 @@ final class RequestUrlPathEncodingTest extends TestCase
         ], $request['params']);
     }
 
+    /** @dataProvider sql_output_modes */
+    public function testSetFormatMatchesSqlOutputMode(string $mode, ?string $cursor): void
+    {
+        $client = new \ImportClient('https://example.com/', $this->root . '/state', $this->root . '/files');
+        (new \ReflectionProperty($client, 'sql_output_mode'))->setValue($client, $mode);
+        $build_request = new \ReflectionMethod($client, 'build_request');
+        $request = $build_request->invoke($client, 'sql_chunk', $cursor);
+        // Files and stdout can later be imported into SQLite. Only direct
+        // MySQL output can request masks without a SQLite label converter.
+        $this->assertSame($mode === 'mysql' ? 'unsigned' : null, $request['params']['set_value_format'] ?? null);
+        $request = $build_request->invoke($client, 'preflight', null);
+        $this->assertArrayNotHasKey('set_value_format', $request['params']);
+    }
+
+    /** Initial and resumed requests must choose the same SET representation. */
+    public static function sql_output_modes(): array
+    {
+        return [
+            'file' => ['file', null],
+            'stdout' => ['stdout', null],
+            'mysql' => ['mysql', null],
+            'resumed file' => ['file', 'saved-cursor'],
+            'resumed stdout' => ['stdout', 'saved-cursor'],
+            'resumed mysql' => ['mysql', 'saved-cursor'],
+        ];
+    }
+
     private function remove_tree(string $path): void
     {
         if (is_file($path) || is_link($path)) {

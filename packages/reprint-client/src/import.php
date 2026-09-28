@@ -12266,6 +12266,12 @@ class ImportClient
         // Keep the source export protocol value accepted by existing servers.
         // It selects one source site; the target boots as single-site WordPress.
         $params["multisite_mode"] = "one-site-network-v1";
+        if ($endpoint === "sql_chunk" && $this->sql_output_mode === "mysql") {
+            // Portable dumps may later go into SQLite, which stores SET labels.
+            // Only direct MySQL output can import masks without a label converter.
+            // Older servers ignore this parameter and continue sending labels.
+            $params["set_value_format"] = "unsigned";
+        }
         if ($cursor !== null) {
             // Include the cursor in the body when hosts strip custom headers.
             $params["cursor"] = $cursor;
