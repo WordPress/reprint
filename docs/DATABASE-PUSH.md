@@ -101,9 +101,9 @@ validator. Enable this route only for trusted deployment clients, not as a
 restricted SQL API for untrusted callers.
 
 The keys file returns a list of one-line public keys, as printed by
-`reprint keygen`. On a host where PHP lacks `openssl_verify()`, the plugin
-accepts a connection token instead: define `CONNECTION_TOKEN_FILE` as a file
-returning the shared secret as a PHP string. Either file is host-level
+`reprint keygen`. The plugin also accepts a connection token, which is the
+only option on a host where PHP lacks `openssl_verify()`: define
+`CONNECTION_TOKEN_FILE` as a file returning the shared secret as a PHP string. Either file is host-level
 permission for destructive pushes, not a setting to expose to visitors.
 Requests still require the existing signed push authentication and HTTPS.
 `database_push` defaults to disabled. Setting it on a normal WordPress route
