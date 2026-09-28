@@ -393,7 +393,7 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-server",
-                "reference": "5a50dbfd84c6d39fcddfd8bff37cc69f9bddbeca"
+                "reference": "e42de18011ee216009c1d10a3c1449b2ac9faa03"
             },
             "require": {
                 "php": ">=7.2"
@@ -402,6 +402,7 @@
                 "wp-php-toolkit/reprint-exporter": "self.version"
             },
             "suggest": {
+                "ext-openssl": "Needed to verify public-key signatures; hosts without it accept HMAC connection tokens only.",
                 "ext-pdo": "Needed for the SQLite export path; recommended for MySQL exports (the wpdb fallback handles MySQL when absent).",
                 "ext-pdo_mysql": "Recommended for MySQL exports; falls back to wpdb when absent."
             },
