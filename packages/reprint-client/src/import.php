@@ -178,6 +178,8 @@ class ImportClient
         "files-stats",
         "db-pull",
         "db-push",
+        "db-baseline",
+        "db-diff",
         "db-index",
         "db-apply",
         "db-rewrite-urls",
@@ -564,9 +566,10 @@ class ImportClient
             } elseif ($signal_handling_command === 'db-rewrite-urls') {
                 pcntl_signal(SIGINT, [$this, 'handle_database_url_rewrite_shutdown']);
                 pcntl_signal(SIGTERM, [$this, 'handle_database_url_rewrite_shutdown']);
-            } elseif (!in_array($signal_handling_command, ['files-diff', 'post-process', 'db-push'], true)) {
-                // files-diff, post-process, and db-push must not save the pull command's
-                // state from a shutdown handler; default signal behavior ends them.
+            } elseif (!in_array($signal_handling_command, ['files-diff', 'post-process', 'db-push', 'db-baseline', 'db-diff'], true)) {
+                // Local inspection, post-processing, and push commands must not save
+                // the pull command's state from a shutdown handler; default
+                // signal behavior ends them.
                 pcntl_signal(SIGINT, [$this, "handle_shutdown"]);
                 pcntl_signal(SIGTERM, [$this, "handle_shutdown"]);
             }
@@ -1051,6 +1054,11 @@ class ImportClient
             }
             $this->state = $this->load_state();
             $this->run_files_diff($options);
+            return;
+        }
+        if (in_array($command, ['db-baseline', 'db-diff'], true)) {
+            $this->state = $this->load_state();
+            $this->run_local_database_baseline($command, $options);
             return;
         }
         if ($command === "db-push") {
@@ -6535,6 +6543,47 @@ class ImportClient
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors are never HTML.
+    /**
+     * @param string $command db-baseline captures; db-diff compares without accepting edits.
+     * @param array $options {
+     *     Local database selection.
+     *     @type string $source_dsn Explicit mysql: DSN, otherwise the recorded db-apply target.
+     *     @type string $source_user Local MySQL username.
+     *     @type string $source_pass Local MySQL password.
+     *     @type list<string> $baseline_tables Exact table names for initial capture only.
+     * }
+     */
+    private function run_local_database_baseline(string $command, array $options): void {
+        require_once __DIR__ . '/lib/class-local-database-baseline.php';
+        $dsn = $options['source_dsn'] ?? '';
+        $user = $options['source_user'] ?? '';
+        $password = $options['source_pass'] ?? '';
+        if (!isset($options['source_dsn'])) {
+            $target = $this->get_local_site_database_target();
+            if ($target['engine'] !== 'mysql') {
+                throw new InvalidArgumentException($command . ' requires a recorded local MySQL database or --source-dsn=mysql:...');
+            }
+            $dsn = 'mysql:host=' . $target['host'] . ';port=' . $target['port'] . ';dbname=' . $target['db'] . ';charset=utf8mb4';
+            $user = $options['source_user'] ?? $target['user'];
+            $password = $options['source_pass'] ?? $target['pass'];
+        }
+        if (strpos($dsn, 'mysql:') !== 0) {
+            throw new InvalidArgumentException($command . ' currently supports only a mysql: source DSN.');
+        }
+        $database = \WordPress\Reprint\Server\Utils::connect_mysql($dsn, $user, $password);
+        $baseline = new LocalDatabaseBaseline($database, dirname($this->pull_state_directory) . '/database-baseline', hash('sha256', $dsn));
+        if ($command === 'db-baseline') {
+            $baseline->capture($options['baseline_tables'] ?? []);
+            return;
+        }
+        foreach ($baseline->changes() as $change) {
+            $line = json_encode($change, JSON_THROW_ON_ERROR) . "\n";
+            if (fwrite(STDOUT, $line) !== strlen($line)) {
+                throw new RuntimeException('Cannot write a complete local database diff record.');
+            }
+        }
+    }
+
     /**
      * Stages a complete local database, or explicitly commits/cleans a staged push.
      *
@@ -14504,21 +14553,30 @@ if (
             'type' => 'value',
             'target' => 'source_dsn',
             'help' => 'Local mysql: or mysql-on-sqlite: DSN (otherwise uses the recorded db-apply target)',
-            'commands' => ['db-push'],
+            'commands' => ['db-push', 'db-baseline', 'db-diff'],
         ],
         [
             'name' => 'source-user',
             'type' => 'value',
             'target' => 'source_user',
             'help' => 'Local MySQL username',
-            'commands' => ['db-push'],
+            'commands' => ['db-push', 'db-baseline', 'db-diff'],
         ],
         [
             'name' => 'source-pass',
             'type' => 'value',
             'target' => 'source_pass',
             'help' => 'Local MySQL password',
-            'commands' => ['db-push'],
+            'commands' => ['db-push', 'db-baseline', 'db-diff'],
+        ],
+        [
+            'name' => 'table',
+            'type' => 'value-or-next',
+            'target' => 'baseline_tables',
+            'placeholder' => 'TABLE',
+            'repeatable' => true,
+            'help' => 'Capture this exact local table; repeat for several (required)',
+            'commands' => ['db-baseline'],
         ],
         [
             'name' => 'table-prefix',
@@ -14953,6 +15011,12 @@ if (
                 && $def['name'] !== 'state-dir'
                 && !in_array('db-push', $def['commands'] ?? [], true)) {
                 fwrite(STDERR, "Error: db-push does not accept --{$def['name']}. Full overwrite includes every site table.\n");
+                exit(1);
+            }
+            if ($matched && in_array($argv[1] ?? '', ['db-baseline', 'db-diff'], true)
+                && $def['name'] !== 'state-dir'
+                && !in_array($argv[1], $def['commands'] ?? [], true)) {
+                fwrite(STDERR, "Error: {$argv[1]} does not accept --{$def['name']}.\n");
                 exit(1);
             }
             if (!$matched) {
@@ -15528,6 +15592,35 @@ if (
                 "Requires a prior files-index or files-pull run.\n",
             "extra" => null,
         ],
+        "db-baseline" => [
+            "level" => "low",
+            "short" => "Save selected local MySQL rows before editing",
+            "usage" => "reprint db-baseline <remote-reprint-api-url> --state-dir=DIR --table=NAME [--table=NAME] [--source-dsn=mysql:...]",
+            "description" =>
+                "Save a local baseline after pull and local URL rewriting finish.\n" .
+                "Select exact tables with --table, including non-prefixed plugin tables.\n" .
+                "Every selected table must have a primary key. Existing baselines\n" .
+                "are never replaced. Uses the recorded MySQL db-apply target unless\n" .
+                "--source-dsn is supplied. No network requests or production writes.\n",
+            "extra" =>
+                "Holds local table read locks during capture; local writes wait.\n" .
+                "Requires SELECT and LOCK TABLES privileges. Interrupted scans restart.\n" .
+                "Keep state-dir private and outside the web root: it contains full rows.\n",
+        ],
+        "db-diff" => [
+            "level" => "low",
+            "short" => "Show local MySQL row and column changes since db-baseline",
+            "usage" => "reprint db-diff <remote-reprint-api-url> --state-dir=DIR [--source-dsn=mysql:...]",
+            "description" =>
+                "Scan the baseline's selected tables and emit JSONL inserts, updates,\n" .
+                "and deletes. Updates contain only changed columns; values are base64\n" .
+                "text or null. The baseline never advances. This is a local diff, not\n" .
+                "a production conflict check or an executable push plan.\n",
+            "extra" =>
+                "Holds local table read locks during the scan. Every run starts over.\n" .
+                "Rejects missing tables and changed column layouts or primary keys.\n" .
+                "No network requests are made, and no secret is required.\n",
+        ],
         "db-push" => [
             "level" => "low",
             "short" => "Stage a full database overwrite for explicit confirmation",
@@ -15938,7 +16031,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "db-push"], true)) {
+    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "db-push", "db-baseline", "db-diff"], true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
