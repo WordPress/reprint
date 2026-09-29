@@ -779,12 +779,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\remove_public_key($second['key_id']));
         $this->assertSame('unknown', \WordPress\Reprint\Server\Plugin\remove_public_key($second['key_id']));
         $this->assertCount(1, get_enrolled_public_keys());
-        // The test runtime has OpenSSL, so the last key cannot be removed.
-        $this->assertSame('last_key', \WordPress\Reprint\Server\Plugin\remove_public_key($first['key_id']));
-        $this->assertCount(1, get_enrolled_public_keys());
-
-        // On an HMAC-only host the keys are inert, so removing the last one is fine.
-        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        // A key host may lose its last key: revoking a leaked key must not wait for another enrollment.
         $this->assertSame('saved', \WordPress\Reprint\Server\Plugin\remove_public_key($first['key_id']));
         $this->assertSame([], get_enrolled_public_keys());
     }

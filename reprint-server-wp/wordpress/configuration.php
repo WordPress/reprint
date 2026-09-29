@@ -157,10 +157,9 @@ function enroll_public_key(string $pasted_key): string {
 }
 
 /**
- * Removes one enrolled key. Refuses the last key on a host that requires
- * key auth, since that would lock every client out.
+ * Removes one enrolled key.
  *
- * @return string saved, unknown, last_key, file_override, storage_failure, or
+ * @return string saved, unknown, file_override, storage_failure, or
  *                runtime_missing when the server runtime cannot be loaded.
  */
 function remove_public_key(string $key_id): string {
@@ -184,9 +183,6 @@ function remove_public_key(string $key_id): string {
     }
     if (!$found) {
         return 'unknown';
-    }
-    if ($remaining === [] && \WordPress\Reprint\Server\Utils::key_auth_required()) {
-        return 'last_key';
     }
     return update_option_public_keys($remaining) ? 'saved' : 'storage_failure';
 }
