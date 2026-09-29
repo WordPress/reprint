@@ -47,18 +47,14 @@ final class PublicKeyServerTest extends TestCase
         $_SERVER = $this->original_server;
         $_GET = $this->original_get;
         $_FILES = $this->original_files;
+        Utils::override_key_auth_required_for_tests(null);
 
         parent::tearDown();
     }
 
-    private function server(?bool $key_auth_required = true): PublicKeyServer
+    private function server(): PublicKeyServer
     {
-        return new PublicKeyServer(
-            [self::$client->get_key_id() => self::$public_key],
-            300,
-            'HTTP_X_EXPORT_CURSOR',
-            $key_auth_required
-        );
+        return new PublicKeyServer([self::$client->get_key_id() => self::$public_key]);
     }
 
     private function now(array $headers): float
@@ -80,7 +76,8 @@ final class PublicKeyServerTest extends TestCase
     public function testRefusesWhenHostIsHmacOnly(): void
     {
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $server = $this->server(false);
+        Utils::override_key_auth_required_for_tests(false);
+        $server = $this->server();
 
         $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
@@ -88,7 +85,8 @@ final class PublicKeyServerTest extends TestCase
 
     public function testHostRuleRunsBeforeAnyHeaderIsRead(): void
     {
-        $server = $this->server(false);
+        Utils::override_key_auth_required_for_tests(false);
+        $server = $this->server();
 
         $error = $server->verify([], 'GET', '/?reprint-api', '', [], null, false, microtime(true));
 
@@ -96,27 +94,23 @@ final class PublicKeyServerTest extends TestCase
         $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
     }
 
-    public function testNullSeamFollowsTheUtilsRule(): void
+    public function testFollowsTheUtilsHostRule(): void
     {
-        // The test runtime has OpenSSL, so a null seam verifies.
+        // The test runtime has OpenSSL, so the host rule accepts keys.
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $this->assertNull($this->server(null)->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNull($this->server()->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
 
-        // And follows the Utils override, which is how the plugin tests reach the other branch.
+        // The rule is read on every call, not when the server is built.
+        $server = $this->server();
         Utils::override_key_auth_required_for_tests(false);
-        try {
-            $server = $this->server(null);
-            $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
-            $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
-        } finally {
-            Utils::override_key_auth_required_for_tests(null);
-        }
+        $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
     }
 
     public function testUnknownKeyIdIsRejectedBeforeSignatureCheck(): void
     {
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $server = new PublicKeyServer(['0000000000000000' => self::$public_key], 300, 'HTTP_X_EXPORT_CURSOR', true);
+        $server = new PublicKeyServer(['0000000000000000' => self::$public_key]);
 
         $this->assertSame('Key ' . self::$client->get_key_id() . ' is not enrolled on this site', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_UNKNOWN_KEY, $server->last_error_reason());
@@ -142,6 +136,91 @@ final class PublicKeyServerTest extends TestCase
         ];
     }
 
+    /** @dataProvider freshnessFieldProvider */
+    public function testChangingASignedFreshnessFieldBreaksTheSignature(string $header_name): void
+    {
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $now = $this->now($headers);
+        $headers[$header_name] = $header_name === 'X-Auth-Nonce'
+            ? str_repeat('0', 32)
+            : sprintf('%.6f', (float) $headers['X-Auth-Timestamp'] + 1.0);
+        $server = $this->server();
+
+        $this->assertSame('Signature verification failed', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $now));
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+    }
+
+    public static function freshnessFieldProvider(): array
+    {
+        return [
+            'nonce' => ['X-Auth-Nonce'],
+            'timestamp' => ['X-Auth-Timestamp'],
+        ];
+    }
+
+    /** @dataProvider requiredHeaderProvider */
+    public function testEachMissingHeaderIsNamed(string $header_name): void
+    {
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $now = $this->now($headers);
+        unset($headers[$header_name]);
+        $server = $this->server();
+
+        $this->assertSame('Missing ' . $header_name . ' header', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $now));
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+    }
+
+    public static function requiredHeaderProvider(): array
+    {
+        return [
+            'key id' => ['X-Auth-Key-Id'],
+            'signature' => ['X-Auth-Signature'],
+            'nonce' => ['X-Auth-Nonce'],
+            'timestamp' => ['X-Auth-Timestamp'],
+            'content hash' => ['X-Auth-Content-Hash'],
+        ];
+    }
+
+    public function testFutureTimestampIsRejected(): void
+    {
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $server = $this->server();
+
+        $this->assertStringContainsString('expired', (string) $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, (float) $headers['X-Auth-Timestamp'] - 301.0));
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+    }
+
+    public function testNonNumericTimestampIsRejected(): void
+    {
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $now = $this->now($headers);
+        $headers['X-Auth-Timestamp'] = 'yesterday';
+        $server = $this->server();
+
+        $this->assertSame('Invalid timestamp format', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $now));
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+    }
+
+    /** @dataProvider malformedSignatureProvider */
+    public function testMalformedSignatureIsRejected(string $signature, string $expected_error): void
+    {
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $headers['X-Auth-Signature'] = $signature;
+        $server = $this->server();
+
+        $this->assertSame($expected_error, $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertNull($server->authenticated_key_id());
+    }
+
+    public static function malformedSignatureProvider(): array
+    {
+        return [
+            'not base64' => ['!!not base64!!', 'Malformed signature'],
+            'truncated' => [base64_encode('short'), 'Signature verification failed'],
+        ];
+    }
+
     public function testStaleTimestampIsRejected(): void
     {
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
@@ -151,13 +230,52 @@ final class PublicKeyServerTest extends TestCase
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
-    public function testShortNonceIsRejected(): void
+    /** @dataProvider invalidNonceProvider */
+    public function testInvalidNonceIsRejected(string $nonce): void
     {
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $headers['X-Auth-Nonce'] = 'abc';
+        $headers['X-Auth-Nonce'] = $nonce;
         $server = $this->server();
 
-        $this->assertSame('Nonce must be at least 16 characters', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame('Nonce must be at least 16 hexadecimal characters', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+    }
+
+    public static function invalidNonceProvider(): array
+    {
+        return [
+            'short' => ['abc'],
+            'not hex' => [str_repeat('z', 32)],
+            'trailing newline' => [str_repeat('a', 32) . "\n"],
+        ];
+    }
+
+    /**
+     * Keys are validated at enrollment, but verify() must not trust a key
+     * that reached the map another way.
+     *
+     * @dataProvider weakStoredKeyProvider
+     */
+    public function testStoredKeyMustBeRsaOfAtLeast2048Bits(array $keypair_options): void
+    {
+        $weak_key = openssl_pkey_new($keypair_options);
+        $weak_public_key = Utils::normalize_public_key(openssl_pkey_get_details($weak_key)['key']);
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $server = new PublicKeyServer([self::$client->get_key_id() => $weak_public_key]);
+
+        $this->assertSame(
+            'Stored public key ' . self::$client->get_key_id() . ' is not an RSA key of at least 2048 bits',
+            $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers))
+        );
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+    }
+
+    public static function weakStoredKeyProvider(): array
+    {
+        return [
+            '1024-bit RSA' => [['private_key_bits' => 1024, 'private_key_type' => OPENSSL_KEYTYPE_RSA]],
+            'EC' => [['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']],
+        ];
     }
 
     public function testWrongKeyIsRejected(): void
@@ -166,7 +284,7 @@ final class PublicKeyServerTest extends TestCase
         $other_client = new PublicKeyClient($other_private);
         $headers = $other_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         // Enroll the other client's id but with OUR public key, so the id is known and the signature is wrong.
-        $server = new PublicKeyServer([$other_client->get_key_id() => self::$public_key], 300, 'HTTP_X_EXPORT_CURSOR', true);
+        $server = new PublicKeyServer([$other_client->get_key_id() => self::$public_key]);
 
         $this->assertSame('Signature verification failed', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
     }
@@ -289,6 +407,32 @@ final class PublicKeyServerTest extends TestCase
     {
         $this->assertSame(self::$public_key, PublicKeyServer::assert_valid_public_key(self::$public_key));
         $this->assertSame(self::$public_key, PublicKeyServer::assert_valid_public_key(Utils::public_key_to_pem(self::$public_key)));
+    }
+
+    /**
+     * Trailing bytes after the DER structure still parse, so the stored key
+     * must be OpenSSL's encoding or its id would differ from the client's.
+     */
+    public function testAssertValidPublicKeyReturnsTheCanonicalEncoding(): void
+    {
+        $padded_public_key = base64_encode(base64_decode(self::$public_key, true) . "\0\0\0");
+
+        $this->assertSame(self::$public_key, PublicKeyServer::assert_valid_public_key($padded_public_key));
+    }
+
+    /** Only keys printed by reprint keygen are supported; a PKCS#1 key gets a pointer there. */
+    public function testAssertValidPublicKeyRejectsAPkcs1Key(): void
+    {
+        // A 2048-bit SubjectPublicKeyInfo is a fixed 24-byte prefix followed by the PKCS#1 RSAPublicKey.
+        $subject_public_key_info = base64_decode(self::$public_key, true);
+        $this->assertSame('30820122300d06092a864886f70d0101010500038201', bin2hex(substr($subject_public_key_info, 0, 22)));
+        $pkcs1_pem = "-----BEGIN RSA PUBLIC KEY-----\n"
+            . chunk_split(base64_encode(substr($subject_public_key_info, 24)), 64, "\n")
+            . "-----END RSA PUBLIC KEY-----\n";
+
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('That is a PKCS#1 RSA public key. Paste the public key printed by "reprint keygen" instead.');
+        PublicKeyServer::assert_valid_public_key($pkcs1_pem);
     }
 
     /** @dataProvider invalidPublicKeyProvider */

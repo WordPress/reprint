@@ -32,9 +32,6 @@ final class PublicKeyServer {
     /** @var string */
     private $cursor_header_name;
 
-    /** @var bool */
-    private $key_auth_required;
-
     /** @var string|null */
     private $last_error_reason = null;
 
@@ -45,18 +42,15 @@ final class PublicKeyServer {
      * @param array<string,string> $public_keys_by_id   key id => one-line public key.
      * @param int                  $timestamp_tolerance Seconds either side of now.
      * @param string               $cursor_header_name  $_SERVER key carrying the cursor.
-     * @param bool|null            $key_auth_required   Test seam; null means Utils::key_auth_required().
      */
     public function __construct(
         array $public_keys_by_id,
         int $timestamp_tolerance = 300,
-        string $cursor_header_name = 'HTTP_X_EXPORT_CURSOR',
-        ?bool $key_auth_required = null
+        string $cursor_header_name = 'HTTP_X_EXPORT_CURSOR'
     ) {
         $this->public_keys_by_id = $public_keys_by_id;
         $this->timestamp_tolerance = $timestamp_tolerance;
         $this->cursor_header_name = $cursor_header_name;
-        $this->key_auth_required = $key_auth_required === null ? Utils::key_auth_required() : $key_auth_required;
     }
 
     /**
@@ -86,11 +80,11 @@ final class PublicKeyServer {
         $this->last_error_reason = null;
         $this->authenticated_key_id = null;
 
-        if (!$this->key_auth_required) {
+        if (!Utils::key_auth_required()) {
             return $this->fail(self::REASON_REQUIRES_TOKEN_AUTH, 'This host accepts connection-token authentication only');
         }
         if (!function_exists('openssl_verify')) {
-            // Unreachable when the rule is honest, kept so a wrong seam fails closed.
+            // Unreachable unless a test overrides the host rule; fails closed.
             return $this->fail(self::REASON_REQUIRES_TOKEN_AUTH, 'This host cannot verify key signatures');
         }
 
@@ -122,8 +116,8 @@ final class PublicKeyServer {
                 sprintf('Request timestamp expired. Difference: %.2f seconds, max allowed: %d seconds', $time_difference, $this->timestamp_tolerance)
             );
         }
-        if (strlen($nonce) < 16) {
-            return $this->fail(self::REASON_AUTH_FAILED, 'Nonce must be at least 16 characters');
+        if (!preg_match('/^[0-9a-fA-F]{16,}\z/', $nonce)) {
+            return $this->fail(self::REASON_AUTH_FAILED, 'Nonce must be at least 16 hexadecimal characters');
         }
 
         if (!isset($this->public_keys_by_id[$key_id])) {
@@ -155,12 +149,22 @@ final class PublicKeyServer {
         }
         $public_key = @openssl_pkey_get_public(Utils::public_key_to_pem($this->public_keys_by_id[$key_id]));
         if ($public_key === false) {
-            self::drain_openssl_error_queue();
+            Utils::drain_openssl_error_queue();
             return $this->fail(self::REASON_AUTH_FAILED, 'Stored public key ' . $key_id . ' could not be parsed');
+        }
+        // Callers are expected to store keys through assert_valid_public_key(),
+        // but a key that reached the map another way must still meet its rules.
+        $public_key_details = openssl_pkey_get_details($public_key);
+        if (
+            !is_array($public_key_details)
+            || ( $public_key_details['type'] ?? null ) !== OPENSSL_KEYTYPE_RSA
+            || ( $public_key_details['bits'] ?? 0 ) < 2048
+        ) {
+            return $this->fail(self::REASON_AUTH_FAILED, 'Stored public key ' . $key_id . ' is not an RSA key of at least 2048 bits');
         }
         $message = PublicKeyClient::build_message($key_id, $nonce, $timestamp, $content_hash, $method, $request_target, $cursor);
         $result = openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256);
-        self::drain_openssl_error_queue();
+        Utils::drain_openssl_error_queue();
         if ($result !== 1) {
             return $this->fail(self::REASON_AUTH_FAILED, 'Signature verification failed');
         }
@@ -222,11 +226,18 @@ final class PublicKeyServer {
     /**
      * Validates a key at enrollment and returns its one-line form.
      *
+     * The result is the SubjectPublicKeyInfo encoding OpenSSL produces, not
+     * the pasted bytes, so its fingerprint matches the key id the client
+     * computes from its private key.
+     *
      * @throws InvalidArgumentException With a message naming what was wrong.
      */
     public static function assert_valid_public_key(string $pem_or_one_line): string {
         if (strpos($pem_or_one_line, 'PRIVATE KEY') !== false) {
             throw new InvalidArgumentException('That is a private key. Paste the public key instead.');
+        }
+        if (strpos($pem_or_one_line, 'BEGIN RSA PUBLIC KEY') !== false) {
+            throw new InvalidArgumentException('That is a PKCS#1 RSA public key. Paste the public key printed by "reprint keygen" instead.');
         }
         $one_line = Utils::normalize_public_key($pem_or_one_line);
         if (!function_exists('openssl_pkey_get_public')) {
@@ -234,6 +245,7 @@ final class PublicKeyServer {
         }
         $public_key = @openssl_pkey_get_public(Utils::public_key_to_pem($one_line));
         if ($public_key === false) {
+            Utils::drain_openssl_error_queue();
             throw new InvalidArgumentException('Not a parseable public key.');
         }
         $details = openssl_pkey_get_details($public_key);
@@ -243,22 +255,13 @@ final class PublicKeyServer {
         if (( $details['bits'] ?? 0 ) < 2048) {
             throw new InvalidArgumentException('RSA key must be at least 2048 bits; got ' . (int) $details['bits'] . '.');
         }
-        return $one_line;
+        $canonical_public_key_pem = (string) $details['key'];
+        return Utils::normalize_public_key($canonical_public_key_pem);
     }
 
     private function fail(string $reason, string $message): string {
         $this->last_error_reason = $reason;
         return $message;
-    }
-
-    /**
-     * Empties the OpenSSL error queue so a later, unrelated call does not
-     * report an error left behind by this one.
-     */
-    private static function drain_openssl_error_queue(): void {
-        // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedWhile -- Draining the queue is the entire purpose of this loop.
-        while (openssl_error_string() !== false) {
-        }
     }
 
     private static function get_header(array $headers, string $name): ?string {

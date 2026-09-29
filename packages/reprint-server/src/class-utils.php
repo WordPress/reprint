@@ -1146,4 +1146,15 @@ final class Utils
         return substr(hash('sha256', (string) $der), 0, 16);
     }
 
+    /**
+     * Empties the OpenSSL error queue so a later, unrelated call does not
+     * report an error left behind by an earlier one.
+     */
+    public static function drain_openssl_error_queue(): void
+    {
+        // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedWhile -- Draining the queue is the entire purpose of this loop.
+        while (openssl_error_string() !== false) {
+        }
+    }
+
 }

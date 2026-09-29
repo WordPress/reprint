@@ -10,8 +10,10 @@ use RuntimeException;
  *
  * The site holds only the public half, so nothing a site stores can produce
  * one of these signatures. The signed message covers the method, request
- * target, content hash and cursor as well as the freshness fields, so a
- * captured signature is bound to one request.
+ * target, content hash and cursor as well as the freshness fields. The
+ * content hash covers the whole body of a form-encoded request, but only the
+ * uploaded file contents of a multipart request: as on the HMAC path, the
+ * form fields of a multipart request are not signed.
  */
 final class PublicKeyClient implements EnvelopeSigner {
 
@@ -38,6 +40,7 @@ final class PublicKeyClient implements EnvelopeSigner {
         self::require_openssl();
         $private_key = @openssl_pkey_get_private($private_key_pem);
         if ($private_key === false) {
+            Utils::drain_openssl_error_queue();
             throw new InvalidArgumentException('The private key could not be parsed. Expected an RSA private key in PEM form.');
         }
         $details = openssl_pkey_get_details($private_key);
@@ -70,6 +73,9 @@ final class PublicKeyClient implements EnvelopeSigner {
                 // before generating or exporting and refuses when the file is
                 // missing, as on Windows and some CI PHP builds. Every setting is
                 // passed explicitly, so an empty file stands in for it.
+                // The failed attempt left config errors queued; drop them so a
+                // failure below reports its own cause.
+                Utils::drain_openssl_error_queue();
                 $temporary_config_path = tempnam(sys_get_temp_dir(), 'reprint-openssl-');
                 if ($temporary_config_path === false) {
                     throw new RuntimeException('Key generation failed: cannot create a temporary OpenSSL config.');
@@ -92,8 +98,13 @@ final class PublicKeyClient implements EnvelopeSigner {
             }
         }
         $details = openssl_pkey_get_details($keypair);
-        $public_key_pem = (string) $details['key'];
-        return [$private_key_pem, Utils::normalize_public_key($public_key_pem)];
+        if (!is_array($details) || !isset($details['key']) || !is_string($details['key'])) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- OpenSSL error text, never HTML output.
+            throw new RuntimeException('Could not read the generated public key: ' . (string) openssl_error_string());
+        }
+        // Generation and export can queue warnings even when they succeed.
+        Utils::drain_openssl_error_queue();
+        return [$private_key_pem, Utils::normalize_public_key($details['key'])];
     }
 
     public function get_public_key(): string {
