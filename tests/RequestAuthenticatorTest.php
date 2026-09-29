@@ -123,27 +123,27 @@ final class RequestAuthenticatorTest extends TestCase
     }
 
     /**
-     * A site that upgraded with only a token stored answers not_configured to
-     * its existing token clients until a key is enrolled; the scheme mismatch
-     * is reported only once a key exists.
+     * A site that upgraded with only a token stored answers no_keys_enrolled
+     * to its existing token clients until a key is enrolled. The scheme
+     * mismatch is reported only once a key exists.
      */
-    public function testKeyHostWithNoKeysIsNotConfiguredForATokenRequest(): void
+    public function testKeyHostWithNoKeysAnswersNoKeysEnrolledForATokenRequest(): void
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $hmac->get_auth_headers('');
         $authenticator = new RequestAuthenticator(self::SECRET, []);
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
-        $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
+        $this->assertSame(RequestAuthenticator::REASON_NO_KEYS_ENROLLED, $authenticator->last_error_reason());
     }
 
-    public function testKeyHostWithNoKeysIsNotConfiguredRegardlessOfToken(): void
+    public function testKeyHostWithNoKeysAnswersNoKeysEnrolledRegardlessOfToken(): void
     {
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(self::SECRET, []);
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
-        $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
+        $this->assertSame(RequestAuthenticator::REASON_NO_KEYS_ENROLLED, $authenticator->last_error_reason());
     }
 
     public function testKeyHostReportsUnknownKey(): void

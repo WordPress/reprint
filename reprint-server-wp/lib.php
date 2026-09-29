@@ -710,9 +710,19 @@ function handle_api_request(array $options = []): void {
         $auth_error = $authenticator->verify_globals();
         if ($auth_error !== null) {
             $reason = $authenticator->last_error_reason() ?? RequestAuthenticator::REASON_AUTH_FAILED;
-            $status = $reason === RequestAuthenticator::REASON_NOT_CONFIGURED ? 503 : 403;
-            if ($reason === RequestAuthenticator::REASON_NOT_CONFIGURED) {
-                // Released clients print this message as they receive it.
+            $is_unconfigured = in_array(
+                $reason,
+                [RequestAuthenticator::REASON_NOT_CONFIGURED, RequestAuthenticator::REASON_NO_KEYS_ENROLLED],
+                true
+            );
+            $status = $is_unconfigured ? 503 : 403;
+            // Released clients print these messages as they receive them.
+            if (in_array($reason, [RequestAuthenticator::REASON_REQUIRES_KEY_AUTH, RequestAuthenticator::REASON_NO_KEYS_ENROLLED], true)) {
+                // A client that signs with a key prints its own remedy. A
+                // released client sends a token and cannot sign with a key,
+                // so enrolling one is not enough.
+                $auth_error .= '. Update the Reprint client to a version that has `reprint keygen`, run it, and enroll the printed key under Tools > Reprint Server.';
+            } elseif ($is_unconfigured) {
                 $auth_error .= '. Set up the connection in WordPress admin under Tools > Reprint Server.';
             }
             if (is_push_endpoint($endpoint)) {

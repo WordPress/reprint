@@ -67,24 +67,29 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
     // ── OpenSSL host (the test runtime's real state) ──
 
-    public function testKeyHostWithOnlyATokenIsNotConfigured(): void
+    public function testKeyHostWithOnlyATokenAnswersNoKeysEnrolled(): void
     {
         $this->startServer(['options' => $this->tokenOptions()]);
 
         $response = $this->pullWithToken();
 
         $this->assertSame(503, $response['status']);
-        $this->assertSame('not_configured', $response['body']['reason']);
+        $this->assertSame('no_keys_enrolled', $response['body']['reason']);
+        $this->assertStringEndsWith(
+            'Update the Reprint client to a version that has `reprint keygen`, run it, and enroll the printed key under Tools > Reprint Server.',
+            $response['body']['error'],
+            'a released client prints this message as it receives it and cannot sign with a key'
+        );
     }
 
-    public function testKeyHostWithOnlyATokenIsNotConfiguredForAKeyRequest(): void
+    public function testKeyHostWithOnlyATokenAnswersNoKeysEnrolledForAKeyRequest(): void
     {
         $this->startServer(['options' => $this->tokenOptions()]);
 
         $response = $this->pullWithKey($this->newKeyClient());
 
         $this->assertSame(503, $response['status']);
-        $this->assertSame('not_configured', $response['body']['reason']);
+        $this->assertSame('no_keys_enrolled', $response['body']['reason']);
     }
 
     public function testKeyHostRejectsAValidTokenWhenAKeyIsEnrolled(): void
@@ -96,6 +101,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
         $this->assertSame(403, $response['status']);
         $this->assertSame('requires_key_auth', $response['body']['reason']);
+        $this->assertStringContainsString('Update the Reprint client', $response['body']['error']);
     }
 
     public function testKeyHostAcceptsAValidKeySignature(): void

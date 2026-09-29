@@ -13,6 +13,7 @@ namespace WordPress\Reprint\Server;
 final class RequestAuthenticator {
 
     public const REASON_NOT_CONFIGURED = 'not_configured';
+    public const REASON_NO_KEYS_ENROLLED = 'no_keys_enrolled';
     public const REASON_REQUIRES_KEY_AUTH = HMACServer::REASON_REQUIRES_KEY_AUTH;
     public const REASON_REQUIRES_TOKEN_AUTH = PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH;
     public const REASON_UNKNOWN_KEY = PublicKeyServer::REASON_UNKNOWN_KEY;
@@ -106,7 +107,7 @@ final class RequestAuthenticator {
         // token stored tells its existing token clients to enroll a key
         // rather than reporting a scheme mismatch they cannot act on.
         if (empty($this->public_keys_by_id)) {
-            return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: this host requires key authentication and no keys are enrolled');
+            return $this->fail(self::REASON_NO_KEYS_ENROLLED, 'Export not configured: this host requires key authentication and no keys are enrolled');
         }
         if (!$has_key_id) {
             return $this->fail(self::REASON_REQUIRES_KEY_AUTH, 'This host requires key authentication; connection tokens are not accepted');
