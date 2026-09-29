@@ -29,9 +29,6 @@ final class RequestAuthenticator {
     /** @var int */
     private $timestamp_tolerance;
 
-    /** @var bool */
-    private $key_auth_required;
-
     /** @var string */
     private $cursor_header_name;
 
@@ -45,26 +42,23 @@ final class RequestAuthenticator {
      * @param string|null          $hmac_secret         Stored connection token, or null when none.
      * @param array<string,string> $public_keys_by_id   Enrolled keys, key id => one-line public key.
      * @param int                  $timestamp_tolerance Seconds either side of now.
-     * @param bool|null            $key_auth_required   Test seam; null means Utils::key_auth_required().
      * @param string               $cursor_header_name  $_SERVER key carrying the cursor.
      */
     public function __construct(
         ?string $hmac_secret,
         array $public_keys_by_id,
         int $timestamp_tolerance = 300,
-        ?bool $key_auth_required = null,
         string $cursor_header_name = 'HTTP_X_EXPORT_CURSOR'
     ) {
         $this->hmac_secret = $hmac_secret === '' ? null : $hmac_secret;
         $this->public_keys_by_id = $public_keys_by_id;
         $this->timestamp_tolerance = $timestamp_tolerance;
-        $this->key_auth_required = $key_auth_required === null ? Utils::key_auth_required() : $key_auth_required;
         $this->cursor_header_name = $cursor_header_name;
     }
 
     /** Which scheme this host requires: 'key' or 'hmac'. */
     public function required_scheme(): string {
-        return $this->key_auth_required ? self::SCHEME_KEY : self::SCHEME_HMAC;
+        return Utils::key_auth_required() ? self::SCHEME_KEY : self::SCHEME_HMAC;
     }
 
     /**
@@ -88,7 +82,7 @@ final class RequestAuthenticator {
         $this->authenticated_key_id = null;
         $has_key_id = PublicKeyServer::requested_key_id($headers) !== null;
 
-        if (!$this->key_auth_required) {
+        if (!Utils::key_auth_required()) {
             if ($has_key_id) {
                 return $this->fail(self::REASON_REQUIRES_TOKEN_AUTH, 'This host accepts connection-token authentication only');
             }
@@ -108,7 +102,7 @@ final class RequestAuthenticator {
         if (empty($this->public_keys_by_id)) {
             return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no keys are enrolled');
         }
-        $public_key_server = new PublicKeyServer($this->public_keys_by_id, $this->timestamp_tolerance, $this->cursor_header_name, true);
+        $public_key_server = new PublicKeyServer($this->public_keys_by_id, $this->timestamp_tolerance, $this->cursor_header_name);
         $error = $public_key_server->verify($headers, $method, $request_target, $body, $files, $cursor, $is_push_endpoint, $now);
         if ($error !== null) {
             return $this->fail($public_key_server->last_error_reason() ?? self::REASON_AUTH_FAILED, $error);
