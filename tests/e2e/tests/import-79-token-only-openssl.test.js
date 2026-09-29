@@ -1,6 +1,6 @@
 /**
- * Test 77: on a host with OpenSSL a connection token is never accepted.
- * No keys enrolled → not_configured. A key enrolled → requires_key_auth.
+ * Test 79: on a host with OpenSSL a connection token is never accepted.
+ * No keys enrolled → no_keys_enrolled. A key enrolled → requires_key_auth.
  * Either way the client makes one request and never retries.
  */
 import { describe, it, beforeAll } from 'vitest';
@@ -24,7 +24,7 @@ describe('Import: token refused on an OpenSSL host', () => {
         await ensureSite(keyedSite);
     });
 
-    it('token with no keys enrolled: 503 not_configured', async () => {
+    it('token with no keys enrolled: 503 no_keys_enrolled', async () => {
         const body = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(tokenOnlySite) });
         const token = new HmacClient(getSiteSecret(tokenOnlySite));
         const response = await fetch(getSiteUrl(tokenOnlySite), {
@@ -33,7 +33,7 @@ describe('Import: token refused on an OpenSSL host', () => {
             body,
         });
         assert.equal(response.status, 503);
-        assert.equal((await response.json()).reason, 'not_configured');
+        assert.equal((await response.json()).reason, 'no_keys_enrolled');
     });
 
     it('token with no keys enrolled: the client reports AUTH_NOT_CONFIGURED', () => {
@@ -43,7 +43,7 @@ describe('Import: token refused on an OpenSSL host', () => {
             autoResume: false,
         });
         assert.notEqual(result.exitCode, 0);
-        assert.match(result.stdout + result.stderr, /AUTH_NOT_CONFIGURED|no connection token configured/);
+        assert.match(result.stdout + result.stderr, /requires key authentication and has no keys enrolled/);
     });
 
     it('token with a key enrolled: 403 requires_key_auth, one request, no retry', () => {

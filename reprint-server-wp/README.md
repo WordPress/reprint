@@ -69,9 +69,11 @@ exists. Where it does, `RequestAuthenticator` accepts only signatures made with
 an enrolled public key and answers a connection token with `requires_key_auth`.
 Where it does not, the authenticator accepts only the connection token and
 answers a key signature with `requires_token_auth`. A site on a host with
-OpenSSL that has no enrolled key answers every request with `not_configured`
-(HTTP 503); a stored connection token is kept but not accepted there, and the
-settings page says so. The Remove button appears for an option-stored token
+OpenSSL that has no enrolled key answers every request with `no_keys_enrolled`
+(HTTP 503). A stored connection token is kept but not accepted there, and the
+settings page says so. A platform that pre-packages `secret.php` ships
+`public-keys.php` to hosts with OpenSSL instead, or its sites answer
+`no_keys_enrolled` from the moment they update. The Remove button appears for an option-stored token
 only; a `secret.php` token is named and must be removed from disk, since the
 page cannot delete that file. `HMACServer` itself refuses on a
 host with OpenSSL, so embedders that call it directly must move to

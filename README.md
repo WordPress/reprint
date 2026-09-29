@@ -290,7 +290,7 @@ failed, and running the same command again after enrolling continues. Every othe
 message naming `reprint keygen` and `--secret`. `--private-key-path=PATH` uses a key stored elsewhere
 (`keygen --out=PATH` writes one there) instead of the state directory. Deleting the state directory destroys the
 private half, so the enrolled public key stops working. The plugin's key table also has a Remove button for each key.
-A site that only has a connection token answers `not_configured` (HTTP 503) on an OpenSSL host until a key is enrolled.
+A site that only has a connection token answers `no_keys_enrolled` (HTTP 503) on an OpenSSL host until a key is enrolled.
 
 Instead of enrolling keys on the settings page, the plugin can be pre-packaged with a
 `./reprint-exporter-wp/public-keys.php` file returning a list of PEM or one-line public keys. When that file exists
