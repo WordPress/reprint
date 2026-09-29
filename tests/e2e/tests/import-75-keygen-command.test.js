@@ -35,13 +35,32 @@ describe('Import: keygen command', () => {
     });
 
     it('prints the key id and a one-line public key', () => {
-        const result = runImporter(getSiteUrl(site), mkdtempSync(join(tmpdir(), 'reprint-keygen-')), 'keygen', keygenOptions);
+        // The runner has no terminal, so auto would select JSONL output.
+        const result = runImporter(
+            getSiteUrl(site),
+            mkdtempSync(join(tmpdir(), 'reprint-keygen-')),
+            'keygen',
+            { ...keygenOptions, extraArgs: ['--progress=tty'] },
+        );
         assert.equal(result.exitCode, 0, result.stdout + result.stderr);
         assert.match(result.stdout, /Key id:\s+[0-9a-f]{16}/);
         // The key sits at column 0 on its own line so a whole-line copy
         // carries nothing but the key into the enrollment form.
         assert.match(result.stdout, /^MII[A-Za-z0-9+/]+=*$/m, 'one-line public key at column 0');
         assert.match(result.stdout, /Tools .* Reprint Server/);
+    });
+
+    it('reports the key in its final JSONL record', () => {
+        const url = getSiteUrl(site);
+        const stateDir = mkdtempSync(join(tmpdir(), 'reprint-keygen-'));
+        const result = runImporter(url, stateDir, 'keygen', { ...keygenOptions, extraArgs: ['--progress=jsonl'] });
+        assert.equal(result.exitCode, 0, result.stdout + result.stderr);
+        const report = JSON.parse(result.stdout.trim().split('\n').pop());
+        assert.equal(report.type, 'reprint_report');
+        assert.equal(report.status, 'complete');
+        assert.equal(report.key_path, exportedKeyPath(url, stateDir));
+        assert.match(report.key_id, /^[0-9a-f]{16}$/);
+        assert.match(report.public_key, /^MII[A-Za-z0-9+/]+=*$/);
     });
 
     it('refuses to overwrite without --force, and obeys --force', () => {

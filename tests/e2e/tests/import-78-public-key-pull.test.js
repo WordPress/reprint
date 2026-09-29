@@ -29,7 +29,8 @@ describe('Import: public-key pull', { timeout: 180000 }, () => {
         // without the helper's automatic preflight.
         const keygen = runImporter(importUrl(), stateDir, 'keygen', { autoResume: false, skipPreflight: true });
         assert.equal(keygen.exitCode, 0, keygen.stdout + keygen.stderr);
-        const publicKey = keygen.stdout.match(/^(MII[A-Za-z0-9+/]+=*)$/m)[1];
+        // Without a terminal, keygen's output is its JSONL command report.
+        const publicKey = JSON.parse(keygen.stdout.trim().split('\n').pop()).public_key;
         await ensureSite(site, { publicKeys: [publicKey] });
 
         const connection = await createMysqlConnection();

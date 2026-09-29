@@ -24,7 +24,8 @@ describe('Import: --private-key overrides the state directory key', () => {
             ...keygenOptions, extraArgs: [`--out=${enrolledPath}`],
         });
         assert.equal(enrolled.exitCode, 0, enrolled.stdout + enrolled.stderr);
-        const publicKey = enrolled.stdout.match(/^(MII[A-Za-z0-9+/]+=*)$/m)[1];
+        // Without a terminal, keygen's output is its JSONL command report.
+        const publicKey = JSON.parse(enrolled.stdout.trim().split('\n').pop()).public_key;
         // A different, un-enrolled key in the state directory.
         const stateKey = runImporter(url, stateDir, 'keygen', keygenOptions);
         assert.equal(stateKey.exitCode, 0, stateKey.stdout + stateKey.stderr);

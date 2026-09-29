@@ -14606,13 +14606,16 @@ class ImportClient
  * }
  * @param ImportClient|null $client    Command client, when construction succeeded.
  * @param Throwable|null    $exception Unhandled command failure, when present.
+ * @param array             $details   Report fields for a command that runs without a
+ *                                     client, such as keygen; a client supplies its own.
  */
 function reprint_write_command_report(
     string $command,
     int $exit_code,
     array $options,
     ?ImportClient $client,
-    ?Throwable $exception = null
+    ?Throwable $exception = null,
+    array $details = []
 ): void {
     $stream = !in_array($command, ['files-push', 'files-diff'], true)
         && ( $options['sql_output'] ?? ( $client === null ? null : $client->get_state()->sql_output ) ) === 'stdout'
@@ -14623,7 +14626,9 @@ function reprint_write_command_report(
     ) {
         return;
     }
-    $details = $client === null ? [] : $client->command_report_details;
+    if ($client !== null) {
+        $details = $client->command_report_details;
+    }
     $status = $details['status'] ?? ( $exit_code === 0 ? 'complete' : ( $exit_code === 2 ? 'partial' : 'error' ) );
     if ($exit_code === 0 && !empty($options['abort'])) {
         $status = 'aborted';
@@ -16454,10 +16459,24 @@ if (
             $reprint_generated_key = ImportClient::generate_key_file($reprint_key_path, !empty($options['force']));
             $reprint_key_stored_in_state =
                 $reprint_key_path === ImportClient::key_file_path($remote_reprint_api_url, $state_dir);
-            fwrite(
-                STDOUT,
-                ImportClient::format_enrollment_instructions($reprint_generated_key, false, $reprint_key_stored_in_state)
-            );
+            $reprint_enrollment_instructions =
+                ImportClient::format_enrollment_instructions($reprint_generated_key, false, $reprint_key_stored_in_state);
+            $reprint_progress_output_mode = $options['progress'] ?? 'auto';
+            // As with pull's enrollment stop, only the terminal presentation
+            // prints the text; JSONL and compact output end with a report
+            // that carries the key and the same text.
+            if (
+                $reprint_progress_output_mode === 'tty'
+                || ( $reprint_progress_output_mode === 'auto' && function_exists('posix_isatty') && posix_isatty(STDOUT) )
+            ) {
+                fwrite(STDOUT, $reprint_enrollment_instructions);
+            }
+            reprint_write_command_report($command, 0, $options, null, null, [
+                'message' => $reprint_enrollment_instructions,
+                'key_id' => $reprint_generated_key['key_id'],
+                'key_path' => $reprint_generated_key['path'],
+                'public_key' => $reprint_generated_key['public_key'],
+            ]);
             exit(0);
         }
         $reprint_files_push_context = null;

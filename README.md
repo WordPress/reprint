@@ -279,7 +279,9 @@ token and refuses a key signature with `requires_token_auth`. The importer never
 
 **Public keys.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 2048-bit RSA key, stores
 the private half at `<state-dir>/remotes/<md5-of-url>/key.pem` with mode `0600`, and prints the key id and the
-public key as one line. Paste that line into the enrollment form under Tools → Reprint Server. Every later command
+public key as one line. Paste that line into the enrollment form under Tools → Reprint Server. In JSONL or compact
+output, which `--progress=auto` selects when stdout is not a terminal, it prints no text; its final `reprint_report`
+record carries `key_id`, `key_path`, `public_key`, and the same text in `message`. Every later command
 against that site finds the key in the state directory, so no credential flag is needed. `reprint pull` with no
 credential does the same generation itself, prints the key, and exits with code 4: enrollment is needed, nothing
 failed, and running the same command again after enrolling continues. Every other remote command refuses with a

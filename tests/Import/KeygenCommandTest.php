@@ -68,7 +68,7 @@ final class KeygenCommandTest extends TestCase
     public function testKeygenCommandWritesIntoTheRemoteStateDirectoryAndPrintsTheKey(): void
     {
         $url = 'https://example.test/?reprint-api';
-        $result = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir]);
+        $result = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--progress=tty']);
 
         $this->assertSame(0, $result['exit_code'], $result['output']);
         $expected_path = ImportClient::key_file_path($url, $this->state_dir);
@@ -82,7 +82,7 @@ final class KeygenCommandTest extends TestCase
     public function testKeygenRefusesASecondRunWithoutForce(): void
     {
         $url = 'https://example.test/?reprint-api';
-        $first = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir]);
+        $first = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--progress=tty']);
         $second = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir]);
         $this->assertNotSame(0, $second['exit_code']);
         $this->assertStringContainsString('--force', $second['output']);
@@ -91,7 +91,7 @@ final class KeygenCommandTest extends TestCase
         // the new key is written as a fresh 0600 file, not into the old inode.
         $key_path = ImportClient::key_file_path($url, $this->state_dir);
         chmod($key_path, 0644);
-        $forced = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--force']);
+        $forced = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--force', '--progress=tty']);
         $this->assertSame(0, $forced['exit_code'], $forced['output']);
         $this->assertNotSame($this->printedKeyId($first['output']), $this->printedKeyId($forced['output']));
         if (DIRECTORY_SEPARATOR !== '\\') {
@@ -110,10 +110,33 @@ final class KeygenCommandTest extends TestCase
         return $match[1];
     }
 
+    public function testKeygenReportsTheKeyInJsonlOutput(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $result = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--progress=jsonl'], true);
+
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $output_lines = explode("\n", $result['output']);
+        $this->assertCount(1, $output_lines, 'the report is the only stdout line');
+        $report = json_decode($output_lines[0], true);
+        $this->assertIsArray($report, $output_lines[0]);
+        $this->assertSame('reprint_report', $report['type']);
+        $this->assertSame('keygen', $report['command']);
+        $this->assertSame('complete', $report['status']);
+        $key_path = ImportClient::key_file_path($url, $this->state_dir);
+        $this->assertSame($key_path, $report['key_path']);
+        $this->assertSame(
+            ( new \WordPress\Reprint\Server\PublicKeyClient(file_get_contents($key_path)) )->get_key_id(),
+            $report['key_id']
+        );
+        $this->assertStringStartsWith('MII', $report['public_key']);
+        $this->assertStringContainsString($report['public_key'], $report['message']);
+    }
+
     public function testKeygenOutWritesElsewhere(): void
     {
         $out = $this->state_dir . '/mine.pem';
-        $result = $this->runCli(['keygen', 'https://example.test/?reprint-api', '--state-dir=' . $this->state_dir, '--out=' . $out]);
+        $result = $this->runCli(['keygen', 'https://example.test/?reprint-api', '--state-dir=' . $this->state_dir, '--out=' . $out, '--progress=tty']);
         $this->assertSame(0, $result['exit_code'], $result['output']);
         $this->assertFileExists($out);
         $this->assertStringContainsString('--private-key=' . escapeshellarg($out), $result['output']);

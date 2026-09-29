@@ -20,7 +20,8 @@ describe('Import: unknown key', () => {
         stateDir = mkdtempSync(join(tmpdir(), 'uk-'));
         const mine = runImporter(getSiteUrl(site), stateDir, 'keygen', { autoResume: false, skipPreflight: true });
         assert.equal(mine.exitCode, 0, mine.stdout + mine.stderr);
-        publicKey = mine.stdout.match(/^(MII[A-Za-z0-9+/]+=*)$/m)[1];
+        // Without a terminal, keygen's output is its JSONL command report.
+        publicKey = JSON.parse(mine.stdout.trim().split('\n').pop()).public_key;
     });
 
     it('reports unknown_key and reprints the public key', () => {
