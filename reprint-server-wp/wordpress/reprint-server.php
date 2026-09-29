@@ -470,7 +470,7 @@ class SettingsPage {
     private function render_scheme_status(array $configuration): void {
         $message = $configuration['required_scheme'] === 'key'
             ? esc_html__('This host has OpenSSL. Clients authenticate with public keys; connection tokens are not accepted.', 'reprint')
-            : esc_html__('This host has no OpenSSL. Clients authenticate with a connection token; public keys are enrolled but not in use on this host.', 'reprint');
+            : esc_html__('This host has no OpenSSL. Clients authenticate with a connection token, and public keys are not used on this host.', 'reprint');
         $this->render_notice('info', '<strong>' . $message . '</strong>');
     }
 
@@ -649,6 +649,7 @@ class SettingsPage {
             'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
             'enrolled' => ['success', __('Public key enrolled.', 'reprint')],
             'enroll_invalid' => ['error', __('That is not a usable public key. Paste an RSA public key of at least 3072 bits, as a PEM block or one line.', 'reprint')],
+            'enroll_no_openssl' => ['error', __('This host cannot read public keys because the OpenSSL extension is missing. Clients authenticate with the connection token here.', 'reprint')],
             'enroll_duplicate' => ['info', __('That public key is already enrolled.', 'reprint')],
             'enroll_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
             'enroll_storage_failure' => ['error', __('Failed to save the public key.', 'reprint')],

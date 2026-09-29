@@ -877,7 +877,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('Clients authenticate with a connection token', $html);
         $this->assertStringContainsString('reprint_server_enroll_public_key', $html, 'enrollment form is present even on an HMAC host');
-        $this->assertStringContainsString('enrolled but not in use on this host', $html);
+        $this->assertStringContainsString('public keys are not used on this host', $html);
     }
 
     public function testAdminPageListsEnrolledKeysWithRemoveAndPushControls(): void
