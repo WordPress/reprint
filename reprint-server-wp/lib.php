@@ -532,9 +532,10 @@ function verify_hmac(string $secret): ?string {
  *
  * Reads the connection token from secret.php when present, otherwise from the
  * site option, and verifies the request's HMAC signature. On hosts that have
- * `openssl_verify` the verification refuses every token (HMACServer's
- * `requires_key_auth` rule) and this answers HTTP 403 with that message,
- * without a reason field. Calls error() on failure.
+ * `openssl_verify` no request passes. A missing or broken token still answers
+ * HTTP 503 with the configuration message below, and a stored token answers
+ * HTTP 403 with HMACServer's `requires_key_auth` message, without a reason
+ * field. Calls error() on failure.
  */
 function default_authenticate(): void {
     if (has_connection_token_file()) {

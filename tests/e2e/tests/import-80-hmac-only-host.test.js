@@ -1,5 +1,5 @@
 /**
- * Test 78: a host whose openssl_verify is disabled stays on HMAC. The token
+ * Test 80: a host whose openssl_verify is disabled stays on HMAC. The token
  * works exactly as before this change, a key is refused with
  * requires_token_auth, and preflight still lists the openssl extension —
  * proving the rule keys off function_exists, not extension_loaded.
