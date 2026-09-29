@@ -2608,7 +2608,7 @@ class ImportClient
         } elseif ($stored_in_state) {
             $lines[] = 'then run any reprint command against this site; the key is found automatically:';
         } else {
-            $lines[] = 'then pass --private-key=' . $generated['path'] . ' to every reprint command:';
+            $lines[] = 'then pass --private-key=' . escapeshellarg($generated['path']) . ' to every reprint command:';
         }
         $lines[] = '';
         // The key sits at the start of its own line so a whole-line copy
@@ -2687,8 +2687,18 @@ class ImportClient
     /** The sentence every remote command throws when it finds no credential. */
     private static function no_credential_message(string $remote_reprint_api_url, string $state_dir): string
     {
-        return "No credential for this site. Run `reprint keygen {$remote_reprint_api_url} --state-dir={$state_dir}` "
+        return 'No credential for this site. Run `' . self::keygen_command($remote_reprint_api_url, $state_dir) . '` '
             . 'and enroll the printed key, or pass --secret=TOKEN.';
+    }
+
+    /**
+     * The keygen command line for a remote, quoted so it can be pasted into a
+     * shell: the default API URL ends in `?`, a glob character, and some carry
+     * `&` in their query.
+     */
+    private static function keygen_command(string $remote_reprint_api_url, string $state_dir): string
+    {
+        return 'reprint keygen ' . escapeshellarg($remote_reprint_api_url) . ' --state-dir=' . escapeshellarg($state_dir);
     }
 
     /**
@@ -13140,7 +13150,7 @@ class ImportClient
                     'message' =>
                         "This site's host has OpenSSL, so it accepts key authentication only; " .
                         "connection tokens are not accepted there.\n\n" .
-                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` " .
+                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
                         "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server.",
                 ];
             }
@@ -13163,7 +13173,7 @@ class ImportClient
                     $not_configured_message =
                         "This site's host requires key authentication and has no keys enrolled; " .
                         "the connection token you passed is not accepted there.\n\n" .
-                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` " .
+                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
                         "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server.";
                 } else {
                     $not_configured_message =
@@ -13186,7 +13196,7 @@ class ImportClient
                     'code' => 'AUTH_NO_CREDENTIAL',
                     'message' =>
                         "No credential was provided and the remote site requires authentication.\n\n" .
-                        "Run `reprint keygen {$this->remote_reprint_api_url} --state-dir={$this->state_dir}` and enroll " .
+                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` and enroll " .
                         "the printed key, or pass --secret=TOKEN with the connection token from Tools > Reprint Server.",
                 ];
             }

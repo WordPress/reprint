@@ -79,7 +79,11 @@ final class AuthErrorDiagnosisTest extends TestCase
         );
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString('the connection token you passed is not accepted there', $result['message']);
-        $this->assertStringContainsString('reprint keygen https://example.test/?reprint-api --state-dir=' . $this->state_dir, $result['message']);
+        // Quoted: an unquoted `?` is a glob in zsh and `&` backgrounds the command.
+        $this->assertStringContainsString(
+            "reprint keygen 'https://example.test/?reprint-api' --state-dir=" . escapeshellarg($this->state_dir),
+            $result['message']
+        );
         $this->assertStringNotContainsString('Set one under', $result['message']);
     }
 
