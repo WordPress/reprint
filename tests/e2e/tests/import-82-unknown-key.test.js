@@ -1,5 +1,5 @@
 /**
- * Test 80: a key on disk that is not enrolled gets unknown_key, and the
+ * Test 82: a key on disk that is not enrolled gets unknown_key, and the
  * client reprints the public key so the user never digs it out of state.
  */
 import { describe, it, beforeAll } from 'vitest';

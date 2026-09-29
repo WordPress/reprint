@@ -1,5 +1,5 @@
 /**
- * Test 74: pull with no credential generates a key, reports it, and stops
+ * Test 76: pull with no credential generates a key, reports it, and stops
  * with the enrollment-needed exit code before sending any request. A second
  * run finds the key; since it is not enrolled, the site says so.
  */

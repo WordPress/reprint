@@ -1,5 +1,5 @@
 /**
- * Test 79: --private-key wins over key.pem in the state directory.
+ * Test 81: --private-key wins over key.pem in the state directory.
  */
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';

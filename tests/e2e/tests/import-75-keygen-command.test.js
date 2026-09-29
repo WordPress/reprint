@@ -1,5 +1,5 @@
 /**
- * Test 73: reprint keygen writes a private key beside the remote's state
+ * Test 75: reprint keygen writes a private key beside the remote's state
  * and prints a one-line public key ready to paste into the site.
  */
 import { describe, it, beforeAll } from 'vitest';

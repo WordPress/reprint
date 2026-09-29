@@ -51,8 +51,9 @@ export function getSiteDir(siteName) {
 }
 
 /**
- * One RSA keypair per secret string, generated once per test run and cached
- * under os.tmpdir()/reprint-e2e-keys/<sha256(secret)>/key.pem. A site's own
+ * One RSA keypair per secret string, generated on first use and stored under
+ * os.tmpdir()/reprint-e2e-keys/<sha256(secret)>/key.pem. Later test runs reuse
+ * the stored key; nothing removes it. A site's own
  * secret yields the key ensureSite() enrolled on it; any other string yields
  * a key that is enrolled nowhere, so "wrong credential" tests keep working.
  *

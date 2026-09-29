@@ -1,5 +1,5 @@
 /**
- * Test 76: the precise path end to end. keygen, enroll the printed key on
+ * Test 78: the precise path end to end. keygen, enroll the printed key on
  * the site, pull with no credential flag — the key is found automatically.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';

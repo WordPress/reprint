@@ -1,5 +1,5 @@
 /**
- * Test 75: precise commands never generate a key. Without a credential they
+ * Test 77: precise commands never generate a key. Without a credential they
  * stop before any request and name keygen.
  */
 import { describe, it, beforeAll } from 'vitest';
