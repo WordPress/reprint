@@ -655,7 +655,6 @@ class SettingsPage {
             'enroll_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
             'key_removed' => ['success', __('Public key removed.', 'reprint')],
             'remove_unknown' => ['error', __('That key is not enrolled.', 'reprint')],
-            'remove_last_key' => ['error', __('This host requires key authentication, so the last key cannot be removed. Enroll another key first.', 'reprint')],
             'remove_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
             'remove_storage_failure' => ['error', __('Failed to remove the public key.', 'reprint')],
             'remove_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],

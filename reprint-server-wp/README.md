@@ -88,8 +88,7 @@ precedence `secret.php` has for the token: the file returns a list of PEM or
 one-line public keys, it is the only key source while it exists, and the page
 shows its keys read-only and refuses enrollment. Removing a key from the table
 revokes its push grant with it. Keys from `public-keys.php` carry no grant, so
-push to such a site needs the managed policy below. On a host with OpenSSL the
-page refuses to remove the last key, because the site would stop answering.
+push to such a site needs the managed policy below.
 
 ## Push access
 
