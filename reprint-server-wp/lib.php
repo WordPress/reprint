@@ -67,26 +67,12 @@ function error(int $code, string $message, ?string $reason = null): void {
     // preview domain while the stored site URL still uses the real domain.
     // This lets users preview a site before changing DNS, but also rewrites
     // application/json bodies. Octet-stream bypasses Hostinger's filter.
-    @header('Content-Type: application/octet-stream');
+    header('Content-Type: application/octet-stream');
     $body = ['error' => $message, 'code' => $code];
     if ($reason !== null) {
         $body['reason'] = $reason;
     }
     echo json_encode($body);
-    terminate();
-}
-
-/**
- * Ends the request. The 'exit' option of handle_api_request() is invoked
- * first, before the process exits; a caller that wants control back, such
- * as a test reading what the dispatcher wrote, throws from it. A callable
- * that returns cannot let the dispatcher continue past an error.
- */
-function terminate(): void {
-    $exit = $GLOBALS['reprint_server_exit'] ?? null;
-    if (is_callable($exit)) {
-        $exit();
-    }
     exit;
 }
 
@@ -118,7 +104,7 @@ function push_error(int $http_code, string $reason, string $detail): void {
         'reason' => $reason,
         'detail' => $detail,
     ]);
-    terminate();
+    exit;
 }
 
 /**
@@ -586,10 +572,6 @@ function default_authenticate(): void {
  *                                  owns the whole decision. Defaults to
  *                                  RequestAuthenticator with the stored
  *                                  connection token and enrolled keys.
- *     @type callable $exit Optional. Invoked by error() and push_error()
- *                          before the process exits. A caller that wants
- *                          control back, such as a test reading the
- *                          response, throws from it; returning still exits.
  *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
@@ -609,7 +591,6 @@ function default_authenticate(): void {
  * @phpstan-param array{
  *     database_push?:bool,
  *     authenticate?:callable,
- *     exit?:callable,
  *     docroot?:string,
  *     reprint_directory?:string,
  *     excluded_paths?:string[],
@@ -618,8 +599,6 @@ function default_authenticate(): void {
  * } $options
  */
 function handle_api_request(array $options = []): void {
-    $GLOBALS['reprint_server_exit'] = $options['exit'] ?? null;
-
     // Revert WordPress error display settings (wp_debug_mode may
     // have enabled display_errors based on WP_DEBUG_DISPLAY).
     if (function_exists('ini_set')) {
