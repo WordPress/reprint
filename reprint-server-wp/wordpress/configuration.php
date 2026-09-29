@@ -157,9 +157,10 @@ function enroll_public_key(string $pasted_key): string {
 }
 
 /**
- * Removes one enrolled key.
+ * Removes one enrolled key. Refuses the last key on a host that requires
+ * key auth, since that would lock every client out.
  *
- * @return string saved, unknown, file_override, storage_failure, or
+ * @return string saved, unknown, last_key, file_override, storage_failure, or
  *                runtime_missing when the server runtime cannot be loaded.
  */
 function remove_public_key(string $key_id): string {
@@ -183,6 +184,9 @@ function remove_public_key(string $key_id): string {
     }
     if (!$found) {
         return 'unknown';
+    }
+    if ($remaining === [] && \WordPress\Reprint\Server\Utils::key_auth_required()) {
+        return 'last_key';
     }
     return update_option_public_keys($remaining) ? 'saved' : 'storage_failure';
 }
@@ -268,13 +272,13 @@ function revoke_push_authorization_after_connection_token_added(): void {
  *     Current Reprint Server configuration state.
  *
  *     @type string    $stored_connection_token Option-backed connection token.
- *     @type bool      $is_configured Whether a credential the host accepts exists: an effective connection token,
- *                                    or on a key host also an enrolled key.
+ *     @type bool      $is_configured Whether a credential the host accepts exists: an enrolled key on a key host,
+ *                                    an effective connection token on an HMAC host.
  *     @type bool      $has_connection_token_file Whether secret.php supplies the effective connection token.
  *     @type bool      $push_supported Whether this PHP runtime can serve push endpoints.
  *     @type bool|null $managed_push_enabled Hosting-provider push policy, or null when the site controls it.
- *     @type bool      $push_enabled Whether push is authorized for the current connection token, or on a key
- *                                   host also for any enrolled key.
+ *     @type bool      $push_enabled Whether push is authorized for any enrolled key on a key host, or for the
+ *                                   current connection token on an HMAC host.
  *     @type string    $required_scheme Scheme this host accepts: key when OpenSSL is available, otherwise hmac.
  *     @type array[]   $enrolled_keys Effective enrolled keys, in the shape normalize_public_key_entry() returns.
  *     @type bool      $has_public_keys_file Whether public-keys.php supplies the enrolled keys.
@@ -306,18 +310,19 @@ function get_configuration_state(): array {
     $effective_connection_token = get_connection_token();
     $push_supported = push_is_supported();
 
-    $is_configured = $effective_connection_token !== null && $effective_connection_token !== '';
-    $push_enabled = is_push_authorized();
-    // Tokens stay accepted on key hosts until clients can sign with keys.
     if ($key_auth_required) {
-        $is_configured = $is_configured || $enrolled_keys !== [];
+        $is_configured = $enrolled_keys !== [];
         // get_push_authorization_error() applies the multisite refusal and the managed policy before the key's flag.
+        $push_enabled = false;
         foreach ($enrolled_keys as $entry) {
-            if ($push_enabled) {
+            if (get_push_authorization_error($entry['key_id']) === null) {
+                $push_enabled = true;
                 break;
             }
-            $push_enabled = get_push_authorization_error($entry['key_id']) === null;
         }
+    } else {
+        $is_configured = $effective_connection_token !== null && $effective_connection_token !== '';
+        $push_enabled = is_push_authorized();
     }
 
     return [

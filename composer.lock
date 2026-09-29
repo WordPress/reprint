@@ -358,7 +358,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-client",
-            "version": "dev-refactor/utils-class",
+            "version": "dev-worktree-public-key-auth",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-client",
@@ -392,7 +392,7 @@
         },
         {
             "name": "wp-php-toolkit/reprint-server",
-            "version": "dev-refactor/utils-class",
+            "version": "dev-worktree-public-key-auth",
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-server",

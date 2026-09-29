@@ -42,8 +42,9 @@ final class ReprintServerPluginRuntimeLoadTest extends TestCase {
         $this->assertCount(1, $report['enrolled_keys_after']);
         $this->assertSame($report['last_enrolled_key_id'], $report['enrolled_keys_after'][0]['key_id']);
         $this->assertSame('saved', $report['push_grant']);
-        $this->assertSame('saved', $report['removal']);
-        $this->assertCount(0, $report['enrolled_keys_after_removal']);
+        // A key host refuses to remove its last key; the refusal needs the host rule from the runtime.
+        $this->assertSame('last_key', $report['removal']);
+        $this->assertCount(1, $report['enrolled_keys_after_removal']);
     }
 
     /**

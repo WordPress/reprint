@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
-use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\PublicKeyClient;
 use WordPress\Reprint\Server\RequestAuthenticator;
 use WordPress\Reprint\Server\Utils;
@@ -113,54 +112,29 @@ final class RequestAuthenticatorTest extends TestCase
         $this->assertSame(self::$key_client->get_key_id(), $authenticator->authenticated_key_id());
     }
 
-    public function testKeyHostStillAcceptsAToken(): void
+    public function testKeyHostRejectsAValidTokenEvenWhenItIsTheOnlyCredential(): void
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $hmac->get_auth_headers('');
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
-        $this->assertNull($authenticator->authenticated_key_id());
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertSame(RequestAuthenticator::REASON_REQUIRES_KEY_AUTH, $authenticator->last_error_reason());
     }
 
-    public function testKeyHostWithNoKeysStillAcceptsAToken(): void
+    /**
+     * A site that upgraded with only a token stored answers not_configured to
+     * its existing token clients until a key is enrolled; the scheme mismatch
+     * is reported only once a key exists.
+     */
+    public function testKeyHostWithNoKeysIsNotConfiguredForATokenRequest(): void
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $hmac->get_auth_headers('');
         $authenticator = new RequestAuthenticator(self::SECRET, []);
 
-        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
-        $this->assertNull($authenticator->authenticated_key_id());
-    }
-
-    public function testKeyHostUsesEnvelopeVerificationForATokenPush(): void
-    {
-        $hmac = new Site_Export_HMAC_Client(self::SECRET);
-        $headers = $hmac->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
-        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
-
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
-        $this->assertNull($authenticator->authenticated_key_id());
-    }
-
-    public function testKeyHostWithoutATokenIsNotConfiguredForATokenRequest(): void
-    {
-        $hmac = new Site_Export_HMAC_Client(self::SECRET);
-        $headers = $hmac->get_auth_headers('');
-        $authenticator = new RequestAuthenticator(null, $this->keys());
-
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
-    }
-
-    public function testKeyHostRejectsAWrongToken(): void
-    {
-        $hmac = new Site_Export_HMAC_Client('some-other-secret');
-        $headers = $hmac->get_auth_headers('');
-        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
-
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
-        $this->assertSame(HMACServer::REASON_SIGNATURE_MISMATCH, $authenticator->last_error_reason());
     }
 
     public function testKeyHostWithNoKeysIsNotConfiguredRegardlessOfToken(): void

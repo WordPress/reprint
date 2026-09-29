@@ -8,6 +8,20 @@ final class HmacServerTest extends TestCase
 {
     private const SECRET = 'shared-secret';
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        // These tests exercise token verification, which only a host without
+        // openssl_verify() performs; the refusal tests clear this.
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+    }
+
+    protected function tearDown(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(null);
+        parent::tearDown();
+    }
+
     public function testValidRequestVerifiesSuccessfully(): void
     {
         $body = '{"paths":["/wp-content/uploads/image.jpg"]}';
@@ -259,6 +273,40 @@ final class HmacServerTest extends TestCase
     {
         $client = new Site_Export_HMAC_Client(self::SECRET);
         $this->assertInstanceOf(\WordPress\Reprint\Server\EnvelopeSigner::class, $client);
+    }
+
+    public function testRefusesOnAHostWithOpenssl(): void
+    {
+        // The test runtime has OpenSSL, so the host rule itself refuses.
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(null);
+        $headers = $this->buildHeadersForBody('', '1700000000.000000');
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+        $this->assertNotNull($server->verify($headers, '', [], 1700000001.0));
+        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_REQUIRES_KEY_AUTH, $server->last_error_reason());
+    }
+
+    public function testRefusesWhenTheHostRequiresKeyAuth(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(true);
+        $headers = $this->buildHeadersForBody('', '1700000000.000000');
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+
+        $this->assertSame(
+            'This host requires key authentication; connection tokens are not accepted',
+            $server->verify($headers, '', [], 1700000001.0)
+        );
+        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_REQUIRES_KEY_AUTH, $server->last_error_reason());
+    }
+
+    public function testEnvelopeAlsoRefusesWhenTheHostRequiresKeyAuth(): void
+    {
+        $client = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $client->get_envelope_auth_headers('POST', 'https://s.test/?endpoint=push_upload');
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(true);
+        $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
+
+        $this->assertNotNull($server->verify_envelope($headers, 'POST', '/?endpoint=push_upload', (float) $headers['X-Auth-Timestamp'] + 1.0));
+        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_REQUIRES_KEY_AUTH, $server->last_error_reason());
     }
 
     public function testSignatureFailureReportsSignatureMismatch(): void
