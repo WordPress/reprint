@@ -328,6 +328,7 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         self::assertSame('after', $this->receiver->query('SELECT value FROM wp_options WHERE id=2')->fetchColumn());
         $cleaned = $this->runCli(array_merge($arguments, ['--cleanup']));
         self::assertSame('complete', $cleaned['phase']);
+        self::assertFileDoesNotExist($this->root . '/cli-state/remotes/' . md5(rtrim($this->remote_reprint_api_url, '?&')) . '/push/database/state.json');
         self::assertSame([['TRIGGER_NAME' => 'mark_unrelated', 'EVENT_OBJECT_TABLE' => 'unrelated']], $this->receiver->query($trigger_query)->fetchAll(PDO::FETCH_ASSOC));
         $this->receiver->exec("INSERT INTO unrelated VALUES (1, 'after')");
         self::assertSame('unrelated:after', $this->receiver->query('SELECT value FROM unrelated')->fetchColumn());
@@ -369,6 +370,7 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
         $discarded = $this->runCli(array_merge($arguments, ['--abort']));
         self::assertSame('discarded', $discarded['phase']);
+        self::assertFileDoesNotExist($this->root . '/cli-state/remotes/' . md5(rtrim($this->remote_reprint_api_url, '?&')) . '/push/database/state.json');
         self::assertSame('production', $this->receiver->query('SELECT value FROM wp_options')->fetchColumn());
         $this->receiver->exec("INSERT INTO wp_options VALUES (2, 'after')");
         self::assertSame('target:after', $this->receiver->query('SELECT value FROM wp_options WHERE id=2')->fetchColumn());
