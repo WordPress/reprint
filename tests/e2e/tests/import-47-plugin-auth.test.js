@@ -6,16 +6,18 @@
  * behaviour via HTTP.
  *
  * The point is to treat the plugin as a black box: activate it, hit the
- * endpoint, and confirm that unauthenticated and wrongly-keyed requests are
- * rejected while a request signed with the enrolled key succeeds.
+ * endpoint, and confirm that unauthenticated, wrongly-keyed and token-signed
+ * requests are rejected while a request signed with the enrolled key
+ * succeeds. The test host has OpenSSL, so the plugin accepts keys only.
  */
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
 import {
     apiRequest,
-    getSiteUrl, getSiteDir,
+    getSiteUrl, getSiteDir, getSiteSecret,
     getHarnessKey,
 } from '../lib/test-helpers.js';
+import { HmacClient } from '../lib/hmac-client.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Reprint Server plugin authentication', () => {
@@ -53,6 +55,19 @@ describe('Import: Reprint Server plugin authentication', () => {
         assert.equal(response.status, 403);
         const body = await response.json();
         assert.equal(body.reason, 'unknown_key');
+    });
+
+    it('rejects a connection token on a host with OpenSSL', async () => {
+        const requestBody = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) });
+        const token = new HmacClient(getSiteSecret(site));
+        const response = await fetch(getSiteUrl(site), {
+            method: 'POST',
+            headers: { ...token.getAuthHeaders(requestBody), 'Content-Type': 'application/json' },
+            body: requestBody,
+        });
+        assert.equal(response.status, 403);
+        const body = await response.json();
+        assert.equal(body.reason, 'requires_key_auth');
     });
 
     it('accepts a correctly signed key request', async () => {

@@ -81,7 +81,7 @@ describe('Import: Invalid API Parameters', () => {
         );
     });
 
-    it('missing auth headers returns 403', async () => {
+    it('missing auth headers returns 403 naming key authentication', async () => {
         const response = await fetch(getSiteUrl(site), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -91,10 +91,7 @@ describe('Import: Invalid API Parameters', () => {
 
         const body = await response.json();
         assert.ok(body.error, 'Expected error message');
-        assert.ok(
-            body.error.includes('X-Auth-Signature') || body.error.includes('Missing'),
-            `Expected missing header error, got: ${body.error}`
-        );
+        assert.equal(body.reason, 'requires_key_auth', `Expected requires_key_auth, got: ${JSON.stringify(body)}`);
     });
 
     it('invalid cursor base64 returns error', async () => {
