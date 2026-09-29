@@ -13,6 +13,9 @@ require_once __DIR__ . '/../../../vendor/autoload.php';
 require_once __DIR__ . '/../../../packages/reprint-server/src/class-http-server.php';
 require_once __DIR__ . '/../../../packages/reprint-server/src/class-hmac-server.php';
 
+// This fixture models a host without openssl_verify(), so HMACServer keeps
+// accepting the connection token.
+\WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
 $reprint_authentication = new \WordPress\Reprint\Server\HMACServer('multipart-test-secret');
 $reprint_authentication_error = $reprint_authentication->verify(getallheaders(), '', $_FILES);
 if ($reprint_authentication_error !== null) {

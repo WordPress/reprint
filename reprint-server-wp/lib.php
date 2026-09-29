@@ -497,7 +497,9 @@ function update_push_authorization(bool $enabled): bool {
 /**
  * Verifies a connection-token (HMAC) signature. Retained for embedders that
  * call it directly; new embedders should call RequestAuthenticator through
- * handle_api_request().
+ * handle_api_request(). On hosts that have `openssl_verify`, HMACServer
+ * refuses every token (its last_error_reason() is `requires_key_auth`), so
+ * this returns that refusal message there whatever the token.
  *
  * The signature covers a SHA-256 hash of the request body rather than
  * the raw bytes.  This sidesteps the problem that libcurl generates
@@ -529,8 +531,10 @@ function verify_hmac(string $secret): ?string {
  * RequestAuthenticator through handle_api_request().
  *
  * Reads the connection token from secret.php when present, otherwise from the
- * site option, and verifies the request's HMAC signature.
- * Calls error() on failure.
+ * site option, and verifies the request's HMAC signature. On hosts that have
+ * `openssl_verify` the verification refuses every token (HMACServer's
+ * `requires_key_auth` rule) and this answers HTTP 403 with that message,
+ * without a reason field. Calls error() on failure.
  */
 function default_authenticate(): void {
     if (has_connection_token_file()) {
@@ -668,8 +672,8 @@ function handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // One call. Core verifies whichever scheme the request uses; the plugin
-    // passes what it has stored and decides nothing.
+    // One call. Core reads the host rule and verifies only the scheme this
+    // host accepts; the plugin passes what it has stored and decides nothing.
     // A custom authenticate callable still runs for every endpoint and owns
     // the whole decision. filter_input, not WP sanitizers: lib.php also runs
     // without WordPress bootstrapped.
@@ -689,7 +693,9 @@ function handle_api_request(array $options = []): void {
             }
             error(500, $runtime_message);
         }
-        if (has_connection_token_file() && empty(get_file_connection_token())) {
+        // A broken secret.php only matters where the token is the scheme; a
+        // key host never accepts it, so enrolled keys must still authenticate.
+        if (!Utils::key_auth_required() && has_connection_token_file() && empty(get_file_connection_token())) {
             $secret_file_message = 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.';
             if (is_push_endpoint($endpoint)) {
                 push_error(503, 'not_configured', $secret_file_message);
