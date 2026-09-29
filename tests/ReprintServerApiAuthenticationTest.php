@@ -144,6 +144,11 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
         $this->assertSame(503, $response['status']);
         $this->assertSame('not_configured', $response['body']['reason']);
+        $this->assertStringEndsWith(
+            'Set up the connection in WordPress admin under Tools > Reprint Server.',
+            $response['body']['error'],
+            'released clients print this message as they receive it'
+        );
     }
 
     public function testHmacHostRejectsAKeyIdHeaderWithRequiresTokenAuth(): void

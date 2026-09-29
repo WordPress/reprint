@@ -705,6 +705,10 @@ function handle_api_request(array $options = []): void {
         if ($auth_error !== null) {
             $reason = $authenticator->last_error_reason() ?? RequestAuthenticator::REASON_AUTH_FAILED;
             $status = $reason === RequestAuthenticator::REASON_NOT_CONFIGURED ? 503 : 403;
+            if ($reason === RequestAuthenticator::REASON_NOT_CONFIGURED) {
+                // Released clients print this message as they receive it.
+                $auth_error .= '. Set up the connection in WordPress admin under Tools > Reprint Server.';
+            }
             if (is_push_endpoint($endpoint)) {
                 push_error($status, $reason, $auth_error);
             }
