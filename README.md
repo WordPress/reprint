@@ -272,10 +272,12 @@ Download the latest release artifacts from [GitHub Releases](../../releases):
 
 ### Authentication
 
-The importer signs every request with one credential: an enrolled public key or a connection token. The plugin
-verifies a key signature against its enrolled keys and a token against its stored connection token. Where PHP lacks
-the OpenSSL extension (`openssl_verify` is missing) the plugin cannot verify keys, so it accepts only a connection
-token and refuses a key signature with `requires_token_auth`. The importer never retries with the other scheme.
+The source host decides how the importer authenticates, and nothing configures this. Where PHP has the OpenSSL
+extension (`openssl_verify` exists) the plugin accepts only signatures made with an enrolled public key; a
+connection token sent to such a host is refused with `requires_key_auth`. Where OpenSSL is missing the plugin
+accepts only a connection token shared by both sides, and a key signature is refused with `requires_token_auth`.
+The settings page under **Tools → Reprint Server** (the network settings page on multisite) says which of the two
+the host accepts. The importer never retries with the other scheme.
 
 **Public keys.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 3072-bit RSA key, stores
 the private half at `<state-dir>/remotes/<md5-of-url>/key.pem` with mode `0600`, and prints the key id and the
@@ -288,6 +290,7 @@ failed, and running the same command again after enrolling continues. Every othe
 message naming `reprint keygen` and `--secret`. `--private-key-path=PATH` uses a key stored elsewhere
 (`keygen --out=PATH` writes one there) instead of the state directory. Deleting the state directory destroys the
 private half, so the enrolled public key stops working. The plugin's key table also has a Remove button for each key.
+A site that only has a connection token answers `not_configured` (HTTP 503) on an OpenSSL host until a key is enrolled.
 
 Instead of enrolling keys on the settings page, the plugin can be pre-packaged with a
 `./reprint-exporter-wp/public-keys.php` file returning a list of PEM or one-line public keys. When that file exists
@@ -295,15 +298,18 @@ it is the only key source; the settings page shows its keys read-only and refuse
 cannot be granted push access individually, so a platform that pushes to such sites sets
 `REPRINT_SERVER_PUSH_ENABLED` (see the plugin README).
 
-**Connection tokens.** A token works on any host and is the only option on a host without OpenSSL. Both sides must
-share the same secret string. The plugin has a UI screen where the user can paste the secret, and then the importer
-must be fed the same string through `--secret=TOKEN` (more details below). Alternatively, the plugin can be pre-packaged with a
+**Connection tokens.** On a host without OpenSSL both sides must share the same secret string. The plugin has a UI
+screen where the user can paste the secret, and then the importer must be fed the same string through
+`--secret=TOKEN` (more details below). Alternatively, the plugin can be pre-packaged with a
 `./reprint-exporter-wp/secret.php` file where a pre-determined secret is shipped:
 
 ```php
 <?php
 return 'MY_SECRET_STRING';
 ```
+
+A token stored on a site whose host has OpenSSL is kept but not accepted; the settings page says so and offers to
+remove it.
 
 ### Migrating the data
 
@@ -323,7 +329,7 @@ FS_ROOT="./local-directory-where-the-remote-site-files-will-be-recreated"
 SECRET="your-shared-secret"
 ```
 
-`$SECRET` is the connection token. To authenticate with a key instead on a host with OpenSSL, run
+`$SECRET` applies to a source host without OpenSSL. On a host with OpenSSL, run
 `php reprint.phar keygen "$URL" --state-dir="$STATE_DIR"` once, enroll the printed key under Tools → Reprint Server,
 and omit `--secret="$SECRET"` from every command below; the key is read from `$STATE_DIR`.
 

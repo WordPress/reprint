@@ -63,11 +63,19 @@ The supported options are:
 
 ## Authentication
 
-`RequestAuthenticator` verifies a request that carries `X-Auth-Key-Id` against
-the enrolled public keys, and any other request against the connection token.
-`Utils::key_auth_required()` returns whether `openssl_verify` exists. A host
-without it cannot verify key signatures, so it accepts only the connection
-token and answers a key signature with `requires_token_auth`.
+The host decides the scheme; no option, constant, or environment variable
+selects it. `Utils::key_auth_required()` returns whether `openssl_verify`
+exists. Where it does, `RequestAuthenticator` accepts only signatures made with
+an enrolled public key and answers a connection token with `requires_key_auth`.
+Where it does not, the authenticator accepts only the connection token and
+answers a key signature with `requires_token_auth`. A site on a host with
+OpenSSL that has no enrolled key answers every request with `not_configured`
+(HTTP 503); a stored connection token is kept but not accepted there, and the
+settings page says so. The Remove button appears for an option-stored token
+only; a `secret.php` token is named and must be removed from disk, since the
+page cannot delete that file. `HMACServer` itself refuses on a
+host with OpenSSL, so embedders that call it directly must move to
+`RequestAuthenticator`.
 
 ### Public keys
 
@@ -80,7 +88,8 @@ precedence `secret.php` has for the token: the file returns a list of PEM or
 one-line public keys, it is the only key source while it exists, and the page
 shows its keys read-only and refuses enrollment. Removing a key from the table
 revokes its push grant with it. Keys from `public-keys.php` carry no grant, so
-push to such a site needs the managed policy below.
+push to such a site needs the managed policy below. On a host with OpenSSL the
+page refuses to remove the last key, because the site would stop answering.
 
 ## Push access
 
@@ -88,7 +97,7 @@ Connection tokens and enrolled keys authorize downloads only by default. This
 also applies to credentials that already existed when the plugin was upgraded;
 no migration enables push access. A site administrator grants push access from
 the plugin settings page: per key in the enrolled-key table, or for the
-connection token. The token grant stores a
+connection token on a host without OpenSSL. The token grant stores a
 fingerprint of the current connection token, so rotating that token revokes the
 grant and requires fresh consent.
 
@@ -149,8 +158,8 @@ require_once '/path/to/reprint-server-wp/lib.php';
 
 // Route however you like — lib.php doesn't check URLs.
 if ($myRouter->matches('/export')) {
-    // Use the default authentication: key signatures where openssl_verify exists,
-    // connection tokens on every host. Keys come from public-keys.php when present,
+    // Use the default authentication: key signatures on a host with openssl_verify,
+    // connection tokens elsewhere. Keys come from public-keys.php when present,
     // otherwise the public-keys option; the token from secret.php when present,
     // otherwise the connection-token option.
     handle_api_request();
