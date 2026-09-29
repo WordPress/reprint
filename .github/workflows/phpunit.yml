@@ -167,4 +167,4 @@ jobs:
           export REPRINT_DB_PUSH_CLIENT_PHP="$RUNNER_TEMP/reprint-no-pdo-mysql-php"
           "$REPRINT_DB_PUSH_SERVER_PHP" -r 'if (class_exists("PDO") || !extension_loaded("mysqli")) { exit(1); }'
           "$REPRINT_DB_PUSH_CLIENT_PHP" -r 'if (extension_loaded("pdo_mysql") || !extension_loaded("mysqli")) { exit(1); }'
-          ../vendor/bin/phpunit MySQLDumpProducer/DatabasePushTest.php MySQLDumpProducer/DatabasePushHttpTest.php
+          ../vendor/bin/phpunit MySQLDumpProducer/DatabasePushTest.php MySQLDumpProducer/DatabasePushHttpTest.php MySQLDumpProducer/DatabaseChangesPushHttpTest.php

@@ -147,25 +147,7 @@ class LocalDatabaseBaseline {
                         // Privileges depend on the connecting user, not row layout.
                         unset($column['Privileges']);
                         $schema['columns'][$name] = self::encode_values($column);
-                        $identifier = DatabasePush::identifier($name);
-                        $data_type = $reader->get_data_type($name);
-                        // Match pull's byte-preserving reads: latin1 E9 must
-                        // remain E9, not become UTF-8 C3A9 on this connection.
-                        $value = $reader->is_numeric_type($data_type)
-                            ? $reader->get_numeric_value_expression($name)
-                            : 'CAST(' . $identifier . ' AS BINARY)';
-                        if (in_array(strtoupper($data_type), ['FLOAT', 'DOUBLE', 'REAL'], true)) {
-                            // PDO can return a float while mysqli returns text.
-                            // Ask MySQL for text on both, after the shared FLOAT
-                            // promotion, so changing PHP drivers cannot invent edits.
-                            $value = 'CAST(' . $value . ' AS CHAR)';
-                        }
-                        if (strtoupper($data_type) === 'ENUM') {
-                            // ENUM index 0 and a declared empty label both read as
-                            // ''. Preserve the index: 0: differs from 1:.
-                            $value = "CONCAT(CAST(" . $identifier . " AS UNSIGNED),':',CAST(" . $identifier . ' AS BINARY))';
-                        }
-                        $select[$name] = $value;
+                        $select[$name] = \WordPress\Reprint\Server\DatabaseRowFormat::select_expression($reader, $name);
                     }
                     if ($baseline !== null && $baseline['tables'][$table] !== $schema) {
                         throw new RuntimeException('The column layout or primary key changed in local table ' . $table . '. Schema changes are not supported by db-diff.');

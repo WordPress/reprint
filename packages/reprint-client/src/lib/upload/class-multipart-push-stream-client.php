@@ -301,7 +301,7 @@ class MultipartPushStreamClient
         $this->response_body = '';
         $this->response_too_large = false;
 
-        if (!in_array($endpoint, ['push_upload', 'push_db_upload'], true)) {
+        if (!in_array($endpoint, ['push_upload', 'push_db_upload', 'push_db_changes'], true)) {
             throw new InvalidArgumentException('Unknown push upload endpoint: ' . $endpoint);
         }
         $request_url = $this->endpoint_url($endpoint, ['push_session_id' => $push_session_id]);

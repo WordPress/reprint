@@ -706,7 +706,7 @@ function handle_api_request(array $options = []): void {
                 // Hosts must provide a route and authentication which survive
                 // replacement of wp_options and deactivation of this plugin.
                 if (( $options['database_push'] ?? false ) !== true || isset($server_options['multisite'])) {
-                    push_error(403, 'push_disabled', 'Full database push requires a host-configured standalone API route; multisite is not supported.');
+                    push_error(403, 'push_disabled', 'Database push requires a host-configured standalone API route; multisite is not supported.');
                 }
                 $server_options['database_push'] = $push_options;
             }

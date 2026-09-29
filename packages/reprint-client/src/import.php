@@ -178,6 +178,7 @@ class ImportClient
         "files-stats",
         "db-pull",
         "db-push",
+        "db-push-changes",
         "db-baseline",
         "db-diff",
         "db-index",
@@ -566,7 +567,7 @@ class ImportClient
             } elseif ($signal_handling_command === 'db-rewrite-urls') {
                 pcntl_signal(SIGINT, [$this, 'handle_database_url_rewrite_shutdown']);
                 pcntl_signal(SIGTERM, [$this, 'handle_database_url_rewrite_shutdown']);
-            } elseif (!in_array($signal_handling_command, ['files-diff', 'post-process', 'db-push', 'db-baseline', 'db-diff'], true)) {
+            } elseif (!in_array($signal_handling_command, ['files-diff', 'post-process', 'db-push', 'db-push-changes', 'db-baseline', 'db-diff'], true)) {
                 // Local inspection, post-processing, and push commands must not save
                 // the pull command's state from a shutdown handler; default
                 // signal behavior ends them.
@@ -809,7 +810,7 @@ class ImportClient
         $masked = $argv;
         if (isset($masked[2]) && strpos($masked[2], '-') !== 0) {
             $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
-            if (in_array($command, ['files-push', 'db-push'], true)) {
+            if (in_array($command, ['files-push', 'db-push', 'db-push-changes'], true)) {
                 $masked[2] = self::mask_url_credentials($masked[2]);
             }
         }
@@ -1059,6 +1060,11 @@ class ImportClient
         if (in_array($command, ['db-baseline', 'db-diff'], true)) {
             $this->state = $this->load_state();
             $this->run_local_database_baseline($command, $options);
+            return;
+        }
+        if ($command === 'db-push-changes') {
+            $this->state = $this->load_state_with_request_context();
+            $this->run_db_push_changes($options);
             return;
         }
         if ($command === "db-push") {
@@ -6581,6 +6587,110 @@ class ImportClient
             if (fwrite(STDOUT, $line) !== strlen($line)) {
                 throw new RuntimeException('Cannot write a complete local database diff record.');
             }
+        }
+    }
+
+    /**
+     * @param array $options {
+     *     Explicit row selection and confirmation. No local database connection is opened.
+     *     @type string $changes Selected db-diff JSONL file.
+     *     @type string $commit Optional review hash; omitted means local review only.
+     *     @type string $secret HMAC token, required only for commit.
+     *     @type array $rewrite_url Local/hosted URL pairs.
+     *     @type string $table_prefix WordPress prefix used for URL rewriting.
+     *     @type bool $allow_http Permit HTTP for local test targets.
+     * }
+     */
+    private function run_db_push_changes(array $options): void {
+        require_once __DIR__ . '/lib/database-push/class-database-changes-source.php';
+        if (empty($options['changes'])) {
+            throw new InvalidArgumentException('db-push-changes requires --changes=FILE containing selected db-diff records.');
+        }
+        $url_mapping = [];
+        foreach ($options['rewrite_url'] ?? [] as [$local_url, $hosted_url]) {
+            $url_mapping[$local_url] = $hosted_url;
+        }
+        $source = new DatabaseChangesSource($options['changes'], dirname($this->pull_state_directory) . '/database-baseline', $url_mapping, $options['table_prefix'] ?? 'wp_');
+        $transport = null;
+        try {
+            $review = $source->review();
+            echo json_encode($review, JSON_UNESCAPED_SLASHES) . "\n";
+            if (!array_key_exists('commit', $options)) {
+                return;
+            }
+            if (!is_string($options['commit']) || !hash_equals($review['review'], $options['commit'])) {
+                throw new InvalidArgumentException('The --commit token does not match these selected changes and URL rewrites. Review again without --commit.');
+            }
+            if (empty($options['secret']) || strpos($this->remote_reprint_api_url, 'SECRET_KEY=') !== false
+                || parse_url($this->remote_reprint_api_url, PHP_URL_USER) !== null
+                || parse_url($this->remote_reprint_api_url, PHP_URL_PASS) !== null) {
+                throw new InvalidArgumentException('db-push-changes --commit requires --secret=TOKEN, never a token in the URL.');
+            }
+            $transport = new MultipartPushStreamClient([
+                'remote_reprint_api_url' => $this->remote_reprint_api_url,
+                'allow_http' => $options['allow_http'] ?? false,
+                'insecure' => $this->insecure,
+                'hmac_client' => new Site_Export_HMAC_Client($options['secret']),
+                'request_context_headers' => $this->request_context_headers,
+            ]);
+            $push_session_id = substr($review['review'], 0, 32);
+            // The receipt is committed with the rows. Re-running this exact
+            // review resolves a lost response without applying its rows twice.
+            $status = $transport->send_push_request('GET', 'push_db_changes_status', ['push_session_id' => $push_session_id], ['accepted']);
+            if ($status['status'] !== 'complete') {
+                $this->last_error_code = $status['reason'] ?? 'database_push_failed';
+                throw new RuntimeException($status['detail'] ?? 'Cannot read the production database changes receipt.');
+            }
+            if ($status['response']['phase'] === 'complete') {
+                if ($status['response']['review'] !== $review['review']) {
+                    throw new RuntimeException('The target receipt describes a different review.');
+                }
+                echo json_encode($status['response']) . "\n";
+                return;
+            }
+            $transport->apply_reported_limits([$status['response']['post_max_bytes']]);
+            $transport->set_max_part_bytes($status['response']['max_part_bytes']);
+            if (!$transport->start_upload_request($push_session_id, 'push_db_changes')) {
+                throw new RuntimeException($transport->get_last_error() ?? 'Cannot open the database changes request.');
+            }
+            $records = ( static function () use ($source, $review): Generator {
+                yield json_encode(['type' => 'begin', 'review' => $review['review']]) . "\n";
+                yield from $source->records();
+            } )();
+            $record_number = 0;
+            // This non-resumable transaction deliberately uses one request.
+            // The CLI owns the loop; the transport sends one bounded part before
+            // returning. Never split a confirmed selection into smaller commits.
+            foreach ($records as $line) {
+                $offset = 0;
+                $total_bytes = strlen($line);
+                while ($offset < $total_bytes) {
+                    $length = $transport->next_database_body_bytes($record_number, $total_bytes, $offset);
+                    if ($length <= 0) {
+                        $this->last_error_code = 'request_too_large';
+                        throw new RuntimeException('The selected changes exceed one push request. No commit was sent. Select fewer rows and review again.');
+                    }
+                    $piece = substr($line, $offset, $length);
+                    if (!$transport->send_part(['type' => 'database', 'record_number' => $record_number, 'total_bytes' => $total_bytes, 'offset' => $offset, 'payload' => $piece])) {
+                        $result = $transport->finish_request();
+                        $this->last_error_code = $result['reason'] ?? 'database_push_failed';
+                        throw new RuntimeException($result['detail'] ?? 'The database changes upload stopped before its end record.');
+                    }
+                    $offset += strlen($piece);
+                }
+                ++$record_number;
+            }
+            $result = $transport->finish_request();
+            if ($result['status'] !== 'complete' || ( $result['response']['phase'] ?? null ) !== 'complete' || ( $result['response']['review'] ?? null ) !== $review['review']) {
+                $this->last_error_code = $result['reason'] ?? 'database_push_failed';
+                throw new RuntimeException( ( $result['detail'] ?? 'The target did not confirm commit.' ) . ' Re-run this same reviewed command to check its receipt before another attempt.');
+            }
+            echo json_encode($result['response']) . "\n";
+        } finally {
+            if ($transport !== null) {
+                $transport->close();
+            }
+            $source->close();
         }
     }
 
@@ -14382,7 +14492,7 @@ if (
             'placeholder' => 'TOKEN',
             'help' => 'HMAC connection token for export API authentication',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-push-changes', 'db-pull', 'db-index', 'preflight', 'preflight-assert'],
         ],
         [
             'name' => 'insecure',
@@ -14425,7 +14535,7 @@ if (
             'short' => 'v',
             'help' => 'Show detailed request/response logs',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-push-changes', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls', 'flat-docroot', 'merge-wp-content', 'apply-runtime'],
         ],
         [
             'name' => 'exclude-host-plugins',
@@ -14549,6 +14659,14 @@ if (
         ],
 
         [
+            'name' => 'changes',
+            'type' => 'value',
+            'target' => 'changes',
+            'placeholder' => 'FILE',
+            'help' => 'JSONL file containing only selected db-diff changes (required)',
+            'commands' => ['db-push-changes'],
+        ],
+        [
             'name' => 'source-dsn',
             'type' => 'value',
             'target' => 'source_dsn',
@@ -14583,7 +14701,7 @@ if (
             'type' => 'value',
             'target' => 'table_prefix',
             'help' => 'Identical local and hosted table prefix (default wp_)',
-            'commands' => ['db-push'],
+            'commands' => ['db-push', 'db-push-changes'],
         ],
         [
             'name' => 'include-table',
@@ -14598,8 +14716,8 @@ if (
             'name' => 'commit',
             'type' => 'value',
             'target' => 'commit',
-            'help' => 'Overwrite production using the staged review token; deletes production-only site rows and tables',
-            'commands' => ['db-push'],
+            'help' => 'Confirm the review token: full overwrite for db-push, selected row changes for db-push-changes',
+            'commands' => ['db-push', 'db-push-changes'],
         ],
         [
             'name' => 'writers-stopped',
@@ -14738,7 +14856,7 @@ if (
             'target' => 'rewrite_url',
             'argument_labels' => 'FROM TO',
             'help' => 'Rewrite FROM to TO (repeatable)',
-            'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'db-push'],
+            'commands' => ['pull', 'pull-files', 'files-pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'db-push', 'db-push-changes'],
         ],
         [
             'name' => 'site-admin',
@@ -15013,7 +15131,7 @@ if (
                 fwrite(STDERR, "Error: db-push does not accept --{$def['name']}. Full overwrite includes every site table.\n");
                 exit(1);
             }
-            if ($matched && in_array($argv[1] ?? '', ['db-baseline', 'db-diff'], true)
+            if ($matched && in_array($argv[1] ?? '', ['db-baseline', 'db-diff', 'db-push-changes'], true)
                 && $def['name'] !== 'state-dir'
                 && !in_array($argv[1], $def['commands'] ?? [], true)) {
                 fwrite(STDERR, "Error: {$argv[1]} does not accept --{$def['name']}.\n");
@@ -15621,6 +15739,13 @@ if (
                 "Rejects missing tables and changed column layouts or primary keys.\n" .
                 "No network requests are made, and no secret is required.\n",
         ],
+        "db-push-changes" => [
+            "level" => "low",
+            "short" => "Review selected database changes, then apply them in one transaction",
+            "usage" => "reprint db-push-changes <remote-reprint-api-url> --state-dir=DIR --changes=FILE [--secret=TOKEN --commit=REVIEW]",
+            "description" => "Reads selected db-diff JSONL records and prints a review token without contacting production.\nPass that token with --commit to send explicit inserts, updates, and deletes in one transaction.\nAny conflict rolls back every selected row change. URL rewriting happens on the client.\n",
+            "extra" => "Requires the standalone push route, matching schemas and InnoDB target tables with primary keys.\nNeeds direct TRIGGER privileges and a global REFERENCES grant to inspect side effects.\nNo target triggers, cascading foreign keys, spatial writes, or schema changes.\nOne request only; an interrupted upload starts over. The local baseline does not advance.\n",
+        ],
         "db-push" => [
             "level" => "low",
             "short" => "Stage a full database overwrite for explicit confirmation",
@@ -16031,7 +16156,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "db-push", "db-baseline", "db-diff"], true)) {
+    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "db-push", "db-push-changes", "db-baseline", "db-diff"], true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
