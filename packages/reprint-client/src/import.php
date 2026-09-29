@@ -12754,20 +12754,15 @@ class ImportClient
     /**
      * Authentication headers for curl ("Name: value"), or [] with no credential.
      *
-     * @param string      $method HTTP method of the request being built.
-     * @param string      $url    Full request URL.
-     * @param string      $body   Raw content to hash: file contents for uploads,
-     *                            http_build_query() output for forms, '' otherwise.
-     * @param string|null $cursor The X-Export-Cursor value being sent as a
-     *                            header, or null. The cursor is signed only
-     *                            when sent this way; the streaming fetch no
-     *                            longer sends it as a header, so it passes
-     *                            no cursor here.
+     * @param string $method HTTP method of the request being built.
+     * @param string $url    Full request URL.
+     * @param string $body   Raw content to hash: file contents for uploads,
+     *                       http_build_query() output for forms, '' otherwise.
      */
-    private function get_auth_headers(string $method, string $url, string $body = '', ?string $cursor = null): array
+    private function get_auth_headers(string $method, string $url, string $body = ''): array
     {
         if ($this->public_key_client !== null) {
-            return $this->public_key_client->get_curl_headers($method, $url, $body, $cursor);
+            return $this->public_key_client->get_curl_headers($method, $url, $body);
         }
         if ($this->hmac_client !== null) {
             return $this->hmac_client->get_curl_headers($body);
