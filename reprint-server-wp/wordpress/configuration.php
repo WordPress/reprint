@@ -120,7 +120,7 @@ function get_last_enrolled_key_id(): ?string {
 /**
  * Validates and stores one pasted public key.
  *
- * @return string saved, invalid, duplicate, file_override, storage_failure, or
+ * @return string saved, invalid, no_openssl, duplicate, file_override, storage_failure, or
  *                runtime_missing when the server runtime cannot be loaded.
  */
 function enroll_public_key(string $pasted_key): string {
@@ -130,6 +130,10 @@ function enroll_public_key(string $pasted_key): string {
     }
     if (has_public_keys_file()) {
         return 'file_override';
+    }
+    // Without the OpenSSL extension no key parses, so every paste would look invalid.
+    if (!function_exists('openssl_pkey_get_public')) {
+        return 'no_openssl';
     }
     try {
         $public_key = \WordPress\Reprint\Server\PublicKeyServer::assert_valid_public_key($pasted_key);

@@ -82,6 +82,24 @@ PHP,
         $this->assertSame([$entry], $report['sanitized'], 'the valid entry survives unchanged and the garbage one is dropped');
     }
 
+    /** Without OpenSSL every paste would fail to parse, so enrollment names the missing extension instead. */
+    public function testEnrollmentNamesTheMissingOpensslExtension(): void
+    {
+        [, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $result = $this->runPluginWithoutAutoloader(
+            <<<'PHP'
+echo json_encode([
+    'enrollment' => WordPress\Reprint\Server\Plugin\enroll_public_key((string) getenv('REPRINT_TEST_PUBLIC_KEY')),
+]);
+PHP,
+            ['disable_functions=openssl_pkey_get_public'],
+            ['REPRINT_TEST_PUBLIC_KEY' => $public_key]
+        );
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $this->assertSame(['enrollment' => 'no_openssl'], json_decode($result['output'], true), $result['output']);
+    }
+
     /**
      * Boots the plugin in a fresh PHP process without vendor/autoload.php and
      * runs $php_body after lib.php and wordpress/configuration.php are loaded.
