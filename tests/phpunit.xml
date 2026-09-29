@@ -38,6 +38,9 @@
             <file>PdoConstantsTest.php</file>
             <file>JoinUnixPathsTest.php</file>
             <file>HmacServerTest.php</file>
+            <file>PublicKeyClientTest.php</file>
+            <file>PublicKeyServerTest.php</file>
+            <file>UtilsPublicKeyTest.php</file>
             <file>MultipartProcessorTest.php</file>
             <file>PushEndpointsTest.php</file>
             <file>ReprintServerPluginTest.php</file>
