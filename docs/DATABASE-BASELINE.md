@@ -5,7 +5,7 @@ Suppose post 42 had the title `Summer sale` after pull. You change it to
 include the unchanged post body. Running it again shows the same change;
 reviewing changes does not accept them as a new baseline.
 
-These commands prepare a local diff for future selective push. They do not
+These commands prepare a local diff for selective push. They do not
 contact production, check production conflicts, or apply changes anywhere.
 
 ## Capture, edit, compare
@@ -109,3 +109,5 @@ proof against deliberate hash collisions.
 
 Production conflict checks, user approval, atomic application of selected
 changes, and advancing only approved baseline rows belong in later PRs.
+
+For an explicitly selected push of these records, see [Push selected database changes](DATABASE-CHANGES-PUSH.md). The baseline itself still does not advance.

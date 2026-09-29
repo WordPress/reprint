@@ -765,11 +765,18 @@ Files first, followed by full database overwrite and then selective database cha
     streams and rewrites local rows, stages incoming tables, and
     exchanges them only after explicit review. The client prepares table DDL,
     row inserts for generated/spatial columns, and deferred foreign keys. The
-    opt-in server currently trusts that SQL without a parser. The later selective mode
-    retains a baseline and pull selection, requests candidate production
-    rows, and applies only approved changes with a final conflict check.
+    opt-in server currently trusts that SQL without a parser. Selective mode
+    retains a local baseline, checks only selected production rows, and applies
+    only approved changes with a final conflict check.
     Its first slice adds explicit local `db-baseline` and `db-diff` commands,
-    retaining old rows and column-level changes before adding production work.
+    retaining old rows and column-level changes. `db-push-changes` then takes
+    an explicitly reviewed subset of those changes and applies insert, update,
+    and delete actions in one target transaction. It checks old column values
+    under row locks, rolls back on any conflict, and commits a receipt with the
+    rows so a lost response cannot replay the selection. URL rewriting stays
+    in the client. This slice does not advance the local baseline or resume an
+    interrupted transaction. See [selected database changes](DATABASE-CHANGES-PUSH.md)
+    for the request-size, table-feature, and metadata-privilege boundaries.
 11. **`reprint files-push`** — the low-level, files-only caller that retains
     one sender per process, applies caller time and memory admission budgets,
     and reports completion, continuation, restart, or failure without retrying.

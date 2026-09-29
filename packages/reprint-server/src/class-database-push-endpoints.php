@@ -7,6 +7,8 @@ use RuntimeException;
 use Throwable;
 
 require_once __DIR__ . '/class-database-push.php';
+require_once __DIR__ . '/class-database-changes-push.php';
+require_once __DIR__ . '/class-database-row-format.php';
 
 /** Authenticated database endpoints. URL rewriting remains entirely in the client. */
 final class DatabasePushEndpoints {
@@ -45,7 +47,7 @@ final class DatabasePushEndpoints {
         $push = null;
         try {
             $endpoint = $config['endpoint'];
-            $method = $endpoint === 'push_db_status' ? 'GET' : 'POST';
+            $method = in_array($endpoint, ['push_db_status', 'push_db_changes_status'], true) ? 'GET' : 'POST';
             // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Compare the exact signed HTTP method; this also runs without WordPress.
             if (( $_SERVER['REQUEST_METHOD'] ?? '' ) !== $method) {
                 throw new RuntimeException('Database push endpoint requires HTTP ' . $method . '.');
@@ -64,6 +66,14 @@ final class DatabasePushEndpoints {
             $database = Utils::connect_mysql(Utils::build_pdo_dsn($credentials['db_host'], $credentials['db_name']), $credentials['db_user'], $credentials['db_password'], $options);
             $database->exec('SET NAMES utf8mb4');
             $push_session_id = $config['push_session_id'] ?? '';
+            if (in_array($endpoint, ['push_db_changes', 'push_db_changes_status'], true)) {
+                $push = new DatabaseChangesPush($database, $push_session_id);
+                if ($endpoint === 'push_db_changes') {
+                    $this->upload($push);
+                }
+                $this->respond(200, ['status' => 'accepted', 'max_part_bytes' => $this->maximum_part_bytes, 'post_max_bytes' => $this->post_max_bytes] + $push->get_status());
+                return;
+            }
             $push = new DatabasePush($database, $credentials['table_prefix'], $push_session_id);
             if ($endpoint === 'push_db_create') {
                 $extra_tables = json_decode($config['extra_tables'] ?? '[]', true);
@@ -99,8 +109,12 @@ final class DatabasePushEndpoints {
             $state['table_prefix'] = $credentials['table_prefix'];
             $this->respond(200, ['status' => 'accepted'] + $state);
         } catch (Throwable $exception) {
+            if ($push !== null) {
+                $push->close();
+                $push = null;
+            }
             $reason = $exception instanceof PushException ? $exception->get_error_code() : 'database_push_failed';
-            $this->respond($reason === 'request_too_large' ? 413 : ( $reason === 'busy' ? 409 : 400 ), ['status' => 'rejected', 'reason' => $reason, 'detail' => $exception->getMessage(), 'post_max_bytes' => $this->post_max_bytes]);
+            $this->respond($reason === 'request_too_large' ? 413 : ( in_array($reason, ['busy', 'conflict'], true) ? 409 : 400 ), ['status' => 'rejected', 'reason' => $reason, 'detail' => $exception->getMessage(), 'post_max_bytes' => $this->post_max_bytes]);
         } finally {
             if ($push !== null) {
                 $push->close();
@@ -108,8 +122,11 @@ final class DatabasePushEndpoints {
         }
     }
 
-    /** Read the request directly into incoming rows; retain only one unfinished record. */
-    private function upload(DatabasePush $push): void {
+    /**
+     * Read directly into incoming rows; retain only one unfinished record.
+     * @param DatabasePush|DatabaseChangesPush $push Full-overwrite staging or one selective transaction.
+     */
+    private function upload($push): void {
         // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- The strict multipart parser validates the exact wire header.
         $multipart = new MultipartProcessor(MultipartProcessor::boundary_from_content_type( (string) ( $_SERVER['CONTENT_TYPE'] ?? '' )));
         $input = fopen('php://input', 'rb');
