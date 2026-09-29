@@ -2564,11 +2564,29 @@ class ImportClient
         if (
             $written_bytes !== strlen($private_key_pem)
             || !chmod($temporary_path, 0600)
-            || !rename($temporary_path, $path)
         ) {
             if (file_exists($temporary_path)) {
                 unlink($temporary_path);
             }
+            throw new RuntimeException("Could not write the private key to {$path}.");
+        }
+        // Some mounts, such as a Windows drive under WSL without metadata,
+        // accept chmod() and keep every file readable by all users. Every
+        // later command refuses such a key file, so check the mode on the
+        // new file before it replaces anything.
+        clearstatcache(true, $temporary_path);
+        $permissions = fileperms($temporary_path);
+        if (DIRECTORY_SEPARATOR !== '\\' && $permissions !== false && ( $permissions & 0077 ) !== 0) {
+            unlink($temporary_path);
+            throw new RuntimeException(
+                "Could not store a private key in {$directory}: the file system there ignores chmod 600 and "
+                . sprintf('leaves new files with mode %04o', $permissions & 0777) . ', which lets other users read the key. '
+                . 'Use a --state-dir on a file system that keeps file permissions, or run '
+                . '`reprint keygen --out=PATH` with PATH on such a file system and pass --private-key=PATH.'
+            );
+        }
+        if (!rename($temporary_path, $path)) {
+            unlink($temporary_path);
             throw new RuntimeException("Could not write the private key to {$path}.");
         }
         return [
