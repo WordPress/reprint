@@ -190,9 +190,13 @@ class ImportClient
         "keygen",
     ];
 
-    /** Commands that authenticate to the remote site and therefore need a credential. */
+    /**
+     * Commands for which run() resolves the credential that signs its requests.
+     * files-push and db-push leave run() earlier and resolve theirs through
+     * build_envelope_signer().
+     */
     public const REMOTE_COMMANDS = [
-        'pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-pull', 'db-index', 'preflight',
+        'pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight',
     ];
 
     /** pull generated a key and stopped so it can be enrolled; not a failure, not a success. */
