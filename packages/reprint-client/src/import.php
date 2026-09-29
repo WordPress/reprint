@@ -1110,6 +1110,47 @@ class ImportClient
 
         $this->state = $this->load_state_with_request_context();
 
+        // Resolve the credential before any option is saved to state: a run
+        // that stops here must not change what the next run does.
+        // --abort clears local state and never signs a request.
+        $signs_remote_requests = !$abort && in_array($command, self::REMOTE_COMMANDS, true);
+        $this->initialize_credential($signs_remote_requests, $options);
+
+        // A remote command with no credential never sends a request. pull is
+        // the one-stop command and generates a key so the user can enroll it;
+        // every other command is a precise tool and says what to run instead.
+        if ($signs_remote_requests && $this->credential['scheme'] === null) {
+            if ($command === 'pull') {
+                $generated = self::generate_key_file(
+                    self::key_file_path($this->remote_reprint_api_url, $this->state_dir),
+                    false
+                );
+                $enrollment_instructions = self::format_enrollment_instructions($generated, true, true);
+                // Only the terminal presentation prints the text. JSONL and
+                // compact output stay parseable: the command report below
+                // carries the key and the same text in its message field.
+                $this->progress->print_line($enrollment_instructions);
+                if ($this->verbose_mode) {
+                    // Verbose terminal output shows JSONL records and no command report.
+                    $this->output_progress(['status' => 'enrollment_needed', 'message' => $enrollment_instructions], true);
+                }
+                // The command report would otherwise call this stop an error with no message.
+                $this->command_report_details = [
+                    'status' => 'enrollment_needed',
+                    'message' => $enrollment_instructions,
+                    'key_id' => $generated['key_id'],
+                    'key_path' => $generated['path'],
+                    'public_key' => $generated['public_key'],
+                ];
+                $this->exit_code = self::EXIT_CODE_ENROLLMENT_NEEDED;
+                return;
+            }
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI guidance with local paths, never HTML.
+                self::no_credential_message($this->remote_reprint_api_url, $this->state_dir)
+            );
+        }
+
         // Exit 3 ends one retry cycle. A later CLI run gets the same internal
         // retry allowance instead of inheriting an already exhausted count.
         if (
@@ -1360,45 +1401,6 @@ class ImportClient
         }
 
         $this->initialize_tuner($options);
-        // --abort clears local state and never signs a request.
-        $signs_remote_requests = !$abort && in_array($command, self::REMOTE_COMMANDS, true);
-        $this->initialize_credential($signs_remote_requests, $options);
-
-        // A remote command with no credential never sends a request. pull is
-        // the one-stop command and generates a key so the user can enroll it;
-        // every other command is a precise tool and says what to run instead.
-        if ($signs_remote_requests && $this->credential['scheme'] === null) {
-            if ($command === 'pull') {
-                $generated = self::generate_key_file(
-                    self::key_file_path($this->remote_reprint_api_url, $this->state_dir),
-                    false
-                );
-                $enrollment_instructions = self::format_enrollment_instructions($generated, true, true);
-                // Only the terminal presentation prints the text. JSONL and
-                // compact output stay parseable: the command report below
-                // carries the key and the same text in its message field.
-                $this->progress->print_line($enrollment_instructions);
-                if ($this->verbose_mode) {
-                    // Verbose terminal output shows JSONL records and no command report.
-                    $this->output_progress(['status' => 'enrollment_needed', 'message' => $enrollment_instructions], true);
-                }
-                // The command report would otherwise call this stop an error with no message.
-                $this->command_report_details = [
-                    'status' => 'enrollment_needed',
-                    'message' => $enrollment_instructions,
-                    'key_id' => $generated['key_id'],
-                    'key_path' => $generated['path'],
-                    'public_key' => $generated['public_key'],
-                ];
-                $this->exit_code = self::EXIT_CODE_ENROLLMENT_NEEDED;
-                return;
-            }
-            throw new InvalidArgumentException(
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI guidance with local paths, never HTML.
-                self::no_credential_message($this->remote_reprint_api_url, $this->state_dir)
-            );
-        }
-
         // Pull-like commands orchestrate preflight and lower-level stages
         // internally, so they run before the normal command dispatch.
         if (in_array($command, ["pull", "pull-files", "pull-db"], true)) {

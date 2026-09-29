@@ -195,6 +195,29 @@ final class KeygenCommandTest extends TestCase
         $this->assertFileDoesNotExist(ImportClient::key_file_path($url, $this->state_dir), 'granular commands never generate');
     }
 
+    public function testCredentialStopSavesNoOptionForTheNextRun(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        $pull_state_file = dirname(ImportClient::key_file_path($url, $this->state_dir)) . '/pull/state.json';
+
+        $files_pull = $this->runCli(['files-pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--filter=essential-files']);
+        $this->assertSame(1, $files_pull['exit_code'], $files_pull['output']);
+        $this->assertStringContainsString('reprint keygen', $files_pull['output']);
+
+        $pull = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--filter=essential-files']);
+        $this->assertSame(4, $pull['exit_code'], $pull['output']);
+
+        // Neither run contacted the site, so a plain run after enrollment
+        // must not inherit the filter they were given.
+        $saved_filter = null;
+        if (file_exists($pull_state_file)) {
+            $saved_filter = json_decode( (string) file_get_contents($pull_state_file), true)['filter'] ?? null;
+        }
+        $this->assertNull($saved_filter);
+    }
+
     public function testAbortNeedsNoCredentialAndGeneratesNoKey(): void
     {
         $url = 'https://example.test/?reprint-api';
