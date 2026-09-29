@@ -211,7 +211,7 @@ class SettingsPage {
     public function handle_public_key_enroll(): void {
         $this->require_manage_capability();
         check_admin_referer('reprint_server_enroll_public_key');
-        // The textarea sanitizer keeps the PEM line breaks; assert_valid_public_key() parses the result.
+        // assert_valid_public_key() is the real check. The sanitizer only cleans the pasted text.
         $pasted_key = isset($_POST['reprint_server_public_key']) && is_string($_POST['reprint_server_public_key'])
             ? sanitize_textarea_field(wp_unslash($_POST['reprint_server_public_key']))
             : '';
