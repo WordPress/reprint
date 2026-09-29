@@ -13221,10 +13221,19 @@ class ImportClient
             }
 
             if (Utils::str_contains($server_msg, 'Signature verification failed')) {
+                // The site found the key by an id derived from the key itself
+                // and the body hash matched, so the signed method, path, query,
+                // or cursor header differs from what the site received.
                 return [
-                    'code' => 'AUTH_KEY_MISMATCH',
+                    'code' => 'AUTH_REQUEST_REWRITTEN',
                     'message' =>
-                        "Signature rejected. The private key does not match the enrolled public key with this key id." . $key_hint,
+                        "Signature rejected. The site received a different request path or query than " .
+                        "this machine signed: " .
+                        Site_Export_HMAC_Client::request_target($this->remote_reprint_api_url) . "\n\n" .
+                        "A proxy, CDN, or host rule is rewriting the request on its way to WordPress, " .
+                        "for example by removing a path prefix. Use the URL at which WordPress itself " .
+                        "receives the request, or ask the host to pass the path and query through unchanged. " .
+                        "The key is not the problem; enrolling a new one will not help.",
                 ];
             }
 

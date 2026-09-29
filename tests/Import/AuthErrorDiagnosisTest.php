@@ -119,6 +119,22 @@ final class AuthErrorDiagnosisTest extends TestCase
         $this->assertStringContainsString('update the Reprint Server plugin', $result['message']);
     }
 
+    public function testRejectedKeySignatureBlamesARewrittenRequestNotTheKey(): void
+    {
+        [$private_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $path = $this->state_dir . '/k.pem';
+        file_put_contents($path, $private_pem);
+        chmod($path, 0600);
+        $result = $this->diagnose(
+            $this->clientWith(['private_key' => $path]),
+            403,
+            ['error' => 'Signature verification failed', 'reason' => 'auth_failed']
+        );
+        $this->assertSame('AUTH_REQUEST_REWRITTEN', $result['code']);
+        $this->assertStringContainsString('this machine signed: /?reprint-api', $result['message']);
+        $this->assertStringContainsString('enrolling a new one will not help', $result['message']);
+    }
+
     public function testNoCredentialMessageNamesBothOptions(): void
     {
         $result = $this->diagnose($this->clientWith([]), 403, ['error' => 'msg']);
