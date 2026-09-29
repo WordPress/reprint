@@ -12,9 +12,6 @@ namespace WordPress\Reprint\Server;
  */
 final class RequestAuthenticator {
 
-    public const SCHEME_KEY = 'key';
-    public const SCHEME_HMAC = 'hmac';
-
     public const REASON_NOT_CONFIGURED = 'not_configured';
     public const REASON_REQUIRES_TOKEN_AUTH = PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH;
     public const REASON_UNKNOWN_KEY = PublicKeyServer::REASON_UNKNOWN_KEY;
@@ -54,11 +51,6 @@ final class RequestAuthenticator {
         $this->public_keys_by_id = $public_keys_by_id;
         $this->timestamp_tolerance = $timestamp_tolerance;
         $this->cursor_header_name = $cursor_header_name;
-    }
-
-    /** Which scheme this host requires: 'key' or 'hmac'. */
-    public function required_scheme(): string {
-        return Utils::key_auth_required() ? self::SCHEME_KEY : self::SCHEME_HMAC;
     }
 
     /**

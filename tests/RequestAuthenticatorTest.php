@@ -61,14 +61,6 @@ final class RequestAuthenticatorTest extends TestCase
         return (float) $headers['X-Auth-Timestamp'] + 1.0;
     }
 
-    public function testRequiredSchemeFollowsTheUtilsHostRule(): void
-    {
-        $authenticator = new RequestAuthenticator(null, []);
-        $this->assertSame('key', $authenticator->required_scheme(), 'the test runtime has OpenSSL');
-        Utils::override_key_auth_required_for_tests(false);
-        $this->assertSame('hmac', $authenticator->required_scheme());
-    }
-
     public function testHmacHostVerifiesTokenAndIgnoresKeys(): void
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
