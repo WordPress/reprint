@@ -261,14 +261,14 @@ final class HmacServerTest extends TestCase
         $this->assertInstanceOf(\WordPress\Reprint\Server\EnvelopeSigner::class, $client);
     }
 
-    public function testSignatureFailureReportsTheGenericReason(): void
+    public function testSignatureFailureReportsSignatureMismatch(): void
     {
         $headers = $this->buildHeadersForBody('', '1700000000.000000');
         $headers['X-Auth-Signature'] = str_repeat('0', 64);
         $server = new \WordPress\Reprint\Server\HMACServer(self::SECRET);
 
         $this->assertSame('HMAC signature verification failed', $server->verify($headers, '', [], 1700000001.0));
-        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertSame(\WordPress\Reprint\Server\HMACServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
     }
 
     private function buildHeadersForBody(

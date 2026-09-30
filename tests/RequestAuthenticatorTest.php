@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\PublicKeyClient;
 use WordPress\Reprint\Server\RequestAuthenticator;
 use WordPress\Reprint\Server\Utils;
@@ -159,7 +160,7 @@ final class RequestAuthenticatorTest extends TestCase
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
-        $this->assertSame(RequestAuthenticator::REASON_AUTH_FAILED, $authenticator->last_error_reason());
+        $this->assertSame(HMACServer::REASON_SIGNATURE_MISMATCH, $authenticator->last_error_reason());
     }
 
     public function testKeyHostWithNoKeysIsNotConfiguredRegardlessOfToken(): void

@@ -20,6 +20,10 @@ final class HMACServer {
      */
     public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
+    public const REASON_MISSING_HEADER = 'missing_header';
+    public const REASON_TIMESTAMP_EXPIRED = 'timestamp_expired';
+    public const REASON_SIGNATURE_MISMATCH = 'signature_mismatch';
+    public const REASON_CONTENT_HASH_MISMATCH = 'content_hash_mismatch';
     public const REASON_AUTH_FAILED = 'auth_failed';
 
     /** @var string */
@@ -41,8 +45,8 @@ final class HMACServer {
         return $this->last_error_reason;
     }
 
-    private function fail(string $message): string {
-        $this->last_error_reason = self::REASON_AUTH_FAILED;
+    private function fail(string $message, string $reason = self::REASON_AUTH_FAILED): string {
+        $this->last_error_reason = $reason;
         return $message;
     }
 
@@ -71,7 +75,7 @@ final class HMACServer {
         }
 
         if (!hash_equals($auth['content_hash'], $actual_content_hash)) {
-            return $this->fail('Content hash mismatch: body was modified in transit');
+            return $this->fail('Content hash mismatch: body was modified in transit', self::REASON_CONTENT_HASH_MISMATCH);
         }
 
         return null;
@@ -112,7 +116,7 @@ final class HMACServer {
         $message = $auth['nonce'] . $auth['timestamp'] . self::UNSIGNED_PAYLOAD . "\n" . strtoupper($method) . "\n" . $request_target;
         $expected_signature = hash_hmac('sha256', $message, $this->secret);
         if (!hash_equals($expected_signature, $auth['signature'])) {
-            return $this->fail('HMAC signature verification failed');
+            return $this->fail('HMAC signature verification failed', self::REASON_SIGNATURE_MISMATCH);
         }
 
         return null;
@@ -150,7 +154,7 @@ final class HMACServer {
 
         $expected_signature = hash_hmac('sha256', $auth['nonce'] . $auth['timestamp'] . $auth['content_hash'], $this->secret);
         if (!hash_equals($expected_signature, $auth['signature'])) {
-            return $this->fail('HMAC signature verification failed');
+            return $this->fail('HMAC signature verification failed', self::REASON_SIGNATURE_MISMATCH);
         }
 
         return null;
@@ -168,16 +172,16 @@ final class HMACServer {
         $timestamp = $auth['timestamp'];
         $signed_content_hash = $auth['content_hash'];
         if ($signature === null) {
-            return $this->fail('Missing X-Auth-Signature header');
+            return $this->fail('Missing X-Auth-Signature header', self::REASON_MISSING_HEADER);
         }
         if ($nonce === null) {
-            return $this->fail('Missing X-Auth-Nonce header');
+            return $this->fail('Missing X-Auth-Nonce header', self::REASON_MISSING_HEADER);
         }
         if ($timestamp === null) {
-            return $this->fail('Missing X-Auth-Timestamp header');
+            return $this->fail('Missing X-Auth-Timestamp header', self::REASON_MISSING_HEADER);
         }
         if ($signed_content_hash === null) {
-            return $this->fail('Missing X-Auth-Content-Hash header');
+            return $this->fail('Missing X-Auth-Content-Hash header', self::REASON_MISSING_HEADER);
         }
 
         if (!is_numeric($timestamp)) {
@@ -193,7 +197,7 @@ final class HMACServer {
                 'Request timestamp expired. Difference: %.2f seconds, max allowed: %d seconds',
                 $time_diff,
                 $this->timestamp_tolerance
-            ));
+            ), self::REASON_TIMESTAMP_EXPIRED);
         }
 
         if (strlen($nonce) < 16) {
