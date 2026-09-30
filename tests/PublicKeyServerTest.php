@@ -18,25 +18,14 @@ final class PublicKeyServerTest extends TestCase
     /** @var PublicKeyClient */
     private static $client;
 
-    /** @var array<string, mixed> */
-    private $original_server = [];
-
     public static function setUpBeforeClass(): void
     {
         [self::$private_key_pem, self::$public_key] = PublicKeyClient::generate_keypair();
         self::$client = new PublicKeyClient(self::$private_key_pem);
     }
 
-    protected function setUp(): void
-    {
-        parent::setUp();
-
-        $this->original_server = $_SERVER;
-    }
-
     protected function tearDown(): void
     {
-        $_SERVER = $this->original_server;
         Utils::override_key_auth_required_for_tests(null);
 
         parent::tearDown();
@@ -296,40 +285,15 @@ final class PublicKeyServerTest extends TestCase
         $this->assertSame('Missing X-Auth-Key-Id header', $server->verify($headers, 'GET', '/?reprint-api', (float) $headers['X-Auth-Timestamp'] + 1.0));
     }
 
-    public function testVerifyGlobalsReadsSuperglobals(): void
-    {
-        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $_SERVER = [
-            'REQUEST_METHOD' => 'GET',
-            'REQUEST_URI' => '/?reprint-api',
-            'HTTP_X_AUTH_KEY_ID' => $headers['X-Auth-Key-Id'],
-            'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
-            'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
-            'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
-        ];
-
-        $this->assertNull($this->server()->verify_globals($this->now($headers)));
-    }
-
     /**
      * The push stream client signs through EnvelopeSigner. Its signature must
-     * verify like any other, with the streamed body left unread.
+     * verify like any other.
      */
     public function testEnvelopeSignatureVerifiesForAPushEndpoint(): void
     {
         $headers = self::$client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
-        $_SERVER = [
-            'REQUEST_METHOD' => 'POST',
-            'REQUEST_URI' => '/?reprint-api&endpoint=push_upload',
-            'CONTENT_LENGTH' => '4194304',
-            'CONTENT_TYPE' => 'application/octet-stream',
-            'HTTP_X_AUTH_KEY_ID' => $headers['X-Auth-Key-Id'],
-            'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
-            'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
-            'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
-        ];
 
-        $this->assertNull($this->server()->verify_globals($this->now($headers)));
+        $this->assertNull($this->server()->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', $this->now($headers)));
     }
 
     public function testAssertValidPublicKeyAcceptsPemAndOneLine(): void

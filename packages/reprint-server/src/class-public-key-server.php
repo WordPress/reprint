@@ -136,19 +136,6 @@ final class PublicKeyServer {
         return null;
     }
 
-    /**
-     * Verifies the current PHP request. The body is never read, so a push
-     * endpoint can still stream php://input itself.
-     */
-    public function verify_globals(?float $now = null): ?string {
-        // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Exact request-line values are covered by the signature.
-        $method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
-        $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
-        // phpcs:enable WordPress.Security.ValidatedSanitizedInput
-
-        return $this->verify(Utils::request_headers(), $method, $request_target, $now);
-    }
-
     public function last_error_reason(): ?string {
         return $this->last_error_reason;
     }
