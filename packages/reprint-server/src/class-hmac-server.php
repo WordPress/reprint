@@ -111,15 +111,15 @@ final class HMACServer {
             $body = '';
         }
 
-        return $this->verify($this->collect_global_headers(), $body, $_FILES, $now);
+        return $this->verify(Utils::request_headers(), $body, $_FILES, $now);
     }
 
     private function collect_auth_headers(array $headers): array {
         return [
-            'signature' => $this->get_header($headers, 'X-Auth-Signature'),
-            'nonce' => $this->get_header($headers, 'X-Auth-Nonce'),
-            'timestamp' => $this->get_header($headers, 'X-Auth-Timestamp'),
-            'content_hash' => $this->get_header($headers, 'X-Auth-Content-Hash'),
+            'signature' => Utils::request_header($headers, 'X-Auth-Signature'),
+            'nonce' => Utils::request_header($headers, 'X-Auth-Nonce'),
+            'timestamp' => Utils::request_header($headers, 'X-Auth-Timestamp'),
+            'content_hash' => Utils::request_header($headers, 'X-Auth-Content-Hash'),
         ];
     }
 
@@ -148,16 +148,16 @@ final class HMACServer {
         $nonce = $auth['nonce'];
         $timestamp = $auth['timestamp'];
         $signed_content_hash = $auth['content_hash'];
-        if ($signature === null || $signature === '') {
+        if ($signature === null) {
             return 'Missing X-Auth-Signature header';
         }
-        if ($nonce === null || $nonce === '') {
+        if ($nonce === null) {
             return 'Missing X-Auth-Nonce header';
         }
-        if ($timestamp === null || $timestamp === '') {
+        if ($timestamp === null) {
             return 'Missing X-Auth-Timestamp header';
         }
-        if ($signed_content_hash === null || $signed_content_hash === '') {
+        if ($signed_content_hash === null) {
             return 'Missing X-Auth-Content-Hash header';
         }
 
@@ -179,45 +179,6 @@ final class HMACServer {
 
         if (strlen($nonce) < 16) {
             return 'Nonce must be at least 16 characters';
-        }
-
-        return null;
-    }
-
-    private function collect_global_headers(): array {
-        $headers = [];
-
-        if (function_exists('getallheaders')) {
-            $all_headers = getallheaders();
-            if (is_array($all_headers)) {
-                $headers = $all_headers;
-            }
-        }
-
-        foreach ($_SERVER as $key => $value) {
-            if (strpos($key, 'HTTP_') !== 0 || !is_string($value)) {
-                continue;
-            }
-
-            $headers[$key] = $value;
-        }
-
-        return $headers;
-    }
-
-    private function get_header(array $headers, string $name): ?string {
-        foreach ($headers as $key => $value) {
-            if (!is_string($value)) {
-                continue;
-            }
-
-            if (strcasecmp($key, $name) === 0) {
-                return $value;
-            }
-
-            if (strcasecmp($key, 'HTTP_' . strtoupper(str_replace('-', '_', $name))) === 0) {
-                return $value;
-            }
         }
 
         return null;

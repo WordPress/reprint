@@ -1094,6 +1094,51 @@ final class Utils
     }
 
     /**
+     * Returns a request header by its HTTP name or its $_SERVER name, or null
+     * when it is absent or empty. No auth header means anything when empty.
+     *
+     * @param array<string|int,mixed> $headers Request headers, either convention.
+     */
+    public static function request_header(array $headers, string $name): ?string
+    {
+        $server_name = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
+        foreach ($headers as $key => $value) {
+            if (!is_string($value)) {
+                continue;
+            }
+            $header_key = (string) $key;
+            if (strcasecmp($header_key, $name) === 0 || strcasecmp($header_key, $server_name) === 0) {
+                return $value === '' ? null : $value;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns the current request's headers: getallheaders() where the SAPI
+     * provides it, followed by every HTTP_* entry of $_SERVER.
+     *
+     * @return array<string,string>
+     */
+    public static function request_headers(): array
+    {
+        $headers = [];
+        if (function_exists('getallheaders')) {
+            $all_headers = getallheaders();
+            if (is_array($all_headers)) {
+                $headers = $all_headers;
+            }
+        }
+        foreach ($_SERVER as $key => $value) {
+            if (strpos( (string) $key, 'HTTP_') !== 0 || !is_string($value)) {
+                continue;
+            }
+            $headers[$key] = $value;
+        }
+        return $headers;
+    }
+
+    /**
      * Reduces a public key to its one-line base64 body.
      *
      * Accepts a PEM block or the bare body. Strips the BEGIN/END armour and

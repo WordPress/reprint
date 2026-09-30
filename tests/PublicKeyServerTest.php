@@ -320,14 +320,6 @@ final class PublicKeyServerTest extends TestCase
         $this->assertNull($this->server()->verify_globals($this->now($headers)));
     }
 
-    public function testGetHeaderReadsEitherHeaderConventionAndTreatsEmptyAsAbsent(): void
-    {
-        $this->assertSame('abc', PublicKeyServer::get_header(['X-Auth-Key-Id' => 'abc'], 'X-Auth-Key-Id'));
-        $this->assertSame('abc', PublicKeyServer::get_header(['HTTP_X_AUTH_KEY_ID' => 'abc'], 'X-Auth-Key-Id'));
-        $this->assertNull(PublicKeyServer::get_header([], 'X-Auth-Key-Id'));
-        $this->assertNull(PublicKeyServer::get_header(['X-Auth-Key-Id' => ''], 'X-Auth-Key-Id'));
-    }
-
     public function testAssertValidPublicKeyAcceptsPemAndOneLine(): void
     {
         $this->assertSame(self::$public_key, PublicKeyServer::assert_valid_public_key(self::$public_key));

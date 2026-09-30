@@ -64,10 +64,10 @@ final class PublicKeyServer {
             return $this->fail(self::REASON_REQUIRES_TOKEN_AUTH, 'This host cannot verify key signatures');
         }
 
-        $key_id = self::get_header($headers, 'X-Auth-Key-Id');
-        $signature_base64 = self::get_header($headers, 'X-Auth-Signature');
-        $nonce = self::get_header($headers, 'X-Auth-Nonce');
-        $timestamp = self::get_header($headers, 'X-Auth-Timestamp');
+        $key_id = Utils::request_header($headers, 'X-Auth-Key-Id');
+        $signature_base64 = Utils::request_header($headers, 'X-Auth-Signature');
+        $nonce = Utils::request_header($headers, 'X-Auth-Nonce');
+        $timestamp = Utils::request_header($headers, 'X-Auth-Timestamp');
 
         foreach ([
             'X-Auth-Key-Id' => $key_id,
@@ -129,8 +129,8 @@ final class PublicKeyServer {
     }
 
     /**
-     * Verifies the current PHP request from $_SERVER. The body is never read,
-     * so a push endpoint can still stream php://input itself.
+     * Verifies the current PHP request. The body is never read, so a push
+     * endpoint can still stream php://input itself.
      */
     public function verify_globals(?float $now = null): ?string {
         // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Exact request-line values are covered by the signature.
@@ -138,25 +138,7 @@ final class PublicKeyServer {
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
 
-        return $this->verify($_SERVER, $method, $request_target, $now);
-    }
-
-    /**
-     * Returns a request header by its HTTP name or its $_SERVER name, or null
-     * when it is absent or empty. No auth header means anything when empty.
-     */
-    public static function get_header(array $headers, string $name): ?string {
-        $server_name = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
-        foreach ($headers as $key => $value) {
-            if (!is_string($value)) {
-                continue;
-            }
-            $header_key = (string) $key;
-            if (strcasecmp($header_key, $name) === 0 || strcasecmp($header_key, $server_name) === 0) {
-                return $value === '' ? null : $value;
-            }
-        }
-        return null;
+        return $this->verify(Utils::request_headers(), $method, $request_target, $now);
     }
 
     public function last_error_reason(): ?string {
