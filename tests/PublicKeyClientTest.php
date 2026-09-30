@@ -80,18 +80,16 @@ final class PublicKeyClientTest extends TestCase
         new PublicKeyClient(Utils::public_key_to_pem(self::$public_key_one_line));
     }
 
-    public function testAuthHeadersHaveTheFiveNamesAndVerifiableSignature(): void
+    public function testAuthHeadersHaveTheFourNamesAndVerifiableSignature(): void
     {
         $client = new PublicKeyClient(self::$private_key_pem);
-        $body = '{"paths":["/a"]}';
-        $headers = $client->get_auth_headers('POST', 'https://example.test/?reprint-api', $body, 'Y3Vyc29y');
+        $headers = $client->get_auth_headers('POST', 'https://example.test/?reprint-api');
 
         $this->assertSame(
-            ['X-Auth-Key-Id', 'X-Auth-Signature', 'X-Auth-Nonce', 'X-Auth-Timestamp', 'X-Auth-Content-Hash'],
+            ['X-Auth-Key-Id', 'X-Auth-Signature', 'X-Auth-Nonce', 'X-Auth-Timestamp'],
             array_keys($headers)
         );
         $this->assertSame($client->get_key_id(), $headers['X-Auth-Key-Id']);
-        $this->assertSame(hash('sha256', $body), $headers['X-Auth-Content-Hash']);
         $this->assertMatchesRegularExpression('/^[0-9a-f]{32}$/', $headers['X-Auth-Nonce']);
         $this->assertMatchesRegularExpression('/^\d+\.\d{6}$/', $headers['X-Auth-Timestamp']);
 
@@ -99,10 +97,8 @@ final class PublicKeyClientTest extends TestCase
             $headers['X-Auth-Key-Id'],
             $headers['X-Auth-Nonce'],
             $headers['X-Auth-Timestamp'],
-            $headers['X-Auth-Content-Hash'],
             'POST',
-            '/?reprint-api',
-            'Y3Vyc29y'
+            '/?reprint-api'
         );
         $signature = base64_decode($headers['X-Auth-Signature'], true);
         $this->assertNotFalse($signature);
@@ -113,15 +109,15 @@ final class PublicKeyClientTest extends TestCase
 
     public function testBuildMessageIsNewlineDelimitedInSpecOrder(): void
     {
-        $message = PublicKeyClient::build_message('k', 'n', 't', 'h', 'get', '/x?y=1', null);
-        $this->assertSame("reprint-rsa-sha256-v1\nk\nn\nt\nh\nGET\n/x?y=1\n", $message);
+        $message = PublicKeyClient::build_message('k', 'n', 't', 'get', '/x?y=1');
+        $this->assertSame("reprint-rsa-sha256-v1\nk\nn\nt\nGET\n/x?y=1", $message);
     }
 
-    public function testEnvelopeHeadersUseTheUnsignedPayloadLiteral(): void
+    public function testEnvelopeHeadersAreTheSameKindOfSignature(): void
     {
         $client = new PublicKeyClient(self::$private_key_pem);
         $headers = $client->get_envelope_auth_headers('post', 'https://example.test/?reprint-api&endpoint=push_upload');
-        $this->assertSame('UNSIGNED-PAYLOAD', $headers['X-Auth-Content-Hash']);
+        $this->assertSame(['X-Auth-Key-Id', 'X-Auth-Signature', 'X-Auth-Nonce', 'X-Auth-Timestamp'], array_keys($headers));
         $this->assertInstanceOf(EnvelopeSigner::class, $client);
     }
 
@@ -129,7 +125,7 @@ final class PublicKeyClientTest extends TestCase
     {
         $client = new PublicKeyClient(self::$private_key_pem);
         $curl_headers = $client->get_curl_headers('GET', 'https://example.test/?reprint-api');
-        $this->assertCount(5, $curl_headers);
+        $this->assertCount(4, $curl_headers);
         $this->assertStringStartsWith('X-Auth-Key-Id: ', $curl_headers[0]);
     }
 }

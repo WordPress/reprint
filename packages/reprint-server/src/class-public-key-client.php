@@ -9,18 +9,14 @@ use RuntimeException;
  * Signs Reprint API requests with an RSA private key.
  *
  * The site holds only the public half, so nothing a site stores can produce
- * one of these signatures. The signed message covers the method, request
- * target, content hash and cursor as well as the freshness fields. The
- * content hash covers the whole body of a form-encoded request, but only the
- * uploaded file contents of a multipart request: as on the HMAC path, the
- * form fields of a multipart request are not signed.
+ * one of these signatures. The signed message covers the key id, the
+ * freshness fields, the method, and the request target. The key
+ * authenticates the sender and TLS protects the request, so no request body
+ * is signed: every request is signed the way the push envelope is.
  */
 final class PublicKeyClient implements EnvelopeSigner {
 
     public const ALGORITHM = 'reprint-rsa-sha256-v1';
-
-    /** Must match PublicKeyServer::UNSIGNED_PAYLOAD and Site_Export_HMAC_Client::UNSIGNED_PAYLOAD. */
-    public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
     /** @var resource|object Private key handle: openssl_pkey_get_private() returns a resource on PHP 7 and an OpenSSLAsymmetricKey object on PHP 8. */
     private $private_key;
@@ -129,75 +125,39 @@ final class PublicKeyClient implements EnvelopeSigner {
      * Builds the newline-delimited message both sides sign.
      *
      * Newlines are a safe delimiter because no field can contain one: hex,
-     * decimal, uppercase letters, a request line, base64, or the literal.
+     * decimal, uppercase letters, or a request line.
      */
     public static function build_message(
         string $key_id,
         string $nonce,
         string $timestamp,
-        string $content_hash,
         string $method,
-        string $request_target,
-        ?string $cursor
+        string $request_target
     ): string {
         return self::ALGORITHM . "\n"
             . $key_id . "\n"
             . $nonce . "\n"
             . $timestamp . "\n"
-            . $content_hash . "\n"
             . strtoupper($method) . "\n"
-            . $request_target . "\n"
-            . (string) $cursor;
+            . $request_target;
     }
 
     /**
-     * Returns the five X-Auth-* headers for a body-signed request.
+     * Returns the four X-Auth-* headers for a request.
      *
-     * @param string      $method HTTP method.
-     * @param string      $url    Full request URL; only path and query are signed.
-     * @param string      $body   Raw content to hash: file contents for uploads,
-     *                            http_build_query() output for forms, '' for GET.
-     * @param string|null $cursor The X-Export-Cursor value sent with the request, or null.
+     * @param string $method HTTP method.
+     * @param string $url    Full request URL; only path and query are signed.
      * @return array<string,string>
      */
-    public function get_auth_headers(string $method, string $url, string $body = '', ?string $cursor = null): array {
-        return $this->sign(hash('sha256', $body), $method, $url, $cursor);
-    }
-
-    /**
-     * Returns headers for a request whose body is not signed. The content hash
-     * is the UNSIGNED-PAYLOAD literal; TLS protects the streamed body.
-     *
-     * @param string      $method HTTP method.
-     * @param string      $url    Full request URL.
-     * @param string|null $cursor Cursor header value, or null.
-     * @return array<string,string>
-     */
-    public function get_envelope_auth_headers(string $method, string $url, ?string $cursor = null): array {
-        return $this->sign(self::UNSIGNED_PAYLOAD, $method, $url, $cursor);
-    }
-
-    /** @return string[] ["Name: value", ...] for CURLOPT_HTTPHEADER. */
-    public function get_curl_headers(string $method, string $url, string $body = '', ?string $cursor = null): array {
-        $curl_headers = [];
-        foreach ($this->get_auth_headers($method, $url, $body, $cursor) as $name => $value) {
-            $curl_headers[] = $name . ': ' . $value;
-        }
-        return $curl_headers;
-    }
-
-    /** @return array<string,string> */
-    private function sign(string $content_hash, string $method, string $url, ?string $cursor): array {
+    public function get_auth_headers(string $method, string $url): array {
         $nonce = $this->generate_nonce();
         $timestamp = $this->get_timestamp();
         $message = self::build_message(
             $this->key_id,
             $nonce,
             $timestamp,
-            $content_hash,
             $method,
-            \Site_Export_HMAC_Client::request_target($url),
-            $cursor
+            \Site_Export_HMAC_Client::request_target($url)
         );
         $signature = '';
         if (!openssl_sign($message, $signature, $this->private_key, OPENSSL_ALGO_SHA256)) {
@@ -209,8 +169,26 @@ final class PublicKeyClient implements EnvelopeSigner {
             'X-Auth-Signature' => base64_encode($signature),
             'X-Auth-Nonce' => $nonce,
             'X-Auth-Timestamp' => $timestamp,
-            'X-Auth-Content-Hash' => $content_hash,
         ];
+    }
+
+    /**
+     * EnvelopeSigner for the push stream client. A key signature never covers
+     * a body, so this is the same signature get_auth_headers() makes.
+     *
+     * @return array<string,string>
+     */
+    public function get_envelope_auth_headers(string $method, string $url): array {
+        return $this->get_auth_headers($method, $url);
+    }
+
+    /** @return string[] ["Name: value", ...] for CURLOPT_HTTPHEADER. */
+    public function get_curl_headers(string $method, string $url): array {
+        $curl_headers = [];
+        foreach ($this->get_auth_headers($method, $url) as $name => $value) {
+            $curl_headers[] = $name . ': ' . $value;
+        }
+        return $curl_headers;
     }
 
     private static function require_openssl(): void {

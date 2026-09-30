@@ -21,12 +21,6 @@ final class PublicKeyServerTest extends TestCase
     /** @var array<string, mixed> */
     private $original_server = [];
 
-    /** @var array<string, mixed> */
-    private $original_get = [];
-
-    /** @var array<string, mixed> */
-    private $original_files = [];
-
     public static function setUpBeforeClass(): void
     {
         [self::$private_key_pem, self::$public_key] = PublicKeyClient::generate_keypair();
@@ -38,15 +32,11 @@ final class PublicKeyServerTest extends TestCase
         parent::setUp();
 
         $this->original_server = $_SERVER;
-        $this->original_get = $_GET;
-        $this->original_files = $_FILES;
     }
 
     protected function tearDown(): void
     {
         $_SERVER = $this->original_server;
-        $_GET = $this->original_get;
-        $_FILES = $this->original_files;
         Utils::override_key_auth_required_for_tests(null);
 
         parent::tearDown();
@@ -64,11 +54,10 @@ final class PublicKeyServerTest extends TestCase
 
     public function testRoundTripVerifies(): void
     {
-        $body = '{"endpoint":"preflight"}';
-        $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api', $body, 'abc');
+        $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api');
         $server = $this->server();
 
-        $this->assertNull($server->verify($headers, 'POST', '/?reprint-api', $body, [], 'abc', false, $this->now($headers)));
+        $this->assertNull($server->verify($headers, 'POST', '/?reprint-api', $this->now($headers)));
         $this->assertSame(self::$client->get_key_id(), $server->authenticated_key_id());
         $this->assertNull($server->last_error_reason());
     }
@@ -79,7 +68,7 @@ final class PublicKeyServerTest extends TestCase
         Utils::override_key_auth_required_for_tests(false);
         $server = $this->server();
 
-        $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
     }
 
@@ -88,7 +77,7 @@ final class PublicKeyServerTest extends TestCase
         Utils::override_key_auth_required_for_tests(false);
         $server = $this->server();
 
-        $error = $server->verify([], 'GET', '/?reprint-api', '', [], null, false, microtime(true));
+        $error = $server->verify([], 'GET', '/?reprint-api', microtime(true));
 
         $this->assertSame('This host accepts connection-token authentication only', $error);
         $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
@@ -98,12 +87,12 @@ final class PublicKeyServerTest extends TestCase
     {
         // The test runtime has OpenSSL, so the host rule accepts keys.
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $this->assertNull($this->server()->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNull($this->server()->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
 
         // The rule is read on every call, not when the server is built.
         $server = $this->server();
         Utils::override_key_auth_required_for_tests(false);
-        $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH, $server->last_error_reason());
     }
 
@@ -112,27 +101,25 @@ final class PublicKeyServerTest extends TestCase
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $server = new PublicKeyServer(['0000000000000000' => self::$public_key]);
 
-        $this->assertSame('Key ' . self::$client->get_key_id() . ' is not enrolled on this site', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame('Key ' . self::$client->get_key_id() . ' is not enrolled on this site', $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_UNKNOWN_KEY, $server->last_error_reason());
     }
 
     /** @dataProvider tamperedInputProvider */
-    public function testEachSignedInputIsBound(string $method, string $target, string $body, ?string $cursor): void
+    public function testEachSignedInputIsBound(string $method, string $target): void
     {
-        $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api', '{"a":1}', 'c1');
+        $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api');
         $server = $this->server();
 
-        $this->assertNotNull($server->verify($headers, $method, $target, $body, [], $cursor, false, $this->now($headers)));
+        $this->assertSame('Signature verification failed', $server->verify($headers, $method, $target, $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
     public static function tamperedInputProvider(): array
     {
         return [
-            'method' => ['GET', '/?reprint-api', '{"a":1}', 'c1'],
-            'target' => ['POST', '/?reprint-api&x=1', '{"a":1}', 'c1'],
-            'body' => ['POST', '/?reprint-api', '{"a":2}', 'c1'],
-            'cursor' => ['POST', '/?reprint-api', '{"a":1}', 'c2'],
+            'method' => ['GET', '/?reprint-api'],
+            'target' => ['POST', '/?reprint-api&x=1'],
         ];
     }
 
@@ -146,7 +133,7 @@ final class PublicKeyServerTest extends TestCase
             : sprintf('%.6f', (float) $headers['X-Auth-Timestamp'] + 1.0);
         $server = $this->server();
 
-        $this->assertSame('Signature verification failed', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $now));
+        $this->assertSame('Signature verification failed', $server->verify($headers, 'GET', '/?reprint-api', $now));
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
@@ -166,7 +153,7 @@ final class PublicKeyServerTest extends TestCase
         unset($headers[$header_name]);
         $server = $this->server();
 
-        $this->assertSame('Missing ' . $header_name . ' header', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $now));
+        $this->assertSame('Missing ' . $header_name . ' header', $server->verify($headers, 'GET', '/?reprint-api', $now));
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
@@ -177,7 +164,6 @@ final class PublicKeyServerTest extends TestCase
             'signature' => ['X-Auth-Signature'],
             'nonce' => ['X-Auth-Nonce'],
             'timestamp' => ['X-Auth-Timestamp'],
-            'content hash' => ['X-Auth-Content-Hash'],
         ];
     }
 
@@ -186,7 +172,7 @@ final class PublicKeyServerTest extends TestCase
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $server = $this->server();
 
-        $this->assertStringContainsString('expired', (string) $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, (float) $headers['X-Auth-Timestamp'] - 301.0));
+        $this->assertStringContainsString('expired', (string) $server->verify($headers, 'GET', '/?reprint-api', (float) $headers['X-Auth-Timestamp'] - 301.0));
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
@@ -197,7 +183,7 @@ final class PublicKeyServerTest extends TestCase
         $headers['X-Auth-Timestamp'] = 'yesterday';
         $server = $this->server();
 
-        $this->assertSame('Invalid timestamp format', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $now));
+        $this->assertSame('Invalid timestamp format', $server->verify($headers, 'GET', '/?reprint-api', $now));
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
@@ -208,7 +194,7 @@ final class PublicKeyServerTest extends TestCase
         $headers['X-Auth-Signature'] = $signature;
         $server = $this->server();
 
-        $this->assertSame($expected_error, $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame($expected_error, $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
         $this->assertNull($server->authenticated_key_id());
     }
@@ -226,7 +212,7 @@ final class PublicKeyServerTest extends TestCase
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $server = $this->server();
 
-        $this->assertStringContainsString('expired', (string) $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, (float) $headers['X-Auth-Timestamp'] + 301.0));
+        $this->assertStringContainsString('expired', (string) $server->verify($headers, 'GET', '/?reprint-api', (float) $headers['X-Auth-Timestamp'] + 301.0));
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
@@ -237,7 +223,7 @@ final class PublicKeyServerTest extends TestCase
         $headers['X-Auth-Nonce'] = $nonce;
         $server = $this->server();
 
-        $this->assertSame('Nonce must be at least 16 hexadecimal characters', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame('Nonce must be at least 16 hexadecimal characters', $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
@@ -265,7 +251,7 @@ final class PublicKeyServerTest extends TestCase
 
         $this->assertSame(
             'Stored public key ' . self::$client->get_key_id() . ' is not an RSA key of at least 2048 bits',
-            $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers))
+            $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers))
         );
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
@@ -286,7 +272,7 @@ final class PublicKeyServerTest extends TestCase
         // Enroll the other client's id but with OUR public key, so the id is known and the signature is wrong.
         $server = new PublicKeyServer([$other_client->get_key_id() => self::$public_key]);
 
-        $this->assertSame('Signature verification failed', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertSame('Signature verification failed', $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
     }
 
     public function testHmacHeadersCannotPassTheKeyPath(): void
@@ -295,77 +281,29 @@ final class PublicKeyServerTest extends TestCase
         $headers = $hmac->get_auth_headers('');
         $server = $this->server();
 
-        $this->assertSame('Missing X-Auth-Key-Id header', $server->verify($headers, 'GET', '/?reprint-api', '', [], null, false, (float) $headers['X-Auth-Timestamp'] + 1.0));
-    }
-
-    public function testUnsignedPayloadIsOnlyAcceptedForPush(): void
-    {
-        $headers = self::$client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
-        $server = $this->server();
-
-        $this->assertNull($server->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed bytes', [], null, true, $this->now($headers)));
-        $this->assertSame('Unsigned payloads are accepted only for push endpoints', $server->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed bytes', [], null, false, $this->now($headers)));
-    }
-
-    /**
-     * Push bodies are streamed by the endpoint and never read during
-     * authentication, so a body-hashed signature cannot be checked there.
-     */
-    public function testPushEndpointRejectsABodyHashedSignature(): void
-    {
-        $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload', 'streamed bytes');
-        $server = $this->server();
-
-        $this->assertSame(
-            'Push endpoints require the literal UNSIGNED-PAYLOAD content hash',
-            $server->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', null, [], null, true, $this->now($headers))
-        );
-        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
-        $this->assertNull($server->authenticated_key_id());
-    }
-
-    public function testMultipartUploadsAreHashedFromTmpFiles(): void
-    {
-        $temporary_upload_path = tempnam(sys_get_temp_dir(), 'pk');
-        try {
-            file_put_contents($temporary_upload_path, '[{"path":"L2E="}]');
-            $files = ['file_list' => ['tmp_name' => $temporary_upload_path, 'name' => 'file_list']];
-            $headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api', '[{"path":"L2E="}]');
-            $server = $this->server();
-
-            $this->assertNull($server->verify($headers, 'POST', '/?reprint-api', '', $files, null, false, $this->now($headers)));
-        } finally {
-            unlink($temporary_upload_path);
-        }
+        $this->assertSame('Missing X-Auth-Key-Id header', $server->verify($headers, 'GET', '/?reprint-api', (float) $headers['X-Auth-Timestamp'] + 1.0));
     }
 
     public function testVerifyGlobalsReadsSuperglobals(): void
     {
-        $body = '';
-        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api', $body, 'cur');
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $_SERVER = [
             'REQUEST_METHOD' => 'GET',
             'REQUEST_URI' => '/?reprint-api',
-            'HTTP_X_EXPORT_CURSOR' => 'cur',
             'HTTP_X_AUTH_KEY_ID' => $headers['X-Auth-Key-Id'],
             'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
             'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
             'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
-            'HTTP_X_AUTH_CONTENT_HASH' => $headers['X-Auth-Content-Hash'],
         ];
-        $_FILES = [];
-        $_GET = [];
 
         $this->assertNull($this->server()->verify_globals($this->now($headers)));
     }
 
     /**
-     * A push request verifies from superglobals through the envelope alone.
-     * php://input is empty under CLI PHPUnit, so the proof is structural: the
-     * declared body length plays no part, and a body-hashed signature for the
-     * same request is refused before any body would be hashed.
+     * The push stream client signs through EnvelopeSigner. Its signature must
+     * verify like any other, with the streamed body left unread.
      */
-    public function testVerifyGlobalsLeavesAPushBodyUnread(): void
+    public function testEnvelopeSignatureVerifiesForAPushEndpoint(): void
     {
         $headers = self::$client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
         $_SERVER = [
@@ -377,23 +315,9 @@ final class PublicKeyServerTest extends TestCase
             'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
             'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
             'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
-            'HTTP_X_AUTH_CONTENT_HASH' => $headers['X-Auth-Content-Hash'],
         ];
-        $_FILES = [];
-        $_GET = ['reprint-api' => '', 'endpoint' => 'push_upload'];
 
         $this->assertNull($this->server()->verify_globals($this->now($headers)));
-
-        $body_hashed_headers = self::$client->get_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload', '');
-        $_SERVER['HTTP_X_AUTH_SIGNATURE'] = $body_hashed_headers['X-Auth-Signature'];
-        $_SERVER['HTTP_X_AUTH_NONCE'] = $body_hashed_headers['X-Auth-Nonce'];
-        $_SERVER['HTTP_X_AUTH_TIMESTAMP'] = $body_hashed_headers['X-Auth-Timestamp'];
-        $_SERVER['HTTP_X_AUTH_CONTENT_HASH'] = $body_hashed_headers['X-Auth-Content-Hash'];
-
-        $this->assertSame(
-            'Push endpoints require the literal UNSIGNED-PAYLOAD content hash',
-            $this->server()->verify_globals($this->now($body_hashed_headers))
-        );
     }
 
     public function testGetHeaderReadsEitherHeaderConventionAndTreatsEmptyAsAbsent(): void
