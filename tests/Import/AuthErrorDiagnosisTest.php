@@ -119,7 +119,7 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose(
             $this->clientWith(['private_key' => $path]),
             403,
-            ['error' => 'Signature verification failed', 'reason' => 'auth_failed']
+            ['error' => 'Signature verification failed', 'reason' => 'signature_mismatch']
         );
         $this->assertSame('AUTH_REQUEST_REWRITTEN', $result['code']);
         $this->assertStringContainsString('this machine signed: /?reprint-api', $result['message']);

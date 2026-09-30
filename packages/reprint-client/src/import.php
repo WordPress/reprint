@@ -13237,7 +13237,7 @@ class ImportClient
                 ];
             }
 
-            if (Utils::str_contains($server_msg, 'Signature verification failed')) {
+            if ($using_key && $server_reason === 'signature_mismatch') {
                 // The site found the key by an id derived from the key itself,
                 // so the signed method, path, or query differs from what the
                 // site received.
