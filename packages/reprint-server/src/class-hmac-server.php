@@ -142,21 +142,6 @@ final class HMACServer {
         return null;
     }
 
-    /**
-     * Verify the current PHP request using superglobals.
-     *
-     * Returns null on success, or an error string on failure. Pull endpoints
-     * use body signatures; push uploads use verify_envelope().
-     */
-    public function verify_globals(?float $now = null): ?string {
-        $body = file_get_contents('php://input');
-        if ($body === false) {
-            $body = '';
-        }
-
-        return $this->verify(Utils::request_headers(), $body, $_FILES, $now);
-    }
-
     private function collect_auth_headers(array $headers): array {
         return [
             'signature' => Utils::request_header($headers, 'X-Auth-Signature'),

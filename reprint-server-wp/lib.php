@@ -11,7 +11,6 @@ namespace WordPress\Reprint\Server\Plugin;
 
 use Exception;
 use InvalidArgumentException;
-use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\PushConfigurationException;
 use WordPress\Reprint\Server\RequestAuthenticator;
@@ -492,69 +491,6 @@ function update_push_authorization(bool $enabled): bool {
     }
 
     return (bool) update_option(PUSH_AUTHORIZATION_OPTION, $fingerprint, false);
-}
-
-/**
- * Verifies a connection-token (HMAC) signature. Retained for embedders that
- * call it directly; new embedders should call RequestAuthenticator through
- * handle_api_request(). On hosts that have `openssl_verify`, HMACServer
- * refuses every token (its last_error_reason() is `requires_key_auth`), so
- * this returns that refusal message there whatever the token.
- *
- * The signature covers a SHA-256 hash of the request body rather than
- * the raw bytes.  This sidesteps the problem that libcurl generates
- * multipart boundaries internally so the client can't predict the exact
- * byte stream — but it CAN hash the logical content before encoding.
- *
- * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), connection token)
- *
- * The client sends X-Auth-Content-Hash = SHA256(body).  The server
- * independently hashes what it received and checks both that the hash
- * matches AND that the HMAC is valid.
- */
-function verify_hmac(string $secret): ?string {
-    if (!class_exists(HMACServer::class, false)) {
-        load_server_runtime();
-    }
-
-    if (!class_exists(HMACServer::class)) {
-        return 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.';
-    }
-
-    $server = new HMACServer($secret, TIMESTAMP_TOLERANCE);
-    return $server->verify_globals();
-}
-
-/**
- * Connection-token authentication handler retained for embedders that call it
- * directly; handle_api_request() no longer uses it. New embedders should call
- * RequestAuthenticator through handle_api_request().
- *
- * Reads the connection token from secret.php when present, otherwise from the
- * site option, and verifies the request's HMAC signature. On hosts that have
- * `openssl_verify` no request passes. A missing or broken token still answers
- * HTTP 503 with the configuration message below, and a stored token answers
- * HTTP 403 with HMACServer's `requires_key_auth` message, without a reason
- * field. Calls error() on failure.
- */
-function default_authenticate(): void {
-    if (has_connection_token_file()) {
-        $connection_token = get_file_connection_token();
-        if (empty($connection_token)) {
-            error(503, 'Invalid secret.php configuration. Please remove it or replace it with a valid connection token.');
-        }
-    } else {
-        $connection_token = get_option_connection_token();
-    }
-
-    if (empty($connection_token) || !is_string($connection_token)) {
-        error(503, 'Export not configured. Please configure the connection token in WordPress admin under Tools > Reprint Server.');
-    }
-
-    $auth_error = verify_hmac($connection_token);
-    if ($auth_error !== null) {
-        error(403, $auth_error);
-    }
 }
 
 /**
