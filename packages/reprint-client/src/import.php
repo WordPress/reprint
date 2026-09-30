@@ -1120,9 +1120,10 @@ class ImportClient
         $signs_remote_requests = !$abort && in_array($command, self::REMOTE_COMMANDS, true);
         $this->initialize_credential($signs_remote_requests, $options);
 
-        // A remote command with no credential never sends a request. pull is
-        // the one-stop command and generates a key so the user can enroll it;
-        // every other command is a precise tool and says what to run instead.
+        // A remote command with no credential never sends a request. Every
+        // remote command signs with the same key.pem, but only pull and keygen
+        // create one: pull does it here so a first run ends with the key to
+        // enroll, and every other command says which keygen command to run.
         if ($signs_remote_requests && $this->credential['scheme'] === null) {
             if ($command === 'pull') {
                 $generated = self::generate_key_file(
