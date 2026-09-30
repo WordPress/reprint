@@ -308,6 +308,10 @@ class DiagnoseHttpErrorTest extends TestCase
             '{"error":"Invalid secret.php configuration","code":503}',
         ));
         $this->assertFalse($this->isPotentiallyTransientHttpError(
+            503,
+            '{"error":"Export not configured: this host requires key authentication and no keys are enrolled","code":503,"reason":"not_configured"}',
+        ));
+        $this->assertFalse($this->isPotentiallyTransientHttpError(
             500,
             '{"error":"Reprint Server runtime is incomplete","code":500}',
         ));
