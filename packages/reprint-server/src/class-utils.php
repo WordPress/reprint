@@ -1141,18 +1141,27 @@ final class Utils
     /**
      * Reduces a public key to its one-line base64 body.
      *
-     * Accepts a PEM block or the bare body. Strips the BEGIN/END armour and
-     * every whitespace byte, so CRLF, trailing newlines and indentation all
-     * produce the same result. This one-line form is what the site stores,
-     * what the administrator pastes, and what the key id hashes.
+     * Accepts exactly one BEGIN PUBLIC KEY block or the bare body. Strips the
+     * armour and every whitespace byte, so CRLF, trailing newlines and
+     * indentation all produce the same result. This one-line form is what the
+     * site stores, what the administrator pastes, and what the key id hashes.
      *
      * @param string $pem_or_one_line PEM text or one-line base64.
      * @return string One-line base64 body.
-     * @throws InvalidArgumentException When the body is empty or not strict base64.
+     * @throws InvalidArgumentException When the input is not one public key block or
+     *                                  bare body, or the body is empty or not strict base64.
      */
     public static function normalize_public_key(string $pem_or_one_line): string
     {
-        $one_line = preg_replace('/-----[^-]+-----|\s+/', '', $pem_or_one_line);
+        $trimmed = trim($pem_or_one_line);
+        if (preg_match('/\A-----BEGIN PUBLIC KEY-----([^-]*)-----END PUBLIC KEY-----\z/', $trimmed, $matches) === 1) {
+            $body = $matches[1];
+        } elseif (strpos($trimmed, '-----') === false) {
+            $body = $trimmed;
+        } else {
+            throw new InvalidArgumentException('Public key must be one BEGIN PUBLIC KEY block or one line of base64.');
+        }
+        $one_line = preg_replace('/\s+/', '', $body);
         if (!is_string($one_line) || $one_line === '') {
             throw new InvalidArgumentException('Public key is empty.');
         }

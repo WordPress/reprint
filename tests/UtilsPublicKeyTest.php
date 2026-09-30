@@ -53,6 +53,26 @@ final class UtilsPublicKeyTest extends TestCase
         Utils::normalize_public_key("-----BEGIN PUBLIC KEY-----\n-----END PUBLIC KEY-----\n");
     }
 
+    /** @dataProvider unsupportedArmourProvider */
+    public function testNormalizeAcceptsOnlyOnePublicKeyBlock(string $candidate): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('one BEGIN PUBLIC KEY block');
+        Utils::normalize_public_key($candidate);
+    }
+
+    public static function unsupportedArmourProvider(): array
+    {
+        $block = Utils::public_key_to_pem(self::ONE_LINE);
+        $body = chunk_split(self::ONE_LINE, 64, "\n");
+        return [
+            'two blocks' => [$block . $block],
+            'mismatched labels' => ["-----BEGIN PUBLIC KEY-----\n" . $body . "-----END CERTIFICATE-----\n"],
+            'another label' => ["-----BEGIN CERTIFICATE-----\n" . $body . "-----END CERTIFICATE-----\n"],
+            'text around the block' => ['key: ' . $block],
+        ];
+    }
+
     public function testPemRoundTripsThroughNormalize(): void
     {
         $pem = Utils::public_key_to_pem(self::ONE_LINE);
