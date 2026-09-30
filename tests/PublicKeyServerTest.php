@@ -112,7 +112,7 @@ final class PublicKeyServerTest extends TestCase
         $server = $this->server();
 
         $this->assertSame('Signature verification failed', $server->verify($headers, $method, $target, $this->now($headers)));
-        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertSame(PublicKeyServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
     }
 
     public static function tamperedInputProvider(): array
@@ -134,7 +134,7 @@ final class PublicKeyServerTest extends TestCase
         $server = $this->server();
 
         $this->assertSame('Signature verification failed', $server->verify($headers, 'GET', '/?reprint-api', $now));
-        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertSame(PublicKeyServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
     }
 
     public static function freshnessFieldProvider(): array
@@ -154,7 +154,7 @@ final class PublicKeyServerTest extends TestCase
         $server = $this->server();
 
         $this->assertSame('Missing ' . $header_name . ' header', $server->verify($headers, 'GET', '/?reprint-api', $now));
-        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertSame(PublicKeyServer::REASON_MISSING_HEADER, $server->last_error_reason());
     }
 
     public static function requiredHeaderProvider(): array
@@ -173,7 +173,7 @@ final class PublicKeyServerTest extends TestCase
         $server = $this->server();
 
         $this->assertStringContainsString('expired', (string) $server->verify($headers, 'GET', '/?reprint-api', (float) $headers['X-Auth-Timestamp'] - 301.0));
-        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertSame(PublicKeyServer::REASON_TIMESTAMP_EXPIRED, $server->last_error_reason());
     }
 
     public function testNonNumericTimestampIsRejected(): void
@@ -188,22 +188,22 @@ final class PublicKeyServerTest extends TestCase
     }
 
     /** @dataProvider malformedSignatureProvider */
-    public function testMalformedSignatureIsRejected(string $signature, string $expected_error): void
+    public function testMalformedSignatureIsRejected(string $signature, string $expected_error, string $expected_reason): void
     {
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $headers['X-Auth-Signature'] = $signature;
         $server = $this->server();
 
         $this->assertSame($expected_error, $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
-        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertSame($expected_reason, $server->last_error_reason());
         $this->assertNull($server->authenticated_key_id());
     }
 
     public static function malformedSignatureProvider(): array
     {
         return [
-            'not base64' => ['!!not base64!!', 'Malformed signature'],
-            'truncated' => [base64_encode('short'), 'Signature verification failed'],
+            'not base64' => ['!!not base64!!', 'Malformed signature', PublicKeyServer::REASON_AUTH_FAILED],
+            'truncated' => [base64_encode('short'), 'Signature verification failed', PublicKeyServer::REASON_SIGNATURE_MISMATCH],
         ];
     }
 
@@ -213,7 +213,7 @@ final class PublicKeyServerTest extends TestCase
         $server = $this->server();
 
         $this->assertStringContainsString('expired', (string) $server->verify($headers, 'GET', '/?reprint-api', (float) $headers['X-Auth-Timestamp'] + 301.0));
-        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+        $this->assertSame(PublicKeyServer::REASON_TIMESTAMP_EXPIRED, $server->last_error_reason());
     }
 
     /** @dataProvider invalidNonceProvider */

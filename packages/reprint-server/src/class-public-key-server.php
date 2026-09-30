@@ -20,6 +20,9 @@ final class PublicKeyServer {
 
     public const REASON_REQUIRES_TOKEN_AUTH = 'requires_token_auth';
     public const REASON_UNKNOWN_KEY = 'unknown_key';
+    public const REASON_MISSING_HEADER = 'missing_header';
+    public const REASON_TIMESTAMP_EXPIRED = 'timestamp_expired';
+    public const REASON_SIGNATURE_MISMATCH = 'signature_mismatch';
     public const REASON_AUTH_FAILED = 'auth_failed';
 
     /** @var array<string,string> key id => one-line public key */
@@ -76,7 +79,7 @@ final class PublicKeyServer {
             'X-Auth-Timestamp' => $timestamp,
         ] as $name => $value) {
             if ($value === null) {
-                return $this->fail(self::REASON_AUTH_FAILED, 'Missing ' . $name . ' header');
+                return $this->fail(self::REASON_MISSING_HEADER, 'Missing ' . $name . ' header');
             }
         }
 
@@ -86,7 +89,7 @@ final class PublicKeyServer {
         $time_difference = abs(( $now === null ? microtime(true) : $now ) - (float) $timestamp);
         if ($time_difference > $this->timestamp_tolerance) {
             return $this->fail(
-                self::REASON_AUTH_FAILED,
+                self::REASON_TIMESTAMP_EXPIRED,
                 sprintf('Request timestamp expired. Difference: %.2f seconds, max allowed: %d seconds', $time_difference, $this->timestamp_tolerance)
             );
         }
@@ -126,7 +129,7 @@ final class PublicKeyServer {
         $result = openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256);
         Utils::drain_openssl_error_queue();
         if ($result !== 1) {
-            return $this->fail(self::REASON_AUTH_FAILED, 'Signature verification failed');
+            return $this->fail(self::REASON_SIGNATURE_MISMATCH, 'Signature verification failed');
         }
 
         $this->authenticated_key_id = $key_id;
