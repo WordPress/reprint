@@ -2566,25 +2566,27 @@ class ImportClient
         } finally {
             umask($previous_umask);
         }
-        if (
-            $written_bytes !== strlen($private_key_pem)
-            || !chmod($temporary_path, 0600)
-        ) {
+        if ($written_bytes !== strlen($private_key_pem)) {
             if (file_exists($temporary_path)) {
                 unlink($temporary_path);
             }
             throw new RuntimeException("Could not write the private key to {$path}.");
         }
-        // Some mounts, such as a Windows drive under WSL without metadata,
-        // accept chmod() and keep every file readable by all users. Every
-        // later command refuses such a key file, so check the mode on the
-        // new file before it replaces anything.
+        // The mode the file ends up with decides, not whether chmod()
+        // succeeded. Some mounts accept chmod() and keep every file readable
+        // by all users, such as a Windows drive under WSL without metadata.
+        // Others refuse chmod() but already give new files a private mode,
+        // such as vfat mounted with fmask=0177. A key this client creates must
+        // not be readable by others, so check the mode on the new file before
+        // it replaces anything. On Windows the mode means nothing: the
+        // directory's access control list protects the key.
+        @chmod($temporary_path, 0600);
         clearstatcache(true, $temporary_path);
         $permissions = fileperms($temporary_path);
         if (DIRECTORY_SEPARATOR !== '\\' && $permissions !== false && ( $permissions & 0077 ) !== 0) {
             unlink($temporary_path);
             throw new RuntimeException(
-                "Could not store a private key in {$directory}: the file system there ignores chmod 600 and "
+                "Could not store a private key in {$directory}: the file system there does not keep chmod 600 and "
                 . sprintf('leaves new files with mode %04o', $permissions & 0777) . ', which lets other users read the key. '
                 . 'Use a --state-dir on a file system that keeps file permissions, or run '
                 . '`reprint keygen --out=PATH` with PATH on such a file system and pass --private-key=PATH.'
