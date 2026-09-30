@@ -396,11 +396,12 @@ final class PublicKeyServerTest extends TestCase
         );
     }
 
-    public function testRequestedKeyIdReadsEitherHeaderConvention(): void
+    public function testGetHeaderReadsEitherHeaderConventionAndTreatsEmptyAsAbsent(): void
     {
-        $this->assertSame('abc', PublicKeyServer::requested_key_id(['X-Auth-Key-Id' => 'abc']));
-        $this->assertSame('abc', PublicKeyServer::requested_key_id(['HTTP_X_AUTH_KEY_ID' => 'abc']));
-        $this->assertNull(PublicKeyServer::requested_key_id([]));
+        $this->assertSame('abc', PublicKeyServer::get_header(['X-Auth-Key-Id' => 'abc'], 'X-Auth-Key-Id'));
+        $this->assertSame('abc', PublicKeyServer::get_header(['HTTP_X_AUTH_KEY_ID' => 'abc'], 'X-Auth-Key-Id'));
+        $this->assertNull(PublicKeyServer::get_header([], 'X-Auth-Key-Id'));
+        $this->assertNull(PublicKeyServer::get_header(['X-Auth-Key-Id' => ''], 'X-Auth-Key-Id'));
     }
 
     public function testAssertValidPublicKeyAcceptsPemAndOneLine(): void

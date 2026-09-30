@@ -88,7 +88,7 @@ final class PublicKeyServer {
             return $this->fail(self::REASON_REQUIRES_TOKEN_AUTH, 'This host cannot verify key signatures');
         }
 
-        $key_id = self::requested_key_id($headers);
+        $key_id = self::get_header($headers, 'X-Auth-Key-Id');
         $signature_base64 = self::get_header($headers, 'X-Auth-Signature');
         $nonce = self::get_header($headers, 'X-Auth-Nonce');
         $timestamp = self::get_header($headers, 'X-Auth-Timestamp');
@@ -101,7 +101,7 @@ final class PublicKeyServer {
             'X-Auth-Timestamp' => $timestamp,
             'X-Auth-Content-Hash' => $content_hash,
         ] as $name => $value) {
-            if ($value === null || $value === '') {
+            if ($value === null) {
                 return $this->fail(self::REASON_AUTH_FAILED, 'Missing ' . $name . ' header');
             }
         }
@@ -206,13 +206,21 @@ final class PublicKeyServer {
     }
 
     /**
-     * Returns the key id header value, or null when absent. Used to pick the
-     * enrolled key within key mode, and by an HMAC-only host to reject a
-     * request that carries it. Not a scheme selector.
+     * Returns a request header by its HTTP name or its $_SERVER name, or null
+     * when it is absent or empty. No auth header means anything when empty.
      */
-    public static function requested_key_id(array $headers): ?string {
-        $value = self::get_header($headers, 'X-Auth-Key-Id');
-        return $value === '' ? null : $value;
+    public static function get_header(array $headers, string $name): ?string {
+        $server_name = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
+        foreach ($headers as $key => $value) {
+            if (!is_string($value)) {
+                continue;
+            }
+            $header_key = (string) $key;
+            if (strcasecmp($header_key, $name) === 0 || strcasecmp($header_key, $server_name) === 0) {
+                return $value === '' ? null : $value;
+            }
+        }
+        return null;
     }
 
     public function last_error_reason(): ?string {
@@ -262,20 +270,6 @@ final class PublicKeyServer {
     private function fail(string $reason, string $message): string {
         $this->last_error_reason = $reason;
         return $message;
-    }
-
-    private static function get_header(array $headers, string $name): ?string {
-        $server_name = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
-        foreach ($headers as $key => $value) {
-            if (!is_string($value)) {
-                continue;
-            }
-            $header_key = (string) $key;
-            if (strcasecmp($header_key, $name) === 0 || strcasecmp($header_key, $server_name) === 0) {
-                return $value;
-            }
-        }
-        return null;
     }
 
     private function compute_received_content_hash(?string $body, array $files): string {
