@@ -2685,22 +2685,14 @@ class ImportClient
     }
 
     /**
-     * Reads a private key file, refusing one other users could read.
+     * Reads a private key file.
      *
-     * @throws InvalidArgumentException When unreadable or too permissive.
+     * @throws InvalidArgumentException When unreadable or empty.
      */
     private static function read_private_key_file(string $path): string
     {
         if (!is_file($path) || !is_readable($path)) {
             throw new InvalidArgumentException("The private key at {$path} could not be read.");
-        }
-        if (DIRECTORY_SEPARATOR !== '\\') {
-            $permissions = fileperms($path);
-            if ($permissions !== false && ( $permissions & 0077 ) !== 0) {
-                throw new InvalidArgumentException(
-                    "The private key at {$path} is readable by other users. Run: chmod 600 " . escapeshellarg($path)
-                );
-            }
         }
         $contents = file_get_contents($path);
         if ($contents === false || trim($contents) === '') {

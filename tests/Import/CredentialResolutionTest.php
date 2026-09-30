@@ -96,15 +96,13 @@ final class CredentialResolutionTest extends TestCase
         $this->assertSame(['scheme' => null], ImportClient::resolve_credential(['secret' => null], $this->temp_dir));
     }
 
-    public function testGroupReadableKeyIsRefused(): void
+    public function testGroupReadableKeyIsAccepted(): void
     {
-        if (DIRECTORY_SEPARATOR === '\\') {
-            $this->markTestSkipped('POSIX permissions only');
-        }
-        $path = $this->writeKey('loose.pem', 0640);
-        $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('chmod 600');
-        ImportClient::resolve_credential(['private_key' => $path], $this->temp_dir);
+        // A key shared between users is readable by a group on purpose.
+        $path = $this->writeKey('shared.pem', 0640);
+        $credential = ImportClient::resolve_credential(['private_key' => $path], $this->temp_dir);
+        $this->assertSame('key', $credential['scheme']);
+        $this->assertSame($path, $credential['path']);
     }
 
     public function testMissingFlagPathIsAnError(): void

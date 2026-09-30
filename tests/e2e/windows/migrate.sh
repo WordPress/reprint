@@ -6,9 +6,8 @@ source_manifest=$2
 [[ $(uname -s) == Linux ]]
 uname -a
 mkdir -p /root/migration
-# The Windows source enrolled a key; its private half travels in the manifest
-# because a file on the Windows drive would not carry the 0600 mode the
-# client requires.
+# The Windows source enrolled a key. Its private half travels in the manifest
+# because a file on the Windows drive would be readable by every user.
 php -r 'echo json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR)["private_key_pem"];' "$source_manifest" > /root/migration/key.pem
 chmod 600 /root/migration/key.pem
 curl --connect-timeout 5 --max-time 10 --retry 10 --retry-connrefused --retry-delay 1 -fsS "$source_url/migration-check.php" > /root/migration/source.json

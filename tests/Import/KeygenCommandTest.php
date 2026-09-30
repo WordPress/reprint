@@ -260,25 +260,4 @@ final class KeygenCommandTest extends TestCase
         $this->assertStringNotContainsString('No credential', $files_pull['output']);
         $this->assertStringContainsString('No preflight data found', $files_pull['output']);
     }
-
-    public function testLocalOnlyCommandIgnoresAGroupReadableKeyFile(): void
-    {
-        if (DIRECTORY_SEPARATOR === '\\') {
-            $this->markTestSkipped('File mode checks do not apply on Windows.');
-        }
-        $url = 'https://example.test/?reprint-api';
-        $fs_root = $this->state_dir . '/site';
-        mkdir($fs_root);
-        $key_path = ImportClient::key_file_path($url, $this->state_dir);
-        ImportClient::generate_key_file($key_path, false);
-        chmod($key_path, 0640);
-
-        // preflight-assert reads only the saved preflight report. It must reach
-        // its own "run preflight first" result, not the key-file check that
-        // remote commands perform on this key.
-        $result = $this->runCli(['preflight-assert', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root]);
-
-        $this->assertStringNotContainsString('readable by other users', $result['output']);
-        $this->assertStringContainsString('No preflight data found', $result['output']);
-    }
 }

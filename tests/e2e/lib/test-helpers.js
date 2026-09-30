@@ -78,7 +78,7 @@ export function getHarnessKey(secret) {
             privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
             publicKeyEncoding: { type: 'spki', format: 'pem' },
         }).privateKey;
-        // The PHP client refuses a key file other users can read, so the
+        // A private key should not be readable by other users, so the
         // candidate is created with mode 0600 and the link keeps that mode.
         const candidatePath = join(keyDirectory, `key.pem.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
         writeFileSync(candidatePath, candidatePrivateKeyPem, { mode: 0o600 });
