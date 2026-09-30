@@ -256,6 +256,18 @@ final class PublicKeyServerTest extends TestCase
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
     }
 
+    public function testStoredKeyThatIsNotOneLineOfBase64IsRefused(): void
+    {
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $server = new PublicKeyServer([self::$client->get_key_id() => Utils::public_key_to_pem(self::$public_key)]);
+
+        $this->assertSame(
+            'Stored public key ' . self::$client->get_key_id() . ' could not be parsed',
+            $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers))
+        );
+        $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
+    }
+
     public static function weakStoredKeyProvider(): array
     {
         return [

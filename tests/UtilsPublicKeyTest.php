@@ -81,6 +81,25 @@ final class UtilsPublicKeyTest extends TestCase
         $this->assertSame(self::ONE_LINE, Utils::normalize_public_key($pem));
     }
 
+    /** @dataProvider notOneLineProvider */
+    public function testPemRejectsAnythingButOneLineOfBase64(string $candidate): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('one line of base64');
+        Utils::public_key_to_pem($candidate);
+    }
+
+    public static function notOneLineProvider(): array
+    {
+        return [
+            'empty' => [''],
+            'a whole PEM block' => [Utils::public_key_to_pem(self::ONE_LINE)],
+            'trailing newline' => [self::ONE_LINE . "\n"],
+            'inner whitespace' => [substr(self::ONE_LINE, 0, 64) . ' ' . substr(self::ONE_LINE, 64)],
+            'armour dashes' => ['-----END PUBLIC KEY-----'],
+        ];
+    }
+
     public function testFingerprintIsSixteenHexCharacters(): void
     {
         $fingerprint = Utils::public_key_fingerprint(self::ONE_LINE);

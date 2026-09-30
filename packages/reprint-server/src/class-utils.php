@@ -1176,9 +1176,13 @@ final class Utils
      *
      * @param string $one_line One-line base64 body from normalize_public_key().
      * @return string PEM text with a trailing newline.
+     * @throws InvalidArgumentException When the input is not one line of strict base64.
      */
     public static function public_key_to_pem(string $one_line): string
     {
+        if (preg_match('/\A[A-Za-z0-9+\/]+={0,2}\z/', $one_line) !== 1) {
+            throw new InvalidArgumentException('Public key must be one line of base64. Pass it through normalize_public_key() first.');
+        }
         return "-----BEGIN PUBLIC KEY-----\n"
             . chunk_split($one_line, 64, "\n")
             . "-----END PUBLIC KEY-----\n";
@@ -1203,6 +1207,9 @@ final class Utils
     /**
      * Empties the OpenSSL error queue so a later, unrelated call does not
      * report an error left behind by an earlier one.
+     *
+     * The loop is bounded: PHP keeps OpenSSL errors in a ring buffer of
+     * ERR_NUM_ERRORS (16) slots, and each call removes one.
      */
     public static function drain_openssl_error_queue(): void
     {

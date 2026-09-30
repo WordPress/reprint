@@ -102,7 +102,12 @@ final class PublicKeyServer {
         if ($signature === false || $signature === '') {
             return $this->fail(self::REASON_AUTH_FAILED, 'Malformed signature');
         }
-        $public_key = @openssl_pkey_get_public(Utils::public_key_to_pem($this->public_keys_by_id[$key_id]));
+        try {
+            $public_key_pem = Utils::public_key_to_pem($this->public_keys_by_id[$key_id]);
+        } catch (InvalidArgumentException $e) {
+            return $this->fail(self::REASON_AUTH_FAILED, 'Stored public key ' . $key_id . ' could not be parsed');
+        }
+        $public_key = @openssl_pkey_get_public($public_key_pem);
         if ($public_key === false) {
             Utils::drain_openssl_error_queue();
             return $this->fail(self::REASON_AUTH_FAILED, 'Stored public key ' . $key_id . ' could not be parsed');
