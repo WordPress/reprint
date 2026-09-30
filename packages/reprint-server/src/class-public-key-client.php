@@ -33,7 +33,7 @@ final class PublicKeyClient implements EnvelopeSigner {
      * @throws RuntimeException When OpenSSL is unavailable.
      */
     public function __construct(string $private_key_pem) {
-        self::require_openssl();
+        self::assert_openssl_available();
         $private_key = @openssl_pkey_get_private($private_key_pem);
         if ($private_key === false) {
             Utils::drain_openssl_error_queue();
@@ -56,7 +56,7 @@ final class PublicKeyClient implements EnvelopeSigner {
      * @throws RuntimeException When OpenSSL is unavailable or generation fails.
      */
     public static function generate_keypair(): array {
-        self::require_openssl();
+        self::assert_openssl_available();
         $configargs = [
             'private_key_bits' => 2048,
             'private_key_type' => OPENSSL_KEYTYPE_RSA,
@@ -191,7 +191,7 @@ final class PublicKeyClient implements EnvelopeSigner {
         return $curl_headers;
     }
 
-    private static function require_openssl(): void {
+    private static function assert_openssl_available(): void {
         if (!function_exists('openssl_sign') || !function_exists('openssl_pkey_new')) {
             throw new RuntimeException('Public-key signing requires the OpenSSL PHP extension.');
         }
