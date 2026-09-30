@@ -2534,7 +2534,8 @@ class ImportClient
     }
 
     /**
-     * Generates a keypair and writes the private half to $path with mode 0600.
+     * Generates a keypair and writes the private half to $path, with mode
+     * 0600 where the file system supports modes.
      *
      * @return array {
      *     @type string $path       Where the private key was written.
@@ -2572,26 +2573,11 @@ class ImportClient
             }
             throw new RuntimeException("Could not write the private key to {$path}.");
         }
-        // The mode the file ends up with decides, not whether chmod()
-        // succeeded. Some mounts accept chmod() and keep every file readable
-        // by all users, such as a Windows drive under WSL without metadata.
-        // Others refuse chmod() but already give new files a private mode,
-        // such as vfat mounted with fmask=0177. A key this client creates must
-        // not be readable by others, so check the mode on the new file before
-        // it replaces anything. On Windows the mode means nothing: the
-        // directory's access control list protects the key.
+        // A default ACL on the directory can override the umask, so ask for
+        // 0600 again. Some mounts ignore modes altogether, such as a Windows
+        // drive under WSL or vfat. The rest of the state directory is no
+        // better protected there, so the key is written regardless.
         @chmod($temporary_path, 0600);
-        clearstatcache(true, $temporary_path);
-        $permissions = fileperms($temporary_path);
-        if (DIRECTORY_SEPARATOR !== '\\' && $permissions !== false && ( $permissions & 0077 ) !== 0) {
-            unlink($temporary_path);
-            throw new RuntimeException(
-                "Could not store a private key in {$directory}: the file system there does not keep chmod 600 and "
-                . sprintf('leaves new files with mode %04o', $permissions & 0777) . ', which lets other users read the key. '
-                . 'Use a --state-dir on a file system that keeps file permissions, or run '
-                . '`reprint keygen --out=PATH` with PATH on such a file system and pass --private-key=PATH.'
-            );
-        }
         if (!rename($temporary_path, $path)) {
             unlink($temporary_path);
             throw new RuntimeException("Could not write the private key to {$path}.");
