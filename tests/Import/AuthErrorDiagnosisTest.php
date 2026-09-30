@@ -48,7 +48,11 @@ final class AuthErrorDiagnosisTest extends TestCase
     {
         $result = $this->diagnose($this->clientWith(['secret' => 'x']), 403, ['error' => 'msg', 'reason' => 'requires_key_auth']);
         $this->assertSame('AUTH_REQUIRES_KEY', $result['code']);
-        $this->assertStringContainsString('reprint keygen', $result['message']);
+        // Quoted: an unquoted `?` is a glob in zsh and `&` backgrounds the command.
+        $this->assertStringContainsString(
+            "reprint keygen 'https://example.test/?reprint-api' --state-dir=" . escapeshellarg($this->state_dir),
+            $result['message']
+        );
         $this->assertStringContainsString('not accepted', $result['message']);
     }
 
@@ -68,23 +72,6 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose($this->clientWith(['private_key' => $path]), 503, ['error' => 'msg', 'reason' => 'not_configured']);
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString($public_key, $result['message']);
-    }
-
-    public function testNotConfiguredOnKeyHostWithATokenNamesKeygenNotTheTokenForm(): void
-    {
-        $result = $this->diagnose(
-            $this->clientWith(['secret' => 'x']),
-            503,
-            ['error' => 'Export not configured: this host requires key authentication and no keys are enrolled', 'reason' => 'not_configured']
-        );
-        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
-        $this->assertStringContainsString('the connection token you passed is not accepted there', $result['message']);
-        // Quoted: an unquoted `?` is a glob in zsh and `&` backgrounds the command.
-        $this->assertStringContainsString(
-            "reprint keygen 'https://example.test/?reprint-api' --state-dir=" . escapeshellarg($this->state_dir),
-            $result['message']
-        );
-        $this->assertStringNotContainsString('Set one under', $result['message']);
     }
 
     public function testNotConfiguredOnTokenHostAsksForAToken(): void

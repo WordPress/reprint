@@ -13180,14 +13180,6 @@ class ImportClient
                     $not_configured_message =
                         "This site requires key authentication but has no keys enrolled. " .
                         "Enroll this public key under Tools > Reprint Server." . $key_hint;
-                } elseif (is_string($server_msg) && strpos($server_msg, 'requires key authentication') !== false) {
-                    // A key host keeps a stored token but never accepts it, so
-                    // setting a token there would change nothing.
-                    $not_configured_message =
-                        "This site's host requires key authentication and has no keys enrolled; " .
-                        "the connection token you passed is not accepted there.\n\n" .
-                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
-                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server.";
                 } else {
                     $not_configured_message =
                         "This site has no connection token configured. " .
