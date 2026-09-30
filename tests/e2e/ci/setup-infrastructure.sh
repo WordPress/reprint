@@ -46,6 +46,10 @@ fi
 # Make sure the 'php' CLI command uses the version we just installed
 sudo update-alternatives --set php "/usr/bin/php${PHP_VERSION}"
 
+# The runner image's package lists go stale when Ubuntu replaces a package
+# version, and apt then asks the mirrors for a file they no longer have.
+sudo apt-get update -qq
+
 # ---------- MariaDB ----------
 echo "=== Installing MariaDB ==="
 sudo apt-get install -y mariadb-server
