@@ -60,7 +60,7 @@ describe('Export: POST body parameters with a query routing marker', () => {
         // The key signature covers the request target, so each request
         // signs the exact URL and method it sends.
         const index = await fetch(url, {
-            headers: createHmacClient(site).getAuthHeaders('', { method: 'GET', url: url.toString() }),
+            headers: createHmacClient(site).getAuthHeaders({ method: 'GET', url: url.toString() }),
         });
         assert.equal(index.status, 200, await index.clone().text());
         assert.match(index.headers.get('content-type'), /multipart\/mixed/);
@@ -74,7 +74,7 @@ describe('Export: POST body parameters with a query routing marker', () => {
         body.set('file_list', new Blob([fileList], { type: 'application/json' }), 'files.json');
         const files = await fetch(url, {
             method: 'POST', body,
-            headers: createHmacClient(site).getAuthHeaders(fileList, { method: 'POST', url: url.toString() }),
+            headers: createHmacClient(site).getAuthHeaders({ method: 'POST', url: url.toString() }),
         });
         assert.equal(files.status, 200, await files.clone().text());
         assert.match(files.headers.get('content-type'), /multipart\/mixed/);
@@ -147,19 +147,12 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
                     value_base64: Buffer.from('_edit_lock').toString('base64'),
                 }]),
             };
-            let body;
-            let signedBody;
-            if (contentType === 'application/json') {
-                body = JSON.stringify(params);
-                signedBody = body;
-            } else {
-                body = new URLSearchParams(params).toString();
-                signedBody = body;
-            }
+            const body = contentType === 'application/json'
+                ? JSON.stringify(params) : new URLSearchParams(params).toString();
             const response = await fetch(firewallUrl, {
                 method: 'POST', body,
                 headers: {
-                    ...createHmacClient(site).getAuthHeaders(signedBody, { method: 'POST', url: firewallUrl }),
+                    ...createHmacClient(site).getAuthHeaders({ method: 'POST', url: firewallUrl }),
                     'Content-Type': contentType,
                 },
             });
@@ -176,7 +169,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         body.set('file_list', new Blob([fileList], { type: 'application/json' }), 'files.json');
         const response = await fetch(firewallUrl, {
             method: 'POST', body,
-            headers: createHmacClient(site).getAuthHeaders(fileList, { method: 'POST', url: firewallUrl }),
+            headers: createHmacClient(site).getAuthHeaders({ method: 'POST', url: firewallUrl }),
         });
         assert.equal(response.status, 200, await response.clone().text());
         assert.match(await response.text(), /Hello World/);
@@ -191,7 +184,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
             const response = await fetch(rolloutUrl, {
                 method: 'POST', body,
                 headers: {
-                    ...createHmacClient(site).getAuthHeaders(body, { method: 'POST', url: rolloutUrl }),
+                    ...createHmacClient(site).getAuthHeaders({ method: 'POST', url: rolloutUrl }),
                     'Content-Type': contentType,
                 },
             });
@@ -205,7 +198,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         const blockedUrl = `${firewallUrl}&endpoint=preflight`;
         const response = await fetch(blockedUrl, {
             method: 'POST', body,
-            headers: createHmacClient(site).getAuthHeaders(body, { method: 'POST', url: blockedUrl }),
+            headers: createHmacClient(site).getAuthHeaders({ method: 'POST', url: blockedUrl }),
         });
         assert.equal(response.status, 403);
         assert.equal(response.headers.get('x-query-firewall'), 'blocked');
@@ -218,18 +211,15 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         assert.match(await response.text(), /Site homepage/);
     });
 
-    it('rejects changed and unsigned POST bodies', async () => {
-        for (const headers of [
-            {},
-            createHmacClient(site).getAuthHeaders('{"directory":"/different"}', { method: 'POST', url: firewallUrl }),
-        ]) {
-            const response = await fetch(firewallUrl, {
-                method: 'POST', body: JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) }),
-                headers: { ...headers, 'Content-Type': 'application/json' },
-            });
-            assert.equal(response.status, 403);
-            assert.ok((await response.json()).error);
-            assert.equal(response.headers.get('x-query-firewall'), null);
-        }
+    it('rejects an unsigned POST request', async () => {
+        // A key signature covers the method and request target, not the
+        // body, so only a missing or wrong signature is refused here.
+        const response = await fetch(firewallUrl, {
+            method: 'POST', body: JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) }),
+            headers: { 'Content-Type': 'application/json' },
+        });
+        assert.equal(response.status, 403);
+        assert.ok((await response.json()).error);
+        assert.equal(response.headers.get('x-query-firewall'), null);
     });
 });
