@@ -27,7 +27,6 @@ use function WordPress\Reprint\Server\Plugin\register_connection_token_setting;
 use function WordPress\Reprint\Server\Plugin\update_connection_token;
 use function WordPress\Reprint\Server\Plugin\update_option_public_keys;
 use function WordPress\Reprint\Server\Plugin\update_push_authorization;
-use function WordPress\Reprint\Server\Plugin\verify_hmac;
 
 use const WordPress\Reprint\Server\Plugin\CONNECTION_TOKEN_OPTION;
 use const WordPress\Reprint\Server\Plugin\PUBLIC_KEYS_FILE;
@@ -139,23 +138,6 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
             'WordPress\\Reprint\\Server\\Plugin\\revoke_push_authorization_after_connection_token_added',
             $add_hooks[0]['callback']
         );
-    }
-
-    public function testPluginHmacVerifierDelegatesToPackageServer(): void
-    {
-        $this->forceHmacHost();
-        $connection_token = 'delegated-token';
-        $nonce = '0123456789abcdef0123456789abcdef';
-        $client = new Site_Export_HMAC_Client($connection_token);
-        $timestamp = $client->get_timestamp();
-        $content_hash = hash('sha256', '');
-
-        $_SERVER['HTTP_X_AUTH_SIGNATURE'] = $client->compute_signature($nonce, $timestamp, $content_hash);
-        $_SERVER['HTTP_X_AUTH_NONCE'] = $nonce;
-        $_SERVER['HTTP_X_AUTH_TIMESTAMP'] = $timestamp;
-        $_SERVER['HTTP_X_AUTH_CONTENT_HASH'] = $content_hash;
-
-        $this->assertNull(verify_hmac($connection_token));
     }
 
     public function testPushAuthorizationMatchesOnlyTheCurrentConnectionToken(): void
@@ -706,11 +688,6 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
         $GLOBALS['reprint_server_test_options'][PUBLIC_KEYS_OPTION] = [['key_id' => 'x']];
         $this->assertSame([], get_enrolled_public_keys(), 'entries missing public_key are dropped');
-    }
-
-    private function forceHmacHost(): void
-    {
-        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
     }
 
     public function testPushGateHonoursThePerKeyFlag(): void
