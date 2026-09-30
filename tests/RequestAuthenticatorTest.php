@@ -68,7 +68,7 @@ final class RequestAuthenticatorTest extends TestCase
         Utils::override_key_auth_required_for_tests(false);
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertNull($authenticator->authenticated_key_id());
     }
 
@@ -78,7 +78,7 @@ final class RequestAuthenticatorTest extends TestCase
         Utils::override_key_auth_required_for_tests(false);
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_REQUIRES_TOKEN_AUTH, $authenticator->last_error_reason());
     }
 
@@ -89,7 +89,7 @@ final class RequestAuthenticatorTest extends TestCase
         Utils::override_key_auth_required_for_tests(false);
         $authenticator = new RequestAuthenticator(null, $this->keys());
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
     }
 
@@ -100,15 +100,15 @@ final class RequestAuthenticatorTest extends TestCase
         Utils::override_key_auth_required_for_tests(false);
         $authenticator = new RequestAuthenticator(self::SECRET, []);
 
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], null, true, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
     }
 
     public function testKeyHostVerifiesKeyAndIgnoresToken(): void
     {
-        $headers = self::$key_client->get_auth_headers('POST', 'https://s.test/?reprint-api', '{"e":1}', 'c');
+        $headers = self::$key_client->get_auth_headers('POST', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api', '{"e":1}', [], 'c', false, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api', '{"e":1}', [], false, $this->now($headers)));
         $this->assertSame(self::$key_client->get_key_id(), $authenticator->authenticated_key_id());
     }
 
@@ -118,7 +118,7 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = $hmac->get_auth_headers('');
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertNull($authenticator->authenticated_key_id());
     }
 
@@ -128,7 +128,7 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = $hmac->get_auth_headers('');
         $authenticator = new RequestAuthenticator(self::SECRET, []);
 
-        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertNull($authenticator->authenticated_key_id());
     }
 
@@ -138,7 +138,7 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = $hmac->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], null, true, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
         $this->assertNull($authenticator->authenticated_key_id());
     }
 
@@ -148,7 +148,7 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = $hmac->get_auth_headers('');
         $authenticator = new RequestAuthenticator(null, $this->keys());
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
     }
 
@@ -158,7 +158,7 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = $hmac->get_auth_headers('');
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_AUTH_FAILED, $authenticator->last_error_reason());
     }
 
@@ -167,7 +167,7 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(self::SECRET, []);
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
     }
 
@@ -176,18 +176,18 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(null, ['0000000000000000' => self::$public_key]);
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], null, false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_UNKNOWN_KEY, $authenticator->last_error_reason());
     }
 
-    public function testKeyHostAllowsUnsignedPayloadOnlyForPush(): void
+    /** A key signature never covers the body, so push and pull verify it the same way. */
+    public function testKeyHostVerifiesAKeySignatureWithoutReadingTheBody(): void
     {
         $headers = self::$key_client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
         $authenticator = new RequestAuthenticator(null, $this->keys());
 
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], null, true, $this->now($headers)));
-        $this->assertNotNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], null, false, $this->now($headers)));
-        $this->assertSame(RequestAuthenticator::REASON_AUTH_FAILED, $authenticator->last_error_reason());
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'another body', [], false, $this->now($headers)));
     }
 
     /**
@@ -215,7 +215,7 @@ final class RequestAuthenticatorTest extends TestCase
         $this->assertNull($authenticator->verify_globals($this->now($headers)));
     }
 
-    public function testVerifyGlobalsDerivesThePushDecisionFromTheQueryEndpoint(): void
+    public function testVerifyGlobalsVerifiesAKeySignedPushRequest(): void
     {
         $headers = self::$key_client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_status');
         $_SERVER = [
@@ -225,7 +225,6 @@ final class RequestAuthenticatorTest extends TestCase
             'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
             'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
             'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
-            'HTTP_X_AUTH_CONTENT_HASH' => $headers['X-Auth-Content-Hash'],
         ];
         $_GET = ['reprint-api' => '', 'endpoint' => 'push_status'];
         $_FILES = [];

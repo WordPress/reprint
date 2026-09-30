@@ -26,9 +26,6 @@ final class RequestAuthenticator {
     /** @var int */
     private $timestamp_tolerance;
 
-    /** @var string */
-    private $cursor_header_name;
-
     /** @var string|null */
     private $last_error_reason = null;
 
@@ -39,26 +36,21 @@ final class RequestAuthenticator {
      * @param string|null          $hmac_secret         Stored connection token, or null when none.
      * @param array<string,string> $public_keys_by_id   Enrolled keys, key id => one-line public key.
      * @param int                  $timestamp_tolerance Seconds either side of now.
-     * @param string               $cursor_header_name  $_SERVER key carrying the cursor.
      */
-    public function __construct(
-        ?string $hmac_secret,
-        array $public_keys_by_id,
-        int $timestamp_tolerance = 300,
-        string $cursor_header_name = 'HTTP_X_EXPORT_CURSOR'
-    ) {
+    public function __construct(?string $hmac_secret, array $public_keys_by_id, int $timestamp_tolerance = 300) {
         $this->hmac_secret = $hmac_secret === '' ? null : $hmac_secret;
         $this->public_keys_by_id = $public_keys_by_id;
         $this->timestamp_tolerance = $timestamp_tolerance;
-        $this->cursor_header_name = $cursor_header_name;
     }
 
     /**
      * Verifies one request from explicit inputs. Null on success, else an
      * error string with a stable code from last_error_reason().
      *
-     * @param bool $is_push_endpoint True for push_* endpoints: HMAC uses envelope
-     *                               verification and the key path accepts UNSIGNED-PAYLOAD.
+     * @param string|null $body             Raw body. Only a token signature on a pull endpoint covers it.
+     * @param array       $files            $_FILES-style uploads, hashed instead of $body when non-empty.
+     * @param bool        $is_push_endpoint True for push_* endpoints, where a token signature uses
+     *                                      envelope verification. A key signature never covers the body.
      */
     public function verify(
         array $headers,
@@ -66,13 +58,12 @@ final class RequestAuthenticator {
         string $request_target,
         ?string $body,
         array $files = [],
-        ?string $cursor = null,
         bool $is_push_endpoint = false,
         ?float $now = null
     ): ?string {
         $this->last_error_reason = null;
         $this->authenticated_key_id = null;
-        $has_key_id = PublicKeyServer::requested_key_id($headers) !== null;
+        $has_key_id = Utils::request_header($headers, 'X-Auth-Key-Id') !== null;
 
         if (!Utils::key_auth_required()) {
             if ($has_key_id) {
@@ -94,8 +85,8 @@ final class RequestAuthenticator {
         if (empty($this->public_keys_by_id)) {
             return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no keys are enrolled');
         }
-        $public_key_server = new PublicKeyServer($this->public_keys_by_id, $this->timestamp_tolerance, $this->cursor_header_name);
-        $error = $public_key_server->verify($headers, $method, $request_target, $body, $files, $cursor, $is_push_endpoint, $now);
+        $public_key_server = new PublicKeyServer($this->public_keys_by_id, $this->timestamp_tolerance);
+        $error = $public_key_server->verify($headers, $method, $request_target, $now);
         if ($error !== null) {
             return $this->fail($public_key_server->last_error_reason() ?? self::REASON_AUTH_FAILED, $error);
         }
@@ -110,13 +101,12 @@ final class RequestAuthenticator {
      * contract, so an unknown one answers "Invalid endpoint" after
      * authenticating instead of failing its envelope signature. Push
      * endpoints leave the body unread because the envelope contract signs
-     * method and target only; the endpoint streams php://input itself.
+     * method and target only. The endpoint streams php://input itself.
      */
     public function verify_globals(?float $now = null): ?string {
         // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Exact request-line values are covered by the signature.
         $method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
-        $cursor = isset($_SERVER[$this->cursor_header_name]) ? (string) $_SERVER[$this->cursor_header_name] : null;
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Routing only; the signature is the check.
         $endpoint = isset($_GET['endpoint']) && is_string($_GET['endpoint']) ? $_GET['endpoint'] : '';
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
@@ -131,7 +121,7 @@ final class RequestAuthenticator {
         }
 
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Request headers are covered by the signature, not a nonce field.
-        return $this->verify($_SERVER, $method, $request_target, $body, $_FILES, $cursor, $is_push_endpoint, $now);
+        return $this->verify(Utils::request_headers(), $method, $request_target, $body, $_FILES, $is_push_endpoint, $now);
     }
 
     public function last_error_reason(): ?string {
