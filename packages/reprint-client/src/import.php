@@ -12760,13 +12760,14 @@ class ImportClient
      *
      * @param string $method HTTP method of the request being built.
      * @param string $url    Full request URL.
-     * @param string $body   Raw content to hash: file contents for uploads,
-     *                       http_build_query() output for forms, '' otherwise.
+     * @param string $body   Raw content a connection token signs the hash of: file
+     *                       contents for uploads, http_build_query() output for forms,
+     *                       '' otherwise. A key signature does not cover the body.
      */
     private function get_auth_headers(string $method, string $url, string $body = ''): array
     {
         if ($this->public_key_client !== null) {
-            return $this->public_key_client->get_curl_headers($method, $url, $body);
+            return $this->public_key_client->get_curl_headers($method, $url);
         }
         if ($this->hmac_client !== null) {
             return $this->hmac_client->get_curl_headers($body);
@@ -13250,9 +13251,9 @@ class ImportClient
             }
 
             if (Utils::str_contains($server_msg, 'Signature verification failed')) {
-                // The site found the key by an id derived from the key itself
-                // and the body hash matched, so the signed method, path, query,
-                // or cursor header differs from what the site received.
+                // The site found the key by an id derived from the key itself,
+                // so the signed method, path, or query differs from what the
+                // site received.
                 return [
                     'code' => 'AUTH_REQUEST_REWRITTEN',
                     'message' =>

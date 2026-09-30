@@ -45,7 +45,7 @@ describe('Import: Reprint Server plugin authentication', () => {
         const response = await fetch(getSiteUrl(site), {
             method: 'POST',
             headers: {
-                ...stranger.getAuthHeaders(requestBody, { url: getSiteUrl(site) }),
+                ...stranger.getAuthHeaders({ url: getSiteUrl(site) }),
                 'Content-Type': 'application/json',
             },
             body: requestBody,

@@ -108,10 +108,9 @@ export function getHarnessKey(secret) {
 /**
  * Signer for a site. The name is historical: since key authentication
  * became the default this returns a KeySigner for the site's harness key.
- * Its getAuthHeaders(body) still works for the JSON POSTs apiRequest makes,
- * defaulting method to POST and url to the site's API URL. A caller that
- * builds its own URL passes it as { url }, because the signature covers the
- * request path and query.
+ * Its getAuthHeaders() defaults method to POST and url to the site's API
+ * URL. A caller that builds its own URL passes it as { url }, because the
+ * signature covers the request path and query. It never covers the body.
  */
 export function createHmacClient(siteName) {
     const { signer } = getHarnessKey(getSiteSecret(siteName));
@@ -121,8 +120,8 @@ export function createHmacClient(siteName) {
     return {
         getKeyId: () => signer.getKeyId(),
         getPublicKey: () => signer.getPublicKey(),
-        getAuthHeaders: (body = '', options = {}) => signer.getAuthHeaders(body, { url: siteUrl, method: 'POST', ...options }),
-        getEnvelopeAuthHeaders: (method, requestUrl, cursor = null) => signer.getEnvelopeAuthHeaders(method, requestUrl, cursor),
+        getAuthHeaders: (options = {}) => signer.getAuthHeaders({ url: siteUrl, method: 'POST', ...options }),
+        getEnvelopeAuthHeaders: (method, requestUrl) => signer.getEnvelopeAuthHeaders(method, requestUrl),
     };
 }
 
@@ -148,7 +147,7 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
         }
     }
     // Sign the final URL: for GET the parameters live in its query string.
-    const headers = client.getAuthHeaders(body, { method, url: url.toString() });
+    const headers = client.getAuthHeaders({ method, url: url.toString() });
     headers['Accept-Encoding'] = 'gzip';
 
     const fetchOptions = {
@@ -773,9 +772,7 @@ export async function apiRequestWithFileList(siteName, filePaths, params = {}, o
     const blob = new Blob([fileListJson], { type: 'application/json' });
     formData.append('file_list', blob, 'file_list.json');
 
-    // The content hash covers the uploaded file's contents, which is what
-    // the server hashes from $_FILES.
-    const headers = client.getAuthHeaders(fileListJson, { method: 'POST', url: url.toString() });
+    const headers = client.getAuthHeaders({ method: 'POST', url: url.toString() });
 
     const response = await fetch(url.toString(), {
         method: 'POST',

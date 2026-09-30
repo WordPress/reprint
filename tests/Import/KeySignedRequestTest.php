@@ -14,9 +14,9 @@ require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
  *
  * The server is `php -S` on tests/fixtures/api-authentication-router.php,
  * which authenticates through index.php as a live site does. The importer
- * signs a form body for preflight and hashes the uploaded file list for a
- * multipart file_fetch; the server must compute the same hashes from what it
- * received.
+ * signs a form-encoded preflight and a multipart file_fetch. A key signature
+ * covers the method and request target, never the body, so both must pass
+ * whatever encoding cURL chose for the body.
  */
 final class KeySignedRequestTest extends TestCase {
 

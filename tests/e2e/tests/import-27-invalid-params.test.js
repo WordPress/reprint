@@ -66,7 +66,7 @@ describe('Import: Invalid API Parameters', () => {
         const requestBody = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) });
         // A credential string that is not a site name yields a key enrolled nowhere.
         const strangerClient = createHmacClient('wrong-secret-value');
-        const headers = strangerClient.getAuthHeaders(requestBody, { url: getSiteUrl(site) });
+        const headers = strangerClient.getAuthHeaders({ url: getSiteUrl(site) });
         headers['Accept-Encoding'] = 'gzip';
         headers['Content-Type'] = 'application/json';
 

@@ -417,7 +417,7 @@ async function runFileFetchScenario({ stage, site, filePath, params = {}, detail
     }
 
     const client = createHmacClient(site);
-    const headers = client.getAuthHeaders(fileListJson, { method: 'POST', url: url.toString() });
+    const headers = client.getAuthHeaders({ method: 'POST', url: url.toString() });
 
     const start = performance.now();
     const response = await fetch(url.toString(), {
