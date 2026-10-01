@@ -5,6 +5,9 @@
 
 // Use the production request authentication and endpoint dispatch behind TLS.
 require_once __DIR__ . '/../../../vendor/autoload.php';
+// This fixture models a host without openssl_verify(), so HMACServer keeps
+// accepting the connection token.
+\WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
 $reprint_authentication = new \WordPress\Reprint\Server\HMACServer('tls-test-secret');
 if (\WordPress\Reprint\Server\HTTPServer::is_push_endpoint($_GET['endpoint'] ?? '')) {
     $reprint_authentication_error = $reprint_authentication->verify_envelope(

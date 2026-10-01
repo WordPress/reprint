@@ -231,7 +231,8 @@
       "port": 8143
     },
     "multisite-admin": {
-      "port": 8144
+      "port": 8144,
+      "hmacOnly": true
     },
     "multisite-files": {
       "port": 8145
@@ -254,6 +255,10 @@
     "multisite-plugin-tables": {
       "port": 8181
     },
+    "hmac-only-host": {
+      "port": 8154,
+      "hmacOnly": true
+    },
     "keygen-command": {
       "port": 8155
     },
@@ -265,6 +270,12 @@
     },
     "public-key-pull": {
       "port": 8158
+    },
+    "token-only-openssl": {
+      "port": 8159
+    },
+    "keyed-openssl": {
+      "port": 8160
     },
     "private-key-override": {
       "port": 8161

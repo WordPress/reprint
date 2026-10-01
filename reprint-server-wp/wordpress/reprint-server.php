@@ -27,6 +27,7 @@ class SettingsPage {
         add_action('admin_post_reprint_server_enroll_public_key', [$this, 'handle_public_key_enroll']);
         add_action('admin_post_reprint_server_remove_public_key', [$this, 'handle_public_key_remove']);
         add_action('admin_post_reprint_server_save_key_push_access', [$this, 'handle_key_push_access_save']);
+        add_action('admin_post_reprint_server_remove_connection_token', [$this, 'handle_connection_token_remove']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
         add_filter(
             'plugin_action_links_' . plugin_basename(PLUGIN_DIR . 'index.php'),
@@ -67,18 +68,29 @@ class SettingsPage {
         }
         $configuration = get_configuration_state();
         echo '<div class="wrap"><h1>' . esc_html__('Reprint Server', 'reprint') . '</h1>';
-        echo '<p>' . esc_html__(
-            'This network token can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
-            'reprint'
+        echo '<p>' . ( $configuration['required_scheme'] === 'key'
+            ? esc_html__(
+                'Enrolled public keys can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
+                'reprint'
+            )
+            : esc_html__(
+                'This network token can pull any site in this network. Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.',
+                'reprint'
+            )
         ) . '</p>';
         $this->render_push_access_notice();
         $this->render_configuration_status($configuration);
-        echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
-        echo '<input type="hidden" name="action" value="reprint_server_save_network_token" />';
-        wp_nonce_field('reprint_server_save_network_token');
-        $this->render_connection_token_field();
-        submit_button();
-        echo '</form>';
+        $this->render_scheme_status($configuration);
+        if ($configuration['required_scheme'] === 'hmac') {
+            echo '<form method="post" action="' . esc_url(admin_url('admin-post.php')) . '">';
+            echo '<input type="hidden" name="action" value="reprint_server_save_network_token" />';
+            wp_nonce_field('reprint_server_save_network_token');
+            $this->render_connection_token_field();
+            submit_button();
+            echo '</form>';
+        } else {
+            $this->render_stored_connection_token_section($configuration);
+        }
         echo '<hr /><h2>' . esc_html__('Public keys', 'reprint') . '</h2>';
         $this->render_public_keys_section($configuration);
         echo '</div>';
@@ -246,6 +258,21 @@ class SettingsPage {
         $this->redirect_to_page(['reprint_server_notice' => $result === 'saved' ? 'key_push_saved' : 'key_push_' . $result]);
     }
 
+    /**
+     * Validate capability and nonce, then clear the option-backed connection token.
+     *
+     * Offered on a key host, where a stored token is never accepted; the plugin
+     * does not delete a credential the administrator set without being asked.
+     */
+    public function handle_connection_token_remove(): void {
+        $this->require_manage_capability();
+        check_admin_referer('reprint_server_remove_connection_token');
+        $result = change_connection_token('');
+        $this->redirect_to_page([
+            'reprint_server_notice' => $result === 'storage_failure' ? 'token_remove_storage_failure' : 'token_removed',
+        ]);
+    }
+
     /** Stop with wp_die() unless the current user may manage this site's, or on multisite the network's, options. */
     private function require_manage_capability(): void {
         $capability = is_multisite() ? 'manage_network_options' : 'manage_options';
@@ -274,7 +301,6 @@ class SettingsPage {
         }
 
         $configuration = get_configuration_state();
-        $connection_token = get_connection_token();
         $remote_reprint_api_url = home_url('?reprint-api');
         ?>
         <div class="wrap">
@@ -291,19 +317,24 @@ class SettingsPage {
             <?php $this->render_settings_notices(); ?>
             <?php $this->render_push_access_notice(); ?>
             <?php $this->render_configuration_status($configuration); ?>
+            <?php $this->render_scheme_status($configuration); ?>
 
-            <form method="post" action="options.php">
-                <?php settings_fields('reprint_server'); ?>
-                <?php do_settings_sections('reprint-server'); ?>
-                <?php submit_button(); ?>
-            </form>
+            <?php if ($configuration['required_scheme'] === 'hmac'): ?>
+                <form method="post" action="options.php">
+                    <?php settings_fields('reprint_server'); ?>
+                    <?php do_settings_sections('reprint-server'); ?>
+                    <?php submit_button(); ?>
+                </form>
+            <?php else: ?>
+                <?php $this->render_stored_connection_token_section($configuration); ?>
+            <?php endif; ?>
 
             <hr />
             <h2><?php echo esc_html__('Public keys', 'reprint'); ?></h2>
             <?php $this->render_public_keys_section($configuration); ?>
 
             <?php if ($configuration['is_configured']): ?>
-                <?php if ($connection_token !== null && $connection_token !== ''): ?>
+                <?php if ($configuration['required_scheme'] === 'hmac'): ?>
                     <hr />
                     <h2><?php echo esc_html__('Push access', 'reprint'); ?></h2>
                     <p>
@@ -350,7 +381,9 @@ class SettingsPage {
     private function render_configuration_status(array $configuration): void {
         $key_host = $configuration['required_scheme'] === 'key';
         if ($configuration['has_connection_token_file']) {
-            if (is_multisite()) {
+            if ($key_host) {
+                $file_detail = esc_html__('It is not accepted on this host.', 'reprint');
+            } elseif (is_multisite()) {
                 $file_detail = esc_html__(
                     'This page updates only the network option. Remove secret.php to use the stored option value.',
                     'reprint'
@@ -373,7 +406,7 @@ class SettingsPage {
                 . esc_html__('Not configured yet.', 'reprint')
                 . '</strong> '
                 . ( $key_host
-                    ? esc_html__('Enter a connection token or enroll a public key to get started.', 'reprint')
+                    ? esc_html__('Enroll a public key to get started.', 'reprint')
                     : esc_html__('Enter a connection token to get started.', 'reprint')
                 );
             $this->render_notice('warning', $message);
@@ -383,17 +416,62 @@ class SettingsPage {
         if ($configuration['push_enabled']) {
             $message = '<strong>' . esc_html__('Connected for downloads and push.', 'reprint') . '</strong> '
                 . ( $key_host
-                    ? esc_html__('The connection token or an enrolled key can change files on this site.', 'reprint')
+                    ? esc_html__('At least one enrolled key can change files on this site.', 'reprint')
                     : esc_html__('The current connection token can change files on this site.', 'reprint')
                 );
         } else {
             $message = '<strong>' . esc_html__('Connected for downloads.', 'reprint') . '</strong> '
                 . ( $key_host
-                    ? esc_html__('Neither the connection token nor an enrolled key can change files on this site.', 'reprint')
+                    ? esc_html__('No enrolled key can change files on this site.', 'reprint')
                     : esc_html__('The connection token cannot change files on this site.', 'reprint')
                 );
         }
         $this->render_notice('info', $message);
+    }
+
+    /**
+     * Read-only connection-token section for a key host, where a stored token is never accepted.
+     *
+     * Renders nothing when no token is stored. An option-stored token gets a Remove button;
+     * a secret.php token is named without one, since this page cannot delete that file.
+     *
+     * @param array $configuration Configuration returned by get_configuration_state().
+     */
+    private function render_stored_connection_token_section(array $configuration): void {
+        if ($configuration['stored_connection_token'] === '' && !$configuration['has_connection_token_file']) {
+            return;
+        }
+        ?>
+        <h2><?php echo esc_html__('Connection token', 'reprint'); ?></h2>
+        <p class="description">
+        <?php
+        echo esc_html(
+            $configuration['has_connection_token_file']
+                ? __('secret.php is present but not accepted on this host. Remove it.', 'reprint')
+                : __('A connection token is stored but not accepted on this host. It is safe to remove.', 'reprint')
+        );
+        ?>
+        </p>
+        <?php if ($configuration['stored_connection_token'] !== '' && !$configuration['has_connection_token_file']): ?>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="reprint_server_remove_connection_token" />
+                <?php wp_nonce_field('reprint_server_remove_connection_token'); ?>
+                <?php submit_button(__('Remove connection token', 'reprint'), 'secondary', 'submit', false); ?>
+            </form>
+        <?php endif; ?>
+        <?php
+    }
+
+    /**
+     * One sentence saying which scheme this host accepts. Nothing on the page changes it.
+     *
+     * @param array $configuration Configuration returned by get_configuration_state().
+     */
+    private function render_scheme_status(array $configuration): void {
+        $message = $configuration['required_scheme'] === 'key'
+            ? esc_html__('This host has OpenSSL. Clients authenticate with public keys; connection tokens are not accepted.', 'reprint')
+            : esc_html__('This host has no OpenSSL. Clients authenticate with a connection token, and public keys are not used on this host.', 'reprint');
+        $this->render_notice('info', '<strong>' . $message . '</strong>');
     }
 
     /**
@@ -402,16 +480,15 @@ class SettingsPage {
      * @param array $configuration Configuration returned by get_configuration_state().
      */
     private function render_public_keys_section(array $configuration): void {
-        if ($configuration['required_scheme'] !== 'key') {
-            echo '<p class="description">' . esc_html__('Public keys need OpenSSL, which this host does not have.', 'reprint') . '</p>';
-            return;
-        }
         $file_override = $configuration['has_public_keys_file'];
         $post_url = admin_url('admin-post.php');
         if ($file_override) {
             $this->render_notice('warning', '<strong><code>public-keys.php</code> '
                 . esc_html__('override is active.', 'reprint') . '</strong> '
                 . esc_html__('Keys come from that file; this page cannot change them.', 'reprint'));
+        }
+        if ($configuration['required_scheme'] === 'key' && $configuration['enrolled_keys'] === []) {
+            $this->render_notice('warning', esc_html__('No client can connect until a key is enrolled.', 'reprint'));
         }
         ?>
         <form method="post" action="<?php echo esc_url($post_url); ?>">
@@ -482,12 +559,8 @@ class SettingsPage {
         <?php
     }
 
-    /**
-     * Render the connection token's push-access form or its read-only state.
-     * The checkbox shows the token's own grant; push_enabled also counts key grants.
-     */
+    /** Render the push-access form or its read-only state. */
     private function render_push_access_form(array $configuration): void {
-        $token_push_enabled = is_push_authorized();
         if (!$configuration['push_supported']) {
             $unsupported_message = sprintf(
                 /* translators: %s: Current PHP version. */
@@ -505,7 +578,7 @@ class SettingsPage {
             ?>
             <label>
                 <input type="checkbox"
-                       value="1"<?php checked($token_push_enabled); ?><?php disabled(true); ?> />
+                       value="1"<?php checked($configuration['push_enabled']); ?><?php disabled(true); ?> />
                 <?php echo esc_html__('Allow push to change files on this site', 'reprint'); ?>
             </label>
             <p class="description">
@@ -535,7 +608,7 @@ class SettingsPage {
             <label>
                 <input type="checkbox"
                        name="reprint_server_push_enabled"
-                       value="1"<?php checked($token_push_enabled); ?> />
+                       value="1"<?php checked($configuration['push_enabled']); ?> />
                 <?php echo esc_html__('Allow push to change files on this site', 'reprint'); ?>
             </label>
             <p class="description">
@@ -553,7 +626,7 @@ class SettingsPage {
         <?php
     }
 
-    /** Render a fixed native notice for the admin-post result: push access or key enrollment. */
+    /** Render a fixed native notice for the admin-post result: push access, key enrollment, or token removal. */
     private function render_push_access_notice(): void {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- A newer Settings API result supersedes the stale push result.
         if (isset($_GET['settings-updated'])) {
@@ -576,6 +649,7 @@ class SettingsPage {
             'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
             'enrolled' => ['success', __('Public key enrolled.', 'reprint')],
             'enroll_invalid' => ['error', __('That is not a usable public key. Paste an RSA public key of at least 3072 bits, as a PEM block or one line.', 'reprint')],
+            'enroll_no_openssl' => ['error', __('This host cannot read public keys because the OpenSSL extension is missing. Clients authenticate with the connection token here.', 'reprint')],
             'enroll_duplicate' => ['info', __('That public key is already enrolled.', 'reprint')],
             'enroll_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
             'enroll_storage_failure' => ['error', __('Failed to save the public key.', 'reprint')],
@@ -594,6 +668,8 @@ class SettingsPage {
             'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided keys.', 'reprint')],
             'key_push_storage_failure' => ['error', __('Failed to save push access for the key.', 'reprint')],
             'key_push_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
+            'token_removed' => ['success', __('Connection token removed.', 'reprint')],
+            'token_remove_storage_failure' => ['error', __('Failed to remove the connection token.', 'reprint')],
         ];
         if (!isset($notices[$result])) {
             return;

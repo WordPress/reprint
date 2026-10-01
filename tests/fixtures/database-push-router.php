@@ -18,6 +18,9 @@ $GLOBALS['table_prefix'] = 'wp_';
 register_shutdown_function(static function (): void {
     file_put_contents(getenv('REPRINT_DB_TEST_ROOT') . '/requests', ($_GET['endpoint'] ?? '') . "\n", FILE_APPEND);
 });
+// This route models a host without openssl_verify(), so the file-backed
+// connection token stays the scheme.
+\WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
 require dirname(__DIR__, 2) . '/reprint-server-wp/lib.php';
 \WordPress\Reprint\Server\Plugin\handle_api_request([
     'docroot' => ABSPATH,

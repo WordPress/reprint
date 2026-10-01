@@ -11,7 +11,6 @@ namespace WordPress\Reprint\Server\Plugin;
 
 use Exception;
 use InvalidArgumentException;
-use WordPress\Reprint\Server\HMACServer;
 use WordPress\Reprint\Server\HTTPServer;
 use WordPress\Reprint\Server\PushConfigurationException;
 use WordPress\Reprint\Server\RequestAuthenticator;
@@ -495,64 +494,6 @@ function update_push_authorization(bool $enabled): bool {
 }
 
 /**
- * Verifies a connection-token (HMAC) signature. Retained for embedders that
- * call it directly; new embedders should call RequestAuthenticator through
- * handle_api_request().
- *
- * The signature covers a SHA-256 hash of the request body rather than
- * the raw bytes.  This sidesteps the problem that libcurl generates
- * multipart boundaries internally so the client can't predict the exact
- * byte stream — but it CAN hash the logical content before encoding.
- *
- * Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), connection token)
- *
- * The client sends X-Auth-Content-Hash = SHA256(body).  The server
- * independently hashes what it received and checks both that the hash
- * matches AND that the HMAC is valid.
- */
-function verify_hmac(string $secret): ?string {
-    if (!class_exists(HMACServer::class, false)) {
-        load_server_runtime();
-    }
-
-    if (!class_exists(HMACServer::class)) {
-        return 'Reprint Server runtime is incomplete. Run composer install in reprint-server-wp or rebuild the release package.';
-    }
-
-    $server = new HMACServer($secret, TIMESTAMP_TOLERANCE);
-    return $server->verify_globals();
-}
-
-/**
- * Connection-token authentication handler retained for embedders that call it
- * directly; handle_api_request() no longer uses it. New embedders should call
- * RequestAuthenticator through handle_api_request().
- *
- * Reads the connection token from secret.php when present, otherwise from the
- * site option, and verifies the request's HMAC signature.
- * Calls error() on failure.
- */
-function default_authenticate(): void {
-    if (has_connection_token_file()) {
-        $connection_token = get_file_connection_token();
-        if (empty($connection_token)) {
-            error(503, 'Invalid secret.php configuration. Please remove it or replace it with a valid connection token.');
-        }
-    } else {
-        $connection_token = get_option_connection_token();
-    }
-
-    if (empty($connection_token) || !is_string($connection_token)) {
-        error(503, 'Export not configured. Please configure the connection token in WordPress admin under Tools > Reprint Server.');
-    }
-
-    $auth_error = verify_hmac($connection_token);
-    if ($auth_error !== null) {
-        error(403, $auth_error);
-    }
-}
-
-/**
  * Handle an export API request.
  *
  * WordPress is already loaded at this point — DB credentials, $table_prefix,
@@ -668,8 +609,8 @@ function handle_api_request(array $options = []): void {
     });
 
     // -- Authenticate --
-    // One call. Core verifies whichever scheme the request uses; the plugin
-    // passes what it has stored and decides nothing.
+    // One call. Core reads the host rule and verifies only the scheme this
+    // host accepts; the plugin passes what it has stored and decides nothing.
     // A custom authenticate callable still runs for every endpoint and owns
     // the whole decision. filter_input, not WP sanitizers: lib.php also runs
     // without WordPress bootstrapped.
@@ -689,7 +630,9 @@ function handle_api_request(array $options = []): void {
             }
             error(500, $runtime_message);
         }
-        if (has_connection_token_file() && empty(get_file_connection_token())) {
+        // A broken secret.php only matters where the token is the scheme; a
+        // key host never accepts it, so enrolled keys must still authenticate.
+        if (!Utils::key_auth_required() && has_connection_token_file() && empty(get_file_connection_token())) {
             $secret_file_message = 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.';
             if (is_push_endpoint($endpoint)) {
                 push_error(503, 'not_configured', $secret_file_message);
@@ -704,9 +647,19 @@ function handle_api_request(array $options = []): void {
         $auth_error = $authenticator->verify_globals();
         if ($auth_error !== null) {
             $reason = $authenticator->last_error_reason() ?? RequestAuthenticator::REASON_AUTH_FAILED;
-            $status = $reason === RequestAuthenticator::REASON_NOT_CONFIGURED ? 503 : 403;
-            if ($reason === RequestAuthenticator::REASON_NOT_CONFIGURED) {
-                // Released clients print this message as they receive it.
+            $is_unconfigured = in_array(
+                $reason,
+                [RequestAuthenticator::REASON_NOT_CONFIGURED, RequestAuthenticator::REASON_NO_KEYS_ENROLLED],
+                true
+            );
+            $status = $is_unconfigured ? 503 : 403;
+            // Released clients print these messages as they receive them.
+            if (in_array($reason, [RequestAuthenticator::REASON_REQUIRES_KEY_AUTH, RequestAuthenticator::REASON_NO_KEYS_ENROLLED], true)) {
+                // A client that signs with a key prints its own remedy. A
+                // released client sends a token and cannot sign with a key,
+                // so enrolling one is not enough.
+                $auth_error .= '. Update the Reprint client to a version that has `reprint keygen`, run it, and enroll the printed key under Tools > Reprint Server.';
+            } elseif ($is_unconfigured) {
                 $auth_error .= '. Set up the connection in WordPress admin under Tools > Reprint Server.';
             }
             if (is_push_endpoint($endpoint)) {

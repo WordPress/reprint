@@ -67,29 +67,41 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
     // ── OpenSSL host (the test runtime's real state) ──
 
-    public function testKeyHostStillAcceptsATokenWithNoKeyEnrolled(): void
+    public function testKeyHostWithOnlyATokenAnswersNoKeysEnrolled(): void
     {
         $this->startServer(['options' => $this->tokenOptions()]);
 
-        $this->assertReachedDispatcher($this->pullWithToken());
+        $response = $this->pullWithToken();
+
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('no_keys_enrolled', $response['body']['reason']);
+        $this->assertStringEndsWith(
+            'Update the Reprint client to a version that has `reprint keygen`, run it, and enroll the printed key under Tools > Reprint Server.',
+            $response['body']['error'],
+            'a released client prints this message as it receives it and cannot sign with a key'
+        );
     }
 
-    public function testKeyHostWithOnlyATokenIsNotConfiguredForAKeyRequest(): void
+    public function testKeyHostWithOnlyATokenAnswersNoKeysEnrolledForAKeyRequest(): void
     {
         $this->startServer(['options' => $this->tokenOptions()]);
 
         $response = $this->pullWithKey($this->newKeyClient());
 
         $this->assertSame(503, $response['status']);
-        $this->assertSame('not_configured', $response['body']['reason']);
+        $this->assertSame('no_keys_enrolled', $response['body']['reason']);
     }
 
-    public function testKeyHostStillAcceptsATokenWhenAKeyIsEnrolled(): void
+    public function testKeyHostRejectsAValidTokenWhenAKeyIsEnrolled(): void
     {
         $key_client = $this->newKeyClient();
         $this->startServer(['options' => $this->tokenOptions() + $this->keyOptions($key_client, false)]);
 
-        $this->assertReachedDispatcher($this->pullWithToken());
+        $response = $this->pullWithToken();
+
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('requires_key_auth', $response['body']['reason']);
+        $this->assertStringContainsString('Update the Reprint client', $response['body']['error']);
     }
 
     public function testKeyHostAcceptsAValidKeySignature(): void
@@ -122,6 +134,16 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
         $this->assertSame(403, $response['status']);
         $this->assertSame('unknown_key', $response['body']['reason']);
+    }
+
+    public function testEmptySecretFileDoesNotBlockAKeySignedRequestOnAKeyHost(): void
+    {
+        file_put_contents($this->credentials_directory . '/secret.php', "<?php return '';\n");
+        $key_client = $this->newKeyClient();
+        $this->startServer(['key_auth_required' => true, 'options' => $this->keyOptions($key_client, false)]);
+
+        // A key host never accepts the token, so a broken secret.php is irrelevant there.
+        $this->assertReachedDispatcher($this->pullWithKey($key_client));
     }
 
     public function testKeySignedPushIsRefusedWhenOnlyTheTokenMayPush(): void

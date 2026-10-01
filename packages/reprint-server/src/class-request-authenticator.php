@@ -13,6 +13,8 @@ namespace WordPress\Reprint\Server;
 final class RequestAuthenticator {
 
     public const REASON_NOT_CONFIGURED = 'not_configured';
+    public const REASON_NO_KEYS_ENROLLED = 'no_keys_enrolled';
+    public const REASON_REQUIRES_KEY_AUTH = HMACServer::REASON_REQUIRES_KEY_AUTH;
     public const REASON_REQUIRES_TOKEN_AUTH = PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH;
     public const REASON_UNKNOWN_KEY = PublicKeyServer::REASON_UNKNOWN_KEY;
     public const REASON_AUTH_FAILED = 'auth_failed';
@@ -91,18 +93,24 @@ final class RequestAuthenticator {
             if ($this->hmac_secret === null) {
                 return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no connection token is stored');
             }
-            return $this->verify_hmac($this->hmac_secret, $headers, $method, $request_target, $read_body, $files, $is_push_endpoint, $now);
+            $hmac_server = new HMACServer($this->hmac_secret, $this->timestamp_tolerance);
+            $error = $is_push_endpoint
+                ? $hmac_server->verify_envelope($headers, $method, $request_target, $now)
+                : $hmac_server->verify($headers, $read_body(), $files, $now);
+            if ($error !== null) {
+                return $this->fail($hmac_server->last_error_reason() ?? self::REASON_AUTH_FAILED, $error);
+            }
+            return null;
         }
 
-        // Tokens stay accepted here until clients can sign with keys.
-        if (!$has_key_id) {
-            if ($this->hmac_secret === null) {
-                return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no connection token is stored');
-            }
-            return $this->verify_hmac($this->hmac_secret, $headers, $method, $request_target, $read_body, $files, $is_push_endpoint, $now);
-        }
+        // No keys enrolled answers first: a site that upgraded with only a
+        // token stored tells its existing token clients to enroll a key
+        // rather than reporting a scheme mismatch they cannot act on.
         if (empty($this->public_keys_by_id)) {
-            return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no keys are enrolled');
+            return $this->fail(self::REASON_NO_KEYS_ENROLLED, 'Export not configured: this host requires key authentication and no keys are enrolled');
+        }
+        if (!$has_key_id) {
+            return $this->fail(self::REASON_REQUIRES_KEY_AUTH, 'This host requires key authentication; connection tokens are not accepted');
         }
         $public_key_server = new PublicKeyServer($this->public_keys_by_id, $this->timestamp_tolerance);
         $error = $public_key_server->verify($headers, $method, $request_target, $now);
@@ -148,26 +156,6 @@ final class RequestAuthenticator {
 
     public function authenticated_key_id(): ?string {
         return $this->authenticated_key_id;
-    }
-
-    private function verify_hmac(
-        string $hmac_secret,
-        array $headers,
-        string $method,
-        string $request_target,
-        callable $read_body,
-        array $files,
-        bool $is_push_endpoint,
-        ?float $now
-    ): ?string {
-        $hmac_server = new HMACServer($hmac_secret, $this->timestamp_tolerance);
-        $error = $is_push_endpoint
-            ? $hmac_server->verify_envelope($headers, $method, $request_target, $now)
-            : $hmac_server->verify($headers, $read_body(), $files, $now);
-        if ($error !== null) {
-            return $this->fail($hmac_server->last_error_reason() ?? self::REASON_AUTH_FAILED, $error);
-        }
-        return null;
     }
 
     private function fail(string $reason, string $message): string {
