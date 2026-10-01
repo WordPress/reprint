@@ -362,10 +362,9 @@
             "dist": {
                 "type": "path",
                 "url": "packages/reprint-client",
-                "reference": "134e282491534c57a254ea708308decadbf6e89b"
+                "reference": "f367faa5a2cbe786c28eaafe8b88b5ddbd8cebec"
             },
             "require": {
-                "ext-openssl": "*",
                 "ext-pdo": "*",
                 "php": ">=7.4",
                 "wp-php-toolkit/data-liberation": "^0.10.1",
@@ -374,6 +373,9 @@
             },
             "replace": {
                 "wp-php-toolkit/reprint-importer": "self.version"
+            },
+            "suggest": {
+                "ext-openssl": "Needed to generate keys and sign requests with them. Without it the client authenticates with a connection token only."
             },
             "bin": [
                 "bin/reprint-client",
