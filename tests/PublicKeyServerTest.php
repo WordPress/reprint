@@ -231,7 +231,7 @@ final class PublicKeyServerTest extends TestCase
      *
      * @dataProvider weakStoredKeyProvider
      */
-    public function testStoredKeyMustBeRsaOfAtLeast2048Bits(array $keypair_options): void
+    public function testStoredKeyMustBeRsaOfAtLeast3072Bits(array $keypair_options): void
     {
         $weak_key = openssl_pkey_new($keypair_options);
         $weak_public_key = Utils::normalize_public_key(openssl_pkey_get_details($weak_key)['key']);
@@ -239,7 +239,7 @@ final class PublicKeyServerTest extends TestCase
         $server = new PublicKeyServer([self::$client->get_key_id() => $weak_public_key]);
 
         $this->assertSame(
-            'Stored public key ' . self::$client->get_key_id() . ' is not an RSA key of at least 2048 bits',
+            'Stored public key ' . self::$client->get_key_id() . ' is not an RSA key of at least 3072 bits',
             $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers))
         );
         $this->assertSame(PublicKeyServer::REASON_AUTH_FAILED, $server->last_error_reason());
@@ -260,7 +260,7 @@ final class PublicKeyServerTest extends TestCase
     public static function weakStoredKeyProvider(): array
     {
         return [
-            '1024-bit RSA' => [['private_key_bits' => 1024, 'private_key_type' => OPENSSL_KEYTYPE_RSA]],
+            '2048-bit RSA' => [['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]],
             'EC' => [['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']],
         ];
     }
@@ -316,9 +316,9 @@ final class PublicKeyServerTest extends TestCase
     /** Only keys printed by reprint keygen are supported; a PKCS#1 key gets a pointer there. */
     public function testAssertValidPublicKeyRejectsAPkcs1Key(): void
     {
-        // A 2048-bit SubjectPublicKeyInfo is a fixed 24-byte prefix followed by the PKCS#1 RSAPublicKey.
+        // A 3072-bit SubjectPublicKeyInfo is a fixed 24-byte prefix followed by the PKCS#1 RSAPublicKey.
         $subject_public_key_info = base64_decode(self::$public_key, true);
-        $this->assertSame('30820122300d06092a864886f70d0101010500038201', bin2hex(substr($subject_public_key_info, 0, 22)));
+        $this->assertSame('308201a2300d06092a864886f70d0101010500038201', bin2hex(substr($subject_public_key_info, 0, 22)));
         $pkcs1_pem = "-----BEGIN RSA PUBLIC KEY-----\n"
             . chunk_split(base64_encode(substr($subject_public_key_info, 24)), 64, "\n")
             . "-----END RSA PUBLIC KEY-----\n";
@@ -338,7 +338,7 @@ final class PublicKeyServerTest extends TestCase
 
     public static function invalidPublicKeyProvider(): array
     {
-        $weak = openssl_pkey_new(['private_key_bits' => 1024, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+        $weak = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
         $weak_public = openssl_pkey_get_details($weak)['key'];
         $ec = openssl_pkey_new(['private_key_type' => OPENSSL_KEYTYPE_EC, 'curve_name' => 'prime256v1']);
         $ec_public = openssl_pkey_get_details($ec)['key'];
@@ -347,7 +347,7 @@ final class PublicKeyServerTest extends TestCase
 
         return [
             'garbage' => ['hello', 'base64'],
-            '1024-bit' => [$weak_public, '2048'],
+            '2048-bit' => [$weak_public, 'at least 3072 bits. This one has 2048.'],
             'EC' => [$ec_public, 'RSA'],
             'private key' => [$private_pem, 'private'],
         ];

@@ -121,9 +121,9 @@ final class PublicKeyServer {
         if (
             !is_array($public_key_details)
             || ( $public_key_details['type'] ?? null ) !== OPENSSL_KEYTYPE_RSA
-            || ( $public_key_details['bits'] ?? 0 ) < 2048
+            || ( $public_key_details['bits'] ?? 0 ) < 3072
         ) {
-            return $this->fail(self::REASON_AUTH_FAILED, 'Stored public key ' . $key_id . ' is not an RSA key of at least 2048 bits');
+            return $this->fail(self::REASON_AUTH_FAILED, 'Stored public key ' . $key_id . ' is not an RSA key of at least 3072 bits');
         }
         $message = PublicKeyClient::build_message($key_id, $nonce, $timestamp, $method, $request_target);
         $result = openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256);
@@ -173,8 +173,8 @@ final class PublicKeyServer {
         if (!is_array($details) || ( $details['type'] ?? null ) !== OPENSSL_KEYTYPE_RSA) {
             throw new InvalidArgumentException('Public key must be RSA.');
         }
-        if (( $details['bits'] ?? 0 ) < 2048) {
-            throw new InvalidArgumentException('RSA key must be at least 2048 bits; got ' . (int) $details['bits'] . '.');
+        if (( $details['bits'] ?? 0 ) < 3072) {
+            throw new InvalidArgumentException('RSA key must be at least 3072 bits. This one has ' . (int) $details['bits'] . '.');
         }
         $canonical_public_key_pem = (string) $details['key'];
         return Utils::normalize_public_key($canonical_public_key_pem);

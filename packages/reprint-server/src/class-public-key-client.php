@@ -50,7 +50,7 @@ final class PublicKeyClient implements EnvelopeSigner {
     }
 
     /**
-     * Generates a 2048-bit RSA keypair.
+     * Generates a 3072-bit RSA keypair.
      *
      * @return array{0:string,1:string} Private key PEM and one-line public key.
      * @throws RuntimeException When OpenSSL is unavailable or generation fails.
@@ -58,7 +58,7 @@ final class PublicKeyClient implements EnvelopeSigner {
     public static function generate_keypair(): array {
         self::assert_openssl_available();
         $configargs = [
-            'private_key_bits' => 2048,
+            'private_key_bits' => 3072,
             'private_key_type' => OPENSSL_KEYTYPE_RSA,
         ];
         $keypair = @openssl_pkey_new($configargs);

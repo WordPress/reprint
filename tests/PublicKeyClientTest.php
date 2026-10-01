@@ -20,11 +20,11 @@ final class PublicKeyClientTest extends TestCase
         [self::$private_key_pem, self::$public_key_one_line] = PublicKeyClient::generate_keypair();
     }
 
-    public function testGeneratedKeypairIsRsa2048(): void
+    public function testGeneratedKeypairIsRsa3072(): void
     {
         $details = openssl_pkey_get_details(openssl_pkey_get_private(self::$private_key_pem));
         $this->assertSame(OPENSSL_KEYTYPE_RSA, $details['type']);
-        $this->assertSame(2048, $details['bits']);
+        $this->assertSame(3072, $details['bits']);
         $this->assertSame(self::$public_key_one_line, Utils::normalize_public_key($details['key']));
     }
 
@@ -51,7 +51,7 @@ final class PublicKeyClientTest extends TestCase
         $this->assertSame('', $stderr);
         $decoded = json_decode($stdout, true);
         $this->assertIsArray($decoded, $stdout);
-        $this->assertSame(2048, $decoded[0]);
+        $this->assertSame(3072, $decoded[0]);
         $this->assertSame($decoded[1], Utils::normalize_public_key(Utils::public_key_to_pem($decoded[1])));
         $this->assertFalse($decoded[2], 'the failed first attempt leaves no OpenSSL error queued');
         $this->assertSame([], glob(sys_get_temp_dir() . '/reprint-openssl-*') ?: []);
@@ -102,7 +102,7 @@ final class PublicKeyClientTest extends TestCase
         );
         $signature = base64_decode($headers['X-Auth-Signature'], true);
         $this->assertNotFalse($signature);
-        $this->assertSame(256, strlen($signature));
+        $this->assertSame(384, strlen($signature));
         $public_key = openssl_pkey_get_public(Utils::public_key_to_pem(self::$public_key_one_line));
         $this->assertSame(1, openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256));
     }
