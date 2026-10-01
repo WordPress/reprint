@@ -1,0 +1,236 @@
+<?php
+
+declare(strict_types=1);
+
+use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\HMACServer;
+use WordPress\Reprint\Server\PublicKeyClient;
+use WordPress\Reprint\Server\RequestAuthenticator;
+use WordPress\Reprint\Server\Utils;
+
+final class RequestAuthenticatorTest extends TestCase
+{
+    private const SECRET = 'shared-secret';
+
+    /** @var PublicKeyClient */
+    private static $key_client;
+
+    /** @var string */
+    private static $public_key;
+
+    /** @var array<string, mixed> */
+    private $original_server = [];
+
+    /** @var array<string, mixed> */
+    private $original_get = [];
+
+    /** @var array<string, mixed> */
+    private $original_files = [];
+
+    public static function setUpBeforeClass(): void
+    {
+        [$private_pem, self::$public_key] = PublicKeyClient::generate_keypair();
+        self::$key_client = new PublicKeyClient($private_pem);
+    }
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->original_server = $_SERVER;
+        $this->original_get = $_GET;
+        $this->original_files = $_FILES;
+    }
+
+    protected function tearDown(): void
+    {
+        $_SERVER = $this->original_server;
+        $_GET = $this->original_get;
+        $_FILES = $this->original_files;
+        Utils::override_key_auth_required_for_tests(null);
+
+        parent::tearDown();
+    }
+
+    private function keys(): array
+    {
+        return [self::$key_client->get_key_id() => self::$public_key];
+    }
+
+    private function now(array $headers): float
+    {
+        return (float) $headers['X-Auth-Timestamp'] + 1.0;
+    }
+
+    public function testHmacHostVerifiesTokenAndIgnoresKeys(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_auth_headers('');
+        Utils::override_key_auth_required_for_tests(false);
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+
+        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNull($authenticator->authenticated_key_id());
+    }
+
+    public function testHmacHostRejectsARequestCarryingAKeyIdBeforeReadingTheToken(): void
+    {
+        $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        Utils::override_key_auth_required_for_tests(false);
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertSame(RequestAuthenticator::REASON_REQUIRES_TOKEN_AUTH, $authenticator->last_error_reason());
+    }
+
+    public function testHmacHostWithoutATokenIsNotConfigured(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_auth_headers('');
+        Utils::override_key_auth_required_for_tests(false);
+        $authenticator = new RequestAuthenticator(null, $this->keys());
+
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
+    }
+
+    public function testHmacHostUsesEnvelopeVerificationForPush(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
+        Utils::override_key_auth_required_for_tests(false);
+        $authenticator = new RequestAuthenticator(self::SECRET, []);
+
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
+    }
+
+    public function testKeyHostVerifiesKeyAndIgnoresToken(): void
+    {
+        $headers = self::$key_client->get_auth_headers('POST', 'https://s.test/?reprint-api');
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api', '{"e":1}', [], false, $this->now($headers)));
+        $this->assertSame(self::$key_client->get_key_id(), $authenticator->authenticated_key_id());
+    }
+
+    public function testKeyHostStillAcceptsAToken(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_auth_headers('');
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+
+        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNull($authenticator->authenticated_key_id());
+    }
+
+    public function testKeyHostWithNoKeysStillAcceptsAToken(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_auth_headers('');
+        $authenticator = new RequestAuthenticator(self::SECRET, []);
+
+        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNull($authenticator->authenticated_key_id());
+    }
+
+    public function testKeyHostUsesEnvelopeVerificationForATokenPush(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
+        $this->assertNull($authenticator->authenticated_key_id());
+    }
+
+    public function testKeyHostWithoutATokenIsNotConfiguredForATokenRequest(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_auth_headers('');
+        $authenticator = new RequestAuthenticator(null, $this->keys());
+
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
+    }
+
+    public function testKeyHostRejectsAWrongToken(): void
+    {
+        $hmac = new Site_Export_HMAC_Client('some-other-secret');
+        $headers = $hmac->get_auth_headers('');
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertSame(HMACServer::REASON_SIGNATURE_MISMATCH, $authenticator->last_error_reason());
+    }
+
+    public function testKeyHostWithNoKeysIsNotConfiguredRegardlessOfToken(): void
+    {
+        $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $authenticator = new RequestAuthenticator(self::SECRET, []);
+
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
+    }
+
+    public function testKeyHostReportsUnknownKey(): void
+    {
+        $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        $authenticator = new RequestAuthenticator(null, ['0000000000000000' => self::$public_key]);
+
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertSame(RequestAuthenticator::REASON_UNKNOWN_KEY, $authenticator->last_error_reason());
+    }
+
+    /** A key signature never covers the body, so push and pull verify it the same way. */
+    public function testKeyHostVerifiesAKeySignatureWithoutReadingTheBody(): void
+    {
+        $headers = self::$key_client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
+        $authenticator = new RequestAuthenticator(null, $this->keys());
+
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'another body', [], false, $this->now($headers)));
+    }
+
+    /**
+     * The reference plugin promises that a push_-prefixed endpoint it does not
+     * know authenticates with the envelope and then gets the push error
+     * contract, so a newer client can tell an old server from a wrong secret.
+     */
+    public function testVerifyGlobalsUsesEnvelopeVerificationForAnUnknownPushPrefixedEndpoint(): void
+    {
+        $hmac = new Site_Export_HMAC_Client(self::SECRET);
+        $headers = $hmac->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_future_operation');
+        $_SERVER = [
+            'REQUEST_METHOD' => 'POST',
+            'REQUEST_URI' => '/?reprint-api&endpoint=push_future_operation',
+            'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
+            'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
+            'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
+            'HTTP_X_AUTH_CONTENT_HASH' => $headers['X-Auth-Content-Hash'],
+        ];
+        $_GET = ['reprint-api' => '', 'endpoint' => 'push_future_operation'];
+        $_FILES = [];
+        Utils::override_key_auth_required_for_tests(false);
+        $authenticator = new RequestAuthenticator(self::SECRET, []);
+
+        $this->assertNull($authenticator->verify_globals($this->now($headers)));
+    }
+
+    public function testVerifyGlobalsVerifiesAKeySignedPushRequest(): void
+    {
+        $headers = self::$key_client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_status');
+        $_SERVER = [
+            'REQUEST_METHOD' => 'POST',
+            'REQUEST_URI' => '/?reprint-api&endpoint=push_status',
+            'HTTP_X_AUTH_KEY_ID' => $headers['X-Auth-Key-Id'],
+            'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
+            'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
+            'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
+        ];
+        $_GET = ['reprint-api' => '', 'endpoint' => 'push_status'];
+        $_FILES = [];
+        $authenticator = new RequestAuthenticator(null, $this->keys());
+
+        $this->assertNull($authenticator->verify_globals($this->now($headers)));
+    }
+}
