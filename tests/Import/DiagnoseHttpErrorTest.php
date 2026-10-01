@@ -138,6 +138,37 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertStringContainsString('Missing X-Auth-Nonce', $result['message']);
     }
 
+    // ── Auth: reason codes ───────────────────────────────────────
+
+    /**
+     * The reason decides the diagnosis, so a reworded or translated message
+     * keeps it.
+     *
+     * @dataProvider reasonCodeProvider
+     */
+    public function testReasonCodeDecidesTheDiagnosisWhateverTheMessage(string $reason, string $expected_code)
+    {
+        $result = $this->diagnose(403, json_encode(['error' => 'Die Anfrage wurde abgelehnt', 'code' => 403, 'reason' => $reason]));
+        $this->assertSame($expected_code, $result['code']);
+    }
+
+    public static function reasonCodeProvider(): array
+    {
+        return [
+            'signature mismatch' => ['signature_mismatch', 'AUTH_SECRET_MISMATCH'],
+            'timestamp expired' => ['timestamp_expired', 'AUTH_CLOCK_SKEW'],
+            'content hash mismatch' => ['content_hash_mismatch', 'AUTH_CONTENT_TAMPERED'],
+            'missing header' => ['missing_header', 'AUTH_HEADERS_STRIPPED'],
+        ];
+    }
+
+    public function testReasonCodeOutranksAMessageThatNamesAnotherFailure()
+    {
+        $body = json_encode(['error' => 'Missing X-Auth-Signature header', 'code' => 403, 'reason' => 'auth_failed']);
+        $result = $this->diagnose(403, $body);
+        $this->assertSame('AUTH_FAILED', $result['code']);
+    }
+
     // ── Auth: unexplained 403 ────────────────────────────────────
 
     public function testAuthUnexplained403NoBody()

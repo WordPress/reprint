@@ -13217,7 +13217,9 @@ class ImportClient
                 ];
             }
 
-            if (Utils::str_contains($server_msg, 'HMAC signature verification failed')) {
+            $auth_reason = $server_reason ?? self::auth_reason_from_legacy_message($server_msg);
+
+            if (!$using_key && $auth_reason === 'signature_mismatch') {
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
@@ -13226,7 +13228,7 @@ class ImportClient
                 ];
             }
 
-            if ($using_key && $server_reason === 'signature_mismatch') {
+            if ($using_key && $auth_reason === 'signature_mismatch') {
                 // The site found the key by an id derived from the key itself,
                 // so the signed method, path, or query differs from what the
                 // site received.
@@ -13243,7 +13245,7 @@ class ImportClient
                 ];
             }
 
-            if (Utils::str_contains($server_msg, 'timestamp expired')) {
+            if ($auth_reason === 'timestamp_expired') {
                 return [
                     'code' => 'AUTH_CLOCK_SKEW',
                     'message' =>
@@ -13253,7 +13255,7 @@ class ImportClient
                 ];
             }
 
-            if (Utils::str_contains($server_msg, 'Content hash mismatch')) {
+            if ($auth_reason === 'content_hash_mismatch') {
                 return [
                     'code' => 'AUTH_CONTENT_TAMPERED',
                     'message' =>
@@ -13263,7 +13265,7 @@ class ImportClient
                 ];
             }
 
-            if (Utils::str_contains($server_msg, 'Missing X-Auth-')) {
+            if ($auth_reason === 'missing_header') {
                 return [
                     'code' => 'AUTH_HEADERS_STRIPPED',
                     'message' =>
@@ -13366,6 +13368,26 @@ class ImportClient
                 ? "HTTP error {$http_code}: {$server_msg}"
                 : "Unexpected HTTP status {$http_code}.",
         ];
+    }
+
+    /**
+     * Maps a refusal from a plugin that sends no reason code to the code a
+     * current plugin sends for it. Returns null for any other message.
+     */
+    private static function auth_reason_from_legacy_message(string $server_msg): ?string
+    {
+        $reasons_by_message_fragment = [
+            'HMAC signature verification failed' => 'signature_mismatch',
+            'timestamp expired' => 'timestamp_expired',
+            'Content hash mismatch' => 'content_hash_mismatch',
+            'Missing X-Auth-' => 'missing_header',
+        ];
+        foreach ($reasons_by_message_fragment as $message_fragment => $reason) {
+            if (Utils::str_contains($server_msg, $message_fragment)) {
+                return $reason;
+            }
+        }
+        return null;
     }
 
     /**
