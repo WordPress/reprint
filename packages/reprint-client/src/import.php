@@ -3061,9 +3061,12 @@ class ImportClient
         ["url" => $url, "params" => $post_data] = $this->build_request("preflight", null);
         $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
 
-        // Try each User-Agent until one gets a JSON response.
+        // Try each User-Agent until one gets a JSON response or Reprint
+        // itself refuses the request.
         // Some WAFs block certain UAs (e.g. browser UAs with custom auth
         // headers), so we cycle through candidates and remember the winner.
+        // A refusal from Reprint means the UA got through, and another UA
+        // cannot change Reprint's answer.
         $result = null;
         $payload = null;
         $user_agents = array_values(array_unique(array_merge(
@@ -3078,7 +3081,7 @@ class ImportClient
             $this->request_context_headers['User-Agent'] = $ua;
             $result = $this->fetch_json($url, $post_data);
             $payload = $result["json"] ?? null;
-            if ($payload !== null) {
+            if ($payload !== null || self::is_reprint_error_response($result["http_code"], $result["body"])) {
                 $this->audit_log("USER-AGENT OK | {$ua}", false);
                 break;
             }
@@ -13366,6 +13369,19 @@ class ImportClient
     }
 
     /**
+     * Whether Reprint itself sent this error. Its deliberate JSON failures
+     * repeat the HTTP status in `code`. HTML, empty, and unmarked JSON
+     * bodies can come from an upstream server or firewall instead.
+     */
+    private static function is_reprint_error_response(int $http_code, ?string $body): bool
+    {
+        $decoded_body = json_decode($body ?? '', true);
+        return is_array($decoded_body)
+            && isset($decoded_body['code'])
+            && $decoded_body['code'] === $http_code;
+    }
+
+    /**
      * Format a diagnosed error as a single string for display.
      * Also stores the error code on the instance for output_progress
      * and write_progress_file to pick up.
@@ -13906,15 +13922,7 @@ class ImportClient
     /** Decide whether a streaming HTTP error is potentially transient. */
     private function is_potentially_transient_http_error(int $http_code, string $body): bool
     {
-        $decoded_body = json_decode($body, true);
-        $is_reprint_error = is_array($decoded_body)
-            && isset($decoded_body['code'])
-            && $decoded_body['code'] === $http_code;
-
-        // Reprint includes the HTTP code in its deliberate JSON failures.
-        // HTML, empty, and unmarked JSON bodies can come from an upstream
-        // server or firewall instead.
-        if ($is_reprint_error) {
+        if (self::is_reprint_error_response($http_code, $body)) {
             return false;
         }
 
