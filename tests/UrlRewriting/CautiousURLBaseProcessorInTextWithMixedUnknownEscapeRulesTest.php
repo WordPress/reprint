@@ -7,6 +7,99 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
 class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends TestCase {
+    /** New path colons use the same escaping rule as target port colons. */
+    public function testScopedTargetCopiesColonAndSlashSpellingsIndependently(): void
+    {
+        for ($colon_backslashes = 0; $colon_backslashes <= 8; ++$colon_backslashes) {
+            for ($slash_backslashes = 0; $slash_backslashes <= 8; ++$slash_backslashes) {
+                $colon = str_repeat('\\', $colon_backslashes) . ':';
+                $slash = str_repeat('\\', $slash_backslashes) . '/';
+                $suffix = '/photo%2fblue+sky.jpg?width=2&caption=a%20b#part';
+                $input = 'http' . $colon . $slash . $slash . 'source.example/media' . $suffix;
+                $expected = 'https' . $colon . $slash . $slash . 'destination.example' . $colon . '9443'
+                    . $slash . 'scope' . $colon . '123' . $slash . 'assets' . $suffix;
+                $this->assertSame($expected, $this->rewrite($input, [
+                    'http://source.example/media' => 'https://destination.example:9443/scope:123/assets',
+                ]), "Colon backslashes: $colon_backslashes; slash backslashes: $slash_backslashes");
+            }
+        }
+    }
+
+    public function testScopedTargetUsesLiteralColonWithoutAScheme(): void
+    {
+        foreach (['//', '\\/\\/', ''] as $prefix) {
+            $target_slash = $prefix === '//' ? '/' : '\\/';
+            $this->assertSame(
+                $prefix . 'destination.example' . $target_slash . 'scope:123\\/photo.jpg',
+                $this->rewrite($prefix . 'source.example\\/photo.jpg', [
+                    'https://source.example' => 'https://destination.example/scope:123',
+                ])
+            );
+        }
+        $this->assertSame('source.example', $this->rewrite('source.example', [
+            'https://source.example' => 'https://destination.example/scope:123',
+        ]));
+    }
+
+    /** A colon must not admit string delimiters or normalized path segments. */
+    public function testScopedTargetStillRejectsUnsafePathBytes(): void
+    {
+        $input = 'https://source.example/photo.jpg';
+        foreach ([
+            '/scope:123/../private', '/scope:123//private', '/scope:123//',
+            '/scope:123%2Fprivate', '/scope:123"', "/scope:123'", '/scope:123)',
+            '/scope:123?x=1', '/scope:123#part', '/scope:123\\private',
+            '/scope:123 with space', '/scope:123/żółć',
+        ] as $path) {
+            $this->assertSame($input, $this->rewrite($input, [
+                'https://source.example' => 'https://destination.example' . $path,
+            ]), $path);
+        }
+    }
+
+    /** A base's trailing slash must not add a second separator before the suffix. */
+    public function testScopedTargetTrailingSlashKeepsTheOriginalSuffixSeparator(): void
+    {
+        foreach (['/', '/assets/', '/scope:123/'] as $target_path) {
+            foreach (['https://source.example', 'https://source.example/'] as $source_base) {
+                foreach (['', '/', '/photo.jpg', '?size=2', '#part'] as $suffix) {
+                    $this->assertSame(
+                        'https://destination.example' . rtrim($target_path, '/') . $suffix,
+                        $this->rewrite('https://source.example' . $suffix, [
+                            $source_base => 'https://destination.example' . $target_path,
+                        ])
+                    );
+                }
+            }
+        }
+        $this->assertSame('https:\\/\\/destination.example\\/scope:123\\/photo.jpg', $this->rewrite(
+            'https:\\/\\/source.example\\/media\\/photo.jpg',
+            ['https://source.example/media' => 'https://destination.example/scope:123/']
+        ));
+    }
+
+    public function testScopedTargetKeepsLongerMappingsExclusionsAndHostBoundaries(): void
+    {
+        $input = 'https://source.example/media/photo.jpg https://source.example/keep/photo.jpg '
+            . 'https://source.example/page https://source.example.evil/page https://source.example:8443/page';
+        $expected = 'https://destination.example/scope:123/uploads/photo.jpg https://source.example/keep/photo.jpg '
+            . 'https://destination.example/scope:123/page https://source.example.evil/page https://source.example:8443/page';
+        $mapping = [
+            'https://source.example' => 'https://destination.example/scope:123',
+            'https://source.example/media' => 'https://destination.example/scope:123/uploads',
+            'https://source.example/keep' => 'https://source.example/keep',
+        ];
+        $this->assertSame($expected, $this->rewrite($input, $mapping));
+        $this->assertSame($expected, $this->rewrite($expected, $mapping));
+
+        $excluded_mapping = new CautiousURLBaseRewriteMapping($mapping, ['https://source.example' => ['/child']]);
+        $processor = new CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules($input, $excluded_mapping);
+        while ($processor->next_url()) {
+            $this->assertFalse($processor->replace_url_base());
+        }
+        $this->assertSame($input, $processor->get_updated_text());
+    }
+
     /** Child-site prefixes use complete path segments and normalized host keys. */
     public function testChildPathLookupUsesSegmentsWithoutChangingUrlBytes(): void
     {
@@ -494,11 +587,6 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/media/logo.png',
                 'https://source.example/media/logo.png',
                 ['https://source.example/media' => 'https://destination.example/assets%2Fprivate'],
-            ],
-            'target path ends with a slash' => [
-                'https://source.example/media/logo.png',
-                'https://source.example/media/logo.png',
-                ['https://source.example/media' => 'https://destination.example/assets/'],
             ],
             'scheme-less authority without a separator stays unchanged' => [
                 'source.example',
