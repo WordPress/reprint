@@ -136,7 +136,7 @@ final class KeySignedRequestTest extends TestCase {
         };
 
         ( new \ReflectionMethod($client, 'fetch_streaming') )->invoke(
-            $client, $request['url'], null, $context,
+            $client, $request['url'], $context,
             $request['params'] + [
                 'file_list' => new \CURLFile($file_list_path, 'application/json', 'file-list.json'),
             ],
