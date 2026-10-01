@@ -13,6 +13,9 @@
         "wp-php-toolkit/html": "^0.10.1",
         "wp-php-toolkit/reprint-server": "*@dev"
     },
+    "suggest": {
+        "ext-openssl": "Needed to generate keys and sign requests with them. Without it the client authenticates with a connection token only."
+    },
     "bin": [
         "bin/reprint-client",
         "bin/reprint-importer"

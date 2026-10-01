@@ -1,0 +1,263 @@
+<?php
+
+declare(strict_types=1);
+
+use PHPUnit\Framework\TestCase;
+
+require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
+
+final class KeygenCommandTest extends TestCase
+{
+    /** @var string */
+    private $state_dir;
+
+    protected function setUp(): void
+    {
+        $this->state_dir = sys_get_temp_dir() . '/reprint-keygen-' . getmypid() . '-' . uniqid();
+        mkdir($this->state_dir, 0700, true);
+    }
+
+    protected function tearDown(): void
+    {
+        exec('rm -rf ' . escapeshellarg($this->state_dir));
+    }
+
+    /**
+     * @param string[] $arguments      CLI arguments after the entry script.
+     * @param bool     $stdout_only    Drop stderr so every returned line came from stdout.
+     * @return array{output:string,exit_code:int}
+     */
+    private function runCli(array $arguments, bool $stdout_only = false): array
+    {
+        $entry = __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+        $command = escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($entry);
+        foreach ($arguments as $argument) {
+            $command .= ' ' . escapeshellarg($argument);
+        }
+        exec($command . ( $stdout_only ? ' 2>/dev/null' : ' 2>&1' ), $output_lines, $exit_code);
+        return ['output' => implode("\n", $output_lines), 'exit_code' => $exit_code];
+    }
+
+    public function testGenerateKeyFileWritesPrivateKeyWithMode600AndReturnsPublicHalf(): void
+    {
+        $path = $this->state_dir . '/nested/key.pem';
+        $generated = ImportClient::generate_key_file($path, false);
+
+        $this->assertSame($path, $generated['path']);
+        $this->assertFileExists($path);
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $this->assertSame(0600, fileperms($path) & 0777);
+            $this->assertSame(0700, fileperms(dirname($path)) & 0777);
+        }
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $generated['key_id']);
+        $this->assertStringNotContainsString("\n", $generated['public_key']);
+        $client = new \WordPress\Reprint\Server\PublicKeyClient(file_get_contents($path));
+        $this->assertSame($generated['key_id'], $client->get_key_id());
+        $this->assertSame($generated['public_key'], $client->get_public_key());
+    }
+
+    public function testGenerateKeyFileRefusesToOverwriteWithoutForce(): void
+    {
+        $path = $this->state_dir . '/key.pem';
+        ImportClient::generate_key_file($path, false);
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('--force');
+        ImportClient::generate_key_file($path, false);
+    }
+
+    public function testKeygenCommandWritesIntoTheRemoteStateDirectoryAndPrintsTheKey(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $result = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--progress=tty']);
+
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $expected_path = ImportClient::key_file_path($url, $this->state_dir);
+        $this->assertFileExists($expected_path);
+        $this->assertStringContainsString('Key id:', $result['output']);
+        $this->assertStringContainsString('Stored at:', $result['output']);
+        $this->assertStringContainsString('Tools → Reprint Server', $result['output']);
+        $this->assertMatchesRegularExpression('/^MII[A-Za-z0-9+\/]+=*$/m', $result['output'], 'prints the one-line public key');
+    }
+
+    public function testKeygenRefusesASecondRunWithoutForce(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $first = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--progress=tty']);
+        $second = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir]);
+        $this->assertNotSame(0, $second['exit_code']);
+        $this->assertStringContainsString('--force', $second['output']);
+
+        // A loosened mode on the old file must not survive the replacement:
+        // the new key is written as a fresh 0600 file, not into the old inode.
+        $key_path = ImportClient::key_file_path($url, $this->state_dir);
+        chmod($key_path, 0644);
+        $forced = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--force', '--progress=tty']);
+        $this->assertSame(0, $forced['exit_code'], $forced['output']);
+        $this->assertNotSame($this->printedKeyId($first['output']), $this->printedKeyId($forced['output']));
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $this->assertSame(0600, fileperms($key_path) & 0777);
+        }
+        $this->assertSame(
+            $this->printedKeyId($forced['output']),
+            (new \WordPress\Reprint\Server\PublicKeyClient(file_get_contents($key_path)))->get_key_id()
+        );
+    }
+
+    private function printedKeyId(string $output): string
+    {
+        $this->assertMatchesRegularExpression('/^  Key id:\s+([0-9a-f]{16})$/m', $output);
+        preg_match('/^  Key id:\s+([0-9a-f]{16})$/m', $output, $match);
+        return $match[1];
+    }
+
+    public function testKeygenReportsTheKeyInJsonlOutput(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $result = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--progress=jsonl'], true);
+
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $output_lines = explode("\n", $result['output']);
+        $this->assertCount(1, $output_lines, 'the report is the only stdout line');
+        $report = json_decode($output_lines[0], true);
+        $this->assertIsArray($report, $output_lines[0]);
+        $this->assertSame('reprint_report', $report['type']);
+        $this->assertSame('keygen', $report['command']);
+        $this->assertSame('complete', $report['status']);
+        $key_path = ImportClient::key_file_path($url, $this->state_dir);
+        $this->assertSame($key_path, $report['key_path']);
+        $this->assertSame(
+            ( new \WordPress\Reprint\Server\PublicKeyClient(file_get_contents($key_path)) )->get_key_id(),
+            $report['key_id']
+        );
+        $this->assertStringStartsWith('MII', $report['public_key']);
+        $this->assertStringContainsString($report['public_key'], $report['message']);
+    }
+
+    public function testKeygenOutWritesElsewhere(): void
+    {
+        $out = $this->state_dir . '/mine.pem';
+        $result = $this->runCli(['keygen', 'https://example.test/?reprint-api', '--state-dir=' . $this->state_dir, '--out=' . $out, '--progress=tty']);
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $this->assertFileExists($out);
+        $this->assertStringContainsString('--private-key-path=' . escapeshellarg($out), $result['output']);
+    }
+
+    public function testKeygenRefusesAnEmptyOutEvenWithForce(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $this->assertSame(0, $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir])['exit_code']);
+        $state_key_path = ImportClient::key_file_path($url, $this->state_dir);
+        $enrolled_key = file_get_contents($state_key_path);
+
+        // `--out=$UNSET --force` must not fall back to the state key and replace it.
+        $result = $this->runCli(['keygen', $url, '--state-dir=' . $this->state_dir, '--out=', '--force']);
+
+        $this->assertSame(1, $result['exit_code'], $result['output']);
+        $this->assertStringContainsString('--out was given without a value', $result['output']);
+        $this->assertSame($enrolled_key, file_get_contents($state_key_path));
+    }
+
+    public function testKeygenHelpIsDocumented(): void
+    {
+        $result = $this->runCli(['keygen', '--help']);
+        $this->assertStringContainsString('--out=PATH', $result['output']);
+        $this->assertStringContainsString('--force', $result['output']);
+    }
+
+    public function testPullWithNoCredentialGeneratesAKeyAndStopsWithExitFour(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        // exec() gives the process no TTY, so --progress=auto would select
+        // JSONL; the human text appears only under the terminal presentation.
+        $result = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--progress=tty']);
+
+        $this->assertSame(4, $result['exit_code'], $result['output']);
+        $this->assertFileExists(ImportClient::key_file_path($url, $this->state_dir));
+        $this->assertStringContainsString('No credential found for this site', $result['output']);
+        $this->assertStringContainsString('run the same command again', $result['output']);
+        $this->assertMatchesRegularExpression('/^\s+MII[A-Za-z0-9+\/]+=*$/m', $result['output']);
+    }
+
+    public function testPullEnrollmentStopReportsItsStatusInTheCommandReport(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        $result = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--progress=jsonl'], true);
+
+        $this->assertSame(4, $result['exit_code'], $result['output']);
+        $output_lines = explode("\n", $result['output']);
+        foreach ($output_lines as $output_line) {
+            $this->assertIsArray(json_decode($output_line, true), "every stdout line is JSON: {$output_line}");
+        }
+        $report = json_decode((string) end($output_lines), true);
+        $this->assertIsArray($report, 'the last line is the command report');
+        $this->assertSame('reprint_report', $report['type']);
+        $this->assertSame('enrollment_needed', $report['status']);
+        $this->assertSame(4, $report['exit_code']);
+        $this->assertNull($report['error']);
+        $this->assertSame(ImportClient::key_file_path($url, $this->state_dir), $report['key_path']);
+        $this->assertMatchesRegularExpression('/^[0-9a-f]{16}$/', $report['key_id']);
+        $this->assertStringStartsWith('MII', $report['public_key']);
+        $this->assertStringContainsString('No credential found for this site', $report['message']);
+        $this->assertStringContainsString($report['public_key'], $report['message']);
+    }
+
+    public function testPreflightWithNoCredentialRefusesAndNamesKeygen(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        $result = $this->runCli(['preflight', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root]);
+
+        $this->assertNotSame(0, $result['exit_code']);
+        $this->assertNotSame(4, $result['exit_code']);
+        $this->assertStringContainsString('reprint keygen', $result['output']);
+        $this->assertFileDoesNotExist(ImportClient::key_file_path($url, $this->state_dir), 'granular commands never generate');
+    }
+
+    public function testCredentialStopSavesNoOptionForTheNextRun(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+        $pull_state_file = dirname(ImportClient::key_file_path($url, $this->state_dir)) . '/pull/state.json';
+
+        $files_pull = $this->runCli(['files-pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--filter=essential-files']);
+        $this->assertSame(1, $files_pull['exit_code'], $files_pull['output']);
+        $this->assertStringContainsString('reprint keygen', $files_pull['output']);
+
+        $pull = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--filter=essential-files']);
+        $this->assertSame(4, $pull['exit_code'], $pull['output']);
+
+        // Neither run contacted the site, so a plain run after enrollment
+        // must not inherit the filter they were given.
+        $saved_filter = null;
+        if (file_exists($pull_state_file)) {
+            $saved_filter = json_decode( (string) file_get_contents($pull_state_file), true)['filter'] ?? null;
+        }
+        $this->assertNull($saved_filter);
+    }
+
+    public function testAbortNeedsNoCredentialAndGeneratesNoKey(): void
+    {
+        $url = 'https://example.test/?reprint-api';
+        $fs_root = $this->state_dir . '/site';
+        mkdir($fs_root);
+
+        // --abort clears local state without a request, so neither the
+        // one-stop command nor a granular one may stop at the credential gate.
+        $pull = $this->runCli(['pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--abort']);
+        $this->assertSame(0, $pull['exit_code'], $pull['output']);
+        $this->assertStringNotContainsString('No credential', $pull['output']);
+        $this->assertFileDoesNotExist(ImportClient::key_file_path($url, $this->state_dir));
+
+        // files-pull --abort asks for a saved preflight after the credential
+        // gate, so reaching that message shows the gate let it through.
+        $files_pull = $this->runCli(['files-pull', $url, '--state-dir=' . $this->state_dir, '--fs-root=' . $fs_root, '--abort']);
+        $this->assertStringNotContainsString('No credential', $files_pull['output']);
+        $this->assertStringContainsString('No preflight data found', $files_pull['output']);
+    }
+}

@@ -444,6 +444,11 @@ class SettingsPage {
             </thead>
             <tbody>
             <?php foreach ($configuration['enrolled_keys'] as $entry): ?>
+                <?php
+                // Show what a push signed with this key would get, so a host
+                // policy that overrides the stored flag shows here too.
+                $key_may_push = $configuration['push_supported'] && get_push_authorization_error($entry['key_id']) === null;
+                ?>
                 <tr>
                     <td><code><?php echo esc_html($entry['key_id']); ?></code></td>
                     <td><?php echo esc_html($entry['added_at'] > 0 ? gmdate('Y-m-d', $entry['added_at']) : '—'); ?></td>
@@ -454,7 +459,7 @@ class SettingsPage {
                             <?php wp_nonce_field('reprint_server_save_key_push_access'); ?>
                             <label>
                                 <input type="checkbox" name="reprint_server_key_push_enabled" value="1"
-                                    <?php checked($entry['push']); ?>
+                                    <?php checked($key_may_push); ?>
                                     <?php disabled(is_multisite() || !$configuration['push_supported'] || $configuration['managed_push_enabled'] !== null || $file_override); ?>
                                     onchange="this.form.submit()" />
                                 <?php echo esc_html__('Allow push', 'reprint'); ?>

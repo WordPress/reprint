@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-    runImporter, createTempDir, cleanupTempDir,
+    runImporter, createTempDir, cleanupTempDir, getHarnessKey,
     getSiteUrl, getSiteSecret, getSiteDir, getDbName,
     createMysqlConnection, fsRootDir, pullStateDirectory,
     writeTestHooks, removeTestHooks,
@@ -77,7 +77,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             '--allow-unsafe-http',
             `--state-dir=${tempDir}`,
             `--fs-root=${fsRootDir(tempDir)}`,
-            `--secret=${getSiteSecret(site)}`,
+            `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
             ...mysqlArguments(),
         ], {
             env: { ...process.env },
@@ -102,7 +102,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             '--allow-unsafe-http',
             `--state-dir=${stateDir}`,
             `--fs-root=${fsRootDir(stateDir)}`,
-            `--secret=${getSiteSecret(site)}`,
+            `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
             ...targetMysqlArguments(),
             '--progress=jsonl',
         ], {

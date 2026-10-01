@@ -100,6 +100,51 @@ final class PreflightErrorOutputTest extends TestCase {
         ];
     }
 
+    /**
+     * Preflight tries other User-Agents when a firewall may have blocked the
+     * request, but not once Reprint itself has answered.
+     *
+     * @dataProvider user_agent_retry_responses
+     */
+    public function testPreflightTriesAnotherUserAgentOnlyWhenReprintDidNotAnswer(
+        int $http_code,
+        string $body,
+        string $error_code,
+        bool $expect_retry
+    ): void {
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => $http_code,
+            'body' => $body,
+        ]));
+        $preflight = $this->run_command('preflight', 1);
+        $this->assertSame($error_code, $preflight['error_code'] ?? null);
+        $request_count = substr_count(file_get_contents($this->root . '/requests.log'), "request\n");
+        if ($expect_retry) {
+            $this->assertGreaterThan(1, $request_count);
+        } else {
+            $this->assertSame(1, $request_count);
+        }
+    }
+
+    public static function user_agent_retry_responses(): array
+    {
+        return [
+            'Reprint authentication refusal' => [
+                403,
+                '{"error":"This host accepts key authentication only","code":403,"reason":"requires_key_auth"}',
+                'AUTH_REQUIRES_KEY',
+                false,
+            ],
+            'Reprint not configured' => [
+                503,
+                '{"error":"Export not configured: no keys are enrolled","code":503,"reason":"not_configured"}',
+                'AUTH_NOT_CONFIGURED',
+                false,
+            ],
+            'firewall page' => [403, '<html>Forbidden</html>', 'AUTH_FAILED', true],
+        ];
+    }
+
     public function testConnectionFailureKeepsItsCodeAndDetail(): void
     {
         proc_terminate($this->server_process);
