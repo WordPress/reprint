@@ -1,5 +1,5 @@
 /**
- * Test 81: --private-key wins over key.pem in the state directory.
+ * Test 81: --private-key-path wins over key.pem in the state directory.
  */
 import { describe, it, beforeAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -11,7 +11,7 @@ import { ensureSite } from '../lib/site-setup.js';
 
 const keygenOptions = { autoResume: false, skipPreflight: true };
 
-describe('Import: --private-key overrides the state directory key', () => {
+describe('Import: --private-key-path overrides the state directory key', () => {
     const site = 'private-key-override';
     let stateDir;
     let enrolledPath;
@@ -34,7 +34,7 @@ describe('Import: --private-key overrides the state directory key', () => {
 
     it('signs with the flag key, not the state key', () => {
         const url = getSiteUrl(site);
-        const withFlag = runImporter(url, stateDir, 'preflight', { autoResume: false, extraArgs: [`--private-key=${enrolledPath}`] });
+        const withFlag = runImporter(url, stateDir, 'preflight', { autoResume: false, extraArgs: [`--private-key-path=${enrolledPath}`] });
         assert.equal(withFlag.exitCode, 0, withFlag.stdout + withFlag.stderr);
 
         const withoutFlag = runImporter(url, stateDir, 'preflight', { autoResume: false });

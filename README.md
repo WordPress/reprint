@@ -285,9 +285,9 @@ record carries `key_id`, `key_path`, `public_key`, and the same text in `message
 against that site finds the key in the state directory, so no credential flag is needed. `reprint pull` with no
 credential does the same generation itself, prints the key, and exits with code 4: enrollment is needed, nothing
 failed, and running the same command again after enrolling continues. Every other remote command refuses with a
-message naming `reprint keygen` and `--secret`. `--private-key=PATH` uses a key stored elsewhere (`keygen --out=PATH`
-writes one there) instead of the state directory. Deleting the state directory destroys the private half, so the
-enrolled public key stops working; the plugin's key table also has a Remove button for each key.
+message naming `reprint keygen` and `--secret`. `--private-key-path=PATH` uses a key stored elsewhere
+(`keygen --out=PATH` writes one there) instead of the state directory. Deleting the state directory destroys the
+private half, so the enrolled public key stops working. The plugin's key table also has a Remove button for each key.
 
 Instead of enrolling keys on the settings page, the plugin can be pre-packaged with a
 `./reprint-exporter-wp/public-keys.php` file returning a list of PEM or one-line public keys. When that file exists

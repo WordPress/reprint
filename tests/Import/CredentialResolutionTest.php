@@ -46,7 +46,7 @@ final class CredentialResolutionTest extends TestCase
     {
         $flag_path = $this->writeKey('elsewhere.pem');
         $this->writeKey('key.pem');
-        $credential = ImportClient::resolve_credential(['private_key' => $flag_path], $this->temp_dir);
+        $credential = ImportClient::resolve_credential(['private_key_path' => $flag_path], $this->temp_dir);
         $this->assertSame('key', $credential['scheme']);
         $this->assertSame($flag_path, $credential['path']);
         $this->assertSame('flag', $credential['source']);
@@ -71,8 +71,8 @@ final class CredentialResolutionTest extends TestCase
     {
         $flag_path = $this->writeKey('k.pem');
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('--secret and --private-key');
-        ImportClient::resolve_credential(['secret' => 'tok', 'private_key' => $flag_path], $this->temp_dir);
+        $this->expectExceptionMessage('--secret and --private-key-path');
+        ImportClient::resolve_credential(['secret' => 'tok', 'private_key_path' => $flag_path], $this->temp_dir);
     }
 
     public function testEmptySecretFlagIsAnErrorNotAnAbsentCredential(): void
@@ -86,8 +86,8 @@ final class CredentialResolutionTest extends TestCase
     public function testEmptyPrivateKeyFlagIsAnErrorNotAnAbsentCredential(): void
     {
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('--private-key was given without a value.');
-        ImportClient::resolve_credential(['private_key' => ''], $this->temp_dir);
+        $this->expectExceptionMessage('--private-key-path was given without a value.');
+        ImportClient::resolve_credential(['private_key_path' => ''], $this->temp_dir);
     }
 
     public function testAbsentSecretStoredAsNullIsNotACredential(): void
@@ -100,7 +100,7 @@ final class CredentialResolutionTest extends TestCase
     {
         // A key shared between users is readable by a group on purpose.
         $path = $this->writeKey('shared.pem', 0640);
-        $credential = ImportClient::resolve_credential(['private_key' => $path], $this->temp_dir);
+        $credential = ImportClient::resolve_credential(['private_key_path' => $path], $this->temp_dir);
         $this->assertSame('key', $credential['scheme']);
         $this->assertSame($path, $credential['path']);
     }
@@ -109,7 +109,7 @@ final class CredentialResolutionTest extends TestCase
     {
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage('could not be read');
-        ImportClient::resolve_credential(['private_key' => $this->temp_dir . '/nope.pem'], $this->temp_dir);
+        ImportClient::resolve_credential(['private_key_path' => $this->temp_dir . '/nope.pem'], $this->temp_dir);
     }
 
     public function testKeyFilePathIsUnderTheRemoteStateDirectory(): void

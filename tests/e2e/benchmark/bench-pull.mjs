@@ -156,7 +156,7 @@ function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env
         ...HTTP_ARGS_BY_IMPORTER.get(importerPath),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--private-key=${getHarnessKey(getSiteSecret(SITE)).privateKeyPath}`,
+        `--private-key-path=${getHarnessKey(getSiteSecret(SITE)).privateKeyPath}`,
         ...extraArgs,
     ];
 
@@ -469,7 +469,7 @@ register_shutdown_function(function () {
         ...HTTP_ARGS_BY_IMPORTER.get(IMPORTER_PATH),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
+        `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
         `--file-chunk-start=${FILE_BENCH_TUNED_CHUNK_SIZE}`,
         `--file-chunk-max=${FILE_BENCH_TUNED_CHUNK_SIZE}`,
         '--duty=1',
@@ -548,7 +548,7 @@ function runPreflightForSite(site, stateDir) {
         ...HTTP_ARGS_BY_IMPORTER.get(PREFLIGHT_IMPORTER_PATH),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
+        `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
     ];
     let lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {

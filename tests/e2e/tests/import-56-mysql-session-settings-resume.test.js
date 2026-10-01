@@ -77,7 +77,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             '--allow-unsafe-http',
             `--state-dir=${tempDir}`,
             `--fs-root=${fsRootDir(tempDir)}`,
-            `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
+            `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
             ...mysqlArguments(),
         ], {
             env: { ...process.env },
@@ -102,7 +102,7 @@ describeWithHostPhpProcess('Import: MySQL session settings after restart', { tim
             '--allow-unsafe-http',
             `--state-dir=${stateDir}`,
             `--fs-root=${fsRootDir(stateDir)}`,
-            `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
+            `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
             ...targetMysqlArguments(),
             '--progress=jsonl',
         ], {

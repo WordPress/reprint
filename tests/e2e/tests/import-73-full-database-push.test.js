@@ -267,7 +267,7 @@ async function exercisePush(createData, { builder = false } = {}) {
 
 function push(stateDirectory, arguments_) {
     return spawnSync(phpBinary, ['-d', 'memory_limit=128M', clientPath, 'db-push', targetApi,
-        `--state-dir=${stateDirectory}`, `--private-key=${pushKey.privateKeyPath}`, '--force-http', '--progress=jsonl', ...arguments_],
+        `--state-dir=${stateDirectory}`, `--private-key-path=${pushKey.privateKeyPath}`, '--force-http', '--progress=jsonl', ...arguments_],
     { encoding: 'utf8', timeout: 600000, maxBuffer: 4 * 1024 * 1024 });
 }
 

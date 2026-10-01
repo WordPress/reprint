@@ -69,7 +69,7 @@ final class AuthErrorDiagnosisTest extends TestCase
         $path = $this->state_dir . '/k.pem';
         file_put_contents($path, $private_pem);
         chmod($path, 0600);
-        $result = $this->diagnose($this->clientWith(['private_key' => $path]), 503, ['error' => 'msg', 'reason' => 'not_configured']);
+        $result = $this->diagnose($this->clientWith(['private_key_path' => $path]), 503, ['error' => 'msg', 'reason' => 'not_configured']);
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString($public_key, $result['message']);
     }
@@ -92,7 +92,7 @@ final class AuthErrorDiagnosisTest extends TestCase
         $path = $this->state_dir . '/k.pem';
         file_put_contents($path, $private_pem);
         chmod($path, 0600);
-        $client = $this->clientWith(['private_key' => $path]);
+        $client = $this->clientWith(['private_key_path' => $path]);
         $result = $this->diagnose($client, 403, ['error' => 'msg', 'reason' => 'unknown_key']);
         $this->assertSame('AUTH_UNKNOWN_KEY', $result['code']);
         $this->assertStringContainsString($public_key, $result['message']);
@@ -105,7 +105,7 @@ final class AuthErrorDiagnosisTest extends TestCase
         $path = $this->state_dir . '/k.pem';
         file_put_contents($path, $private_pem);
         chmod($path, 0600);
-        $result = $this->diagnose($this->clientWith(['private_key' => $path]), 403, ['error' => 'HMAC signature verification failed']);
+        $result = $this->diagnose($this->clientWith(['private_key_path' => $path]), 403, ['error' => 'HMAC signature verification failed']);
         $this->assertSame('AUTH_KEY_UNSUPPORTED', $result['code']);
         $this->assertStringContainsString('update the Reprint Server plugin', $result['message']);
     }
@@ -117,7 +117,7 @@ final class AuthErrorDiagnosisTest extends TestCase
         file_put_contents($path, $private_pem);
         chmod($path, 0600);
         $result = $this->diagnose(
-            $this->clientWith(['private_key' => $path]),
+            $this->clientWith(['private_key_path' => $path]),
             403,
             ['error' => 'Signature verification failed', 'reason' => 'signature_mismatch']
         );

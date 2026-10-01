@@ -139,7 +139,7 @@ final class KeygenCommandTest extends TestCase
         $result = $this->runCli(['keygen', 'https://example.test/?reprint-api', '--state-dir=' . $this->state_dir, '--out=' . $out, '--progress=tty']);
         $this->assertSame(0, $result['exit_code'], $result['output']);
         $this->assertFileExists($out);
-        $this->assertStringContainsString('--private-key=' . escapeshellarg($out), $result['output']);
+        $this->assertStringContainsString('--private-key-path=' . escapeshellarg($out), $result['output']);
     }
 
     public function testKeygenRefusesAnEmptyOutEvenWithForce(): void

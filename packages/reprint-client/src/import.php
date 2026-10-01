@@ -1914,7 +1914,7 @@ class ImportClient
 
         if (!class_exists('Site_Export_HMAC_Client')) {
             throw new RuntimeException(
-                'Streaming exporter runtime not found. Run composer install before using --secret or --private-key.'
+                'Streaming exporter runtime not found. Run composer install before using --secret or --private-key-path.'
             );
         }
 
@@ -2619,7 +2619,7 @@ class ImportClient
         } elseif ($stored_in_state) {
             $lines[] = 'then run any reprint command against this site; the key is found automatically:';
         } else {
-            $lines[] = 'then pass --private-key=' . escapeshellarg($generated['path']) . ' to every reprint command:';
+            $lines[] = 'then pass --private-key-path=' . escapeshellarg($generated['path']) . ' to every reprint command:';
         }
         $lines[] = '';
         // The key sits at the start of its own line so a whole-line copy
@@ -2631,8 +2631,8 @@ class ImportClient
 
     /**
      * Resolves which credential a command uses. First match wins:
-     *   1. --secret        → HMAC
-     *   2. --private-key   → key from that file
+     *   1. --secret           → HMAC
+     *   2. --private-key-path → key from that file
      *   3. key.pem in the remote state directory → key from there
      *   4. nothing
      *
@@ -2649,13 +2649,13 @@ class ImportClient
         if (isset($options['secret']) && $options['secret'] === '') {
             throw new InvalidArgumentException('--secret was given without a value.');
         }
-        if (isset($options['private_key']) && $options['private_key'] === '') {
-            throw new InvalidArgumentException('--private-key was given without a value.');
+        if (isset($options['private_key_path']) && $options['private_key_path'] === '') {
+            throw new InvalidArgumentException('--private-key-path was given without a value.');
         }
         $secret = isset($options['secret']) && is_string($options['secret']) ? $options['secret'] : null;
-        $flag_path = isset($options['private_key']) && is_string($options['private_key']) ? $options['private_key'] : null;
+        $flag_path = isset($options['private_key_path']) && is_string($options['private_key_path']) ? $options['private_key_path'] : null;
         if ($secret !== null && $flag_path !== null) {
-            throw new InvalidArgumentException('--secret and --private-key cannot be combined. Pass one credential.');
+            throw new InvalidArgumentException('--secret and --private-key-path cannot be combined. Pass one credential.');
         }
         if ($secret !== null) {
             return ['scheme' => 'hmac', 'secret' => $secret];
@@ -3023,7 +3023,7 @@ class ImportClient
      */
     private function initialize_credential(bool $signs_remote_requests, array $options): void
     {
-        // Resolve the credential once: --secret, then --private-key, then
+        // Resolve the credential once: --secret, then --private-key-path, then
         // key.pem in the remote state directory. Every request signs with
         // whichever client this produced; nothing later re-decides.
         $this->hmac_client = null;
@@ -3040,7 +3040,7 @@ class ImportClient
             $this->hmac_client = new \Site_Export_HMAC_Client($this->credential['secret']);
         } elseif ($this->credential['scheme'] === 'key') {
             if (!class_exists(\WordPress\Reprint\Server\PublicKeyClient::class)) {
-                throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --private-key.');
+                throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --private-key-path.');
             }
             try {
                 $this->public_key_client = new \WordPress\Reprint\Server\PublicKeyClient($this->credential['private_key_pem']);
@@ -6868,7 +6868,7 @@ class ImportClient
         if (strpos($this->remote_reprint_api_url, 'SECRET_KEY=') !== false
             || parse_url($this->remote_reprint_api_url, PHP_URL_USER) !== null
             || parse_url($this->remote_reprint_api_url, PHP_URL_PASS) !== null) {
-            throw new InvalidArgumentException('db-push takes its credential from --secret or --private-key, never from the URL.');
+            throw new InvalidArgumentException('db-push takes its credential from --secret or --private-key-path, never from the URL.');
         }
         if (count(array_filter([$options['commit'] ?? null, $options['cleanup'] ?? null, $options['abort'] ?? null])) > 1) {
             throw new InvalidArgumentException('db-push accepts only one of --commit, --cleanup, or --abort.');
@@ -14776,9 +14776,9 @@ if (
             'commands' => array_merge(ImportClient::COMMANDS, ['post-process']),
         ],
         [
-            'name' => 'private-key',
+            'name' => 'private-key-path',
             'type' => 'value',
-            'target' => 'private_key',
+            'target' => 'private_key_path',
             'placeholder' => 'PATH',
             'help' => 'RSA private key file for export API authentication; overrides the key stored in the state directory',
             'help_section' => 'global',
@@ -14789,7 +14789,7 @@ if (
             'type' => 'value',
             'target' => 'out',
             'placeholder' => 'PATH',
-            'help' => 'Write the private key here instead of the state directory; later commands then need --private-key=PATH',
+            'help' => 'Write the private key here instead of the state directory; later commands then need --private-key-path=PATH',
             'commands' => ['keygen'],
         ],
         [
@@ -15859,7 +15859,7 @@ if (
                 "Generates a 3072-bit RSA keypair and stores the private half at\n" .
                 "  <state-dir>/remotes/<md5-of-url>/key.pem   (mode 0600)\n" .
                 "beside everything else about that site. Every later command\n" .
-                "finds it there; no --private-key flag is needed.\n" .
+                "finds it there; no --private-key-path flag is needed.\n" .
                 "\n" .
                 "Prints the public key as one line. Paste it into the site under\n" .
                 "Tools > Reprint Server. Deleting the state directory destroys the\n" .
@@ -15960,7 +15960,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key-path=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -16019,7 +16019,7 @@ if (
         "db-push" => [
             "level" => "low",
             "short" => "Stage a full database overwrite for explicit confirmation",
-            "usage" => "reprint db-push <remote-reprint-api-url> --state-dir=DIR (--secret=TOKEN or --private-key=PATH, or a key from `reprint keygen`) [options]",
+            "usage" => "reprint db-push <remote-reprint-api-url> --state-dir=DIR (--secret=TOKEN or --private-key-path=PATH, or a key from `reprint keygen`) [options]",
             "description" => "Streams local database rows into private hosted tables, rewriting URLs on the client without a full dump or frozen snapshot. Prints the table list and review token without changing live tables.\nRequires a host-configured standalone API route. Stop all writers before --commit. Clear caches and verify the site before --cleanup.\n",
             "extra" => "Initial limits: InnoDB target tables, 256 tables, 128 columns per table, 1 MiB per row before and after rewriting. No multisite, foreign keys crossing the selected site boundary, triggers, events, or routines.\n",
         ],
@@ -16344,7 +16344,7 @@ if (
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
                 || strpos($reprint_files_push_command_argument, '--secret=') === 0
-                || strpos($reprint_files_push_command_argument, '--private-key=') === 0
+                || strpos($reprint_files_push_command_argument, '--private-key-path=') === 0
                 || strpos($reprint_files_push_command_argument, '--progress=') === 0;
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
@@ -16450,7 +16450,7 @@ if (
         // each command owns every local state transition for its complete invocation.
         $reprint_process_lock = new ReprintProcessLock($state_dir);
         if ($command === 'keygen') {
-            // As with --secret and --private-key, `--out=` is a present, invalid
+            // As with --secret and --private-key-path, `--out=` is a present, invalid
             // option. Treating it as absent would let `--out=$UNSET --force`
             // replace the state directory's enrolled key.
             if (isset($options['out']) && $options['out'] === '') {

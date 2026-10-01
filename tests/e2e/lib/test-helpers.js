@@ -322,7 +322,7 @@ export function exportedKeyPath(remoteReprintApiUrl, stateDirectory) {
  * @param {string} outputDir - Local output directory (state files live here; fs-root is outputDir/fs-root)
  * @param {string} command - Import command (files-pull, db-pull, etc.)
  * @param {Object} options - Additional options. `secret` selects the harness
- *   key for that secret string and passes it as --private-key; with
+ *   key for that secret string and passes it as --private-key-path; with
  *   `useToken: true` the secret itself is passed as --secret, which only a
  *   scenario on the HMAC-only pool wants. `extraArgs` are appended.
  * @returns {Object} { stdout, stderr, exitCode }
@@ -344,7 +344,7 @@ export function runImporter(url, outputDir, command, options = {}) {
         if (secret && options.useToken) {
             args.push(`--secret=${secret}`);
         } else if (secret) {
-            args.push(`--private-key=${getHarnessKey(secret).privateKeyPath}`);
+            args.push(`--private-key-path=${getHarnessKey(secret).privateKeyPath}`);
         }
         if (extraArgs.length > 0) {
             args.push(...extraArgs);

@@ -117,12 +117,12 @@ whose dependencies the account cannot inspect.
 ## Command flow
 
 Use a private local state directory and the same remote Reprint API URL for
-every step. On a token host, pass `--secret=TOKEN` instead of `--private-key`. These examples use explicit source credentials; omitting them
+every step. On a token host, pass `--secret=TOKEN` instead of `--private-key-path`. These examples use explicit source credentials; omitting them
 uses the local MySQL database previously recorded by `db-apply`.
 
 ```sh
 reprint db-push https://example.com/reprint-api.php \
-  --state-dir=/private/deploy-42 --private-key=/private/deploy-key.pem \
+  --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem \
   --source-dsn='mysql:host=127.0.0.1;dbname=local_site;charset=utf8mb4' \
   --source-user=local_user --source-pass=LOCAL_PASSWORD \
   --table-prefix=wp_ --include-table=plugin_orders \
@@ -141,7 +141,7 @@ which may use these tables. WordPress's `.maintenance` file alone is not enough.
 
 ```sh
 reprint db-push https://example.com/reprint-api.php \
-  --state-dir=/private/deploy-42 --private-key=/private/deploy-key.pem \
+  --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem \
   --commit=REVIEW_TOKEN --writers-stopped
 ```
 
@@ -161,7 +161,7 @@ Once satisfied, explicitly delete the retained old tables:
 
 ```sh
 reprint db-push https://example.com/reprint-api.php \
-  --state-dir=/private/deploy-42 --private-key=/private/deploy-key.pem --cleanup
+  --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem --cleanup
 ```
 
 Before commit, `--abort` instead discards incoming tables. It never undoes a

@@ -22,7 +22,7 @@ fi
 curl --connect-timeout 5 --max-time 10 -fsS "$source_url/migration-check.php" > /root/migration/source.json
 php packages/reprint-client/src/import.php pull "$source_url/?reprint-api" \
     --allow-unsafe-http \
-    --private-key=/root/migration/key.pem \
+    --private-key-path=/root/migration/key.pem \
     --state-dir=/root/migration/state --fs-root=/root/migration/files \
     --target-engine=mysql --target-host=127.0.0.1 --target-user=migration --target-pass=migration --target-db=migration_target \
     --new-site-url=http://127.0.0.1:8881 \
@@ -31,7 +31,7 @@ php packages/reprint-client/src/import.php pull "$source_url/?reprint-api" \
 # Also generate a runtime for the raw download, without --flatten-to.
 php packages/reprint-client/src/import.php apply-runtime "$source_url/?reprint-api" \
     --allow-unsafe-http \
-    --private-key=/root/migration/key.pem \
+    --private-key-path=/root/migration/key.pem \
     --state-dir=/root/migration/state --fs-root=/root/migration/files \
     --runtime=php-builtin --start-runtime=none --output-dir=/root/migration/raw-runtime \
     --progress=jsonl 2>&1 | tee /root/migration/raw-runtime.log

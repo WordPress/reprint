@@ -366,7 +366,7 @@ class DiagnoseHttpErrorTest extends TestCase
                 ['allow_http' => true],
             );
             $reflection = new \ReflectionClass(\ImportClient::class);
-            $reflection->getMethod('initialize_credential')->invoke($client, true, ['private_key' => $key_path]);
+            $reflection->getMethod('initialize_credential')->invoke($client, true, ['private_key_path' => $key_path]);
             $this->assertNull($reflection->getProperty('hmac_client')->getValue($client));
             $this->assertInstanceOf(
                 \WordPress\Reprint\Server\PublicKeyClient::class,

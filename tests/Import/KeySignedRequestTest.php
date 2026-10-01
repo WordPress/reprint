@@ -115,7 +115,7 @@ final class KeySignedRequestTest extends TestCase {
         file_put_contents($remote_path, "pulled\0contents\n");
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
         ( new \ReflectionMethod($client, 'initialize_credential') )->invoke(
-            $client, true, ['private_key' => $this->private_key_path]
+            $client, true, ['private_key_path' => $this->private_key_path]
         );
         $client->get_state()->set_preflight_record([
             'data' => ['capabilities' => ['base64_path_parameters' => true]],
@@ -157,7 +157,7 @@ final class KeySignedRequestTest extends TestCase {
             $this->url,
             '--state-dir=' . $this->root . '/state',
             '--fs-root=' . $this->root . '/local',
-            '--private-key=' . $private_key_path,
+            '--private-key-path=' . $private_key_path,
             '--allow-unsafe-http',
             '--progress=jsonl',
         ]));

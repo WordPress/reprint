@@ -150,7 +150,7 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
         child = spawn(phpBinary, [clientPath, 'files-pull', importUrl,
             '--allow-unsafe-http',
             `--state-dir=${temporaryDirectory}`, `--fs-root=${fsRootDir(temporaryDirectory)}`,
-            `--private-key=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`, ...downloadArguments(),
+            `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`, ...downloadArguments(),
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
         let output = '';
         child.stdout.on('data', bytes => { output += bytes; });
