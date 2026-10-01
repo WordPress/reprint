@@ -57,8 +57,9 @@ local relative path to a document-root-relative path.
   metadata. Use `$next_remote_index_file`.
 - A **local index** is the retained filesystem-root snapshot in one remote
   state directory. Its entries use local relative paths and locally observed
-  type, size, ctime, and directory emptiness. The remote Reprint API URL selects
-  the remote state directory; a different filesystem root uses a different
+  type, size, ctime, and directory emptiness. A saved remote name selects
+  the remote state directory; explicit URL commands select it by the remote
+  Reprint API URL. A different filesystem root uses a different
   state directory. Files-pull advances only the entries for completed local
   mutations; files-push atomically replaces the local index only after the
   target confirms commit. Use `$local_index_file`.
@@ -177,9 +178,11 @@ development. There are no compatibility aliases or migration paths.
 The **state directory** is the caller-supplied `<state-dir>`; use `$state_dir`.
 Reprint uses it exactly as supplied and does not append `.reprint`. A consumer
 may choose `.reprint` or any other private directory name. A **remote state
-directory** contains state for one remote Reprint API URL. It is
-`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`; use
-`$remote_state_directory`. The **pull state directory** is
+directory** contains state for one remote. Saved remote commands use
+`<state-dir>/remotes/<remote-name>`; explicit URL commands use
+`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`. Use
+`$remote_state_directory`. See [saved remote settings](CLI-CONFIG.md) for
+explicit address changes and their interruption checks. The **pull state directory** is
 `<remote-state-directory>/pull`; use `$pull_state_directory`. Filenames inside
 the state directory do not begin with a dot or repeat the scope supplied by
 their parent directories.
@@ -190,7 +193,7 @@ their parent directories.
 ├── progress.json
 ├── audit.log
 └── remotes/
-    └── <md5-of-trimmed-remote-reprint-api-url>/
+    └── <remote-name-or-url-hash>/
         ├── local_index.jsonl
         ├── pull/
         │   ├── state.json
@@ -430,16 +433,17 @@ The low-level, files-only command is `files-push`. Its `remote Reprint API URL` 
 exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
 `--fs-root`. It requires saved preflight data and treats its remote document
 root as a path beneath that filesystem root. Local relative paths beneath the document root become document-root-relative paths; other local paths do not
-become push or delete work. It also requires `--secret=TOKEN`; `--insecure`
+become push or delete work. It also requires `--secret=TOKEN` or
+`--secret-file=FILE`; `--insecure`
 or `REPRINT_INSECURE_TLS=1` explicitly allows plain HTTP and skips
 HTTPS certificate and hostname checks for that invocation.
 
 `files-push` uses the shared progress output mode. It never stores that mode in
 sender state.
 
-The **local push state directory** is
-`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
-directory name is:
+The **local push state directory** is `<remote-state-directory>/push`.
+Saved remote commands select the remote name; explicit URL commands select
+the hash directory name:
 
 ```text
 md5(rtrim(<remote-reprint-api-url>, "?&"))

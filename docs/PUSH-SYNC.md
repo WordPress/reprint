@@ -85,8 +85,10 @@ one. It answers "what changed locally since my last target-confirmed push
 commit to this remote" by comparing the current local paths and rows against
 the local index and previously pushed rows for that remote Reprint API URL.
 
-The local machine keeps these files **per remote Reprint API URL**. The caller
-uses a different state directory for each filesystem root:
+The local machine keeps these files **per remote**. Saved remote commands use
+the remote name instead of the URL hash shown below. Explicit URL commands
+keep their URL-based layout. The caller uses a different state directory for
+each filesystem root:
 
     <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/local_index.jsonl
     <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/previously_pushed_rows.jsonl   (phase two)
@@ -332,7 +334,8 @@ prevents concurrent pull, push, diff, and other local Reprint processes from
 using that site state, regardless of their remote Reprint API URLs.
 
 The remote state directory keeps the retained local index beside active push
-state:
+state. Saved remote commands use `<remote-name>` in place of the URL hash
+below; [saved remote settings](CLI-CONFIG.md) describes explicit address changes:
 
 ```text
 <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/
@@ -475,21 +478,23 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 `PushFilesSender`. It treats the saved preflight document root as a path beneath
 the resolved filesystem root named by `--fs-root`. It removes that local prefix when producing document-root-relative paths and excludes local paths
 outside the document root from push and delete work. It requires `--state-dir`,
-`--fs-root`, `--secret`, and saved preflight data; HTTPS is required unless the
+`--fs-root`, `--secret` or `--secret-file`, and saved preflight data; HTTPS is required unless the
 operator passes `--insecure` or sets `REPRINT_INSECURE_TLS=1`. It reads but never writes
 `<remote-state-directory>/pull/state.json`. It does not run preflight itself,
 show a plan, ask for confirmation, transfer a database, retry a failed request,
 or start a replacement sender after a `restart` outcome.
 
-The local push state directory is
-`<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push`. The hash
-directory name is:
+The local push state directory is `<remote-state-directory>/push`. Saved
+remote commands select the remote name; explicit URL commands select the hash
+directory name:
 
 ```text
 md5(rtrim(<remote-reprint-api-url>, "?&"))
 ```
 
-A different remote query therefore selects a different retained local index. A
+For explicit URL commands, a different remote query selects a different retained
+local index. Saved remote commands keep the name and index when the caller
+changes the saved address with `remote set-url`. A
 different filesystem root requires a different state directory and does not
 participate in the directory name. Fragments, URL user-info, and `SECRET_KEY`
 target parameters are rejected. The local push state directory must be outside
@@ -573,9 +578,10 @@ local paths a files-push would send or delete, compared against the same
 filtered patch base used by files-push. The retained local index is not
 changed. Files-pull advances that local index after
 completed local mutations, and files-push replaces it after the target
-confirms commit. The remote state directory is
+confirms commit. Saved remote commands use
+`<state-dir>/remotes/<remote-name>`. Explicit URL commands use
 `<state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>`, so another URL
-query cannot reuse the index. A different filesystem root uses a different
+query in an explicit URL command cannot reuse the index. A different filesystem root uses a different
 state directory. The command accepts only `--state-dir`, `--fs-root`, and the
 optional `--progress`; it needs no secret, performs no preflight, and makes no
 network request. It reads any local runtime cleanup record from pull state and
