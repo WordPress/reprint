@@ -292,10 +292,16 @@ class CautiousURLBaseRewriteMapping {
         $scheme = strtolower( (string) $parts['scheme'] );
         $host = (string) $parts['host'];
         $path = isset($parts['path']) ? (string) $parts['path'] : '';
+        // A target base's final slash is supplied by the candidate suffix.
+        // Remove only one: an empty component such as /scope:123// is still
+        // unsupported. Keep source paths literal for matching and exclusions.
+        if (!$is_source_url && substr($path, -1) === '/') {
+            $path = substr($path, 0, -1);
+        }
         $has_unsupported_target_path =
             !$is_source_url
             && $path !== ''
-            && preg_match('#^/[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*$#', $path) !== 1;
+            && preg_match('#^/[A-Za-z0-9_:-]+(?:/[A-Za-z0-9_:-]+)*$#', $path) !== 1;
         // These limits apply only to literal replacement in unknown text.
         // A parsed HTTP host can contain quotes, but inserting one could end
         // the surrounding value. Hostname syntax keeps output to letters,

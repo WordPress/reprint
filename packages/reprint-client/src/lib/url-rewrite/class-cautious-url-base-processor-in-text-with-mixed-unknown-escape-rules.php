@@ -62,13 +62,14 @@
  * replacement:
  *
  * - A target path may contain non-empty slash-separated components composed
- *   only of ASCII letters, digits, hyphens, and underscores. Each slash copies
- *   the first available spelling from the URL prefix, configured source path,
- *   or following candidate path. A scheme-less authority with no slash stays
- *   unchanged when the target has a path.
- * - A target port copies the colon spelling after the matched scheme. A
- *   protocol-relative or scheme-less candidate has no scheme colon to copy, so
- *   its target port uses a literal `:`. This may not match the escaping rules
+ *   only of ASCII letters, digits, hyphens, underscores, and colons. One final
+ *   slash is ignored; the original suffix keeps its own separator. Each inserted
+ *   slash copies the first available spelling from the URL prefix, configured
+ *   source path, or following candidate path. A scheme-less authority with no
+ *   slash stays unchanged when the target has a path.
+ * - Target port and path colons copy the colon spelling after the matched
+ *   scheme. A protocol-relative or scheme-less candidate has no scheme colon
+ *   to copy, so they use a literal `:`. This may not match the escaping rules
  *   of the surrounding text.
  * - A same-URL mapping is an exclusion: it wins over shorter source bases and
  *   retains the matched bytes, including IP hosts and original slash escaping.
@@ -322,16 +323,16 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                     ? $matches['path_slash'][0]
                     : $matches['url_slash'][0];
             }
-            $target_port = '';
-            if ($mapping['target_port'] !== null) {
-                // No escaped colon is available here. Use an unescaped colon.
-                // This risks breaking an unknown format, but ':' is not a
-                // common string terminator in popular formats.
-                $target_port_colon = $matches['scheme_colon'][1] === -1
-                    ? ':'
-                    : $matches['scheme_colon'][0];
-                $target_port = $target_port_colon . $mapping['target_port'];
-            }
+            // Target ports and paths such as /scope:123 need the same colon
+            // spelling. Without a scheme colon, use an unescaped colon.
+            // This risks breaking an unknown format, but ':' is not a
+            // common string terminator in popular formats.
+            $target_colon = $matches['scheme_colon'][1] === -1
+                ? ':'
+                : $matches['scheme_colon'][0];
+            $target_port = $mapping['target_port'] === null
+                ? ''
+                : $target_colon . $mapping['target_port'];
 
             // An exclusion must preserve the actual matched bytes, including
             // mixed slash escaping. Rebuilding an equal URL base can change them.
@@ -343,10 +344,9 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRules {
                 [
                     'start'         => $authority_start,
                     'base_length'   => strlen($matches['base'][0]),
-                    'replacement'   => $unchanged_base ? $matches['base'][0] : $mapping['target_domain'] . $target_port . str_replace(
-                        '/',
-                        $target_path_slash,
-                        $mapping['target_path']
+                    'replacement'   => $unchanged_base ? $matches['base'][0] : $mapping['target_domain'] . $target_port . strtr(
+                        $mapping['target_path'],
+                        ['/' => $target_path_slash, ':' => $target_colon]
                     ),
                     'scheme_start'  => $matches['scheme'][1] === -1
                         ? null
