@@ -45,14 +45,17 @@ const PHP_BINARY = process.env.PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const IMPORTER_PATH = process.env.IMPORTER_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PREFLIGHT_IMPORTER_PATH = process.env.BENCH_PREFLIGHT_IMPORTER_PATH || IMPORTER_PATH;
-const HTTP_ARGS_BY_IMPORTER = new Map(
+const OPTIONS_BY_IMPORTER = new Map(
     [...new Set([IMPORTER_PATH, PREFLIGHT_IMPORTER_PATH])].map(importerPath => {
         const help = execFileSync(PHP_BINARY, [importerPath, 'preflight', '--help'], {
             encoding: 'utf-8',
             timeout: 30_000,
         });
         const httpOption = ['--insecure', '--allow-unsafe-http'].find(option => help.includes(option));
-        return [importerPath, httpOption ? [httpOption] : []];
+        return [importerPath, {
+            httpOption,
+            supportsPrivateKeyPath: help.includes('--private-key-path'),
+        }];
     }),
 );
 const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'playground-php.sh');
@@ -153,10 +156,9 @@ function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env
         importerPath,
         stage,
         url,
-        ...HTTP_ARGS_BY_IMPORTER.get(importerPath),
+        ...importerConnectionArguments(importerPath, SITE),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--private-key-path=${getHarnessKey(getSiteSecret(SITE)).privateKeyPath}`,
         ...extraArgs,
     ];
 
@@ -466,10 +468,9 @@ register_shutdown_function(function () {
         IMPORTER_PATH,
         'files-pull',
         url,
-        ...HTTP_ARGS_BY_IMPORTER.get(IMPORTER_PATH),
+        ...importerConnectionArguments(IMPORTER_PATH, site),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
         `--file-chunk-start=${FILE_BENCH_TUNED_CHUNK_SIZE}`,
         `--file-chunk-max=${FILE_BENCH_TUNED_CHUNK_SIZE}`,
         '--duty=1',
@@ -545,10 +546,9 @@ function runPreflightForSite(site, stateDir) {
         PREFLIGHT_IMPORTER_PATH,
         'preflight',
         url,
-        ...HTTP_ARGS_BY_IMPORTER.get(PREFLIGHT_IMPORTER_PATH),
+        ...importerConnectionArguments(PREFLIGHT_IMPORTER_PATH, site),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
-        `--private-key-path=${getHarnessKey(getSiteSecret(site)).privateKeyPath}`,
     ];
     let lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -570,6 +570,17 @@ function runPreflightForSite(site, stateDir) {
         }
     }
     throw lastErr;
+}
+
+function importerConnectionArguments(importerPath, site) {
+    const { httpOption, supportsPrivateKeyPath } = OPTIONS_BY_IMPORTER.get(importerPath);
+    // The trunk baseline may predate key support, even when preflight uses
+    // the PR build. Choose the credential for the client that will send it.
+    const secret = getSiteSecret(site);
+    const credential = supportsPrivateKeyPath
+        ? `--private-key-path=${getHarnessKey(secret).privateKeyPath}`
+        : `--secret=${secret}`;
+    return [...(httpOption ? [httpOption] : []), credential];
 }
 
 function renderMarkdown(results, meta) {
