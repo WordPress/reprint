@@ -100,6 +100,20 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $this->assertReachedDispatcher($this->pullWithKey($key_client));
     }
 
+    /**
+     * A key signature never covers the body, so verifying one must not buffer
+     * it. A body larger than the memory limit still reaches the dispatcher.
+     */
+    public function testKeyHostVerifiesAKeySignatureWithoutBufferingALargeBody(): void
+    {
+        $key_client = $this->newKeyClient();
+        $this->startServer(['options' => $this->keyOptions($key_client, false)], ['memory_limit' => '24M']);
+
+        $url = $this->endpointUrl(self::PULL_PROBE_ENDPOINT);
+        $headers = $key_client->get_auth_headers('POST', $url) + ['Content-Type' => 'application/octet-stream'];
+        $this->assertReachedDispatcher($this->request($headers, $url, 'POST', str_repeat('x', 32 * 1024 * 1024)));
+    }
+
     public function testKeyHostReportsUnknownKey(): void
     {
         $this->startServer(['options' => $this->keyOptions($this->newKeyClient(), false)]);
@@ -248,7 +262,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
      * @param array<string,string> $headers Name => value.
      * @return array{status:int,body:array<string,mixed>}
      */
-    private function request(array $headers, ?string $url = null): array
+    private function request(array $headers, ?string $url = null, string $http_method = 'GET', string $body = ''): array
     {
         $header_lines = [];
         foreach ($headers as $name => $value) {
@@ -256,24 +270,28 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         }
         $context = stream_context_create([
             'http' => [
-                'method' => 'GET',
+                'method' => $http_method,
                 'header' => $header_lines,
+                'content' => $body,
                 'ignore_errors' => true,
                 'timeout' => 10,
             ],
         ]);
-        $body = file_get_contents($url ?? $this->endpointUrl(self::PULL_PROBE_ENDPOINT), false, $context);
-        $this->assertIsString($body, (string) file_get_contents($this->server_log_path));
+        $response_body = file_get_contents($url ?? $this->endpointUrl(self::PULL_PROBE_ENDPOINT), false, $context);
+        $this->assertIsString($response_body, (string) file_get_contents($this->server_log_path));
         // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.runtime_configuration_http_response_header -- Set by the HTTP stream wrapper above.
         $status_line = $http_response_header[0] ?? '';
         $this->assertSame(1, preg_match('#^HTTP/\S+ (\d{3})#', $status_line, $matches), $status_line);
-        $decoded = json_decode($body, true);
-        $this->assertIsArray($decoded, $body);
+        $decoded = json_decode($response_body, true);
+        $this->assertIsArray($decoded, $response_body);
         return ['status' => (int) $matches[1], 'body' => $decoded];
     }
 
-    /** @param array<string,mixed> $configuration Router configuration; see the fixture. */
-    private function startServer(array $configuration): void
+    /**
+     * @param array<string,mixed>  $configuration Router configuration; see the fixture.
+     * @param array<string,string> $php_settings  INI settings for the server process, name => value.
+     */
+    private function startServer(array $configuration, array $php_settings = []): void
     {
         $configuration['credentials_directory'] = $this->credentials_directory;
         file_put_contents($this->configuration_path, json_encode($configuration, JSON_THROW_ON_ERROR));
@@ -286,8 +304,13 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $router = realpath(__DIR__ . '/fixtures/api-authentication-router.php');
         $this->assertNotFalse($router);
 
+        $command = [PHP_BINARY, '-d', 'display_errors=0'];
+        foreach ($php_settings as $name => $value) {
+            array_push($command, '-d', $name . '=' . $value);
+        }
+        array_push($command, '-S', $address, '-t', $this->root . '/docroot', $router);
         $this->server_process = proc_open(
-            [PHP_BINARY, '-d', 'display_errors=0', '-S', $address, '-t', $this->root . '/docroot', $router],
+            $command,
             [0 => ['pipe', 'r'], 1 => ['file', $this->server_log_path, 'a'], 2 => ['file', $this->server_log_path, 'a']],
             $pipes,
             dirname($router),

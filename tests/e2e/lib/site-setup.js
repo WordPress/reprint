@@ -15,6 +15,7 @@ import { createRequire } from 'node:module';
 import { createConnection } from 'mysql2/promise';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { randomBytes } from 'node:crypto';
+import { getHarnessKey } from './test-helpers.js';
 
 const REGISTRY = createRequire(import.meta.url)('../site-registry.json');
 
@@ -173,6 +174,7 @@ function createSampleFiles(siteDir) {
  *   wpConfig: { DB_USER: '...', ... } — override wp-config.php creds AFTER install
  *   tablePrefix: 'wp_' — table prefix to write into wp-config.php before install
  *   wpContentDir: '/path/to/wp-content' — establish an external content directory before WordPress loads
+ *   publicKeys: ['<one-line key>', ...] — public-keys.php contents instead of the site's harness key
  *   afterCreate: async (siteDir, dbName) => {} — post-creation hook (dir is writable)
  *   afterPermissions: async (siteDir) => {} — runs after final chown/chmod (for chmod 000 etc.)
  */
@@ -261,6 +263,17 @@ export async function ensureSite(name, options = {}) {
     writeFileSync(
         join(siteDir, 'wp-content', 'plugins', 'reprint-server', 'secret.php'),
         `<?php return '${secret}';\n`
+    );
+
+    // Enroll the harness key for this site's secret. On a host with OpenSSL
+    // this is the credential that works; secret.php stays for the one pool
+    // that has openssl_verify disabled. options.publicKeys replaces the list.
+    const publicKeys = Array.isArray(options.publicKeys)
+        ? options.publicKeys
+        : [getHarnessKey(secret).publicKey];
+    writeFileSync(
+        join(siteDir, 'wp-content', 'plugins', 'reprint-server', 'public-keys.php'),
+        `<?php return [\n${publicKeys.map((key) => `    ${JSON.stringify(key)},`).join('\n')}\n];\n`
     );
     log('Files copied');
 

@@ -72,7 +72,7 @@ database may deactivate the plugin or replace the token.
 
 The host supplies an API entry point which does **not** boot WordPress. It
 must remain reachable while public requests are stopped. Its configuration
-and token live outside the document root. For example:
+and credential live outside the document root. For example:
 
 ```php
 <?php
@@ -82,7 +82,7 @@ require '/srv/private/reprint-database-config.php';
 
 $plugin_directory = '/srv/site/wp-content/plugins/reprint-server/';
 define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', $plugin_directory);
-define('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE', '/srv/private/reprint-token.php');
+define('WordPress\\Reprint\\Server\\Plugin\\PUBLIC_KEYS_FILE', '/srv/private/reprint-public-keys.php');
 define('REPRINT_SERVER_PUSH_ENABLED', true);
 require $plugin_directory . 'vendor/autoload.php';
 require $plugin_directory . 'lib.php';
@@ -100,7 +100,10 @@ tables. A server-side parser remains a TODO; a keyword blacklist is not a SQL
 validator. Enable this route only for trusted deployment clients, not as a
 restricted SQL API for untrusted callers.
 
-The token file returns the shared secret as a PHP string. This is host-level
+The keys file returns a list of one-line public keys, as printed by
+`reprint keygen`. The plugin also accepts a connection token, which is the
+only option on a host where PHP lacks `openssl_verify()`: define
+`CONNECTION_TOKEN_FILE` as a file returning the shared secret as a PHP string. Either file is host-level
 permission for destructive pushes, not a setting to expose to visitors.
 Requests still require the existing signed push authentication and HTTPS.
 `database_push` defaults to disabled. Setting it on a normal WordPress route
@@ -114,12 +117,12 @@ whose dependencies the account cannot inspect.
 ## Command flow
 
 Use a private local state directory and the same remote Reprint API URL for
-every step. These examples use explicit source credentials; omitting them
+every step. On a token host, pass `--secret=TOKEN` instead of `--private-key-path`. These examples use explicit source credentials; omitting them
 uses the local MySQL database previously recorded by `db-apply`.
 
 ```sh
 reprint db-push https://example.com/reprint-api.php \
-  --state-dir=/private/deploy-42 --secret=TOKEN \
+  --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem \
   --source-dsn='mysql:host=127.0.0.1;dbname=local_site;charset=utf8mb4' \
   --source-user=local_user --source-pass=LOCAL_PASSWORD \
   --table-prefix=wp_ --include-table=plugin_orders \
@@ -138,7 +141,7 @@ which may use these tables. WordPress's `.maintenance` file alone is not enough.
 
 ```sh
 reprint db-push https://example.com/reprint-api.php \
-  --state-dir=/private/deploy-42 --secret=TOKEN \
+  --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem \
   --commit=REVIEW_TOKEN --writers-stopped
 ```
 
@@ -158,7 +161,7 @@ Once satisfied, explicitly delete the retained old tables:
 
 ```sh
 reprint db-push https://example.com/reprint-api.php \
-  --state-dir=/private/deploy-42 --secret=TOKEN --cleanup
+  --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem --cleanup
 ```
 
 Before commit, `--abort` instead discards incoming tables. It never undoes a

@@ -425,6 +425,7 @@ class FetchRequestBodySizingTest extends TestCase
             ob_start();
             $client->run([
                 'command' => $command,
+                'secret' => 'test-secret',
                 'runtime' => 'none',
                 'target_engine' => 'sqlite',
                 'target_sqlite_path' => $this->tempDir . '/target.sqlite',
@@ -570,7 +571,7 @@ class FetchRequestBodySizingTest extends TestCase
         $this->assertStringContainsString('base_prefix', $error);
         file_put_contents($this->stateDir . '/db.sql', 'CREATE TABLE must_not_be_imported (id INT);');
         $options = [
-            'command' => $command, 'site_admin' => 'chosen',
+            'command' => $command, 'secret' => 'test-secret', 'site_admin' => 'chosen',
             'target_engine' => 'mysql', 'target_user' => 'unused', 'target_db' => 'unused',
             'runtime' => 'php', 'output_dir' => $this->tempDir . '/runtime',
         ];

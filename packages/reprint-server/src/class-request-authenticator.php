@@ -61,6 +61,25 @@ final class RequestAuthenticator {
         bool $is_push_endpoint = false,
         ?float $now = null
     ): ?string {
+        $read_body = function () use ($body): ?string {
+            return $body;
+        };
+        return $this->authenticate($headers, $method, $request_target, $read_body, $files, $is_push_endpoint, $now);
+    }
+
+    /**
+     * @param callable():(string|null) $read_body Returns the raw body. Called only to verify a token
+     *                                            signature on a pull endpoint.
+     */
+    private function authenticate(
+        array $headers,
+        string $method,
+        string $request_target,
+        callable $read_body,
+        array $files,
+        bool $is_push_endpoint,
+        ?float $now
+    ): ?string {
         $this->last_error_reason = null;
         $this->authenticated_key_id = null;
         $has_key_id = Utils::request_header($headers, 'X-Auth-Key-Id') !== null;
@@ -72,7 +91,7 @@ final class RequestAuthenticator {
             if ($this->hmac_secret === null) {
                 return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no connection token is stored');
             }
-            return $this->verify_hmac($this->hmac_secret, $headers, $method, $request_target, $body, $files, $is_push_endpoint, $now);
+            return $this->verify_hmac($this->hmac_secret, $headers, $method, $request_target, $read_body, $files, $is_push_endpoint, $now);
         }
 
         // Tokens stay accepted here until clients can sign with keys.
@@ -80,7 +99,7 @@ final class RequestAuthenticator {
             if ($this->hmac_secret === null) {
                 return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no connection token is stored');
             }
-            return $this->verify_hmac($this->hmac_secret, $headers, $method, $request_target, $body, $files, $is_push_endpoint, $now);
+            return $this->verify_hmac($this->hmac_secret, $headers, $method, $request_target, $read_body, $files, $is_push_endpoint, $now);
         }
         if (empty($this->public_keys_by_id)) {
             return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no keys are enrolled');
@@ -99,9 +118,11 @@ final class RequestAuthenticator {
      * query-string endpoint, exactly as HTTPServer::handle_request() makes it:
      * every push_-prefixed endpoint, known or not, uses the push request
      * contract, so an unknown one answers "Invalid endpoint" after
-     * authenticating instead of failing its envelope signature. Push
-     * endpoints leave the body unread because the envelope contract signs
-     * method and target only. The endpoint streams php://input itself.
+     * authenticating instead of failing its envelope signature.
+     *
+     * Only a token signature on a pull endpoint covers the body, so only that
+     * path reads php://input. A key request never buffers the body here, and
+     * a push endpoint streams php://input itself.
      */
     public function verify_globals(?float $now = null): ?string {
         // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Exact request-line values are covered by the signature.
@@ -112,16 +133,13 @@ final class RequestAuthenticator {
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
 
         $is_push_endpoint = strpos($endpoint, 'push_') === 0;
-        $body = null;
-        if (!$is_push_endpoint) {
+        $read_body = function (): string {
             $body = file_get_contents('php://input');
-            if ($body === false) {
-                $body = '';
-            }
-        }
+            return $body === false ? '' : $body;
+        };
 
         // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Request headers are covered by the signature, not a nonce field.
-        return $this->verify(Utils::request_headers(), $method, $request_target, $body, $_FILES, $is_push_endpoint, $now);
+        return $this->authenticate(Utils::request_headers(), $method, $request_target, $read_body, $_FILES, $is_push_endpoint, $now);
     }
 
     public function last_error_reason(): ?string {
@@ -137,7 +155,7 @@ final class RequestAuthenticator {
         array $headers,
         string $method,
         string $request_target,
-        ?string $body,
+        callable $read_body,
         array $files,
         bool $is_push_endpoint,
         ?float $now
@@ -145,7 +163,7 @@ final class RequestAuthenticator {
         $hmac_server = new HMACServer($hmac_secret, $this->timestamp_tolerance);
         $error = $is_push_endpoint
             ? $hmac_server->verify_envelope($headers, $method, $request_target, $now)
-            : $hmac_server->verify($headers, $body, $files, $now);
+            : $hmac_server->verify($headers, $read_body(), $files, $now);
         if ($error !== null) {
             return $this->fail($hmac_server->last_error_reason() ?? self::REASON_AUTH_FAILED, $error);
         }

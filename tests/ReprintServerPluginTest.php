@@ -1006,6 +1006,37 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertFalse(get_configuration_state()['push_enabled']);
     }
 
+    /**
+     * The key table shows the push permission a request signed with the key
+     * gets, so a host policy outranks the stored flag there too.
+     *
+     * @dataProvider managedKeyPushCheckboxProvider
+     */
+    public function testKeyPushCheckboxShowsThePermissionTheApiEnforces(string $managed_policy, bool $stored_push, bool $expect_checked): void
+    {
+        $entry = $this->sampleKeyEntry();
+        $entry['push'] = $stored_push;
+        update_option_public_keys([$entry]);
+        putenv('REPRINT_SERVER_PUSH_ENABLED=' . $managed_policy);
+        try {
+            $html = $this->renderAdminPage();
+        } finally {
+            putenv('REPRINT_SERVER_PUSH_ENABLED');
+        }
+
+        $this->assertSame(1, preg_match('/<input type="checkbox" name="reprint_server_key_push_enabled" value="1"([^>]*)>/', $html, $matches), $html);
+        $this->assertSame($expect_checked, strpos($matches[1], 'checked="checked"') !== false);
+        $this->assertStringContainsString('disabled="disabled"', $matches[1], 'the host decides, so the key cannot be changed here');
+    }
+
+    public static function managedKeyPushCheckboxProvider(): array
+    {
+        return [
+            'host enables push for a key never granted it' => ['true', false, true],
+            'host disables push for a key granted it' => ['false', true, false],
+        ];
+    }
+
     /** The network page keeps its editable token form beside key enrollment on a key host. */
     public function testMultisiteKeyHostKeepsTheNetworkTokenFormBesideKeyEnrollment(): void
     {
