@@ -27,7 +27,21 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         $this->remote_reprint_api_url = 'http://' . $address . '/';
         $environment = getenv();
         $environment['REPRINT_DB_TEST_ROOT'] = $this->root;
-        $this->server = proc_open([getenv('REPRINT_DB_PUSH_SERVER_PHP') ?: PHP_BINARY, '-d', 'post_max_size=2M', '-S', $address, __DIR__ . '/../fixtures/database-push-router.php'], [['pipe', 'r'], ['file', $this->root . '/server.log', 'a'], ['file', $this->root . '/server.log', 'a']], $pipes, null, $environment);
+        $environment['REPRINT_SERVER_CONFIG'] = $this->root . '/config.php';
+        file_put_contents($this->root . '/config.php', '<?php '
+            . 'define("ABSPATH", ' . var_export($this->root . '/site/', true) . ');'
+            . 'define("DB_HOST", ' . var_export(str_replace(';port=', ':', getenv('DB_HOST')), true) . ');'
+            . 'define("DB_NAME", ' . var_export($this->dbName . '_receiver', true) . ');'
+            . 'define("DB_USER", ' . var_export(getenv('DB_USER'), true) . ');'
+            . 'define("DB_PASSWORD", ' . var_export(getenv('DB_PASS'), true) . ');'
+            . '$GLOBALS["table_prefix"] = "wp_";'
+            . 'define("WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE", ' . var_export($this->root . '/secret.php', true) . ');'
+            . 'define("REPRINT_SERVER_PUSH_ENABLED", true);'
+            . 'return ' . var_export(['docroot' => $this->root . '/site', 'reprint_directory' => $this->root . '/private', 'database_push' => true, 'maximum_part_bytes' => 16384], true) . ';');
+        // Booting WordPress would fail, even before the incoming options remove
+        // the plugin and its old option-backed connection token.
+        file_put_contents($this->root . '/site/wp-load.php', '<?php throw new RuntimeException("WordPress must not boot");');
+        $this->server = proc_open([getenv('REPRINT_DB_PUSH_SERVER_PHP') ?: PHP_BINARY, '-d', 'post_max_size=2M', '-S', $address, '-t', $this->root . '/site', __DIR__ . '/../fixtures/database-push-router.php'], [['pipe', 'r'], ['file', $this->root . '/server.log', 'a'], ['file', $this->root . '/server.log', 'a']], $pipes, null, $environment);
         fclose($pipes[0]);
         $deadline = microtime(true) + 5;
         do {
@@ -53,6 +67,70 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         }
         rmdir($this->root);
         parent::tearDown();
+    }
+
+    public function testStandaloneRejectsUnsignedRequestsAndMissingConfig(): void {
+        $context = stream_context_create(['http' => ['ignore_errors' => true]]);
+        $url = $this->remote_reprint_api_url . '?endpoint=push_db_status';
+        $response = json_decode(file_get_contents($url, false, $context), true);
+        self::assertSame('auth_failed', $response['reason']);
+        // Removing the host's configuration disables the ready-made route.
+        unlink($this->root . '/config.php');
+        $response = json_decode(file_get_contents($url . '&REPRINT_SERVER_CONFIG=' . urlencode($this->root . '/secret.php'), false, $context), true);
+        self::assertSame('not_configured', $response['reason']);
+    }
+
+    public function testStandaloneRejectsConfigAndTokenInsideDocumentRoot(): void {
+        $context = stream_context_create(['http' => ['ignore_errors' => true]]);
+        $url = $this->remote_reprint_api_url . '?endpoint=push_db_status';
+        rename($this->root . '/secret.php', $this->root . '/site/secret.php');
+        symlink($this->root . '/site/secret.php', $this->root . '/secret.php');
+        $response = json_decode(file_get_contents($url, false, $context), true);
+        self::assertSame('not_configured', $response['reason']);
+        self::assertStringContainsString('outside', $response['detail']);
+        rename($this->root . '/config.php', $this->root . '/site/config.php');
+        symlink($this->root . '/site/config.php', $this->root . '/config.php');
+        $response = json_decode(file_get_contents($url, false, $context), true);
+        self::assertSame('not_configured', $response['reason']);
+        self::assertStringContainsString('outside', $response['detail']);
+    }
+
+    public function testStandaloneRejectsPublicTokenAliasToPrivateFile(): void {
+        symlink($this->root . '/secret.php', $this->root . '/site/token.php');
+        $config = file_get_contents($this->root . '/config.php');
+        file_put_contents($this->root . '/config.php', str_replace($this->root . '/secret.php', $this->root . '/site/token.php', $config));
+        $context = stream_context_create(['http' => ['ignore_errors' => true]]);
+        $response = json_decode(file_get_contents($this->remote_reprint_api_url . '?endpoint=push_db_status', false, $context), true);
+        self::assertSame('not_configured', $response['reason']);
+        self::assertStringContainsString('outside', $response['detail']);
+    }
+
+    public function testStandaloneAuthenticationSurvivesOptionsReplacementAndCleanup(): void {
+        $this->pdo->exec('CREATE TABLE wp_options (option_name varchar(191) PRIMARY KEY, option_value longtext) ENGINE=InnoDB');
+        $this->pdo->exec("INSERT INTO wp_options VALUES ('active_plugins', 'a:0:{}'), ('reprint_server_connection_token', 'different-token')");
+        $client = $this->client();
+        $processor = $this->processor($client);
+        try {
+            while ($processor->next_step()) {
+            }
+            $status = $processor->get_status();
+            $parameters = ['push_session_id' => $status['push_session_id']];
+            $commit = $client->send_push_request('POST', 'push_db_commit', $parameters + ['review' => $status['review'], 'writers_stopped' => 'yes'], ['accepted']);
+            self::assertSame('complete', $commit['status'], json_encode($commit));
+            self::assertSame('a:0:{}', $this->receiver->query("SELECT option_value FROM wp_options WHERE option_name='active_plugins'")->fetchColumn());
+            $client->close();
+            $client = $this->client();
+            do {
+                $result = $client->send_push_request('POST', 'push_db_cleanup', $parameters, ['accepted']);
+                self::assertSame('complete', $result['status'], json_encode($result));
+            } while ($result['response']['phase'] !== 'complete');
+            $result = $client->send_push_request('GET', 'push_db_status', $parameters, ['accepted']);
+            self::assertSame('complete', $result['status']);
+            self::assertSame('complete', $result['response']['phase']);
+        } finally {
+            $processor->close();
+            $client->close();
+        }
     }
 
     /**

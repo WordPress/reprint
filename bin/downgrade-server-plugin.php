@@ -32,6 +32,7 @@ $paths = [
     $staging_root . '/reprint-server-wp/index.php',
     $staging_root . '/reprint-server-wp/uninstall.php',
     $staging_root . '/reprint-server-wp/lib.php',
+    $staging_root . '/reprint-server-wp/standalone.php',
     $staging_root . '/reprint-server-wp/compat.php',
     $staging_root . '/reprint-server-wp/wordpress',
 ];

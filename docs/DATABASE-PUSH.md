@@ -70,29 +70,52 @@ database may deactivate the plugin or replace the token.
 
 ## Host setup
 
-The host supplies an API entry point which does **not** boot WordPress. It
-must remain reachable while public requests are stopped. Its configuration
-and token live outside the document root. For example:
+The plugin bundle includes `standalone.php`. Point the client at
+`https://example.com/wp-content/plugins/reprint-server/standalone.php`.
+This route never loads WordPress or `wp-config.php`. Keep it reachable when
+stopping public requests for commit.
+
+Set the server environment variable `REPRINT_SERVER_CONFIG` to an absolute
+path outside the document root, for example `/srv/private/reprint-config.php`.
+For PHP-FPM, set it in the site's pool configuration:
+
+```ini
+env[REPRINT_SERVER_CONFIG] = /srv/private/reprint-config.php
+```
+
+The private PHP file supplies the existing database constants, the file-backed
+token, and the API options. Use this site's actual paths and credentials:
 
 ```php
 <?php
-// This private file defines ABSPATH, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD,
-// and sets $GLOBALS['table_prefix'] to the one site's table prefix.
-require '/srv/private/reprint-database-config.php';
-
-$plugin_directory = '/srv/site/wp-content/plugins/reprint-server/';
-define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', $plugin_directory);
+define('ABSPATH', '/srv/site/');
+define('DB_HOST', 'localhost');
+define('DB_NAME', 'wordpress');
+define('DB_USER', 'wordpress');
+define('DB_PASSWORD', 'replace-with-the-database-password');
+$GLOBALS['table_prefix'] = 'wp_';
 define('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE', '/srv/private/reprint-token.php');
 define('REPRINT_SERVER_PUSH_ENABLED', true);
-require $plugin_directory . 'vendor/autoload.php';
-require $plugin_directory . 'lib.php';
 
-\WordPress\Reprint\Server\Plugin\handle_api_request([
+return [
     'docroot' => '/srv/site',
     'reprint_directory' => '/srv/private/reprint',
     'database_push' => true,
-]);
+];
 ```
+
+Create `/srv/private/reprint-token.php` with `<?php return 'YOUR_RANDOM_SECRET';`.
+Generate a long random secret, for example with `openssl rand -hex 32`. Restrict
+both files to the account running PHP. Do not commit credentials or put either
+file in the plugin directory. The endpoint rejects configuration and token
+files inside the document root, including symlinks resolving there.
+
+Missing configuration disables the endpoint. Requests cannot choose a different
+configuration file. To revoke access, remove the private config or rotate the
+private token. WordPress admin settings do not control this route. It remains
+available when the plugin is inactive, but removing the plugin files also
+removes the endpoint. Keep multisite on the WordPress route: this standalone
+configuration supports one site and does not discover network settings.
 
 The server currently trusts DDL prepared by the authenticated client. It does
 not parse SQL or guarantee that arbitrary client SQL stays within the selected
@@ -102,7 +125,8 @@ restricted SQL API for untrusted callers.
 
 The token file returns the shared secret as a PHP string. This is host-level
 permission for destructive pushes, not a setting to expose to visitors.
-Requests still require the existing signed push authentication and HTTPS.
+Requests still require the existing signed push authentication. Serve the route
+over HTTPS; the host supplies TLS.
 `database_push` defaults to disabled. Setting it on a normal WordPress route
 is insufficient: the host must actually provide the independent route.
 
