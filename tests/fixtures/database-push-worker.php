@@ -6,7 +6,7 @@ require dirname(__DIR__, 2) . '/packages/reprint-client/src/lib/database-push/cl
 $client = new MultipartPushStreamClient([
     'remote_reprint_api_url' => $argv[1],
     'allow_http' => true,
-    'hmac_client' => new Site_Export_HMAC_Client('database-push-test-secret'),
+    'envelope_signer' => new Site_Export_HMAC_Client('database-push-test-secret'),
     'request_context_headers' => ['User-Agent' => 'Reprint database push test'],
     'chunk_bytes' => 16384,
 ]);

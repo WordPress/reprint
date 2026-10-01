@@ -16,6 +16,7 @@
     },
     "suggest": {
         "ext-pdo": "Needed for the SQLite export path; recommended for MySQL exports (the wpdb fallback handles MySQL when absent).",
-        "ext-pdo_mysql": "Recommended for MySQL exports; falls back to wpdb when absent."
+        "ext-pdo_mysql": "Recommended for MySQL exports; falls back to wpdb when absent.",
+        "ext-openssl": "Needed to verify public-key signatures; hosts without it accept HMAC connection tokens only."
     }
 }

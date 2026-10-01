@@ -890,7 +890,7 @@ class DatabasePushHttpTest extends MySQLDumpProducerTestBase {
         return new MultipartPushStreamClient([
             'remote_reprint_api_url' => $this->remote_reprint_api_url,
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client('database-push-test-secret'),
+            'envelope_signer' => new Site_Export_HMAC_Client('database-push-test-secret'),
             'request_context_headers' => ['User-Agent' => 'Reprint database push test'],
             'chunk_bytes' => 16384,
         ]);

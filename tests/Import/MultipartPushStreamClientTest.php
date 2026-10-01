@@ -31,7 +31,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4,
             'connect_timeout' => 2,
             'stall_timeout' => 2,
@@ -182,7 +182,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 2,
@@ -216,7 +216,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 64,
             'max_part_bytes' => 7,
             'connect_timeout' => 2,
@@ -248,7 +248,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'request_sizer' => $request_sizer,
             'chunk_bytes' => 1024,
             'connect_timeout' => 2,
@@ -282,7 +282,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->expectExceptionMessage('allow_http is true');
         $this->newClient([
             'remote_reprint_api_url' => 'http://example.test/?reprint-api=1',
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
         ]);
     }
 
@@ -294,7 +294,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->expectExceptionMessage('request_context_headers');
         new MultipartPushStreamClient([
             'remote_reprint_api_url' => 'https://example.test/?reprint-api=1',
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
         ]);
     }
 
@@ -308,7 +308,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 2,
@@ -357,7 +357,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'request_sizer' => $request_sizer,
             'connect_timeout' => 2,
             'response_timeout' => 2,
@@ -391,7 +391,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 2,
@@ -436,7 +436,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 2,
@@ -508,7 +508,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'response_timeout' => 2,
         ]);
@@ -589,7 +589,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             $client = $this->newClient([
                 'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
                 'allow_http' => true,
-                'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+                'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
                 'connect_timeout' => 2,
                 'response_timeout' => 2,
             ]);
@@ -623,7 +623,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'response_timeout' => 2,
         ]);
@@ -664,7 +664,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 2,
@@ -747,7 +747,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 2,
@@ -832,7 +832,7 @@ final class MultipartPushStreamClientTest extends TestCase {
             $client = $this->newClient([
                 'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
                 'allow_http' => true,
-                'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+                'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
                 'connect_timeout' => 2,
                 'response_timeout' => 2,
             ]);
@@ -871,7 +871,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 16 * 1024 * 1024,
             'connect_timeout' => 2,
             'stall_timeout' => 1,
@@ -914,7 +914,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 1,
@@ -997,7 +997,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 1,
@@ -1078,7 +1078,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 8 * 1024 * 1024,
             'connect_timeout' => 2,
             'stall_timeout' => 1,

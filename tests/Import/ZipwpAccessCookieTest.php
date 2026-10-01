@@ -149,7 +149,7 @@ final class ZipwpAccessCookieTest extends TestCase {
                 'Referer' => 'http://demo.zipwp.to/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new \Site_Export_HMAC_Client('zipwp-test-secret'),
+            'envelope_signer' => new \Site_Export_HMAC_Client('zipwp-test-secret'),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 2,
