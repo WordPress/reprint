@@ -691,7 +691,7 @@ cache clearing and site inspection before reopening. The first version has
 explicit engine, schema, and row-size limits. See [Full database push](DATABASE-PUSH.md)
 for setup, commands, recovery, and current restrictions.
 
-## Selective database changes (future work)
+## Selective database changes
 
 This mode applies reviewed local INSERT, UPDATE, and DELETE operations rather
 than overwriting the database. The plan is tracked in [issue #827](https://github.com/WordPress/reprint/issues/827).
@@ -703,6 +703,15 @@ There is no automatic reconciliation and no automatic local-wins rule for
 conflicting rows. Users review grouped changes, choose what to push, and can
 skip, replace explicitly, or revise a conflicting group. Production values
 must be checked again when applying the approved changes.
+
+The first local-only slice is `db-baseline` followed by `db-diff`. It retains
+full old local rows and reports changed columns without advancing the baseline.
+Capture is explicit after local preparation; it is not wired into pull yet.
+Selected local tables are read-locked for each consistent scan. Interrupted
+scans restart rather than resume a database lock that no longer exists.
+There are no production reads or writes in this slice. See
+[Local database baseline and diff](DATABASE-BASELINE.md) for commands, storage,
+and limits.
 
 ## Accepted limitations
 
@@ -759,6 +768,8 @@ Files first, followed by full database overwrite and then selective database cha
     opt-in server currently trusts that SQL without a parser. The later selective mode
     retains a baseline and pull selection, requests candidate production
     rows, and applies only approved changes with a final conflict check.
+    Its first slice adds explicit local `db-baseline` and `db-diff` commands,
+    retaining old rows and column-level changes before adding production work.
 11. **`reprint files-push`** — the low-level, files-only caller that retains
     one sender per process, applies caller time and memory admission budgets,
     and reports completion, continuation, restart, or failure without retrying.

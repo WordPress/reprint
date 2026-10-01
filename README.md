@@ -1341,6 +1341,14 @@ truncated or rotated, so it provides a complete history of the migration.
 Pass `--verbose` to also print audit log entries to the console as they happen.
 This is useful for debugging but noisy for production use.
 
+### Local database changes
+
+`db-baseline` saves selected local MySQL rows before editing. `db-diff` then
+shows row additions, deletions, and changed columns with their old and new
+values. Neither command contacts production or advances the baseline. See
+[Local database baseline and diff](docs/DATABASE-BASELINE.md) for usage and
+the local read-lock and disk-space requirements.
+
 ### Low-level CLI commands
 
 The importer accepts the following commands:
@@ -1358,9 +1366,11 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `db-pull` — Pull the database as a SQL dump. Defaults to writing `db.sql`; use `--sql-output=stdout` or `--sql-output=mysql` to stream elsewhere.
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Both engines continue from the file group named by the cursor stored in the target. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-rewrite-urls` — Rewrites URLs directly in an existing MySQL or SQLite database. You can stop it and continue later. See [Rewrite URLs in a live database](docs/DB-REWRITE-URLS.md).
+* `db-baseline` — Saves selected local MySQL tables before editing; no `--fs-root` needed.
+* `db-diff` — Reports local row and column changes without changing the baseline or contacting production; no `--fs-root` needed.
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
 * `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from the pull state selected by the remote Reprint API URL. No network calls are made. See [Step 6](#step-6--generate-runtime-configuration).
 
-All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+For pull commands, `--abort` aborts the current sync and exits. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Resumable pull commands continue from the last saved cursor. The local database commands restart interrupted scans and do not accept `--abort`.
