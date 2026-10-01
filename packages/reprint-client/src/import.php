@@ -3453,7 +3453,7 @@ class ImportClient
             };
 
             try {
-                $this->fetch_streaming($url, null, $context, $post_data, "file_fetch");
+                $this->fetch_streaming($url, $context, $post_data, "file_fetch");
             } catch (\RuntimeException $e) {
                 $this->audit_log(
                     "Fetch failed for directory {$directory} (non-fatal): " .
@@ -8876,7 +8876,6 @@ class ImportClient
         try {
             $this->fetch_streaming(
                 $url,
-                $cursor,
                 $context,
                 $post_data,
                 "file_fetch",
@@ -9197,7 +9196,7 @@ class ImportClient
         $cursor_before = $cursor;
         $request_start = microtime(true);
         try {
-            $this->fetch_streaming($url, $cursor, $context, $post_data, "file_index");
+            $this->fetch_streaming($url, $context, $post_data, "file_index");
         } catch (TransientInterruptionException $e) {
             $this->get_state()->index->cursor = $cursor;
             $this->get_state()->active_resumable_command->completion_state = "partial";
@@ -10344,7 +10343,7 @@ class ImportClient
                 $cursor_before = $mode === "mysql" ? $durable_mysql_cursor : $cursor;
                 $request_start = microtime(true);
                 try {
-                    $this->fetch_streaming($url, $cursor, $context, $post_data, "sql_chunk");
+                    $this->fetch_streaming($url, $context, $post_data, "sql_chunk");
                 } catch (TransientInterruptionException $e) {
                     if ($remote_sql_error !== null) {
                         throw new RuntimeException(
@@ -10939,7 +10938,6 @@ class ImportClient
                 try {
                     $this->fetch_streaming(
                         $url,
-                        $cursor,
                         $context,
                         $post_data,
                         "db_index",
@@ -12600,7 +12598,6 @@ class ImportClient
             $params["set_value_format"] = "unsigned";
         }
         if ($cursor !== null) {
-            // Include the cursor in the body when hosts strip custom headers.
             $params["cursor"] = $cursor;
         }
         return ['url' => $this->remote_reprint_api_url, 'params' => $params];
@@ -13532,7 +13529,6 @@ class ImportClient
      */
     protected function fetch_streaming(
         string $url,
-        ?string $cursor,
         StreamingContext $context,
         ?array $post_data = null,
         ?string $endpoint = null
@@ -13582,10 +13578,6 @@ class ImportClient
             "Sec-Fetch-Site: none",
             "Sec-Fetch-User: ?1",
         ];
-
-        if ($cursor) {
-            $headers[] = "X-Export-Cursor: {$cursor}";
-        }
 
         // Configure POST data. We need to know the body
         // content BEFORE generating HMAC headers so the content hash

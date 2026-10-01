@@ -39,9 +39,10 @@ file-content signature. The separate push request contract is unchanged.
 The client sends URL-encoded forms for preflight and streaming pull commands.
 File-list downloads retain multipart uploads, with endpoint and options before
 the file part. Base64 path encoding is still used when supported, so arbitrary
-filename bytes survive PHP form parsing. Cursors travel in the body as well as
-the existing header; the strict-WAF test removes that header and checks SQL
-continuation.
+filename bytes survive PHP form parsing. Cursors travel only in the body, which
+also keeps a large cursor clear of host header size limits. The exporter still
+reads an `X-Export-Cursor` header when the body has no cursor, for older
+clients. The strict-WAF test strips that header and checks SQL continuation.
 
 Multipart array fields use bracketed names built directly from their keys.
 They do not depend on PHP's `arg_separator.output` setting.

@@ -122,7 +122,7 @@ final class ZipwpAccessCookieTest extends TestCase {
                     $received .= $chunk['body'];
                 }
             };
-            $fetch->invoke($client, $remote_reprint_api_url, null, $context, [
+            $fetch->invoke($client, $remote_reprint_api_url, $context, [
                 'endpoint' => 'file_fetch',
                 'file_list' => new \CURLFile($file_list_path, 'application/json', 'file-list.json'),
             ], 'file_fetch');

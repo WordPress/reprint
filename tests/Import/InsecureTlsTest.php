@@ -137,7 +137,7 @@ final class InsecureTlsTest extends TestCase {
                     $received .= $chunk['body'];
                 }
             };
-            ( new \ReflectionMethod($client, 'fetch_streaming') )->invoke($client, $this->https_url, null, $context, [
+            ( new \ReflectionMethod($client, 'fetch_streaming') )->invoke($client, $this->https_url, $context, [
                 'endpoint' => 'file_fetch', 'file_list' => new \CURLFile($file_list, 'application/json', 'file-list.json'),
             ], 'file_fetch');
             $this->assertSame(file_get_contents($this->root . '/remote/example.txt'), $received);

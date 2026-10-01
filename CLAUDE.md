@@ -34,7 +34,7 @@ Both producers support pausing and resuming via JSON cursors that encode complet
 - Accumulated rows/chunks waiting to emit
 - Last processed primary key values or byte offsets
 
-Cursors are JSON strings internally, base64-encoded for HTTP transmission in X-Cursor (outgoing) and X-Export-Cursor (incoming) headers.
+Cursors are JSON strings internally, base64-encoded for HTTP transmission. The exporter returns them in the X-Cursor response header, and the importer sends them back in the request body's `cursor` field. The exporter also accepts an X-Export-Cursor request header from older importers.
 
 ### Resource Budgeting
 The system tracks memory and execution time limits to gracefully end requests before hitting host limits. This prevents process termination and allows resumption.
