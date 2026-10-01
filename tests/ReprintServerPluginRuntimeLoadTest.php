@@ -121,7 +121,7 @@ if (class_exists('WordPress\Reprint\Server\Utils', false)) {
 PHP;
         $php_code .= "\n" . ( $php_body ?? <<<'PHP'
 $before = WordPress\Reprint\Server\Plugin\get_configuration_state();
-$private_key = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
+$private_key = openssl_pkey_new(['private_key_bits' => 3072, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
 $public_key_pem = openssl_pkey_get_details($private_key)['key'];
 $enrollment = WordPress\Reprint\Server\Plugin\enroll_public_key($public_key_pem);
 $last_enrolled_key_id = WordPress\Reprint\Server\Plugin\get_last_enrolled_key_id();

@@ -570,7 +570,7 @@ class SettingsPage {
             'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
             'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
             'enrolled' => ['success', __('Public key enrolled.', 'reprint')],
-            'enroll_invalid' => ['error', __('That is not a usable public key. Paste an RSA public key of at least 2048 bits, as a PEM block or one line.', 'reprint')],
+            'enroll_invalid' => ['error', __('That is not a usable public key. Paste an RSA public key of at least 3072 bits, as a PEM block or one line.', 'reprint')],
             'enroll_duplicate' => ['info', __('That public key is already enrolled.', 'reprint')],
             'enroll_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
             'enroll_storage_failure' => ['error', __('Failed to save the public key.', 'reprint')],
