@@ -15826,7 +15826,7 @@ if (
             "short" => "Generate a private key for one remote site",
             "usage" => "reprint keygen <remote-reprint-api-url> --state-dir=DIR [--out=PATH] [--force]",
             "description" =>
-                "Generates a 2048-bit RSA keypair and stores the private half at\n" .
+                "Generates a 3072-bit RSA keypair and stores the private half at\n" .
                 "  <state-dir>/remotes/<md5-of-url>/key.pem   (mode 0600)\n" .
                 "beside everything else about that site. Every later command\n" .
                 "finds it there; no --private-key flag is needed.\n" .

@@ -74,7 +74,7 @@ export function getHarnessKey(secret) {
     if (!existsSync(privateKeyPath)) {
         mkdirSync(keyDirectory, { recursive: true, mode: 0o700 });
         const candidatePrivateKeyPem = generateKeyPairSync('rsa', {
-            modulusLength: 2048,
+            modulusLength: 3072,
             privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
             publicKeyEncoding: { type: 'spki', format: 'pem' },
         }).privateKey;

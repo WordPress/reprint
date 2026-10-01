@@ -277,7 +277,7 @@ verifies a key signature against its enrolled keys and a token against its store
 the OpenSSL extension (`openssl_verify` is missing) the plugin cannot verify keys, so it accepts only a connection
 token and refuses a key signature with `requires_token_auth`. The importer never retries with the other scheme.
 
-**Public keys.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 2048-bit RSA key, stores
+**Public keys.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 3072-bit RSA key, stores
 the private half at `<state-dir>/remotes/<md5-of-url>/key.pem` with mode `0600`, and prints the key id and the
 public key as one line. Paste that line into the enrollment form under Tools → Reprint Server. In JSONL or compact
 output, which `--progress=auto` selects when stdout is not a terminal, it prints no text; its final `reprint_report`
