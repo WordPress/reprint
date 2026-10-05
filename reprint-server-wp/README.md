@@ -79,6 +79,8 @@ page cannot delete that file. `HMACServer` itself refuses on a
 host with OpenSSL, so embedders that call it directly must move to
 `RequestAuthenticator`.
 
+Every authentication error body carries `auth_version`. A request with `X-Auth-Content-Hash`, which every released token client sends, is refused with `client_update_required` (HTTP 403).
+
 ### Public keys
 
 The settings page has an enrollment form which takes a PEM or one-line public
