@@ -708,6 +708,15 @@ function handle_api_request(array $options = []): void {
         );
     }
 
+    // Every 0.11 client signs a URL that names the endpoint. An authenticated
+    // request without one comes from a released key client, which sends the
+    // endpoint in the body. A 0.11 request whose endpoint was stripped on the
+    // way fails authentication above instead, so its user is not told to
+    // update a current client. Only push endpoints use the push gates above.
+    if ($endpoint === '') {
+        error(403, Utils::client_update_message(), 'client_update_required');
+    }
+
     // -- Dispatch --
     try {
         $server_options = ['default_directory' => ABSPATH];

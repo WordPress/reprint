@@ -65,13 +65,18 @@ final class AuthProtocolTest extends TestCase {
 	/** @dataProvider contentHashHeaderProvider */
 	public function testAContentHashMarksAReleasedTokenClient(array $headers): void
 	{
-		$error = Utils::client_update_error($headers);
+		$this->assertSame(Utils::client_update_message(), Utils::client_update_error($headers));
+	}
 
-		$this->assertSame('Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.', $error);
+	public function testTheClientUpdateMessageAvoidsWhatReleasedClientsMatch(): void
+	{
+		$message = Utils::client_update_message();
+
+		$this->assertSame('Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.', $message);
 		foreach (self::RELEASED_CLIENT_FRAGMENTS as $fragment) {
-			$this->assertStringNotContainsString($fragment, $error);
+			$this->assertStringNotContainsString($fragment, $message);
 		}
-		$this->assertStringNotContainsString(';', $error);
+		$this->assertStringNotContainsString(';', $message);
 	}
 
 	public static function contentHashHeaderProvider(): array

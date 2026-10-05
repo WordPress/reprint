@@ -103,7 +103,7 @@ describe('Import: Reprint Server plugin authentication', () => {
         assert.match(body.error, /^Update the Reprint client to version \S+ or later\.$/);
     });
 
-    it('serves a v0.10.12 key client', async () => {
+    it('asks a v0.10.12 key client to update the client', async () => {
         const url = getSiteUrl(site);
         // The enrolled harness key, signing the way v0.10.12 does.
         const { signer } = getHarnessKey(getSiteSecret(site));
@@ -121,8 +121,10 @@ describe('Import: Reprint Server plugin authentication', () => {
                 'Content-Type': 'application/json',
             },
         });
-        assert.equal(response.status, 200, 'A v0.10.12 key request must reach preflight');
-        const report = await response.json();
-        assert.ok(report && report.php, 'preflight answered with its JSON report');
+        // The signature is valid, but it names no endpoint.
+        assert.equal(response.status, 403);
+        const body = await response.json();
+        assert.equal(body.reason, 'client_update_required');
+        assert.match(body.error, /^Update the Reprint client to version \S+ or later\.$/);
     });
 });

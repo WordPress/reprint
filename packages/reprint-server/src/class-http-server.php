@@ -225,15 +225,11 @@ final class HTTPServer {
             }
         }
 
-        // The endpoint is part of the signed request target, so the query's
-        // value wins. Released key clients send a pull endpoint in the body
-        // and sign the bare API URL. A push endpoint comes only from the query.
-        $body_endpoint = $params['endpoint'] ?? null;
+        // The endpoint is part of the signed request target, so only the
+        // query's value counts. A body endpoint is ignored.
         unset($params['endpoint']);
         if (array_key_exists('endpoint', $get)) {
             $params = ['endpoint' => $get['endpoint']] + $params;
-        } elseif (is_string($body_endpoint) && strpos($body_endpoint, 'push_') !== 0) {
-            $params = ['endpoint' => $body_endpoint] + $params;
         }
 
         foreach ($params as $key => $value) {

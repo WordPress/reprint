@@ -386,7 +386,7 @@ final class ExportHttpServerTest extends TestCase
     }
 
     /** @dataProvider bodyEndpointProvider */
-    public function testParseHttpConfigPrefersTheQueryEndpoint(array $get, array $post, string $content_type, string $body, ?string $expected): void
+    public function testParseHttpConfigReadsTheEndpointFromTheQueryOnly(array $get, array $post, string $content_type, string $body, ?string $expected): void
     {
         $config = ( new \WordPress\Reprint\Server\HTTPServer() )->parse_http_config($get, $post, ['CONTENT_TYPE' => $content_type], $body);
 
@@ -398,8 +398,8 @@ final class ExportHttpServerTest extends TestCase
         return [
             'form body names another' => [['reprint-api' => '', 'endpoint' => 'preflight'], ['endpoint' => 'db_index'], 'application/x-www-form-urlencoded', 'endpoint=db_index', 'preflight'],
             'json body names another' => [['reprint-api' => '', 'endpoint' => 'preflight'], [], 'application/json', '{"endpoint":"db_index"}', 'preflight'],
-            'form body only' => [['reprint-api' => ''], ['endpoint' => 'db_index'], 'application/x-www-form-urlencoded', 'endpoint=db_index', 'db_index'],
-            'json body only' => [['reprint-api' => ''], [], 'application/json', '{"endpoint":"preflight"}', 'preflight'],
+            'form body only' => [['reprint-api' => ''], ['endpoint' => 'db_index'], 'application/x-www-form-urlencoded', 'endpoint=db_index', null],
+            'json body only' => [['reprint-api' => ''], [], 'application/json', '{"endpoint":"preflight"}', null],
             'json body names a push endpoint' => [['reprint-api' => ''], [], 'application/json', '{"endpoint":"push_commit"}', null],
             'json body names a non-string endpoint' => [['reprint-api' => ''], [], 'application/json', '{"endpoint":["push_commit"]}', null],
             'neither' => [['reprint-api' => ''], [], 'application/json', '{"directory":"/site"}', null],

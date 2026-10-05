@@ -1157,6 +1157,15 @@ final class Utils
         if (self::request_header($headers, 'X-Auth-Content-Hash') === null) {
             return null;
         }
+        return self::client_update_message();
+    }
+
+    /**
+     * Names the client release a refused released client must install. It
+     * contains none of the fragments released clients match in an
+     * authentication message, so they print it after "Authentication failed:".
+     */
+    public static function client_update_message(): string {
         return 'Update the Reprint client to version ' . self::AUTH_VERSION_CLIENT_RELEASE . ' or later.';
     }
 

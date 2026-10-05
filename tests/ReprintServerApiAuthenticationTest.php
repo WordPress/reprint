@@ -184,7 +184,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
     // ── Protocol version ──
 
-    public function testKeyHostDispatchesAReleasedKeyClientsBodyEndpoint(): void
+    public function testAReleasedKeyClientIsAskedToUpdateTheClient(): void
     {
         $key_client = $this->newKeyClient();
         $this->startServer(['options' => $this->keyOptions($key_client, false)]);
@@ -193,7 +193,19 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $headers = $key_client->get_auth_headers('POST', $this->base_url) + ['Content-Type' => 'application/json'];
         $response = $this->request($headers, $this->base_url, 'POST', json_encode(['endpoint' => self::PULL_PROBE_ENDPOINT]));
 
-        $this->assertReachedDispatcher($response);
+        $this->assertClientUpdateRequired($response);
+    }
+
+    public function testAStrippedEndpointFailsAuthenticationInsteadOfAskingForAnUpdate(): void
+    {
+        $key_client = $this->newKeyClient();
+        $this->startServer(['options' => $this->keyOptions($key_client, false)]);
+
+        // A firewall removed the endpoint from a 0.11 request on the way.
+        $response = $this->request($key_client->get_auth_headers('GET', $this->endpointUrl('preflight')), $this->base_url);
+
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('signature_mismatch', $response['body']['reason']);
     }
 
     public function testAReleasedKeyClientIsAuthenticated(): void
@@ -236,13 +248,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
             'X-Auth-Content-Hash' => hash('sha256', ''),
         ]);
 
-        // v0.10.12 treats a 403 as an authentication answer. No reason it
-        // knows matches, so it prints "Authentication failed: " followed by
-        // this message.
-        $this->assertSame(403, $response['status']);
-        $this->assertSame('client_update_required', $response['body']['reason']);
-        $this->assertSame(2, $response['body']['auth_version']);
-        $this->assertSame('Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.', $response['body']['error']);
+        $this->assertClientUpdateRequired($response);
     }
 
     public function testEveryAuthenticationErrorCarriesTheVersion(): void
@@ -328,6 +334,20 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
             $response['body']['error']
         );
         $this->assertArrayNotHasKey('status', $response['body'], 'a pull endpoint keeps the pull error shape');
+    }
+
+    /**
+     * v0.10.12 treats a 403 as an authentication answer. No reason it knows
+     * matches, so it prints "Authentication failed: " followed by the message.
+     *
+     * @param array{status:int,body:array<string,mixed>} $response
+     */
+    private function assertClientUpdateRequired(array $response): void
+    {
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('client_update_required', $response['body']['reason']);
+        $this->assertSame(2, $response['body']['auth_version']);
+        $this->assertSame('Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.', $response['body']['error']);
     }
 
     /** @param array{status:int,body:array<string,mixed>} $response */
