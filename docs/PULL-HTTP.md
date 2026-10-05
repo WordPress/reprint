@@ -26,10 +26,10 @@ transport. A released token client, recognised by its
 `X-Auth-Content-Hash` header, is refused with `client_update_required` before
 its request is dispatched. When a parameter appears in both places, the
 POST value wins for JSON and form bodies. The endpoint is the exception. The
-server dispatches the query's value. When the query names none, it takes the
-body's value unless that value is a push endpoint. Released key clients send
-the endpoint in the body, so this fallback keeps them working. It ends in
-0.11.1. Existing multipart file-list uploads keep their file
+server dispatches only the query's value and ignores a body endpoint. The
+plugin refuses an authenticated request whose query names no endpoint with
+`client_update_required`, since only released key clients send the endpoint
+in the body. Existing multipart file-list uploads keep their file
 part, and their options may stay in the query string.
 
 Requests are signed over newline-joined fields behind a version label. The

@@ -279,9 +279,9 @@ accepts only a connection token shared by both sides, and a key signature is ref
 The settings page under **Tools → Reprint Server** (the network settings page on multisite) says which of the two
 the host accepts. The importer never retries with the other scheme.
 
-Key clients from v0.10.12 on work with this plugin, and this client's key signatures work with plugins from v0.10.12 on. Token authentication changed format: update the client and the plugin together. The plugin tells an older token client to update, and the client tells you to update the plugin when the site's plugin is older.
+This client's key signatures work with plugins from v0.10.12 on. Key clients older than 0.11.0 send the endpoint in the request body, and the plugin tells them to update. Token authentication changed format: update the client and the plugin together. The plugin tells an older token client to update, and the client tells you to update the plugin when the site's plugin is older.
 
-**Upgrading.** The plugin still accepts the endpoint in the request body from v0.10.12 and v0.10.13 key clients. 0.11.1 removes that, so update those clients before then. A firewall in front of the site must let the `endpoint` query parameter through. Embedders that called `verify_hmac()`, `default_authenticate()`, or their `_site_export_` aliases must change, since those functions are gone. Call `handle_api_request()`, which authenticates through `RequestAuthenticator`, or pass an `authenticate` callable.
+**Upgrading.** Update v0.10.12 and v0.10.13 key clients to 0.11.0 or later. A firewall in front of the site must let the `endpoint` query parameter through. Embedders that called `verify_hmac()`, `default_authenticate()`, or their `_site_export_` aliases must change, since those functions are gone. Call `handle_api_request()`, which authenticates through `RequestAuthenticator`, or pass an `authenticate` callable.
 
 **Public keys.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 3072-bit RSA key, stores
 the private half at `<state-dir>/remotes/<md5-of-url>/key.pem` with mode `0600`, and prints the key id and the
