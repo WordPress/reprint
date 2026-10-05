@@ -7,8 +7,9 @@ use InvalidArgumentException;
 /**
  * Verifies requests signed by PublicKeyClient against enrolled public keys.
  *
- * A signature covers who sent the request, when, and the method and request
- * target. No body is read: TLS protects the request.
+ * A signature covers who sent the request, when, and the method and the
+ * request target, whose query names the endpoint. No body is read: TLS
+ * protects the request.
  *
  * The host rule is enforced here, not in a wrapper an embedder might skip:
  * on a host that does not accept key signatures this class refuses every
@@ -83,18 +84,9 @@ final class PublicKeyServer {
             }
         }
 
-        if (!is_numeric($timestamp)) {
-            return $this->fail(self::REASON_AUTH_FAILED, 'Invalid timestamp format');
-        }
-        $time_difference = abs(( $now === null ? microtime(true) : $now ) - (float) $timestamp);
-        if ($time_difference > $this->timestamp_tolerance) {
-            return $this->fail(
-                self::REASON_TIMESTAMP_EXPIRED,
-                sprintf('Request timestamp expired. Difference: %.2f seconds, max allowed: %d seconds', $time_difference, $this->timestamp_tolerance)
-            );
-        }
-        if (!preg_match('/^[0-9a-fA-F]{16,}\z/', $nonce)) {
-            return $this->fail(self::REASON_AUTH_FAILED, 'Nonce must be at least 16 hexadecimal characters');
+        $freshness_error = Utils::freshness_error($nonce, $timestamp, $this->timestamp_tolerance, $now);
+        if ($freshness_error !== null) {
+            return $this->fail($freshness_error[0], $freshness_error[1]);
         }
 
         if (!isset($this->public_keys_by_id[$key_id])) {

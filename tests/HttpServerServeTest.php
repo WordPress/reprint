@@ -20,7 +20,7 @@ final class HttpServerServeTest extends TestCase
     public function testServeLoadsExportPhpWhenNotYetLoaded(): void
     {
         $script = <<<PHP
-        \$_POST['endpoint'] = 'preflight';
+        \$_GET['endpoint'] = 'preflight';
         \$_POST['directory'] = base64_encode(sys_get_temp_dir());
 
         require '{$this->classPath()}';
@@ -48,7 +48,7 @@ final class HttpServerServeTest extends TestCase
     public function testServeDoesNotRedundantlyReloadExportPhp(): void
     {
         $script = <<<PHP
-        \$_POST['endpoint'] = 'preflight';
+        \$_GET['endpoint'] = 'preflight';
         \$_POST['directory'] = base64_encode(sys_get_temp_dir());
 
         require '{$this->classPath()}';
@@ -67,7 +67,7 @@ final class HttpServerServeTest extends TestCase
     public function testServeForwardsOptionsToConstructor(): void
     {
         $script = <<<PHP
-        \$_POST['endpoint'] = 'preflight';
+        \$_GET['endpoint'] = 'preflight';
 
         require '{$this->classPath()}';
 

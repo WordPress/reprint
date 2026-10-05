@@ -128,4 +128,13 @@ final class PublicKeyClientTest extends TestCase
         $this->assertCount(4, $curl_headers);
         $this->assertStringStartsWith('X-Auth-Key-Id: ', $curl_headers[0]);
     }
+
+    public function testSignsTheV1KeyMessage(): void
+    {
+        $this->assertSame('reprint-rsa-sha256-v1', PublicKeyClient::ALGORITHM);
+        $this->assertSame(
+            "reprint-rsa-sha256-v1\nkid\n" . str_repeat('a', 32) . "\n1700000000.000000\nPOST\n/?reprint-api&endpoint=preflight",
+            PublicKeyClient::build_message('kid', str_repeat('a', 32), '1700000000.000000', 'post', '/?reprint-api&endpoint=preflight')
+        );
+    }
 }

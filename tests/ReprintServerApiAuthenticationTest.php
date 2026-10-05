@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use WordPress\Reprint\Server\PublicKeyClient;
+use WordPress\Reprint\Server\Utils;
 
 /**
  * Authenticates real HTTP requests through the plugin entry point.
@@ -76,9 +77,8 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $this->assertSame(503, $response['status']);
         $this->assertSame('no_keys_enrolled', $response['body']['reason']);
         $this->assertStringEndsWith(
-            'Update the Reprint client to a version that has `reprint keygen`, run it, and enroll the printed key under Tools > Reprint Server.',
-            $response['body']['error'],
-            'a released client prints this message as it receives it and cannot sign with a key'
+            'Set up the connection in WordPress admin under Tools > Reprint Server.',
+            $response['body']['error']
         );
     }
 
@@ -101,7 +101,6 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
         $this->assertSame(403, $response['status']);
         $this->assertSame('requires_key_auth', $response['body']['reason']);
-        $this->assertStringContainsString('Update the Reprint client', $response['body']['error']);
     }
 
     public function testKeyHostAcceptsAValidKeySignature(): void
@@ -170,6 +169,118 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $this->assertStringStartsWith("Invalid endpoint: '" . self::PUSH_PROBE_ENDPOINT . "'", $response['body']['detail']);
     }
 
+    public function testDatabasePushWithoutAHostConfiguredRouteIsRefused(): void
+    {
+        $key_client = $this->newKeyClient();
+        $this->startServer(['options' => $this->tokenOptions(false) + $this->keyOptions($key_client, true)]);
+
+        $url = $this->endpointUrl('push_db_status');
+        $response = $this->request($key_client->get_envelope_auth_headers('GET', $url), $url);
+
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('push_disabled', $response['body']['reason']);
+        $this->assertStringContainsString('host-configured standalone API route', $response['body']['detail']);
+    }
+
+    // ── Protocol version ──
+
+    public function testKeyHostDispatchesAReleasedKeyClientsBodyEndpoint(): void
+    {
+        $key_client = $this->newKeyClient();
+        $this->startServer(['options' => $this->keyOptions($key_client, false)]);
+
+        // v0.10.12 signs the bare API URL and names the endpoint in the JSON body.
+        $headers = $key_client->get_auth_headers('POST', $this->base_url) + ['Content-Type' => 'application/json'];
+        $response = $this->request($headers, $this->base_url, 'POST', json_encode(['endpoint' => self::PULL_PROBE_ENDPOINT]));
+
+        $this->assertReachedDispatcher($response);
+    }
+
+    public function testAReleasedKeyClientIsAuthenticated(): void
+    {
+        [$private_pem, ] = PublicKeyClient::generate_keypair();
+        $key_client = new PublicKeyClient($private_pem);
+        $this->startServer(['options' => $this->keyOptions($key_client, false)]);
+        $url = $this->endpointUrl(self::PULL_PROBE_ENDPOINT);
+
+        // What v0.10.12 sends: a reprint-rsa-sha256-v1 signature and no version header.
+        $nonce = bin2hex(random_bytes(16));
+        $timestamp = sprintf('%.6f', microtime(true));
+        $message = implode("\n", [
+            'reprint-rsa-sha256-v1',
+            $key_client->get_key_id(),
+            $nonce,
+            $timestamp,
+            'GET',
+            Site_Export_HMAC_Client::request_target($url),
+        ]);
+        $this->assertTrue(openssl_sign($message, $signature, $private_pem, OPENSSL_ALGO_SHA256));
+        $response = $this->request([
+            'X-Auth-Key-Id' => $key_client->get_key_id(),
+            'X-Auth-Signature' => base64_encode($signature),
+            'X-Auth-Nonce' => $nonce,
+            'X-Auth-Timestamp' => $timestamp,
+        ], $url);
+
+        $this->assertReachedDispatcher($response);
+    }
+
+    public function testAReleasedTokenClientIsAskedToUpdateTheClient(): void
+    {
+        $this->startServer(['key_auth_required' => false, 'options' => $this->tokenOptions()]);
+
+        $response = $this->request([
+            'X-Auth-Signature' => str_repeat('0', 64),
+            'X-Auth-Nonce' => str_repeat('a', 32),
+            'X-Auth-Timestamp' => sprintf('%.6f', microtime(true)),
+            'X-Auth-Content-Hash' => hash('sha256', ''),
+        ]);
+
+        // v0.10.12 treats a 403 as an authentication answer. No reason it
+        // knows matches, so it prints "Authentication failed: " followed by
+        // this message.
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('client_update_required', $response['body']['reason']);
+        $this->assertSame(2, $response['body']['auth_version']);
+        $this->assertSame('Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.', $response['body']['error']);
+    }
+
+    public function testEveryAuthenticationErrorCarriesTheVersion(): void
+    {
+        $this->startServer(['key_auth_required' => false, 'options' => $this->tokenOptions()]);
+
+        $response = $this->request([]);
+
+        $this->assertSame('missing_header', $response['body']['reason']);
+        $this->assertSame(2, $response['body']['auth_version']);
+    }
+
+    public function testAPushAuthenticationErrorCarriesTheVersion(): void
+    {
+        $this->startServer(['options' => $this->keyOptions($this->newKeyClient(), true)]);
+
+        $response = $this->request([], $this->endpointUrl(self::PUSH_PROBE_ENDPOINT));
+
+        $this->assertSame('rejected', $response['body']['status']);
+        $this->assertSame('requires_key_auth', $response['body']['reason']);
+        $this->assertSame(2, $response['body']['auth_version']);
+    }
+
+    public function testASignatureOverAnotherEndpointIsRejected(): void
+    {
+        $key_client = $this->newKeyClient();
+        $this->startServer(['options' => $this->keyOptions($key_client, false)]);
+
+        // Signed for preflight, sent to the probe endpoint.
+        $response = $this->request(
+            $key_client->get_auth_headers('GET', $this->endpointUrl('preflight')),
+            $this->endpointUrl(self::PULL_PROBE_ENDPOINT)
+        );
+
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('signature_mismatch', $response['body']['reason']);
+    }
+
     // ── HMAC-only host (forced through the Utils override) ──
 
     public function testHmacHostReturnsNotConfiguredWhenNoTokenIsStored(): void
@@ -182,8 +293,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $this->assertSame('not_configured', $response['body']['reason']);
         $this->assertStringEndsWith(
             'Set up the connection in WordPress admin under Tools > Reprint Server.',
-            $response['body']['error'],
-            'released clients print this message as they receive it'
+            $response['body']['error']
         );
     }
 
@@ -258,7 +368,8 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
     /** @return array{status:int,body:array<string,mixed>} */
     private function pullWithToken(): array
     {
-        return $this->request(( new Site_Export_HMAC_Client(self::TOKEN) )->get_auth_headers(''));
+        $url = $this->endpointUrl(self::PULL_PROBE_ENDPOINT);
+        return $this->request(( new Site_Export_HMAC_Client(self::TOKEN) )->get_auth_headers('GET', $url), $url);
     }
 
     /** @return array{status:int,body:array<string,mixed>} */
@@ -277,7 +388,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
     private function endpointUrl(string $endpoint): string
     {
-        return $this->base_url . '&endpoint=' . rawurlencode($endpoint);
+        return Utils::endpoint_url($this->base_url, $endpoint);
     }
 
     /**

@@ -279,7 +279,7 @@ final class PublicKeyServerTest extends TestCase
     public function testHmacHeadersCannotPassTheKeyPath(): void
     {
         $hmac = new Site_Export_HMAC_Client('secret');
-        $headers = $hmac->get_auth_headers('');
+        $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $server = $this->server();
 
         $this->assertSame('Missing X-Auth-Key-Id header', $server->verify($headers, 'GET', '/?reprint-api', (float) $headers['X-Auth-Timestamp'] + 1.0));
