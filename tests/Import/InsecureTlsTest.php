@@ -137,13 +137,13 @@ final class InsecureTlsTest extends TestCase {
                     $received .= $chunk['body'];
                 }
             };
-            ( new \ReflectionMethod($client, 'fetch_streaming') )->invoke($client, $this->https_url, $context, [
-                'endpoint' => 'file_fetch', 'file_list' => new \CURLFile($file_list, 'application/json', 'file-list.json'),
+            ( new \ReflectionMethod($client, 'fetch_streaming') )->invoke($client, \WordPress\Reprint\Server\Utils::endpoint_url($this->https_url, 'file_fetch'), $context, [
+                'file_list' => new \CURLFile($file_list, 'application/json', 'file-list.json'),
             ], 'file_fetch');
             $this->assertSame(file_get_contents($this->root . '/remote/example.txt'), $received);
         }
         $secure_client = new \ImportClient($this->https_url, $this->root . '/secure-state', $this->root . '/local');
-        $result = ( new \ReflectionMethod($secure_client, 'fetch_json') )->invoke($secure_client, $this->https_url, ['endpoint' => 'preflight']);
+        $result = ( new \ReflectionMethod($secure_client, 'fetch_json') )->invoke($secure_client, \WordPress\Reprint\Server\Utils::endpoint_url($this->https_url, 'preflight'), []);
         $this->assertFalse($result['ok']);
         $this->assertSame(CURLE_SSL_CACERT, $result['curl_errno']);
         $this->assertFalse(getenv('REPRINT_INSECURE_TLS'));

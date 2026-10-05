@@ -72,7 +72,7 @@ final class ZipwpAccessCookieTest extends TestCase {
     public function testPreflightSendsCookieOnlyToZipwpSubdomains(string $remote_reprint_api_url, bool $expects_cookie): void
     {
         $client = $this->create_client($remote_reprint_api_url);
-        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url, ['endpoint' => 'preflight']);
+        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, \WordPress\Reprint\Server\Utils::endpoint_url($remote_reprint_api_url, 'preflight'), []);
         $cookie = trim(file_get_contents($this->root . '/cookie.log'));
 
         if ($expects_cookie) {
@@ -122,8 +122,7 @@ final class ZipwpAccessCookieTest extends TestCase {
                     $received .= $chunk['body'];
                 }
             };
-            $fetch->invoke($client, $remote_reprint_api_url, $context, [
-                'endpoint' => 'file_fetch',
+            $fetch->invoke($client, \WordPress\Reprint\Server\Utils::endpoint_url($remote_reprint_api_url, 'file_fetch'), $context, [
                 'file_list' => new \CURLFile($file_list_path, 'application/json', 'file-list.json'),
             ], 'file_fetch');
             $this->assertSame('temporary site contents', $received);
@@ -134,9 +133,10 @@ final class ZipwpAccessCookieTest extends TestCase {
     {
         $remote_reprint_api_url = 'http://demo.zipwp.to/?reprint-api';
         $client = $this->create_client($remote_reprint_api_url, 'wrong-token');
-        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, $remote_reprint_api_url, ['endpoint' => 'preflight']);
+        $result = ( new \ReflectionMethod($client, 'fetch_json') )->invoke($client, \WordPress\Reprint\Server\Utils::endpoint_url($remote_reprint_api_url, 'preflight'), []);
         $this->assertSame(401, $result['http_code']);
         $this->assertSame('AUTH_SECRET_MISMATCH', $result['error_code']);
+        $this->assertStringContainsString('This machine signed: /?reprint-api&endpoint=preflight', $result['error']);
     }
 
     public function testPushControlAndUploadRequestsPassTheTemporarySitePage(): void

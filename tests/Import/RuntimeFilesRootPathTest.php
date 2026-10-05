@@ -220,7 +220,7 @@ final class RuntimeFilesRootPathTest extends TestCase
 <?php
 // Query fields select the fixture response; client-generated export fields arrive in POST.
 $request = array(
-    'endpoint' => $_POST['endpoint'] ?? null,
+    'endpoint' => $_GET['endpoint'] ?? null,
     'directory' => isset($_POST['directory'])
         ? (array) $_POST['directory']
         : null,

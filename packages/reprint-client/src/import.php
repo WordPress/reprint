@@ -48,6 +48,8 @@ use function Reprint\Importer\resolve_sqlite_integration_path;
 use function Reprint\Importer\resolve_sqlite_integration_plugin_path;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\unsupported_media_type_error_detail;
+use function Reprint\Importer\is_older_plugin_authentication_refusal;
+use function Reprint\Importer\older_plugin_authentication_error_detail;
 use function Reprint\Importer\wordpress_admin_referer;
 use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
@@ -598,7 +600,7 @@ class ImportClient
         }
 
         $this->insecure = $insecure || '1' === getenv('REPRINT_INSECURE_TLS');
-        self::validate_remote_reprint_api_url_transport($remote_reprint_api_url, $allow_http || $this->insecure);
+        self::validate_remote_reprint_api_url($remote_reprint_api_url, $allow_http || $this->insecure);
         $this->remote_reprint_api_url = $remote_reprint_api_url;
         // Some WAFs reject automated requests without User-Agent or Referer.
         // Accept-Language supplies the browser-language context managed hosts
@@ -680,13 +682,31 @@ class ImportClient
         $this->state = new PullState();
     }
 
-    public static function validate_remote_reprint_api_url_transport(string $remote_reprint_api_url, bool $allow_http): void
+    /**
+     * Refuses a remote Reprint API URL that no command can use.
+     *
+     * Every request appends its endpoint to the end of this URL. After a
+     * fragment, the endpoint would land in the fragment, which cURL never
+     * sends, so the site would receive a request without an endpoint.
+     *
+     * @param string $remote_reprint_api_url Remote Reprint API URL as supplied.
+     * @param bool   $allow_http             Whether an unencrypted http:// URL is accepted.
+     * @throws InvalidArgumentException When the URL uses HTTP without permission or contains a fragment.
+     */
+    public static function validate_remote_reprint_api_url(string $remote_reprint_api_url, bool $allow_http): void
     {
         if (!$allow_http && strncasecmp($remote_reprint_api_url, 'http://', 7) === 0) {
             throw new InvalidArgumentException(
                 'The remote Reprint API URL you provided uses HTTP. '
                 . 'HTTP is unencrypted, so transferring a site over it can expose its data, including passwords, to eavesdropping. '
                 . 'Provide an HTTPS URL, or pass --insecure to accept this risk.'
+            );
+        }
+        if (strpos($remote_reprint_api_url, '#') !== false) {
+            $masked_remote_reprint_api_url = self::mask_url_credentials($remote_reprint_api_url);
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option error, not HTML.
+                'The remote Reprint API URL must not contain a fragment: ' . $masked_remote_reprint_api_url . '.'
             );
         }
     }
@@ -2414,7 +2434,7 @@ class ImportClient
         if ( ( $options['insecure'] ?? false ) === true || '1' === getenv('REPRINT_INSECURE_TLS')) {
             $allow_http = true;
         }
-        self::validate_remote_reprint_api_url_transport(
+        self::validate_remote_reprint_api_url(
             $remote_reprint_api_url,
             $allow_http
         );
@@ -2462,11 +2482,6 @@ class ImportClient
     ): string {
         $masked_remote_reprint_api_url =
             self::mask_url_credentials($remote_reprint_api_url);
-        if (strpos($remote_reprint_api_url, '#') !== false) {
-            throw new InvalidArgumentException(
-                'The ' . $command . ' remote Reprint API URL must not contain a fragment: ' . $masked_remote_reprint_api_url . '.'
-            );
-        }
         $remote_reprint_api_url_user = parse_url($remote_reprint_api_url, PHP_URL_USER);
         $remote_reprint_api_url_password = parse_url($remote_reprint_api_url, PHP_URL_PASS);
         if (is_string($remote_reprint_api_url_user) || is_string($remote_reprint_api_url_password)) {
@@ -3683,7 +3698,12 @@ class ImportClient
             return ['code' => 'PREFLIGHT_REQUIRED', 'message' => "No preflight data found. Run 'preflight' first."];
         }
         if ( ( $entry["http_code"] ?? 0 ) !== 200 ) {
-            $diagnosis = $this->diagnose_http_error($entry["http_code"] ?? 0, $entry["response_body_preview"] ?? null);
+            $diagnosis = $this->diagnose_http_error(
+                $entry["http_code"] ?? 0,
+                $entry["response_body_preview"] ?? null,
+                null,
+                Utils::endpoint_url($this->remote_reprint_api_url, 'preflight')
+            );
             return [
                 'code' => $entry["error_code"] ?? $diagnosis['code'],
                 'message' => $entry["error"] ?? $diagnosis['message'],
@@ -12551,13 +12571,13 @@ class ImportClient
     }
 
     /**
-     * Use the supplied URL unchanged; send client-generated parameters in the body.
+     * Put the endpoint in the query of the supplied URL and every other client-generated parameter in the body.
      *
      * @param array $params Endpoint-specific pull options, including tuning,
      *                      path selections, table selections, and row filters.
      * @return array {
-     *     @type string $url    API URL exactly as supplied by the caller.
-     *     @type array  $params Endpoint and options to send in the POST body.
+     *     @type string $url    API URL with the endpoint appended to its query.
+     *     @type array  $params Options to send in the POST body.
      * }
      */
     private function build_request(
@@ -12565,10 +12585,7 @@ class ImportClient
         ?string $cursor,
         array $params = []
     ): array {
-        // Keep endpoint before multipart file data so hosts can route the
-        // request without first reading a potentially large file list.
         unset($params['endpoint']);
-        $params = ['endpoint' => $endpoint] + $params;
         $preflight_record = $this->get_state()->preflight_record();
         // Preflight keeps the legacy path parameters so a new client can learn
         // whether an older server supports the base64 form before using it.
@@ -12600,7 +12617,7 @@ class ImportClient
         if ($cursor !== null) {
             $params["cursor"] = $cursor;
         }
-        return ['url' => $this->remote_reprint_api_url, 'params' => $params];
+        return ['url' => Utils::endpoint_url($this->remote_reprint_api_url, $endpoint), 'params' => $params];
     }
 
     /**
@@ -12740,18 +12757,15 @@ class ImportClient
      * Authentication headers for curl ("Name: value"), or [] with no credential.
      *
      * @param string $method HTTP method of the request being built.
-     * @param string $url    Full request URL.
-     * @param string $body   Raw content a connection token signs the hash of: file
-     *                       contents for uploads, http_build_query() output for forms,
-     *                       '' otherwise. A key signature does not cover the body.
+     * @param string $url    Full request URL, endpoint included.
      */
-    private function get_auth_headers(string $method, string $url, string $body = ''): array
+    private function get_auth_headers(string $method, string $url): array
     {
         if ($this->public_key_client !== null) {
             return $this->public_key_client->get_curl_headers($method, $url);
         }
         if ($this->hmac_client !== null) {
-            return $this->hmac_client->get_curl_headers($body);
+            return $this->hmac_client->get_curl_headers($method, $url);
         }
         return [];
     }
@@ -13098,10 +13112,14 @@ class ImportClient
      * @param int         $http_code    HTTP status code (0 for connection failures).
      * @param string|null $body         Response body (may be HTML, JSON, or empty).
      * @param string|null $redirect_url The Location header / CURLINFO_REDIRECT_URL for 3xx responses.
+     * @param string|null $request_url  Full URL of the diagnosed request, endpoint included. A
+     *                                  signature mismatch names its signed target. Without it
+     *                                  the message names the API URL.
      */
-    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null): array
+    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null, ?string $request_url = null): array
     {
         $body = ($body !== null && $body !== false) ? $body : '';
+        $signed_request_target = Site_Export_HMAC_Client::request_target($request_url ?? $this->remote_reprint_api_url);
 
         $decoded = json_decode($body, true);
         $server_msg = is_array($decoded) ? ($decoded['error'] ?? null) : null;
@@ -13144,6 +13162,39 @@ class ImportClient
             if ($using_key) {
                 $key_hint = "\n\nYour public key (key id " . $this->public_key_client->get_key_id() . "):\n\n  "
                     . $this->public_key_client->get_public_key();
+            }
+
+            // Older plugins verify this client's key signatures, so only a
+            // token request can be refused for the plugin's age.
+            if (
+                $this->hmac_client !== null
+                && is_older_plugin_authentication_refusal($http_code, $decoded)
+            ) {
+                return [
+                    'code' => 'AUTH_PLUGIN_OUTDATED',
+                    'message' => older_plugin_authentication_error_detail(),
+                ];
+            }
+            // A plugin older than the key stack refuses a key request with a
+            // Reprint error body that has no reason.
+            if (
+                $using_key
+                && $server_reason === null
+                && is_older_plugin_authentication_refusal($http_code, $decoded)
+            ) {
+                return [
+                    'code' => 'AUTH_KEY_UNSUPPORTED',
+                    'message' =>
+                        "The site rejected the key signature without a reason code, which an older " .
+                        "Reprint Server plugin does when it does not understand key authentication.\n\n" .
+                        "Ask the site owner to update the Reprint Server plugin, or use --secret with a connection token.",
+                ];
+            }
+            if ($server_reason === 'client_update_required') {
+                return [
+                    'code' => 'AUTH_VERSION_MISMATCH',
+                    'message' => is_string($server_msg) ? $server_msg : 'The site uses another Reprint authentication version.',
+                ];
             }
 
             if ($server_reason === 'requires_key_auth') {
@@ -13223,28 +13274,18 @@ class ImportClient
                 ];
             }
 
-            if ($using_key && $server_reason === null) {
-                return [
-                    'code' => 'AUTH_KEY_UNSUPPORTED',
-                    'message' =>
-                        "The site rejected the key signature without a reason code, which an older " .
-                        "Reprint Server plugin does when it does not understand key authentication.\n\n" .
-                        "Ask the site owner to update the Reprint Server plugin, or use --secret with a connection token.",
-                ];
-            }
-
-            $auth_reason = $server_reason ?? self::auth_reason_from_legacy_message($server_msg);
-
-            if (!$using_key && $auth_reason === 'signature_mismatch') {
+            if (!$using_key && $server_reason === 'signature_mismatch') {
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
-                        "Wrong connection token. The --secret value does not match " .
-                        "the one configured under Tools > Reprint Server in wp-admin.",
+                        "Signature rejected. Either the --secret value does not match the connection token " .
+                        "under Tools > Reprint Server, or a proxy, CDN, or host rule is rewriting the request " .
+                        "path or query on its way to WordPress. This machine signed: " .
+                        $signed_request_target,
                 ];
             }
 
-            if ($using_key && $auth_reason === 'signature_mismatch') {
+            if ($using_key && $server_reason === 'signature_mismatch') {
                 // The site found the key by an id derived from the key itself,
                 // so the signed method, path, or query differs from what the
                 // site received.
@@ -13253,7 +13294,7 @@ class ImportClient
                     'message' =>
                         "Signature rejected. The site received a different request path or query than " .
                         "this machine signed: " .
-                        Site_Export_HMAC_Client::request_target($this->remote_reprint_api_url) . "\n\n" .
+                        $signed_request_target . "\n\n" .
                         "A proxy, CDN, or host rule is rewriting the request on its way to WordPress, " .
                         "for example by removing a path prefix. Use the URL at which WordPress itself " .
                         "receives the request, or ask the host to pass the path and query through unchanged. " .
@@ -13261,7 +13302,7 @@ class ImportClient
                 ];
             }
 
-            if ($auth_reason === 'timestamp_expired') {
+            if ($server_reason === 'timestamp_expired') {
                 return [
                     'code' => 'AUTH_CLOCK_SKEW',
                     'message' =>
@@ -13271,17 +13312,7 @@ class ImportClient
                 ];
             }
 
-            if ($auth_reason === 'content_hash_mismatch') {
-                return [
-                    'code' => 'AUTH_CONTENT_TAMPERED',
-                    'message' =>
-                        "Request body was modified in transit. A proxy, CDN, " .
-                        "or firewall between this machine and the server is " .
-                        "altering the request content.",
-                ];
-            }
-
-            if ($auth_reason === 'missing_header') {
+            if ($server_reason === 'missing_header') {
                 return [
                     'code' => 'AUTH_HEADERS_STRIPPED',
                     'message' =>
@@ -13387,26 +13418,6 @@ class ImportClient
     }
 
     /**
-     * Maps a refusal from a plugin that sends no reason code to the code a
-     * current plugin sends for it. Returns null for any other message.
-     */
-    private static function auth_reason_from_legacy_message(string $server_msg): ?string
-    {
-        $reasons_by_message_fragment = [
-            'HMAC signature verification failed' => 'signature_mismatch',
-            'timestamp expired' => 'timestamp_expired',
-            'Content hash mismatch' => 'content_hash_mismatch',
-            'Missing X-Auth-' => 'missing_header',
-        ];
-        foreach ($reasons_by_message_fragment as $message_fragment => $reason) {
-            if (Utils::str_contains($server_msg, $message_fragment)) {
-                return $reason;
-            }
-        }
-        return null;
-    }
-
-    /**
      * Whether Reprint itself sent this error. Its deliberate JSON failures
      * repeat the HTTP status in `code`. HTML, empty, and unmarked JSON
      * bodies can come from an upstream server or firewall instead.
@@ -13449,7 +13460,7 @@ class ImportClient
 
         $headers = [
             ...$this->get_base_headers("application/json"),
-            ...($this->get_auth_headers('POST', $url, $body)),
+            ...($this->get_auth_headers('POST', $url)),
         ];
 
         curl_setopt_array($ch, [
@@ -13498,7 +13509,7 @@ class ImportClient
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
 
         if ($http_code !== 200) {
-            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
+            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url, $url);
             return [
                 "ok" => false,
                 "http_code" => $http_code,
@@ -13598,10 +13609,8 @@ class ImportClient
             "Sec-Fetch-User: ?1",
         ];
 
-        // Configure POST data. We need to know the body
-        // content BEFORE generating HMAC headers so the content hash
-        // can be included in the signature.
-        $body_for_signing = '';
+        // The endpoint travels in the URL, which the signature covers. Every
+        // other export parameter travels in the body.
         $post_data = $post_data ?? [];
         curl_setopt($ch, CURLOPT_POST, true);
         $has_file = false;
@@ -13612,16 +13621,6 @@ class ImportClient
             }
         }
         if ($has_file) {
-            // For CURLFile uploads, sign the raw file content — this
-            // is the logical payload the server will receive, even
-            // though curl wraps it in multipart framing.
-            foreach ($post_data as $value) {
-                if ($value instanceof CURLFile) {
-                    $body_for_signing .= file_get_contents(
-                        $value->getFilename(),
-                    );
-                }
-            }
             // cURL requires flat multipart field names. PHP reconstructs the
             // bracketed names as arrays, just as it does for URL-encoded forms.
             $multipart_fields = [];
@@ -13643,12 +13642,10 @@ class ImportClient
             }
             curl_setopt($ch, CURLOPT_POSTFIELDS, $multipart_fields);
         } else {
-            $body_for_signing = http_build_query($post_data);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($post_data));
         }
 
-        // Append auth headers now that we know the body content
-        array_push($headers, ...($this->get_auth_headers('POST', $url, $body_for_signing)));
+        array_push($headers, ...($this->get_auth_headers('POST', $url)));
 
         curl_setopt_array($ch, [
             CURLOPT_FOLLOWLOCATION => false,
@@ -13916,7 +13913,7 @@ class ImportClient
                 true,
             );
 
-            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url);
+            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url, $url);
             $error_msg = $this->format_diagnosed_error($diagnosis);
 
             // Append stack trace from the server if available.
@@ -16453,7 +16450,7 @@ if (
     }
 
     try {
-        ImportClient::validate_remote_reprint_api_url_transport(
+        ImportClient::validate_remote_reprint_api_url(
             $remote_reprint_api_url,
             $options['allow_http'] ?? false
         );

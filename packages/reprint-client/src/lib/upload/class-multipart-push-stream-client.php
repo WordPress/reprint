@@ -3,7 +3,10 @@
 use function Reprint\Importer\apply_curl_ca_bundle;
 use function Reprint\Importer\apply_curl_proxy_from_environment;
 use function Reprint\Importer\apply_zipwp_access_cookie;
+use function Reprint\Importer\is_older_plugin_authentication_refusal;
+use function Reprint\Importer\older_plugin_authentication_error_detail;
 use function Reprint\Importer\unsupported_media_type_error_detail;
+use WordPress\Reprint\Server\Utils;
 
 require_once __DIR__ . '/../import/functions.php';
 
@@ -1195,8 +1198,7 @@ class MultipartPushStreamClient
      */
     private function endpoint_url(string $endpoint, array $parameters): string
     {
-        $parameters = array_merge(['endpoint' => $endpoint], $parameters);
-        return $this->remote_reprint_api_url . (strpos($this->remote_reprint_api_url, '?') === false ? '?' : '&') . http_build_query($parameters, '', '&', PHP_QUERY_RFC3986);
+        return Utils::endpoint_url($this->remote_reprint_api_url, $endpoint, $parameters);
     }
 
     /**
@@ -1333,12 +1335,22 @@ class MultipartPushStreamClient
             ];
         }
         $reason = is_string($response['reason'] ?? null) ? $response['reason'] : 'unexpected_response';
+        $http_code = (int) ( $response['http_code'] ?? 0 );
+        $detail = is_string($response['detail'] ?? null) ? $response['detail'] : 'HTTP ' . $http_code;
+        // files-push and db-push reuse the saved preflight, so a client
+        // upgraded during a project meets an older plugin's refusal here.
+        // Older plugins verify key signatures, so only a token request is
+        // refused for the plugin's age.
+        if (
+            $this->envelope_signer instanceof \Site_Export_HMAC_Client
+            && is_older_plugin_authentication_refusal($http_code, $response)
+        ) {
+            $detail = older_plugin_authentication_error_detail();
+        }
         return [
             'status' => in_array($reason, ['lock_acquisition_failure', 'offset_gap'], true) ? 'retry' : 'failed',
             'reason' => $reason,
-            'detail' => is_string($response['detail'] ?? null)
-                ? $response['detail']
-                : 'HTTP ' . (int) ($response['http_code'] ?? 0),
+            'detail' => $detail,
             'response' => $response,
             'parts_sent' => $this->parts_sent,
             'body_bytes_sent' => $this->body_bytes_sent,

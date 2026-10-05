@@ -9,18 +9,19 @@ require_once __DIR__ . '/../../../vendor/autoload.php';
 // accepting the connection token.
 \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
 $reprint_authentication = new \WordPress\Reprint\Server\HMACServer('tls-test-secret');
-if (\WordPress\Reprint\Server\HTTPServer::is_push_endpoint($_GET['endpoint'] ?? '')) {
-    $reprint_authentication_error = $reprint_authentication->verify_envelope(
-        getallheaders(),
-        $_SERVER['REQUEST_METHOD'],
-        Site_Export_HMAC_Client::request_target($_SERVER['REQUEST_URI'])
-    );
-} else {
-    $reprint_authentication_error = $reprint_authentication->verify(getallheaders(), file_get_contents('php://input'), $_FILES);
-}
+$reprint_authentication_error = $reprint_authentication->verify(
+    getallheaders(),
+    $_SERVER['REQUEST_METHOD'],
+    $_SERVER['REQUEST_URI']
+);
 if ($reprint_authentication_error !== null) {
     http_response_code(401);
-    echo json_encode(['error' => $reprint_authentication_error]);
+    echo json_encode([
+        'error' => $reprint_authentication_error,
+        'code' => 401,
+        'reason' => $reprint_authentication->last_error_reason(),
+        'auth_version' => \WordPress\Reprint\Server\Utils::AUTH_VERSION,
+    ]);
     return;
 }
 \WordPress\Reprint\Server\HTTPServer::serve([

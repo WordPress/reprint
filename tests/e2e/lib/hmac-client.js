@@ -1,80 +1,56 @@
 /**
  * Request signers for the Reprint Server API.
  *
- * HmacClient matches the PHP Site_Export_HMAC_Client:
- *   Signature = HMAC-SHA256(nonce + timestamp + SHA256(body), secret)
+ * Both classes sign the newline-joined message the PHP clients build: the
+ * algorithm label, the key id (keys only), nonce, timestamp, uppercase
+ * method, and request target (path?query). The request target's query names
+ * the endpoint, so a signature covers the endpoint it was made for. Any change
+ * to Site_Export_HMAC_Client::build_message() or
+ * PublicKeyClient::build_message() must be mirrored here.
  *
- * KeySigner matches the PHP PublicKeyClient and is what the harness signs
- * with by default, because a host with openssl_verify() accepts key
- * signatures only. A key signature does not cover the request body.
+ * HmacClient matches the PHP Site_Export_HMAC_Client. KeySigner matches the
+ * PHP PublicKeyClient and is what the harness signs with by default, because
+ * a host with openssl_verify() accepts key signatures only. Neither signature
+ * covers the request body.
  */
 import { createHash, createHmac, createPrivateKey, createPublicKey, randomBytes, sign } from 'node:crypto';
 
+/** The URL of one endpoint, the same URL Utils::endpoint_url() builds. */
+export function endpointUrl(apiUrl, endpoint) {
+    const trimmed = apiUrl.replace(/[?&]+$/, '');
+    return `${trimmed}${trimmed.includes('?') ? '&' : '?'}endpoint=${encodeURIComponent(endpoint)}`;
+}
+
 export class HmacClient {
+    static ALGORITHM = 'reprint-hmac-sha256-v2';
+
     constructor(secret) {
         this.secret = secret;
     }
 
-    /**
-     * Generate a cryptographically secure nonce (hex string, 32 chars).
-     */
-    generateNonce() {
-        return randomBytes(16).toString('hex');
-    }
-
-    /**
-     * Get current timestamp with microsecond precision.
-     */
-    getTimestamp() {
-        return (Date.now() / 1000).toFixed(6);
-    }
-
-    /**
-     * Compute SHA-256 hash of data.
-     */
-    sha256(data) {
-        return createHash('sha256').update(data).digest('hex');
-    }
-
-    /**
-     * Compute HMAC-SHA256 signature.
-     */
-    computeSignature(nonce, timestamp, contentHash) {
-        if (!contentHash) {
-            contentHash = this.sha256('');
+    /** @param {{method?: string, url: string}} options url is the full request URL, endpoint included. */
+    getAuthHeaders({ method = 'POST', url } = {}) {
+        if (typeof url !== 'string' || url === '') {
+            throw new Error('HmacClient needs the full request URL: the signature covers its path and query.');
         }
-        const message = nonce + timestamp + contentHash;
-        return createHmac('sha256', this.secret).update(message).digest('hex');
-    }
-
-    /**
-     * Get all authentication headers for a request.
-     * @param {string|Buffer} body - Request body (empty string for GET)
-     * @returns {Object} Headers object
-     */
-    getAuthHeaders(body = '') {
-        const nonce = this.generateNonce();
-        const timestamp = this.getTimestamp();
-        const bodyStr = typeof body === 'string' ? body : body.toString();
-        const contentHash = this.sha256(bodyStr);
-        const signature = this.computeSignature(nonce, timestamp, contentHash);
-
+        const nonce = randomBytes(16).toString('hex');
+        const timestamp = (Date.now() / 1000).toFixed(6);
+        const message = [HmacClient.ALGORITHM, nonce, timestamp, method.toUpperCase(), KeySigner.requestTarget(url)].join('\n');
         return {
-            'X-Auth-Signature': signature,
+            'X-Auth-Signature': createHmac('sha256', this.secret).update(message).digest('hex'),
             'X-Auth-Nonce': nonce,
             'X-Auth-Timestamp': timestamp,
-            'X-Auth-Content-Hash': contentHash,
         };
+    }
+
+    getEnvelopeAuthHeaders(method, url) {
+        return this.getAuthHeaders({ method, url });
     }
 }
 
 /**
  * Signs requests the way packages/reprint-server/src/class-public-key-client.php does.
- * Mirror any change to the signed message there; the server verifies both.
- *
- * The signed message is the newline-joined list: algorithm, key id, nonce,
- * timestamp, uppercase method, and request target (path?query). No body is
- * signed: TLS protects the request.
+ * No body is signed: TLS protects the request.
  */
 export class KeySigner {
     static ALGORITHM = 'reprint-rsa-sha256-v1';

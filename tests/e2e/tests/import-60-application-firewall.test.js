@@ -21,6 +21,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { endpointUrl } from '../lib/hmac-client.js';
 import {
     assertPullPipelineComplete,
     cleanupTempDir,
@@ -183,8 +184,9 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         assert.ok(records.length > 0);
         for (const record of records) {
             const url = new URL(record.path, firewallOrigin);
+            // The routing marker and the endpoint name are the only query parameters.
             for (const parameter of url.searchParams.keys()) {
-                assert.ok(parameter === 'reprint-api', parameter);
+                assert.ok(['reprint-api', 'endpoint'].includes(parameter), parameter);
             }
         }
     });
@@ -334,9 +336,9 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
 
     it('rejects a Reprint POST without the Referer', async () => {
         const response = await fetch(
-            `${firewallOrigin}/?reprint-api`,
+            endpointUrl(`${firewallOrigin}/?reprint-api`, 'preflight'),
             {
-                method: 'POST', body: 'endpoint=preflight',
+                method: 'POST', body: '',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Accept-Language': 'en-US,en;q=0.9',
@@ -351,9 +353,9 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
 
     it('rejects a Reprint POST without the User-Agent', async () => {
         const response = await fetch(
-            `${firewallOrigin}/?reprint-api`,
+            endpointUrl(`${firewallOrigin}/?reprint-api`, 'preflight'),
             {
-                method: 'POST', body: 'endpoint=preflight',
+                method: 'POST', body: '',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Accept-Language': 'en-US,en;q=0.9',
@@ -369,9 +371,9 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
 
     it('rejects a Reprint POST without Accept-Language', async () => {
         const response = await fetch(
-            `${firewallOrigin}/?reprint-api`,
+            endpointUrl(`${firewallOrigin}/?reprint-api`, 'preflight'),
             {
-                method: 'POST', body: 'endpoint=preflight',
+                method: 'POST', body: '',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
                     'Accept-Language': '',
@@ -387,7 +389,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
 
     it('rejects a clear absolute path after preflight', async () => {
         const response = await fetch(
-            `${firewallOrigin}/?reprint-api&endpoint=file_index&directory=/srv/site`,
+            `${endpointUrl(`${firewallOrigin}/?reprint-api`, 'file_index')}&directory=/srv/site`,
             {
                 headers: {
                     'Accept-Language': 'en-US,en;q=0.9',

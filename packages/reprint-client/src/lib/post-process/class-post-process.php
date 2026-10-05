@@ -34,7 +34,7 @@ final class PostProcess {
         $current_task = null;
         $client       = null;
         try {
-            ImportClient::validate_remote_reprint_api_url_transport( $remote_reprint_api_url ?? '', $allow_http );
+            ImportClient::validate_remote_reprint_api_url( $remote_reprint_api_url ?? '', $allow_http );
             $selected_tasks = 'all' === $tasks ? self::TASKS : explode( ',', $tasks );
             foreach ( $selected_tasks as $task ) {
                 if ( ! in_array( $task, self::TASKS, true ) ) {

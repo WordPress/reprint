@@ -129,7 +129,7 @@ final class MultipartRequestParametersTest extends TestCase {
         ];
         $this->assertSame($expected_parameters, json_decode(file_get_contents($this->root . '/parameters.json'), true));
         $this->assertSame(
-            '/nested%2Fapi?%72eprint-api=1&site-export-api%5Bflag%5D=1&',
+            '/nested%2Fapi?%72eprint-api=1&site-export-api%5Bflag%5D=1&endpoint=file_fetch',
             file_get_contents($this->root . '/request-target.txt')
         );
         $this->assertSame($file_list_json, file_get_contents($this->root . '/uploaded-file-list.json'));

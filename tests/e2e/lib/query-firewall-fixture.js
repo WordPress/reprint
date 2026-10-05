@@ -1,38 +1,41 @@
 /**
- * Strict query firewall: only the API routing marker may reach WordPress in a URL.
- * This models the reported base64 query rejection, not a complete WAF engine.
- * Request bodies and streaming responses pass through unchanged. Cursor headers
- * are stripped to exercise continuation from the request parameters alone.
+ * Strict query firewall: strips query parameters whose values contain
+ * anything but letters, digits, and underscores, and forwards the rest. This
+ * models the reported firewall, which objected to base64 characters in
+ * values, not a complete WAF engine. Request bodies and
+ * streaming responses pass through unchanged. Cursor headers are stripped
+ * to exercise continuation from the request parameters alone.
  */
 import http from 'node:http';
-import { readRequestEndpoint } from './request-endpoint.js';
 import { appendFileSync } from 'node:fs';
+
+const PERMITTED_VALUE = /^[A-Za-z0-9_]*$/;
 
 const [backend, logPath] = process.argv.slice(2);
 const backendUrl = new URL(backend);
 const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, 'http://localhost');
-    const blocked = [...url.searchParams.keys()].some(
-        key => !['reprint-api', 'site-export-api'].includes(key),
-    );
+    const stripped = [...url.searchParams.entries()]
+        .filter(([, value]) => !PERMITTED_VALUE.test(value))
+        .map(([key]) => key);
+    for (const key of stripped) {
+        url.searchParams.delete(key);
+    }
+    // URLSearchParams writes a bare marker as "reprint-api=". Keep the client's form.
+    const forwardedPath = url.pathname + (url.search ? '?' + url.search.slice(1).replace(/=(&|$)/g, '$1') : '');
     appendFileSync(logPath, JSON.stringify({
         method: request.method,
         path: request.url,
-        endpoint: blocked ? url.searchParams.get('endpoint') : await readRequestEndpoint(request),
-        blocked,
+        forwardedPath,
+        endpoint: url.searchParams.get('endpoint'),
+        stripped,
     }) + '\n');
-    if (blocked) {
-        request.resume();
-        response.writeHead(403, { 'Content-Type': 'text/html', 'X-Query-Firewall': 'blocked' });
-        response.end('<!doctype html><title>Site homepage</title>');
-        return;
-    }
     const headers = { ...request.headers, host: backendUrl.host };
     delete headers['x-export-cursor'];
     const upstream = http.request({
         hostname: backendUrl.hostname,
         port: backendUrl.port,
-        path: request.url,
+        path: forwardedPath,
         method: request.method,
         headers,
     }, upstreamResponse => {
