@@ -84,14 +84,14 @@ class DiagnoseHttpErrorTest extends TestCase
     public function testAuthNoSecretProvided()
     {
         $result = $this->diagnose(403, '{"error":"Missing X-Auth-Signature header"}', null, false);
-        $this->assertSame('AUTH_NO_SECRET', $result['code']);
+        $this->assertSame('AUTH_NO_CREDENTIAL', $result['code']);
         $this->assertStringContainsString('--secret', $result['message']);
     }
 
     public function test401NoSecretProvided()
     {
         $result = $this->diagnose(401, '', null, false);
-        $this->assertSame('AUTH_NO_SECRET', $result['code']);
+        $this->assertSame('AUTH_NO_CREDENTIAL', $result['code']);
     }
 
     // ── Auth: secret mismatch ────────────────────────────────────
@@ -136,6 +136,37 @@ class DiagnoseHttpErrorTest extends TestCase
         $result = $this->diagnose(403, '{"error":"Missing X-Auth-Nonce header"}');
         $this->assertSame('AUTH_HEADERS_STRIPPED', $result['code']);
         $this->assertStringContainsString('Missing X-Auth-Nonce', $result['message']);
+    }
+
+    // ── Auth: reason codes ───────────────────────────────────────
+
+    /**
+     * The reason decides the diagnosis, so a reworded or translated message
+     * keeps it.
+     *
+     * @dataProvider reasonCodeProvider
+     */
+    public function testReasonCodeDecidesTheDiagnosisWhateverTheMessage(string $reason, string $expected_code)
+    {
+        $result = $this->diagnose(403, json_encode(['error' => 'Die Anfrage wurde abgelehnt', 'code' => 403, 'reason' => $reason]));
+        $this->assertSame($expected_code, $result['code']);
+    }
+
+    public static function reasonCodeProvider(): array
+    {
+        return [
+            'signature mismatch' => ['signature_mismatch', 'AUTH_SECRET_MISMATCH'],
+            'timestamp expired' => ['timestamp_expired', 'AUTH_CLOCK_SKEW'],
+            'content hash mismatch' => ['content_hash_mismatch', 'AUTH_CONTENT_TAMPERED'],
+            'missing header' => ['missing_header', 'AUTH_HEADERS_STRIPPED'],
+        ];
+    }
+
+    public function testReasonCodeOutranksAMessageThatNamesAnotherFailure()
+    {
+        $body = json_encode(['error' => 'Missing X-Auth-Signature header', 'code' => 403, 'reason' => 'auth_failed']);
+        $result = $this->diagnose(403, $body);
+        $this->assertSame('AUTH_FAILED', $result['code']);
     }
 
     // ── Auth: unexplained 403 ────────────────────────────────────
@@ -308,6 +339,10 @@ class DiagnoseHttpErrorTest extends TestCase
             '{"error":"Invalid secret.php configuration","code":503}',
         ));
         $this->assertFalse($this->isPotentiallyTransientHttpError(
+            503,
+            '{"error":"Export not configured: this host requires key authentication and no keys are enrolled","code":503,"reason":"not_configured"}',
+        ));
+        $this->assertFalse($this->isPotentiallyTransientHttpError(
             500,
             '{"error":"Reprint Server runtime is incomplete","code":500}',
         ));
@@ -315,6 +350,47 @@ class DiagnoseHttpErrorTest extends TestCase
             415,
             '<!doctype html><title>Unsupported Media Type</title>',
         ));
+    }
+
+    public function testUnmarked403AfterAKeySignedRequestIsPotentiallyTransient()
+    {
+        $key_path = tempnam(sys_get_temp_dir(), 'reprint-key-');
+        [$private_key_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        file_put_contents($key_path, $private_key_pem);
+        chmod($key_path, 0600);
+        try {
+            $client = new \ImportClient(
+                'http://example.com',
+                sys_get_temp_dir(),
+                sys_get_temp_dir(),
+                ['allow_http' => true],
+            );
+            $reflection = new \ReflectionClass(\ImportClient::class);
+            $reflection->getMethod('initialize_credential')->invoke($client, true, ['private_key_path' => $key_path]);
+            $this->assertNull($reflection->getProperty('hmac_client')->getValue($client));
+            $this->assertInstanceOf(
+                \WordPress\Reprint\Server\PublicKeyClient::class,
+                $reflection->getProperty('public_key_client')->getValue($client),
+            );
+
+            $classify = $reflection->getMethod('is_potentially_transient_http_error');
+            $this->assertTrue($classify->invoke(
+                $client,
+                403,
+                '<!doctype html><title>Temporary firewall response</title>',
+            ));
+            $this->assertTrue($classify->invoke($client, 401, ''));
+            $this->assertFalse($classify->invoke(
+                $client,
+                403,
+                '{"error":"Invalid timestamp format","code":403}',
+            ));
+
+            $diagnosis = $reflection->getMethod('diagnose_http_error')->invoke($client, 403, null, null);
+            $this->assertNotSame('AUTH_NO_CREDENTIAL', $diagnosis['code']);
+        } finally {
+            unlink($key_path);
+        }
     }
 
     public function testPullJsonRequestReportsHttp415AsPossibleFirewallGreylist()

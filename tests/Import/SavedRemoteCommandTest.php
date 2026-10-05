@@ -353,6 +353,47 @@ final class SavedRemoteCommandTest extends TestCase {
         $this->assertSame($preflight, json_decode(file_get_contents($state_file), true)['preflight']);
     }
 
+    public function testKeygenUsesTheNamedRemoteDirectoryAndFilesPushFindsItsKey(): void
+    {
+        $this->addRemote();
+        mkdir($this->directory . '/files');
+        $result = $this->runCli(['keygen']);
+        $this->assertSame(0, $result['code'], $result['output']);
+        $this->assertFileExists($this->directory . '/.reprint/state/remotes/source/key.pem');
+        $this->assertDirectoryDoesNotExist($this->directory . '/.reprint/state/remotes/' . md5('https://example.invalid'));
+        $result = $this->runCli(['files-push']);
+        $this->assertSame(1, $result['code']);
+        $this->assertStringContainsString('No preflight data found', $result['output']);
+        $this->assertStringNotContainsString('No credential', $result['output']);
+    }
+
+    public function testPullGeneratesItsEnrollmentKeyInTheNamedRemoteDirectory(): void
+    {
+        $this->addRemote();
+        $result = $this->runCli(['pull']);
+        $this->assertSame(4, $result['code'], $result['output']);
+        $this->assertFileExists($this->directory . '/.reprint/state/remotes/source/key.pem');
+        $this->assertDirectoryDoesNotExist($this->directory . '/.reprint/state/remotes/' . md5('https://example.invalid'));
+    }
+
+    public function testMissingKeyInstructionsSelectTheNamedRemoteKeyFile(): void
+    {
+        $this->addRemote();
+        $result = $this->runCli(['preflight']);
+        $this->assertSame(1, $result['code']);
+        $this->assertStringContainsString('--out=' . escapeshellarg($this->directory . '/.reprint/state/remotes/source/key.pem'), $result['output']);
+    }
+
+    public function testExplicitPrivateKeyReplacesTheSavedSecretFile(): void
+    {
+        $this->addRemote(['--secret-file=./absent.secret']);
+        $result = $this->runCli(['config', 'show', '--command=files-push', '--private-key-path=./enrolled.pem']);
+        $this->assertSame(0, $result['code'], $result['output']);
+        $options = json_decode($result['output'], true)['options'];
+        $this->assertSame('./enrolled.pem', $options['private_key_path']);
+        $this->assertArrayNotHasKey('secret_file', $options);
+    }
+
     private function startServer(): string
     {
         mkdir($this->directory . '/remote');

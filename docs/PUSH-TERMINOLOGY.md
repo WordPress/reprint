@@ -433,9 +433,10 @@ The low-level, files-only command is `files-push`. Its `remote Reprint API URL` 
 exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
 `--fs-root`. It requires saved preflight data and treats its remote document
 root as a path beneath that filesystem root. Local relative paths beneath the document root become document-root-relative paths; other local paths do not
-become push or delete work. It also requires `--secret=TOKEN` or
-`--secret-file=FILE`; `--insecure`
-or `REPRINT_INSECURE_TLS=1` explicitly allows plain HTTP and skips
+become push or delete work. It requires a credential accepted by the remote:
+`--private-key-path=FILE` or `key.pem` in the remote state directory for key
+authentication, or `--secret=TOKEN` / `--secret-file=FILE` for token authentication.
+`--insecure` or `REPRINT_INSECURE_TLS=1` explicitly allows plain HTTP and skips
 HTTPS certificate and hostname checks for that invocation.
 
 `files-push` uses the shared progress output mode. It never stores that mode in
@@ -579,8 +580,10 @@ JSON responses use `push_session_id`, `blocking_push_session_id`,
 `lock_acquisition_failure`, `offset_gap`, `push_not_found`, `filesystem_error`,
 `commit_required`, `unexpected_docroot_mutation`, `corrupted_push_state`, and
 `same_device`. Authentication, authorization, and request-boundary failures
-are `auth_failed`, `push_disabled`, `not_configured`, `invalid_request`, and
-`request_too_large`.
+are `missing_header`, `timestamp_expired`, `signature_mismatch`, `auth_failed`,
+`push_disabled`, `not_configured`, `invalid_request`, and `request_too_large`.
+`auth_failed` covers every other authentication failure, such as a malformed
+header value.
 
 The document-root `.maintenance` file identifies its owner with the push
 session ID. `commit.json` stores no separate maintenance value.

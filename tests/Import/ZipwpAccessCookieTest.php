@@ -122,7 +122,7 @@ final class ZipwpAccessCookieTest extends TestCase {
                     $received .= $chunk['body'];
                 }
             };
-            $fetch->invoke($client, $remote_reprint_api_url, null, $context, [
+            $fetch->invoke($client, $remote_reprint_api_url, $context, [
                 'endpoint' => 'file_fetch',
                 'file_list' => new \CURLFile($file_list_path, 'application/json', 'file-list.json'),
             ], 'file_fetch');
@@ -149,7 +149,7 @@ final class ZipwpAccessCookieTest extends TestCase {
                 'Referer' => 'http://demo.zipwp.to/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new \Site_Export_HMAC_Client('zipwp-test-secret'),
+            'envelope_signer' => new \Site_Export_HMAC_Client('zipwp-test-secret'),
             'connect_timeout' => 2,
             'stall_timeout' => 2,
             'response_timeout' => 2,

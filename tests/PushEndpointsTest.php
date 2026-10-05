@@ -101,7 +101,7 @@ final class PushEndpointsTest extends TestCase {
             $push_session_id
         );
         $this->assertSame(403, $authentication['http_code']);
-        $this->assertSame('auth_failed', $authentication['response']['reason']);
+        $this->assertSame('signature_mismatch', $authentication['response']['reason']);
 
         $requests = [
             ['POST', 'push_create', null, null],
@@ -1417,7 +1417,7 @@ final class PushEndpointsTest extends TestCase {
         ], 'incorrect-secret');
 
         $this->assertSame(403, $authentication_failure['http_code'], $authentication_failure['body']);
-        $this->assertSame('auth_failed', json_decode($authentication_failure['body'], true, 512, JSON_THROW_ON_ERROR)['reason']);
+        $this->assertSame('signature_mismatch', json_decode($authentication_failure['body'], true, 512, JSON_THROW_ON_ERROR)['reason']);
         $this->assertNoCacheHeaders($authentication_failure['headers']);
         $this->assertSame(['application/octet-stream'], $authentication_failure['headers']['content-type'] ?? []);
     }
@@ -1439,7 +1439,7 @@ final class PushEndpointsTest extends TestCase {
             'push_session_id' => $push_session_id,
         ], ['created']);
         $this->assertSame('failed', $authentication['status']);
-        $this->assertSame('auth_failed', $authentication['reason']);
+        $this->assertSame('signature_mismatch', $authentication['reason']);
         $this->assertStringContainsString('HMAC signature verification failed', $authentication['detail']);
 
         $create = $client->send_push_request('POST', 'push_create', [
@@ -2819,7 +2819,7 @@ final class PushEndpointsTest extends TestCase {
                 'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'connect_timeout' => 2,
             'response_timeout' => 2,
         ]);
@@ -3770,7 +3770,7 @@ final class PushEndpointsTest extends TestCase {
                 'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 4 * 1024 * 1024,
         ];
     }
@@ -4029,7 +4029,7 @@ final class PushEndpointsTest extends TestCase {
                 'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
             'chunk_bytes' => 64,
             'request_sizer_options' => [
                 'floor_bytes' => 2048,
@@ -4319,7 +4319,7 @@ final class PushEndpointsTest extends TestCase {
                 'Referer' => 'http://127.0.0.1/wp-admin/upload.php',
             ],
             'allow_http' => true,
-            'hmac_client' => new Site_Export_HMAC_Client($secret),
+            'envelope_signer' => new Site_Export_HMAC_Client($secret),
             'chunk_bytes' => 4,
             'connect_timeout' => 3,
             'stall_timeout' => 3,

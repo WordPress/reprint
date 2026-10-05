@@ -19,6 +19,13 @@ Put the connection token in `reprint.secret` first. Keep that file outside the
 filesystem root and out of version control. The token is read only by commands
 that use it; `files-diff` and `config show` do not read it.
 
+For key authentication, omit `--secret-file` and run `reprint keygen` with the
+saved config. It writes `key.pem` in the named remote state directory. Enroll
+the printed public key on the site; pull and push then use that same file.
+A first `pull` without credentials also generates its enrollment key there.
+An explicit `--private-key-path=FILE` replaces a saved `--secret-file` for that
+invocation without changing the config.
+
 ## What gets saved
 
 `remote add` creates `.reprint/config.json` in the current directory. It makes

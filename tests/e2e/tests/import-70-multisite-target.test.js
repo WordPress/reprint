@@ -182,6 +182,9 @@ describe('Pull a selected site into a fresh single site', () => {
         } finally { await connection.end(); }
     });
 
+    // Building the million rows and migrating them takes about 150 seconds on
+    // an unloaded runner and twice that on a busy one, so the case timeout is
+    // generous; runImporter below keeps its own 180 second bound on the client.
     it('keeps a million other domains out of preflight, then migrates with a million child paths', async () => {
         const url = `${fixture.sites[7].url}/?reprint-api`;
         const baseline = await apiRequest(site, 'preflight', { multisite_mode: 'one-site-network-v1' }, { url });
@@ -308,7 +311,7 @@ describe('Pull a selected site into a fresh single site', () => {
             await connection.query('DROP TABLE IF EXISTS reprint_test_digits');
             await connection.end();
         }
-    }, 300000);
+    }, 600000);
 
     it('keeps child-path collection out of ordinary export context and never collects upload site IDs', () => {
         const observations = JSON.parse(runWp(getSiteDir(site), ['eval', `

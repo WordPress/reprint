@@ -17,6 +17,71 @@ class StructuredDataUrlRewriterTest extends TestCase
         ]);
     }
 
+    /** Each enclosing parser must update its own escaping and string byte lengths. */
+    #[DataProvider('scopedTargetCases')]
+    public function testScopedTargetRewritesNestedValues(string $source, string $target): void
+    {
+        $rewriter = $this->createRewriter([$source => $target]);
+        $suffix = '/wp-content/uploads/café%2fphoto.jpg?size=2&name=a+b#view';
+        $source_url = $source . $suffix;
+        $target_url = rtrim($target, '/') . $suffix;
+        $input_json = json_encode([
+            $source_url => ['url' => $source_url, 'serialized' => serialize(['url' => $source_url])],
+            'unchanged' => [null, false, 42, 'https://other.example/photo.jpg'],
+        ]);
+        $expected_json = [
+            $source_url => ['url' => $target_url, 'serialized' => serialize(['url' => $target_url])],
+            'unchanged' => [null, false, 42, 'https://other.example/photo.jpg'],
+        ];
+        $input = serialize([
+            $source_url => $source_url,
+            'nested' => serialize(['json' => $input_json]),
+            'binary' => "Zażółć\0\xff;\" " . $source_url,
+        ]);
+
+        $output = $rewriter->rewrite($input);
+        $decoded = unserialize($output, ['allowed_classes' => false]);
+        $this->assertSame($target_url, $decoded[$source_url]);
+        $this->assertSame("Zażółć\0\xff;\" " . $target_url, $decoded['binary']);
+        $nested = unserialize($decoded['nested'], ['allowed_classes' => false]);
+        $this->assertSame($expected_json, json_decode($nested['json'], true, 512, JSON_THROW_ON_ERROR));
+        $this->assertSame($output, serialize($decoded));
+        $this->assertSame($output, $rewriter->rewrite($input));
+        $this->assertSame($output, $rewriter->rewrite($output));
+        $this->assertSame($input, $rewriter->rewrite($input, 'skip'));
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function scopedTargetCases(): array
+    {
+        return [
+            'origin control' => ['https://old-site.com', 'https://playground.test'],
+            'ordinary path control' => ['https://old-site.com', 'https://playground.test/preview'],
+            'Playground scope' => ['https://old-site.com', 'https://playground.test/scope:123'],
+            'Playground scope with trailing slash' => ['https://old-site.com', 'https://playground.test/scope:123/'],
+            'source directory and local port' => ['https://old-site.com/blog', 'http://localhost:9400/scope:123/nested'],
+        ];
+    }
+
+    public function testScopedTargetRewritesUnicodeEscapedJsonHost(): void
+    {
+        $rewriter = $this->createRewriter(['https://old-site.com' => 'https://playground.test/scope:123']);
+        $input = '{"url":"https:\u002f\u002fold\u002dsite\u002ecom\u002fphoto.jpg"}';
+        $this->assertSame(['url' => 'https://playground.test/scope:123/photo.jpg'], json_decode($rewriter->rewrite($input), true));
+    }
+
+    public function testScopedTargetRewritesShortcodeAttributesAlongsideHtml(): void
+    {
+        $rewriter = $this->createRewriter(['https://old-site.com' => 'https://playground.test/scope:123']);
+        $input = '[video src="https://old-site.com/movie.mp4"]'
+            . '<a href="https://old-site.com/page">Read</a>';
+        $this->assertSame(
+            '[video src="https://playground.test/scope:123/movie.mp4"]'
+                . '<a href="https://playground.test/scope:123/page">Read</a>',
+            $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
     /** An empty child-path list still selects the multisite parser path. */
     public function testOrdinaryImportsKeepTheRawStyleAndBlockPaths(): void
     {
@@ -1714,7 +1779,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         return [
             'trailing slash' => [
                 '<a href="https://old-site.com/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
-                '<a href="https://new.example/media/image.jpg">Image</a>[vc_video link="https:\/\/old-site.com\/media\/video.mp4"]',
+                '<a href="https://new.example/media/image.jpg">Image</a>[vc_video link="https:\/\/new.example\/media\/video.mp4"]',
                 ['https://old-site.com' => 'https://new.example/'],
             ],
             'initial path' => [

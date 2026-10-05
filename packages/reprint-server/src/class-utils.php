@@ -1059,4 +1059,163 @@ final class Utils
         return $target;
     }
 
+    /** @var bool|null Test-only override; null means ask the runtime. */
+    private static $key_auth_required_override = null;
+
+    /**
+     * Whether this host accepts public-key signatures and refuses HMAC.
+     *
+     * function_exists, not extension_loaded: a host that ships the extension
+     * but blocks openssl_verify through disable_functions cannot verify a key
+     * and must stay on HMAC. There is no option, constant, or environment
+     * variable behind this; the host's capability is the whole decision.
+     *
+     * @return bool
+     */
+    public static function key_auth_required(): bool
+    {
+        if (self::$key_auth_required_override !== null) {
+            return self::$key_auth_required_override;
+        }
+        return function_exists('openssl_verify');
+    }
+
+    /**
+     * Forces key_auth_required() for tests that must exercise the HMAC branch
+     * on a machine that has OpenSSL, or the reverse. Not configuration: only
+     * PHP already running in the process can call it, and nothing in
+     * production does. Pass null to clear.
+     *
+     * @param bool|null $value Forced answer, or null to ask the runtime again.
+     */
+    public static function override_key_auth_required_for_tests(?bool $value): void
+    {
+        self::$key_auth_required_override = $value;
+    }
+
+    /**
+     * Returns a request header by its HTTP name or its $_SERVER name, or null
+     * when it is absent or empty. No auth header means anything when empty.
+     *
+     * @param array<string|int,mixed> $headers Request headers, either convention.
+     */
+    public static function request_header(array $headers, string $name): ?string
+    {
+        $server_name = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
+        foreach ($headers as $key => $value) {
+            if (!is_string($value)) {
+                continue;
+            }
+            $header_key = (string) $key;
+            if (strcasecmp($header_key, $name) === 0 || strcasecmp($header_key, $server_name) === 0) {
+                return $value === '' ? null : $value;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Returns the current request's headers: getallheaders() where the SAPI
+     * provides it, followed by every HTTP_* entry of $_SERVER.
+     *
+     * @return array<string,string>
+     */
+    public static function request_headers(): array
+    {
+        $headers = [];
+        if (function_exists('getallheaders')) {
+            $all_headers = getallheaders();
+            if (is_array($all_headers)) {
+                $headers = $all_headers;
+            }
+        }
+        foreach ($_SERVER as $key => $value) {
+            if (strpos( (string) $key, 'HTTP_') !== 0 || !is_string($value)) {
+                continue;
+            }
+            $headers[$key] = $value;
+        }
+        return $headers;
+    }
+
+    /**
+     * Reduces a public key to its one-line base64 body.
+     *
+     * Accepts exactly one BEGIN PUBLIC KEY block or the bare body. Strips the
+     * armour and every whitespace byte, so CRLF, trailing newlines and
+     * indentation all produce the same result. This one-line form is what the
+     * site stores, what the administrator pastes, and what the key id hashes.
+     *
+     * @param string $pem_or_one_line PEM text or one-line base64.
+     * @return string One-line base64 body.
+     * @throws InvalidArgumentException When the input is not one public key block or
+     *                                  bare body, or the body is empty or not strict base64.
+     */
+    public static function normalize_public_key(string $pem_or_one_line): string
+    {
+        $trimmed = trim($pem_or_one_line);
+        if (preg_match('/\A-----BEGIN PUBLIC KEY-----([^-]*)-----END PUBLIC KEY-----\z/', $trimmed, $matches) === 1) {
+            $body = $matches[1];
+        } elseif (strpos($trimmed, '-----') === false) {
+            $body = $trimmed;
+        } else {
+            throw new InvalidArgumentException('Public key must be one BEGIN PUBLIC KEY block or one line of base64.');
+        }
+        $one_line = preg_replace('/\s+/', '', $body);
+        if (!is_string($one_line) || $one_line === '') {
+            throw new InvalidArgumentException('Public key is empty.');
+        }
+        if (base64_decode($one_line, true) === false) {
+            throw new InvalidArgumentException('Public key is not valid base64.');
+        }
+        return $one_line;
+    }
+
+    /**
+     * Re-wraps a one-line public key as the PEM block OpenSSL parses.
+     *
+     * @param string $one_line One-line base64 body from normalize_public_key().
+     * @return string PEM text with a trailing newline.
+     * @throws InvalidArgumentException When the input is not one line of strict base64.
+     */
+    public static function public_key_to_pem(string $one_line): string
+    {
+        if (preg_match('/\A[A-Za-z0-9+\/]+={0,2}\z/', $one_line) !== 1) {
+            throw new InvalidArgumentException('Public key must be one line of base64. Pass it through normalize_public_key() first.');
+        }
+        return "-----BEGIN PUBLIC KEY-----\n"
+            . chunk_split($one_line, 64, "\n")
+            . "-----END PUBLIC KEY-----\n";
+    }
+
+    /**
+     * Computes the key id: the first 16 hex characters of SHA-256 over the
+     * DER bytes. Both sides compute it from the same bytes, so nothing has to
+     * be coordinated.
+     *
+     * @param string $pem_or_one_line PEM text or one-line base64.
+     * @return string Sixteen lowercase hex characters.
+     * @throws InvalidArgumentException When the key cannot be normalized.
+     */
+    public static function public_key_fingerprint(string $pem_or_one_line): string
+    {
+        $one_line = self::normalize_public_key($pem_or_one_line);
+        $der = base64_decode($one_line, true);
+        return substr(hash('sha256', (string) $der), 0, 16);
+    }
+
+    /**
+     * Empties the OpenSSL error queue so a later, unrelated call does not
+     * report an error left behind by an earlier one.
+     *
+     * The loop is bounded: PHP keeps OpenSSL errors in a ring buffer of
+     * ERR_NUM_ERRORS (16) slots, and each call removes one.
+     */
+    public static function drain_openssl_error_queue(): void
+    {
+        // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedWhile -- Draining the queue is the entire purpose of this loop.
+        while (openssl_error_string() !== false) {
+        }
+    }
+
 }

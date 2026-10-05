@@ -208,6 +208,66 @@ class NewSiteUrlSqliteTest extends TestCase
         $this->assertSame('My Test Blog', $blogname[0]['option_value']);
     }
 
+    /** Options, builder meta and plugin tables must use the same scoped destination as HTML. */
+    public function testScopedTargetRewritesStructuredValuesAcrossSqliteTables(): void
+    {
+        $sourceUrl = 'https://old-site.example.com';
+        $targetUrl = 'https://playground.test/scope:123';
+        $exportUrl = $sourceUrl . '/?reprint-api';
+        $sqlitePath = $this->tempDir . '/database/wordpress.sqlite';
+        $themeMods = ['header_image' => $sourceUrl . '/header.jpg', 'label' => 'Zażółć'];
+        $builderData = ['background' => ['url' => $sourceUrl . '/background.jpg?x=1&y=2#top']];
+        $customData = serialize(['json' => json_encode($builderData)]);
+        $postContent = '<a href="' . $sourceUrl . '/page">Read</a>'
+            . '[video src="' . $sourceUrl . '/movie.mp4"]';
+        $dump = $this->buildSqlDump($sourceUrl);
+        $dump .= "INSERT INTO `wp_options` VALUES (4, FROM_BASE64('" . base64_encode('theme_mods_test')
+            . "'), FROM_BASE64('" . base64_encode(serialize($themeMods)) . "'), 'yes');\n";
+        foreach ([
+            'wp_posts' => ['post_content', $postContent],
+            'wp_postmeta' => ['meta_value', json_encode($builderData)],
+            'plugin_layouts' => ['layout_data', $customData],
+        ] as $table => [$column, $value]) {
+            $dump .= "CREATE TABLE `$table` (`id` bigint NOT NULL PRIMARY KEY, `$column` longtext NOT NULL);\n"
+                . self::SQL_GROUP_MARKER . base64_encode(json_encode(['current_table' => $table])) . "\n"
+                . "INSERT INTO `$table` (`id`, `$column`) VALUES (1, FROM_BASE64('" . base64_encode($value) . "'));\n";
+        }
+        $dump .= self::SQL_GROUP_MARKER . base64_encode(json_encode(['current_table' => null])) . "\n";
+        file_put_contents($this->tempDir . '/db.sql', $dump);
+        $this->writeState($exportUrl);
+
+        $client = new \ImportClient($exportUrl, $this->tempDir, $this->tempDir . '/fs-root');
+        $client->run([
+            'command' => 'db-apply',
+            'abort' => false,
+            'verbose' => false,
+            'secret' => null,
+            'tuning_config' => [],
+            'target_engine' => 'sqlite',
+            'target_sqlite_path' => $sqlitePath,
+            'target_db' => 'wp_test',
+            'new_site_url' => $targetUrl . '/',
+        ]);
+
+        $options = $this->querySqlite($sqlitePath, 'SELECT option_name, option_value FROM wp_options', 'wp_test');
+        $options = array_column($options, 'option_value', 'option_name');
+        $this->assertSame($targetUrl, $options['home']);
+        $this->assertSame($targetUrl, $options['siteurl']);
+        $this->assertSame('My Test Blog', $options['blogname']);
+        $this->assertSame(
+            ['header_image' => $targetUrl . '/header.jpg', 'label' => 'Zażółć'],
+            unserialize($options['theme_mods_test'], ['allowed_classes' => false])
+        );
+        $rows = $this->querySqlite($sqlitePath, 'SELECT post_content FROM wp_posts', 'wp_test');
+        $this->assertSame(str_replace($sourceUrl, $targetUrl, $postContent), $rows[0]['post_content']);
+        $expectedBuilderData = ['background' => ['url' => $targetUrl . '/background.jpg?x=1&y=2#top']];
+        $rows = $this->querySqlite($sqlitePath, 'SELECT meta_value FROM wp_postmeta', 'wp_test');
+        $this->assertSame($expectedBuilderData, json_decode($rows[0]['meta_value'], true));
+        $rows = $this->querySqlite($sqlitePath, 'SELECT layout_data FROM plugin_layouts', 'wp_test');
+        $customResult = unserialize($rows[0]['layout_data'], ['allowed_classes' => false]);
+        $this->assertSame($expectedBuilderData, json_decode($customResult['json'], true));
+    }
+
     /** Ordinary db-apply must not select the more expensive multisite CSS path. */
     public function testOrdinaryApplyKeepsRawStyleBodyRewriting(): void
     {

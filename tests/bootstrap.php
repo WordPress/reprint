@@ -33,8 +33,24 @@ if (!class_exists('WordPress\\Reprint\\Server\\Utils', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-utils.php';
 }
 
+if (!interface_exists('WordPress\\Reprint\\Server\\EnvelopeSigner', false)) {
+    require_once __DIR__ . '/../packages/reprint-server/src/class-envelope-signer.php';
+}
+
 if (!class_exists('Site_Export_HMAC_Client', false)) {
     require_once __DIR__ . '/../packages/reprint-server/src/class-hmac-client.php';
+}
+
+if (!class_exists('WordPress\\Reprint\\Server\\PublicKeyClient', false)) {
+    require_once __DIR__ . '/../packages/reprint-server/src/class-public-key-client.php';
+}
+
+if (!class_exists('WordPress\\Reprint\\Server\\PublicKeyServer', false)) {
+    require_once __DIR__ . '/../packages/reprint-server/src/class-public-key-server.php';
+}
+
+if (!class_exists('WordPress\\Reprint\\Server\\RequestAuthenticator', false)) {
+    require_once __DIR__ . '/../packages/reprint-server/src/class-request-authenticator.php';
 }
 
 if (!class_exists('WordPress\\Reprint\\Server\\HMACServer', false)) {

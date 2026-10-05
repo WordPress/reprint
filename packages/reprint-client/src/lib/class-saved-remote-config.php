@@ -199,7 +199,7 @@ final class SavedRemoteConfig {
                 $overridden_targets[] = $definition['target'];
             }
         }
-        if (isset($provided['secret'])) {
+        if (isset($provided['secret']) || isset($provided['private-key-path'])) {
             $overridden_targets[] = 'secret_file';
         }
         if ($command === 'apply-runtime' && isset($provided['flat-document-root'])) {

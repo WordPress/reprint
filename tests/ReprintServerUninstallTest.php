@@ -30,6 +30,7 @@ $site_stack = [];
 $settings = [
     'reprint_server_connection_token' => 'token',
     'reprint_server_push_authorized_token_fingerprint' => 'fingerprint',
+    'reprint_server_public_keys' => [['key_id' => '0123456789abcdef']],
     'site_export_secret' => 'old-token',
     'site_export_push_authorized_token_fingerprint' => 'old-fingerprint',
     '_transient_reprint_server_activated' => 1,
@@ -39,7 +40,11 @@ $settings = [
 ];
 $unrelated = ['reprint_server_connection_token_extra' => 'keep', 'another_plugin' => 'keep'];
 $sites = array_fill(1, $multisite ? 205 : 1, $settings + $unrelated);
-$networks = $multisite ? array_fill(1, 103, ['reprint_server_connection_token' => 'network-token'] + $unrelated) : [];
+$networks = $multisite ? array_fill(1, 103, [
+    'reprint_server_connection_token' => 'network-token',
+    // Multisite stores enrolled keys in the network option.
+    'reprint_server_public_keys' => [['key_id' => 'fedcba9876543210']],
+] + $unrelated) : [];
 function is_multisite() { return $GLOBALS['multisite']; }
 function get_sites($args) { return array_slice(array_keys($GLOBALS['sites']), $args['offset'], $args['number']); }
 function get_networks($args) { return array_slice(array_keys($GLOBALS['networks']), $args['offset'], $args['number']); }

@@ -478,8 +478,10 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 `PushFilesSender`. It treats the saved preflight document root as a path beneath
 the resolved filesystem root named by `--fs-root`. It removes that local prefix when producing document-root-relative paths and excludes local paths
 outside the document root from push and delete work. It requires `--state-dir`,
-`--fs-root`, `--secret` or `--secret-file`, and saved preflight data; HTTPS is required unless the
-operator passes `--insecure` or sets `REPRINT_INSECURE_TLS=1`. It reads but never writes
+`--fs-root`, saved preflight data, and a credential accepted by the remote.
+Key authentication uses `--private-key-path` or the remote state directory's
+`key.pem`; token authentication uses `--secret` or `--secret-file`.
+HTTPS is required unless the operator passes `--insecure` or sets `REPRINT_INSECURE_TLS=1`. It reads but never writes
 `<remote-state-directory>/pull/state.json`. It does not run preflight itself,
 show a plan, ask for confirmation, transfer a database, retry a failed request,
 or start a replacement sender after a `restart` outcome.

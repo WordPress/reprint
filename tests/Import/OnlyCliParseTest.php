@@ -257,6 +257,7 @@ PHP, var_export($requestsLog, true)));
             '--abort',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
+            '--secret=x',
         ));
 
         $result = null;
@@ -285,6 +286,7 @@ PHP, var_export($requestsLog, true)));
             '--runtime=none',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
+            '--secret=x',
         ));
 
         $error = null;
@@ -311,6 +313,7 @@ PHP, var_export($requestsLog, true)));
             'http://fake.invalid/?reprint-api',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
+            '--secret=x',
         ));
 
         $error = null;
@@ -347,6 +350,7 @@ PHP, var_export($requestsLog, true)));
             ':wp-content:/themes',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
+            '--secret=x',
         ));
 
         $this->assertStringNotContainsString('"status":"error"', $output);
@@ -382,6 +386,7 @@ PHP, var_export($requestsLog, true)));
             ':wp-uploads:',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
+            '--secret=x',
         ));
 
         $this->assertStringNotContainsString('"status":"error"', $output);
@@ -412,6 +417,7 @@ PHP, var_export($requestsLog, true)));
             '--abort',
             '--state-dir=' . $this->tempDir . '/state',
             '--fs-root=' . $this->tempDir . '/fs',
+            '--secret=x',
         ));
 
         $this->assertStringContainsString('"status":"aborted"', $output);
