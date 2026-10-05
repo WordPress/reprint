@@ -64,6 +64,34 @@ Pulling example.com
   Press Ctrl-C to stop.
 ```
 
+### Save settings for later commands
+
+For repeated work on one site, save its address and settings once:
+
+```bash
+# Put the connection token in ./reprint.secret, outside ./files.
+php reprint.phar remote add source https://example.com \
+  --fs-root=./files --secret-file=./reprint.secret \
+  --target-engine=sqlite \
+  --rewrite-url https://example.com http://localhost:8881
+
+php reprint.phar pull
+php reprint.phar files-diff
+```
+
+The first command creates `.reprint/config.json` without contacting the site.
+Later commands in the same directory use it. State goes in `.reprint/state`
+unless you save a different `--state-dir`.
+
+A redirect still stops the command. Change the address explicitly with
+`reprint remote set-url source https://www.example.com`; mappings stay unchanged.
+When completed sync work exists, add `--same-remote` to confirm that this is
+another address for the same site. Unfinished transfers must finish or be
+explicitly aborted first.
+
+See [saved remote settings](docs/CLI-CONFIG.md) for overrides, path rules,
+credentials, and address changes.
+
 ### Options
 
 **Database import** — add target database options and reprint will also import the SQL with URL rewriting:
