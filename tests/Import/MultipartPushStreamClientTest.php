@@ -613,7 +613,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
         $response_body = (string) json_encode(['error' => 'Unsupported Media Type']);
-        $child = $this->fork_http_415_responder(
+        $child = $this->fork_http_responder(
             $listener,
             'POST /?reprint-api=1&endpoint=push_create',
             $response_body,
@@ -653,7 +653,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
         $response_body = '<!doctype html><title>Unsupported Media Type</title>';
-        $child = $this->fork_http_415_responder(
+        $child = $this->fork_http_responder(
             $listener,
             'POST /?reprint-api=1&endpoint=push_upload&push_session_id=',
             $response_body,
@@ -859,6 +859,127 @@ final class MultipartPushStreamClientTest extends TestCase {
             $this->assertTrue(pcntl_wifexited($status));
             $this->assertSame(0, pcntl_wexitstatus($status));
         }
+    }
+
+    /**
+     * An older plugin does not know the version 2 endpoint names, so it
+     * refuses the signature. Its push endpoints answer with the push refusal
+     * shape, and neither answer carries auth_version.
+     *
+     * @return array<string,array{0:string,1:array<string,mixed>}>
+     */
+    public static function olderPluginAuthenticationRefusals(): array {
+        return [
+            'push refusal' => ['403 Forbidden', [
+                'status' => 'rejected', 'reason' => 'missing_header', 'detail' => 'Missing X-Auth-Content-Hash header',
+            ]],
+            'unconfigured site' => ['503 Service Unavailable', [
+                'status' => 'rejected', 'reason' => 'not_configured', 'detail' => 'No connection token is configured.',
+            ]],
+        ];
+    }
+
+    /**
+     * @dataProvider olderPluginAuthenticationRefusals
+     * @param array<string,mixed> $response_body
+     */
+    public function testPushRequestRefusedByAnOlderPluginAsksForAPluginUpdate(string $response_status, array $response_body): void {
+        $result = $this->sendPushRequestAnsweredWith($response_status, $response_body);
+
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame(
+            "The site's Reprint Server plugin is older than this client and does not accept its signatures.\n\n"
+                . 'Update the Reprint Server plugin on the site.',
+            $result['detail']
+        );
+    }
+
+    public function testPushRequestRefusedByAnOlderPluginForAKeyKeepsTheSiteDetail(): void {
+        // Older plugins verify the key message this client signs, so their key refusals are genuine.
+        [$private_key_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $result = $this->sendPushRequestAnsweredWith('403 Forbidden', [
+            'status' => 'rejected', 'reason' => 'unknown_key', 'detail' => 'Unknown key',
+        ], new \WordPress\Reprint\Server\PublicKeyClient($private_key_pem));
+
+        $this->assertSame('failed', $result['status']);
+        $this->assertSame('unknown_key', $result['reason']);
+        $this->assertSame('Unknown key', $result['detail']);
+    }
+
+    public function testUploadRefusedByAnOlderPluginAsksForAPluginUpdate(): void {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork') || PHP_VERSION_ID < 80100) {
+            $this->markTestSkipped('Upload refusal coverage requires PHP curl, pcntl, and CURL_READFUNC_PAUSE support.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertNotFalse($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $child = $this->fork_http_responder(
+            $listener,
+            'POST /?reprint-api=1&endpoint=push_upload&push_session_id=',
+            (string) json_encode(['error' => 'HMAC signature verification failed', 'code' => 403, 'reason' => 'missing_header']),
+            'application/octet-stream',
+            true,
+            '403 Forbidden'
+        );
+
+        $client = $this->newClient([
+            'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 2,
+            'stall_timeout' => 2,
+            'response_timeout' => 2,
+        ]);
+        $this->assertTrue($client->start_upload_request(str_repeat('a', 32)));
+        $this->assertTrue($client->send_part([
+            'type' => 'file', 'path' => 'refused.txt', 'total_bytes' => 1, 'offset' => 0, 'payload' => 'x',
+        ]));
+        $result = $client->finish_request();
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        $this->assertSame('failed', $result['status']);
+        $this->assertStringContainsString('Update the Reprint Server plugin on the site.', (string) $result['detail']);
+    }
+
+    /**
+     * @param array<string,mixed> $response_body
+     * @return array<string,mixed> The client's classified result.
+     */
+    private function sendPushRequestAnsweredWith(string $response_status, array $response_body, ?\WordPress\Reprint\Server\EnvelopeSigner $envelope_signer = null): array {
+        if (!function_exists('curl_init') || !function_exists('pcntl_fork')) {
+            $this->markTestSkipped('Push refusal coverage requires PHP curl and pcntl.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+        $this->assertNotFalse($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        $child = $this->fork_http_responder(
+            $listener,
+            'POST /?reprint-api=1&endpoint=push_create',
+            (string) json_encode($response_body),
+            'application/octet-stream',
+            false,
+            $response_status
+        );
+
+        $client = $this->newClient([
+            'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
+            'allow_http' => true,
+            'envelope_signer' => $envelope_signer ?? new Site_Export_HMAC_Client(self::SECRET),
+            'connect_timeout' => 2,
+            'response_timeout' => 2,
+        ]);
+        $result = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => str_repeat('6', 32),
+        ], ['created']);
+        pcntl_waitpid($child, $status);
+        fclose($listener);
+
+        $this->assertTrue(pcntl_wifexited($status));
+        $this->assertSame(0, pcntl_wexitstatus($status));
+        return $result;
     }
 
     public function testZeroProgressUploadStallStopsWithoutATotalTransferTimeout(): void {
@@ -1108,12 +1229,13 @@ final class MultipartPushStreamClientTest extends TestCase {
     /**
      * @param resource $listener Open loopback listener.
      */
-    private function fork_http_415_responder(
+    private function fork_http_responder(
         $listener,
         string $request_line_prefix,
         string $response_body,
         string $response_content_type,
-        bool $read_complete_multipart_body = false
+        bool $read_complete_multipart_body = false,
+        string $response_status = '415 Unsupported Media Type'
     ): int {
         $child = pcntl_fork();
         $this->assertNotSame(-1, $child);
@@ -1157,7 +1279,7 @@ final class MultipartPushStreamClientTest extends TestCase {
 
         fwrite(
             $connection,
-            "HTTP/1.1 415 Unsupported Media Type\r\nContent-Type: {$response_content_type}\r\nContent-Length: "
+            "HTTP/1.1 {$response_status}\r\nContent-Type: {$response_content_type}\r\nContent-Length: "
                 . strlen($response_body) . "\r\nConnection: close\r\n\r\n" . $response_body
         );
         fclose($connection);

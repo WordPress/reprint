@@ -131,14 +131,20 @@ final class PreflightErrorOutputTest extends TestCase {
         return [
             'Reprint authentication refusal' => [
                 403,
-                '{"error":"This host accepts key authentication only","code":403,"reason":"requires_key_auth"}',
+                '{"error":"This host accepts key authentication only","code":403,"reason":"requires_key_auth","auth_version":2}',
                 'AUTH_REQUIRES_KEY',
                 false,
             ],
             'Reprint not configured' => [
                 503,
-                '{"error":"Export not configured: no keys are enrolled","code":503,"reason":"not_configured"}',
+                '{"error":"Export not configured: no keys are enrolled","code":503,"reason":"not_configured","auth_version":2}',
                 'AUTH_NOT_CONFIGURED',
+                false,
+            ],
+            'older plugin' => [
+                403,
+                '{"error":"Missing X-Auth-Content-Hash header","code":403,"reason":"missing_header"}',
+                'AUTH_PLUGIN_OUTDATED',
                 false,
             ],
             'firewall page' => [403, '<html>Forbidden</html>', 'AUTH_FAILED', true],

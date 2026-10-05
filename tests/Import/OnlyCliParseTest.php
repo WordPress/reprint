@@ -92,7 +92,7 @@ class OnlyCliParseTest extends TestCase
 <?php
 $log = %s;
 file_put_contents($log, json_encode(array(
-    'endpoint' => $_POST['endpoint'] ?? null,
+    'endpoint' => $_GET['endpoint'] ?? null,
     'directory' => isset($_POST['directory'])
         ? array_map('base64_decode', (array) $_POST['directory'])
         : null,

@@ -83,7 +83,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testAuthNoSecretProvided()
     {
-        $result = $this->diagnose(403, '{"error":"Missing X-Auth-Signature header"}', null, false);
+        $result = $this->diagnose(403, '{"error":"Missing X-Auth-Signature header","code":403,"reason":"missing_header"}', null, false);
         $this->assertSame('AUTH_NO_CREDENTIAL', $result['code']);
         $this->assertStringContainsString('--secret', $result['message']);
     }
@@ -94,48 +94,22 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertSame('AUTH_NO_CREDENTIAL', $result['code']);
     }
 
-    // ── Auth: secret mismatch ────────────────────────────────────
-
-    public function testAuthSecretMismatch()
-    {
-        $result = $this->diagnose(403, '{"error":"HMAC signature verification failed"}');
-        $this->assertSame('AUTH_SECRET_MISMATCH', $result['code']);
-        $this->assertStringContainsString('does not match', $result['message']);
-    }
-
     // ── Auth: clock skew ─────────────────────────────────────────
 
     public function testAuthClockSkew()
     {
-        $server_msg = 'Request timestamp expired. Difference: 400.00 seconds, max allowed: 300 seconds';
-        $result = $this->diagnose(403, json_encode(['error' => $server_msg]));
+        $result = $this->diagnose(403, '{"error":"Request timestamp expired. Difference: 400.00 seconds, max allowed: 300 seconds","code":403,"reason":"timestamp_expired","auth_version":2}');
         $this->assertSame('AUTH_CLOCK_SKEW', $result['code']);
         $this->assertStringContainsString('400.00 seconds', $result['message']);
-    }
-
-    // ── Auth: content tampered ───────────────────────────────────
-
-    public function testAuthContentTampered()
-    {
-        $result = $this->diagnose(403, '{"error":"Content hash mismatch: body was modified in transit"}');
-        $this->assertSame('AUTH_CONTENT_TAMPERED', $result['code']);
-        $this->assertStringContainsString('modified in transit', $result['message']);
     }
 
     // ── Auth: headers stripped ───────────────────────────────────
 
     public function testAuthHeadersStripped()
     {
-        $result = $this->diagnose(403, '{"error":"Missing X-Auth-Signature header"}');
+        $result = $this->diagnose(403, '{"error":"Missing X-Auth-Signature header","code":403,"reason":"missing_header","auth_version":2}');
         $this->assertSame('AUTH_HEADERS_STRIPPED', $result['code']);
         $this->assertStringContainsString('Missing X-Auth-Signature', $result['message']);
-    }
-
-    public function testAuthMissingNonceHeader()
-    {
-        $result = $this->diagnose(403, '{"error":"Missing X-Auth-Nonce header"}');
-        $this->assertSame('AUTH_HEADERS_STRIPPED', $result['code']);
-        $this->assertStringContainsString('Missing X-Auth-Nonce', $result['message']);
     }
 
     // ── Auth: reason codes ───────────────────────────────────────
@@ -148,7 +122,7 @@ class DiagnoseHttpErrorTest extends TestCase
      */
     public function testReasonCodeDecidesTheDiagnosisWhateverTheMessage(string $reason, string $expected_code)
     {
-        $result = $this->diagnose(403, json_encode(['error' => 'Die Anfrage wurde abgelehnt', 'code' => 403, 'reason' => $reason]));
+        $result = $this->diagnose(403, json_encode(['error' => 'Die Anfrage wurde abgelehnt', 'code' => 403, 'reason' => $reason, 'auth_version' => 2]));
         $this->assertSame($expected_code, $result['code']);
     }
 
@@ -157,16 +131,76 @@ class DiagnoseHttpErrorTest extends TestCase
         return [
             'signature mismatch' => ['signature_mismatch', 'AUTH_SECRET_MISMATCH'],
             'timestamp expired' => ['timestamp_expired', 'AUTH_CLOCK_SKEW'],
-            'content hash mismatch' => ['content_hash_mismatch', 'AUTH_CONTENT_TAMPERED'],
             'missing header' => ['missing_header', 'AUTH_HEADERS_STRIPPED'],
         ];
     }
 
     public function testReasonCodeOutranksAMessageThatNamesAnotherFailure()
     {
-        $body = json_encode(['error' => 'Missing X-Auth-Signature header', 'code' => 403, 'reason' => 'auth_failed']);
+        $body = json_encode(['error' => 'Missing X-Auth-Signature header', 'code' => 403, 'reason' => 'auth_failed', 'auth_version' => 2]);
         $result = $this->diagnose(403, $body);
         $this->assertSame('AUTH_FAILED', $result['code']);
+    }
+
+    public function testAnAuthenticationErrorWithoutTheVersionMeansAnOlderPlugin(): void
+    {
+        foreach ([
+            '{"error":"Missing X-Auth-Content-Hash header","code":403,"reason":"missing_header"}',
+            '{"error":"HMAC signature verification failed","code":403}',
+        ] as $body) {
+            $result = $this->diagnose(403, $body);
+            $this->assertSame('AUTH_PLUGIN_OUTDATED', $result['code'], $body);
+            $this->assertStringContainsString('Update the Reprint Server plugin on the site.', $result['message']);
+        }
+    }
+
+    private function diagnoseWithKey(int $http_code, string $body): array
+    {
+        $client = new \ImportClient('https://example.com', sys_get_temp_dir(), sys_get_temp_dir());
+        $reflection = new \ReflectionClass(\ImportClient::class);
+        [$private_key_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $reflection->getProperty('public_key_client')->setValue($client, new \WordPress\Reprint\Server\PublicKeyClient($private_key_pem));
+
+        return $reflection->getMethod('diagnose_http_error')->invoke($client, $http_code, $body, null);
+    }
+
+    public function testAnOlderPluginsKeySignatureMismatchIsNotBlamedOnThePlugin(): void
+    {
+        $result = $this->diagnoseWithKey(403, '{"error":"Signature verification failed","code":403,"reason":"signature_mismatch"}');
+
+        $this->assertSame('AUTH_REQUEST_REWRITTEN', $result['code']);
+    }
+
+    public function testAKeyClientIsToldWhenThePluginPredatesKeyAuthentication(): void
+    {
+        $result = $this->diagnoseWithKey(403, '{"error":"Missing X-Auth-Content-Hash header","code":403}');
+
+        $this->assertSame('AUTH_KEY_UNSUPPORTED', $result['code']);
+        $this->assertStringContainsString('update the Reprint Server plugin', $result['message']);
+    }
+
+    /** @dataProvider notAnOlderPluginProvider */
+    public function testARefusalWithoutTheVersionIsNotAlwaysBlamedOnThePlugin(string $body): void
+    {
+        $result = $this->diagnose(403, $body);
+
+        $this->assertNotSame('AUTH_PLUGIN_OUTDATED', $result['code'], $body);
+    }
+
+    public static function notAnOlderPluginProvider(): array
+    {
+        return [
+            'push refusal that is not about authentication' => ['{"status":"rejected","reason":"push_disabled","detail":"Push is disabled for this credential."}'],
+            'JSON without a matching code, from a gateway' => ['{"error":"Invalid signature"}'],
+        ];
+    }
+
+    public function testANewerPluginVersionRepeatsWhatTheSiteSaid(): void
+    {
+        $result = $this->diagnose(403, '{"error":"This site accepts Reprint authentication version 3 and the client sent version 2. Update whichever of the Reprint client and the Reprint Server plugin is older.","code":403,"reason":"client_update_required","auth_version":3}');
+
+        $this->assertSame('AUTH_VERSION_MISMATCH', $result['code']);
+        $this->assertStringContainsString('version 3', $result['message']);
     }
 
     // ── Auth: unexplained 403 ────────────────────────────────────
@@ -188,7 +222,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testAuthUnknownServerMessage()
     {
-        $result = $this->diagnose(403, '{"error":"Some future error we haven\'t seen"}');
+        $result = $this->diagnose(403, '{"error":"Some future error we haven\'t seen","code":403,"reason":"auth_failed","auth_version":2}');
         $this->assertSame('AUTH_FAILED', $result['code']);
         $this->assertStringContainsString("Some future error", $result['message']);
     }
@@ -442,7 +476,7 @@ class DiagnoseHttpErrorTest extends TestCase
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $method = $reflection->getMethod('fetch_json');
-        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1', ['endpoint' => 'preflight']);
+        $result = $method->invoke($client, \WordPress\Reprint\Server\Utils::endpoint_url('http://' . $address . '/?reprint-api=1', 'preflight'), []);
         pcntl_waitpid($child, $status);
         fclose($listener);
 
@@ -507,7 +541,7 @@ class DiagnoseHttpErrorTest extends TestCase
         );
         $reflection = new \ReflectionClass(\ImportClient::class);
         $method = $reflection->getMethod('fetch_json');
-        $result = $method->invoke($client, 'http://' . $address . '/?reprint-api=1', ['endpoint' => 'preflight']);
+        $result = $method->invoke($client, \WordPress\Reprint\Server\Utils::endpoint_url('http://' . $address . '/?reprint-api=1', 'preflight'), []);
         pcntl_waitpid($child, $status);
         fclose($listener);
 
