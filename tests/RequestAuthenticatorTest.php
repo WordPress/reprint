@@ -64,11 +64,11 @@ final class RequestAuthenticatorTest extends TestCase
     public function testHmacHostVerifiesTokenAndIgnoresKeys(): void
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
-        $headers = $hmac->get_auth_headers('');
+        $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
         Utils::override_key_auth_required_for_tests(false);
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertNull($authenticator->authenticated_key_id());
     }
 
@@ -78,47 +78,38 @@ final class RequestAuthenticatorTest extends TestCase
         Utils::override_key_auth_required_for_tests(false);
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_REQUIRES_TOKEN_AUTH, $authenticator->last_error_reason());
     }
 
     public function testHmacHostWithoutATokenIsNotConfigured(): void
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
-        $headers = $hmac->get_auth_headers('');
+        $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
         Utils::override_key_auth_required_for_tests(false);
         $authenticator = new RequestAuthenticator(null, $this->keys());
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
     }
 
-    public function testHmacHostUsesEnvelopeVerificationForPush(): void
-    {
-        $hmac = new Site_Export_HMAC_Client(self::SECRET);
-        $headers = $hmac->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
-        Utils::override_key_auth_required_for_tests(false);
-        $authenticator = new RequestAuthenticator(self::SECRET, []);
-
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
-    }
 
     public function testKeyHostVerifiesKeyAndIgnoresToken(): void
     {
         $headers = self::$key_client->get_auth_headers('POST', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api', '{"e":1}', [], false, $this->now($headers)));
+        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api', $this->now($headers)));
         $this->assertSame(self::$key_client->get_key_id(), $authenticator->authenticated_key_id());
     }
 
     public function testKeyHostRejectsAValidTokenEvenWhenItIsTheOnlyCredential(): void
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
-        $headers = $hmac->get_auth_headers('');
+        $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_REQUIRES_KEY_AUTH, $authenticator->last_error_reason());
     }
 
@@ -130,10 +121,10 @@ final class RequestAuthenticatorTest extends TestCase
     public function testKeyHostWithNoKeysAnswersNoKeysEnrolledForATokenRequest(): void
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
-        $headers = $hmac->get_auth_headers('');
+        $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(self::SECRET, []);
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NO_KEYS_ENROLLED, $authenticator->last_error_reason());
     }
 
@@ -142,7 +133,7 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(self::SECRET, []);
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NO_KEYS_ENROLLED, $authenticator->last_error_reason());
     }
 
@@ -151,43 +142,8 @@ final class RequestAuthenticatorTest extends TestCase
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         $authenticator = new RequestAuthenticator(null, ['0000000000000000' => self::$public_key]);
 
-        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', '', [], false, $this->now($headers)));
+        $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_UNKNOWN_KEY, $authenticator->last_error_reason());
-    }
-
-    /** A key signature never covers the body, so push and pull verify it the same way. */
-    public function testKeyHostVerifiesAKeySignatureWithoutReadingTheBody(): void
-    {
-        $headers = self::$key_client->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_upload');
-        $authenticator = new RequestAuthenticator(null, $this->keys());
-
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'streamed', [], true, $this->now($headers)));
-        $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api&endpoint=push_upload', 'another body', [], false, $this->now($headers)));
-    }
-
-    /**
-     * The reference plugin promises that a push_-prefixed endpoint it does not
-     * know authenticates with the envelope and then gets the push error
-     * contract, so a newer client can tell an old server from a wrong secret.
-     */
-    public function testVerifyGlobalsUsesEnvelopeVerificationForAnUnknownPushPrefixedEndpoint(): void
-    {
-        $hmac = new Site_Export_HMAC_Client(self::SECRET);
-        $headers = $hmac->get_envelope_auth_headers('POST', 'https://s.test/?reprint-api&endpoint=push_future_operation');
-        $_SERVER = [
-            'REQUEST_METHOD' => 'POST',
-            'REQUEST_URI' => '/?reprint-api&endpoint=push_future_operation',
-            'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
-            'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
-            'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
-            'HTTP_X_AUTH_CONTENT_HASH' => $headers['X-Auth-Content-Hash'],
-        ];
-        $_GET = ['reprint-api' => '', 'endpoint' => 'push_future_operation'];
-        $_FILES = [];
-        Utils::override_key_auth_required_for_tests(false);
-        $authenticator = new RequestAuthenticator(self::SECRET, []);
-
-        $this->assertNull($authenticator->verify_globals($this->now($headers)));
     }
 
     public function testVerifyGlobalsVerifiesAKeySignedPushRequest(): void
@@ -206,5 +162,23 @@ final class RequestAuthenticatorTest extends TestCase
         $authenticator = new RequestAuthenticator(null, $this->keys());
 
         $this->assertNull($authenticator->verify_globals($this->now($headers)));
+    }
+
+    public function testAReleasedClientIsAskedToUpdateBeforeAnythingElse(): void
+    {
+        $released_client_headers = [
+            'X-Auth-Signature' => str_repeat('0', 64),
+            'X-Auth-Nonce' => str_repeat('a', 32),
+            'X-Auth-Timestamp' => sprintf('%.6f', microtime(true)),
+            'X-Auth-Content-Hash' => hash('sha256', ''),
+        ];
+        // Token host, key host with keys, key host with none: the content hash wins each time.
+        foreach ([[false, $this->keys()], [true, $this->keys()], [true, []]] as [$key_host, $keys]) {
+            Utils::override_key_auth_required_for_tests($key_host);
+            $authenticator = new RequestAuthenticator(self::SECRET, $keys);
+
+            $this->assertSame('Update the Reprint client to version 0.11.0 or later.', $authenticator->verify($released_client_headers, 'POST', '/?reprint-api'));
+            $this->assertSame(RequestAuthenticator::REASON_CLIENT_UPDATE_REQUIRED, $authenticator->last_error_reason());
+        }
     }
 }

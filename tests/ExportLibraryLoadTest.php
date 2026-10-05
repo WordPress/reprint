@@ -18,7 +18,7 @@ final class ExportLibraryLoadTest extends TestCase {
     public function testRequiringExportPhpDoesNotRejectMissingSecretKey(): void
     {
         $script = <<<'PHP'
-        $_POST['endpoint'] = 'preflight';
+        $_GET['endpoint'] = 'preflight';
         PHP;
 
         $result = $this->runExportWith($script);

@@ -1138,6 +1138,72 @@ final class Utils
         return $headers;
     }
 
+    /** The protocol generation every plugin authentication error reports as auth_version. */
+    public const AUTH_VERSION = 2;
+
+    /** The first client release that signs tokens with the v2 message. */
+    public const AUTH_VERSION_CLIENT_RELEASE = '0.11.0';
+
+    /**
+     * Refuses a released token client. Every released token client sends
+     * X-Auth-Content-Hash on every request, and no key client or v2 token
+     * client sends it. Released key clients sign the key message this server
+     * verifies, so they pass here.
+     *
+     * @param array<string,mixed> $headers Request headers in either convention.
+     * @return string|null Null unless the request comes from a released token client.
+     */
+    public static function client_update_error(array $headers): ?string {
+        if (self::request_header($headers, 'X-Auth-Content-Hash') === null) {
+            return null;
+        }
+        return 'Update the Reprint client to version ' . self::AUTH_VERSION_CLIENT_RELEASE . ' or later.';
+    }
+
+    /**
+     * Checks the freshness fields of a signed request: a decimal timestamp
+     * within the tolerance of now, then a hexadecimal nonce of at least 16
+     * characters. The timestamp is strictly digits with an optional fraction,
+     * as every client writes it, so it cannot carry whitespace into the signed
+     * message.
+     *
+     * @param string     $nonce               Value of X-Auth-Nonce.
+     * @param string     $timestamp           Value of X-Auth-Timestamp.
+     * @param int        $timestamp_tolerance Seconds either side of now.
+     * @param float|null $now                 Current time. Null reads the clock.
+     * @return array{0:string,1:string}|null Null when fresh, else the failure reason and message.
+     */
+    public static function freshness_error(string $nonce, string $timestamp, int $timestamp_tolerance, ?float $now): ?array {
+        if (!preg_match('/^[0-9]+(\.[0-9]+)?\z/', $timestamp)) {
+            return ['auth_failed', 'Invalid timestamp format'];
+        }
+        $time_difference = abs(( $now === null ? microtime(true) : $now ) - (float) $timestamp);
+        if ($time_difference > $timestamp_tolerance) {
+            return [
+                'timestamp_expired',
+                sprintf('Request timestamp expired. Difference: %.2f seconds, max allowed: %d seconds', $time_difference, $timestamp_tolerance),
+            ];
+        }
+        if (!preg_match('/^[0-9a-fA-F]{16,}\z/', $nonce)) {
+            return ['auth_failed', 'Nonce must be at least 16 hexadecimal characters'];
+        }
+        return null;
+    }
+
+    /**
+     * Returns the URL of one endpoint. The endpoint travels in the query so
+     * the signed request target names the operation.
+     *
+     * @param string              $api_url    API URL as supplied, routing query included.
+     * @param string              $endpoint   Endpoint name.
+     * @param array<string,mixed> $parameters Further query parameters, after the endpoint.
+     */
+    public static function endpoint_url(string $api_url, string $endpoint, array $parameters = []): string {
+        $api_url = rtrim($api_url, '?&');
+        $query = http_build_query(array_merge(['endpoint' => $endpoint], $parameters), '', '&', PHP_QUERY_RFC3986);
+        return $api_url . ( strpos($api_url, '?') === false ? '?' : '&' ) . $query;
+    }
+
     /**
      * Reduces a public key to its one-line base64 body.
      *
