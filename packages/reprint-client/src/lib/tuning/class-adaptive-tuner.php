@@ -8,8 +8,10 @@ namespace Reprint\Importer\Tuning;
  * The exporter runs until its server-side budgets expire, so the client-side
  * objective is to maximize useful work per request without pushing a host into
  * timeouts or response buffering. The tuner tracks endpoint throughput, applies
- * additive increase / multiplicative decrease, shrinks immediately on request
- * errors, and computes duty-cycle sleep between requests.
+ * additive increase / multiplicative decrease, shrinks on timeouts and HTTP
+ * errors other than 429, learns request spacing from HTTP 429, and computes
+ * duty-cycle sleep between requests. Successful requests retain a learned gap:
+ * one accepted request cannot establish that a higher request rate is safe.
  */
 class AdaptiveTuner
 {
@@ -19,6 +21,9 @@ class AdaptiveTuner
      * Under nginx's 1 MiB default to leave room for envelope wrapping and other overhead.
      */
     public const REQUEST_BODY_HARD_CAP_BYTES = 800 * 1024;
+
+    /** Client-side interval ceiling, independent of host-reported quotas. */
+    private const MAX_REQUEST_INTERVAL_SECONDS = 60.0;
 
     /** @var array<string, mixed> */
     private array $config;
@@ -96,6 +101,26 @@ class AdaptiveTuner
     public function get_state(): array
     {
         return $this->state;
+    }
+
+    /**
+     * Return the remaining gap before another request to this source may start.
+     * Transfer time and existing duty-cycle or retry waits already count.
+     *
+     * @param float $now Current Unix time in seconds.
+     */
+    public function get_request_wait_seconds(float $now): float
+    {
+        if (!$this->config["enabled"]) {
+            return 0.0;
+        }
+        return max(0.0, $this->state["last_request_started_at"] + $this->state["request_interval_seconds"] - $now);
+    }
+
+    /** @param float $now Request start time in Unix seconds. */
+    public function record_request_start(float $now): void
+    {
+        $this->state["last_request_started_at"] = $now;
     }
 
     /**
@@ -186,9 +211,15 @@ class AdaptiveTuner
     }
 
     /**
-     * Record a request-level error, adjust sizing, and trigger backoff.
+     * Record a request-level error and adjust sizing or request pacing.
      *
-     * @param array<string, mixed> $error
+     * @param array $error {
+     *     @type int  $http_code     HTTP status, or zero for a transfer failure.
+     *     @type bool $timeout       Whether the request timed out.
+     *     @type int  $curl_errno    cURL error number, or zero when absent.
+     *     @type bool $final_attempt Whether the next request is the last retry.
+     * }
+     * @phpstan-param array<string, mixed> $error
      * @return array<string, mixed>
      */
     public function tune_after_error(string $endpoint, array $error): array
@@ -196,6 +227,24 @@ class AdaptiveTuner
         $http_code = (int) ($error["http_code"] ?? 0);
         $timeout = (bool) ($error["timeout"] ?? false);
         $curl_errno = (int) ($error["curl_errno"] ?? 0);
+
+        if ($http_code === 429) {
+            // Fewer entries or bytes per request would create more requests.
+            if ($this->config["enabled"]) {
+                $this->state["request_interval_seconds"] = min(
+                    self::MAX_REQUEST_INTERVAL_SECONDS,
+                    max(1.0, $this->state["request_interval_seconds"] * 2.0),
+                );
+            }
+            return [
+                "decision" => $this->config["enabled"] ? "rate_limited" : "disabled",
+                "http_code" => $http_code,
+                "timeout" => $timeout,
+                "curl_errno" => $curl_errno,
+                "error_backoff_remaining" => $this->state["error_backoff_remaining"],
+                "request_interval_seconds" => $this->state["request_interval_seconds"],
+            ];
+        }
 
         if ($http_code === 413 && isset(self::ENDPOINTS[$endpoint]["request_body_key"])) {
             return $this->shrink_request_body(
@@ -413,6 +462,8 @@ class AdaptiveTuner
         $state_defaults = [
             "duty" => $config["duty"],
             "error_backoff_remaining" => 0,
+            "request_interval_seconds" => 0.0,
+            "last_request_started_at" => 0.0,
         ];
 
         foreach (self::ENDPOINTS as $endpoint) {
@@ -441,6 +492,8 @@ class AdaptiveTuner
 
         $state["duty"] = $this->clamp((float) $state["duty"], $config["duty_min"], $config["duty_max"]);
         $state["error_backoff_remaining"] = max(0, (int) ($state["error_backoff_remaining"] ?? 0));
+        $state["request_interval_seconds"] = $this->clamp( (float) $state["request_interval_seconds"], 0.0, self::MAX_REQUEST_INTERVAL_SECONDS);
+        $state["last_request_started_at"] = max(0.0, (float) $state["last_request_started_at"]);
 
         return $state;
     }

@@ -458,8 +458,29 @@ including those reached through `pull`, `pull-files`, and `pull-db`:
 
 Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
 Preflight failures, DNS lookup failures, refused connections, certificate errors,
-and local errors keep their existing classification. Reprint does not choose a
-wait time or schedule later runs.
+and local errors keep their existing classification. Reprint does not schedule
+later command runs.
+
+**Request pacing after HTTP 429**
+
+The first HTTP `429 Too Many Requests` response sets a one-second minimum gap
+between request starts. Each later 429 doubles the gap, up to one minute.
+A 429 leaves batch sizes unchanged: smaller batches would need more requests.
+These intervals are client-side starting rules, not a published host limit.
+
+The learned gap is stored for the remote API URL in the existing pull state.
+It applies to preflight, file indexes, file downloads, database indexes, and SQL
+requests, including later commands using the same state directory. Successful
+requests keep the learned gap. A completed endpoint or missing server timing
+does not bypass it. Transfer time and existing duty-cycle or retry waits count
+toward the gap, so a slow transfer needs no extra wait once the gap has elapsed.
+`--no-adaptive` disables this pacing without discarding the learned interval.
+Sources that have never returned 429 keep their existing request pacing.
+
+This does not coordinate concurrent importer processes or other programs using
+the same source IP. A host may also block that IP for minutes; request spacing
+alone does not guarantee that its block has expired. The three-failure retry
+limit and exit codes stay unchanged.
 
 **File pull modes**
 
