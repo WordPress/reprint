@@ -5,8 +5,9 @@
  * expected same-origin WordPress admin Referer, User-Agent, and Accept-Language.
  * After preflight reports base64 path support, the proxy also rejects clear
  * path query values. Before forwarding each streaming endpoint, it returns two
- * potentially transient HTTP errors. The third request reaches the real E2E
- * site, so Reprint must recover without hitting its three-failure limit.
+ * potentially transient HTTP errors, with a one-second Retry-After for HTTP 429.
+ * The third request reaches the real E2E site, so Reprint must recover without
+ * hitting its three-failure limit.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -244,6 +245,22 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
                 );
             }
         }
+    });
+
+    it('waits for Retry-After before retrying HTTP 429', () => {
+        const fetchRecords = readRequestRecords().filter(
+            record => record.endpoint === 'file_fetch',
+        );
+        const rateLimitIndex = fetchRecords.findIndex(
+            record => record.injectedStatus === 429,
+        );
+        assert.ok(rateLimitIndex >= 0, 'Expected an HTTP 429 response');
+        const retryRecord = fetchRecords[rateLimitIndex + 1];
+        assert.ok(retryRecord, 'Expected another file_fetch request after HTTP 429');
+        assert.ok(
+            retryRecord.timeMilliseconds - fetchRecords[rateLimitIndex].timeMilliseconds >= 900,
+            'Expected the next file_fetch request to wait for Retry-After: 1',
+        );
     });
 
     it('completes pull through the application firewall', () => {

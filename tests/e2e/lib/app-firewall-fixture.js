@@ -73,6 +73,7 @@ const server = http.createServer(async (request, response) => {
     }
 
     writeRequestLog({
+        timeMilliseconds: performance.now(),
         method: request.method,
         path: request.url,
         contentType,
@@ -104,6 +105,10 @@ const server = http.createServer(async (request, response) => {
         // Drain uploads before responding so cURL observes the HTTP status
         // instead of an upload-side socket error.
         request.on('end', () => {
+            // Keep the rate-limit retry inside the test's subprocess timeout.
+            if (injectedStatus === 429) {
+                response.setHeader('Retry-After', '1');
+            }
             response.writeHead(injectedStatus, {
                 'Content-Type': 'text/html; charset=utf-8',
                 'X-App-Firewall': 'potentially-transient-error',
