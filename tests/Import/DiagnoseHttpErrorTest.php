@@ -176,7 +176,8 @@ class DiagnoseHttpErrorTest extends TestCase
         $result = $this->diagnoseWithKey(403, '{"error":"Missing X-Auth-Content-Hash header","code":403}');
 
         $this->assertSame('AUTH_KEY_UNSUPPORTED', $result['code']);
-        $this->assertStringContainsString('update the Reprint Server plugin', $result['message']);
+        $this->assertStringContainsString('Update the Reprint Server plugin', $result['message']);
+        $this->assertStringNotContainsString('Ask the site owner', $result['message']);
     }
 
     public function testAKeyClientToldToUseAKeyHadItsHeadersStripped(): void
@@ -200,7 +201,8 @@ class DiagnoseHttpErrorTest extends TestCase
         $result = $this->diagnoseWithKey(403, '{"error":"This host accepts connection-token authentication only","code":403,"reason":"requires_token_auth"}');
 
         $this->assertSame('AUTH_REQUIRES_TOKEN', $result['code']);
-        $this->assertStringContainsString('update the Reprint Server plugin', $result['message']);
+        $this->assertStringContainsString('Update the Reprint Server plugin', $result['message']);
+        $this->assertStringNotContainsString('Ask the site owner', $result['message']);
     }
 
     public function testACurrentTokenOnlyPluginOnlyNeedsAToken(): void

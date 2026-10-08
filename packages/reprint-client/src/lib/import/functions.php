@@ -4,6 +4,7 @@ namespace Reprint\Importer;
 
 use PDO;
 use RuntimeException;
+use WordPress\Reprint\Server\RequestAuthenticator;
 
 /**
  * Build the fixed WordPress admin Referer for a remote Reprint API URL.
@@ -57,33 +58,14 @@ function unsupported_media_type_error_detail(): string
 }
 
 /**
- * Reasons with which Reprint Server plugins refuse a request's credential.
- *
- * Plugins of several versions share these reasons. Only a plugin that speaks
- * the client's authentication version adds `auth_version` to the refusal.
- */
-const AUTHENTICATION_REASONS = [
-	'auth_failed',
-	'missing_header',
-	'timestamp_expired',
-	'signature_mismatch',
-	'content_hash_mismatch',
-	'requires_key_auth',
-	'requires_token_auth',
-	'unknown_key',
-	'not_configured',
-	'no_keys_enrolled',
-];
-
-/**
  * Returns whether a signed request was refused by a plugin older than the client.
  *
  * Every authentication refusal from a plugin that speaks this protocol carries
  * `auth_version`. An older plugin refuses the signature with its error body,
  * which repeats the HTTP status as `code`, or with the push refusal body,
  * whose `status` is `rejected`. Its oldest error body has no reason. A
- * refusal for any reason outside AUTHENTICATION_REASONS is not about the
- * credential, so it is reported as the site sent it.
+ * refusal for a reason outside RequestAuthenticator::AUTHENTICATION_REASONS
+ * is not about the credential, so it is reported as the site sent it.
  *
  * For a token-signed request this means the plugin cannot verify the
  * signature. Older plugins verify key signatures, so for a key request it
@@ -99,7 +81,7 @@ function is_older_plugin_authentication_refusal(int $http_code, $decoded_body): 
 		return false;
 	}
 	$reason = $decoded_body['reason'] ?? null;
-	if ($reason !== null && !in_array($reason, AUTHENTICATION_REASONS, true)) {
+	if ($reason !== null && !in_array($reason, RequestAuthenticator::AUTHENTICATION_REASONS, true)) {
 		return false;
 	}
 	$is_refusal_status = 401 === $http_code || 403 === $http_code

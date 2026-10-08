@@ -100,7 +100,9 @@ final class RequestUrlPathEncodingTest extends TestCase
                 $this->fail('A remote Reprint API URL with a fragment must be rejected: ' . $remote_reprint_api_url);
             } catch (\InvalidArgumentException $error) {
                 $this->assertSame(
-                    'The remote Reprint API URL must not contain a fragment: ' . $remote_reprint_api_url . '.',
+                    'The remote Reprint API URL must not contain a fragment: ' . $remote_reprint_api_url . '. ' .
+                    'Remove # and everything after it. URL fragments are not sent to the server; ' .
+                    'the endpoint Reprint appends there would not reach the server either.',
                     $error->getMessage()
                 );
             }

@@ -20,6 +20,28 @@ final class RequestAuthenticator {
     public const REASON_UNKNOWN_KEY = PublicKeyServer::REASON_UNKNOWN_KEY;
     public const REASON_AUTH_FAILED = 'auth_failed';
 
+    /**
+     * Authentication refusal reasons shared with client error diagnosis.
+     *
+     * Use the verifier constants so changes to server reasons reach the client.
+     * Keep content_hash_mismatch for plugins using the earlier token protocol.
+     * Current plugin errors also report auth_version; older plugin errors can
+     * carry these reasons without it.
+     */
+    public const AUTHENTICATION_REASONS = [
+        self::REASON_AUTH_FAILED,
+        HMACServer::REASON_MISSING_HEADER,
+        HMACServer::REASON_TIMESTAMP_EXPIRED,
+        HMACServer::REASON_SIGNATURE_MISMATCH,
+        'content_hash_mismatch',
+        self::REASON_REQUIRES_KEY_AUTH,
+        self::REASON_REQUIRES_TOKEN_AUTH,
+        self::REASON_UNKNOWN_KEY,
+        self::REASON_NOT_CONFIGURED,
+        self::REASON_NO_KEYS_ENROLLED,
+        self::REASON_CLIENT_UPDATE_REQUIRED,
+    ];
+
     /** @var string|null */
     private $hmac_secret;
 

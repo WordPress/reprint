@@ -4,6 +4,11 @@ declare(strict_types=1);
 
 use PHPUnit\Framework\TestCase;
 use WordPress\Reprint\Server\Utils;
+use WordPress\Reprint\Server\RequestAuthenticator;
+use WordPress\Reprint\Server\HMACServer;
+use WordPress\Reprint\Server\PublicKeyServer;
+
+require_once __DIR__ . '/../packages/reprint-client/src/lib/import/functions.php';
 
 final class AuthProtocolTest extends TestCase {
 
@@ -14,6 +19,31 @@ final class AuthProtocolTest extends TestCase {
 		'Content hash mismatch',
 		'Missing X-Auth-',
 	];
+
+	public function testAuthenticationReasonsStayInSyncWithEveryVerifier(): void
+	{
+		// The removed token-body hash check still occurs in older plugin responses.
+		$expected_reasons = ['content_hash_mismatch'];
+		foreach ([RequestAuthenticator::class, HMACServer::class, PublicKeyServer::class] as $verifier) {
+			foreach ((new ReflectionClass($verifier))->getConstants() as $name => $reason) {
+				if (strpos($name, 'REASON_') === 0) {
+					$expected_reasons[] = $reason;
+				}
+			}
+		}
+		$expected_reasons = array_values(array_unique($expected_reasons));
+		$actual_reasons = RequestAuthenticator::AUTHENTICATION_REASONS;
+		sort($expected_reasons);
+		sort($actual_reasons);
+		$this->assertSame($expected_reasons, $actual_reasons);
+
+		foreach ($actual_reasons as $reason) {
+			$this->assertTrue(\Reprint\Importer\is_older_plugin_authentication_refusal(403, [
+				'code' => 403,
+				'reason' => $reason,
+			]), $reason);
+		}
+	}
 
 	/** @dataProvider requestWithoutAContentHashProvider */
 	public function testARequestWithoutAContentHashIsLeftToTheVerifier(array $headers): void

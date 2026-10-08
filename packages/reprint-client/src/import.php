@@ -685,9 +685,10 @@ class ImportClient
     /**
      * Refuses a remote Reprint API URL that no command can use.
      *
-     * Every request appends its endpoint to the end of this URL. After a
-     * fragment, the endpoint would land in the fragment, which cURL never
-     * sends, so the site would receive a request without an endpoint.
+     * For example, appending &endpoint=preflight to /?reprint-api#section
+     * puts the endpoint after #, where cURL treats it as a URL fragment and
+     * never sends it. The server would receive /?reprint-api with no endpoint.
+     * Reject fragments before creating state, for pull and push alike.
      *
      * @param string $remote_reprint_api_url Remote Reprint API URL as supplied.
      * @param bool   $allow_http             Whether an unencrypted http:// URL is accepted.
@@ -706,7 +707,9 @@ class ImportClient
             $masked_remote_reprint_api_url = self::mask_url_credentials($remote_reprint_api_url);
             throw new InvalidArgumentException(
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option error, not HTML.
-                'The remote Reprint API URL must not contain a fragment: ' . $masked_remote_reprint_api_url . '.'
+                'The remote Reprint API URL must not contain a fragment: ' . $masked_remote_reprint_api_url . '. ' .
+                'Remove # and everything after it. URL fragments are not sent to the server; ' .
+                'the endpoint Reprint appends there would not reach the server either.'
             );
         }
     }
@@ -13175,8 +13178,10 @@ class ImportClient
                     'message' => older_plugin_authentication_error_detail(),
                 ];
             }
-            // A plugin older than the key stack refuses a key request with a
-            // Reprint error body that has no reason.
+            // Before public-key authentication was added, plugins required
+            // X-Auth-Content-Hash for token requests. Key requests lack that
+            // header, so those plugins return an authentication error without
+            // a reason code. Updating the plugin adds key verification.
             if (
                 $using_key
                 && $server_reason === null
@@ -13187,7 +13192,7 @@ class ImportClient
                     'message' =>
                         "The site rejected the key signature without a reason code, which an older " .
                         "Reprint Server plugin does when it does not understand key authentication.\n\n" .
-                        "Ask the site owner to update the Reprint Server plugin.",
+                        "Update the Reprint Server plugin.",
                 ];
             }
             if ($server_reason === 'client_update_required') {
@@ -13221,16 +13226,18 @@ class ImportClient
                 ];
             }
             if ($server_reason === 'requires_token_auth') {
-                // This client's tokens use a message older plugins do not
-                // verify, so --secret alone cannot help there.
+                // Older plugins without OpenSSL check the previous token
+                // signature format. Update them before switching from a key
+                // to this client's token signatures.
                 $token_advice = is_older_plugin_authentication_refusal($http_code, $decoded)
-                    ? "Ask the site owner to update the Reprint Server plugin, then pass --secret=TOKEN " .
+                    ? "Update the Reprint Server plugin, then pass --secret=TOKEN " .
                         "using the connection token configured under Tools > Reprint Server."
                     : "Pass --secret=TOKEN using the connection token configured under Tools > Reprint Server.";
                 return [
                     'code' => 'AUTH_REQUIRES_TOKEN',
                     'message' =>
-                        "This site's host has no OpenSSL, so it accepts connection-token authentication only.\n\n" .
+                        "This site's PHP cannot verify public-key signatures because OpenSSL is unavailable. " .
+                        "Reprint therefore requires the site's connection token.\n\n" .
                         $token_advice,
                 ];
             }
@@ -13255,8 +13262,9 @@ class ImportClient
                 // A missing or broken token, a broken secret.php, or a host
                 // configuration error: only the site's message says which.
                 $not_configured_message = is_string($server_msg)
-                    ? "The site is not set up to accept connections. The site reported: {$server_msg}"
-                    : "The site is not set up to accept connections. Set up the connection under Tools > Reprint Server.";
+                    ? "The Reprint Server plugin could not authenticate the request. The site reported: {$server_msg}"
+                    : "The Reprint Server plugin reported an authentication configuration error without a detail. " .
+                        "Check the connection settings under Tools > Reprint Server and the site's PHP error log.";
                 // Older plugins also answer not_configured when no keys are enrolled.
                 if ($using_key && is_older_plugin_authentication_refusal($http_code, $decoded)) {
                     $not_configured_message .= "\n\nIf the site has no keys enrolled, enroll this public key under Tools > Reprint Server." . $key_hint;
@@ -13298,9 +13306,9 @@ class ImportClient
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',
                     'message' =>
-                        "Signature rejected. Either the --secret value does not match the connection token " .
-                        "under Tools > Reprint Server, or a proxy, CDN, or host rule is rewriting the request " .
-                        "path or query on its way to WordPress. This machine signed: " .
+                        "Signature rejected. The --secret value may not match the connection token " .
+                        "under Tools > Reprint Server. A changed HTTP method, path, or query also breaks both token and key signatures. " .
+                        "A proxy, CDN, or host rule may be rewriting the request on its way to WordPress. This machine signed: " .
                         $signed_request_target,
                 ];
             }

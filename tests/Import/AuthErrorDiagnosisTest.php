@@ -63,6 +63,8 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose($this->clientWith([]), 403, ['error' => 'msg', 'reason' => 'requires_token_auth', 'auth_version' => 2]);
         $this->assertSame('AUTH_REQUIRES_TOKEN', $result['code']);
         $this->assertStringContainsString('--secret=TOKEN', $result['message']);
+        $this->assertStringContainsString('cannot verify public-key signatures because OpenSSL is unavailable', $result['message']);
+        $this->assertStringNotContainsString('Ask the site owner', $result['message']);
     }
 
     public function testNoKeysEnrolledReprintsThePublicKey(): void
@@ -101,6 +103,22 @@ final class AuthErrorDiagnosisTest extends TestCase
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString('The site reported: Export not configured: no connection token is stored', $result['message']);
         $this->assertStringNotContainsString('reprint keygen', $result['message']);
+        $this->assertStringNotContainsString('not set up to accept connections', $result['message']);
+    }
+
+    public function testNotConfiguredWithoutADetailDoesNotGuessWhichCredentialIsMissing(): void
+    {
+        $result = $this->diagnose(
+            $this->clientWith(['secret' => 'x']),
+            503,
+            ['reason' => 'not_configured', 'auth_version' => 2]
+        );
+        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
+        $this->assertSame(
+            'The Reprint Server plugin reported an authentication configuration error without a detail. ' .
+            'Check the connection settings under Tools > Reprint Server and the site\'s PHP error log.',
+            $result['message']
+        );
     }
 
     public function testNotConfiguredForAKeyDoesNotClaimTheHostRequiresKeys(): void
@@ -160,6 +178,7 @@ final class AuthErrorDiagnosisTest extends TestCase
         $this->assertStringContainsString('This machine signed: /?reprint-api&endpoint=sql_chunk', $result['message']);
         $this->assertStringContainsString('--secret', $result['message']);
         $this->assertStringContainsString('rewriting the request', $result['message']);
+        $this->assertStringContainsString('breaks both token and key signatures', $result['message']);
     }
 
     public function testNoCredentialMessageNamesBothOptions(): void
