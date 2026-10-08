@@ -601,7 +601,6 @@ abstract class ReprintServerPluginTestCase extends TestCase
 
     protected function renderAdminPage(): string
     {
-        SettingsPage::get_instance()->register_settings_fields();
         ob_start();
         SettingsPage::get_instance()->render_admin_page();
         return (string) ob_get_clean();

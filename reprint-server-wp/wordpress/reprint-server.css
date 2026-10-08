@@ -1,7 +1,208 @@
+.reprint-server-page {
+	max-width: 980px;
+}
+
+.reprint-server-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 24px;
+	margin: 20px 0;
+}
+
+.reprint-server-header h1 {
+	padding: 0;
+}
+
+.reprint-server-header p {
+	margin-bottom: 0;
+}
+
+.reprint-server-status {
+	flex-shrink: 0;
+	margin-top: 4px;
+	padding: 5px 10px;
+	border: 1px solid #c3c4c7;
+	border-radius: 3px;
+	background: #f6f7f7;
+	font-weight: 600;
+}
+
+.reprint-server-status-ready {
+	border-color: #68a879;
+	background: #edfaef;
+	color: #1b5e20;
+}
+
+.reprint-server-card {
+	margin: 0 0 16px;
+	padding: 24px;
+	border: 1px solid #c3c4c7;
+	background: #fff;
+}
+
+.reprint-server-card h2 {
+	margin: 0 0 12px;
+	font-size: 18px;
+	line-height: 1.4;
+}
+
+.reprint-server-card p {
+	max-width: 76em;
+}
+
+.reprint-server-card > p:last-child {
+	margin-bottom: 0;
+}
+
+.reprint-server-card label {
+	font-weight: 600;
+}
+
+.reprint-server-url-row,
+.reprint-server-token-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.reprint-server-url-row input {
+	flex: 1;
+	min-width: 160px;
+	padding: 4px 8px;
+}
+
+.reprint-server-copy-status:empty {
+	display: none;
+}
+
+.reprint-server-card textarea {
+	display: block;
+	margin-top: 8px;
+}
+
+.reprint-server-card .submit {
+	margin-bottom: 0;
+	padding-bottom: 0;
+}
+
+.reprint-server-help {
+	margin-top: 20px;
+}
+
+.reprint-server-page summary {
+	width: fit-content;
+	color: #2271b1;
+	cursor: pointer;
+	font-weight: 600;
+}
+
+.reprint-server-page summary:hover {
+	color: #135e96;
+}
+
+.reprint-server-page summary:focus-visible {
+	outline: 2px solid #2271b1;
+	outline-offset: 4px;
+}
+
+.reprint-server-page pre {
+	padding: 12px;
+	background: #f6f7f7;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.reprint-server-next-action {
+	margin-top: 20px;
+	padding-top: 16px;
+	border-top: 1px solid #dcdcde;
+}
+
+.reprint-server-next-step {
+	background: #f6f7f7;
+}
+
+.reprint-server-host-details {
+	padding: 16px 24px;
+	background: transparent;
+}
+
+.reprint-server-key-table-wrapper {
+	overflow-x: auto;
+}
+
 /*
  * Layout for the bundled settings page. WordPress list tables align cells to
  * the top, which leaves the key id sitting above the buttons beside it.
  */
 .reprint-server-key-table td {
 	vertical-align: middle;
+}
+
+.reprint-server-key-table code {
+	white-space: nowrap;
+}
+
+.reprint-server-key-table label {
+	display: inline-block;
+	margin-inline-end: 8px;
+	font-weight: 400;
+	white-space: nowrap;
+}
+
+@media screen and (max-width: 782px) {
+	.reprint-server-header {
+		flex-direction: column;
+		gap: 12px;
+	}
+
+	.reprint-server-card {
+		padding: 16px;
+	}
+
+	.reprint-server-token-row .regular-text {
+		width: 100%;
+	}
+
+	/* Keep key actions visible on small screens instead of requiring sideways scrolling. */
+	.reprint-server-key-table thead {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+	}
+
+	.reprint-server-key-table tbody,
+	.reprint-server-key-table tr {
+		display: block;
+	}
+
+	.reprint-server-key-table tr + tr {
+		border-top: 1px solid #c3c4c7;
+	}
+
+	.reprint-server-key-table td {
+		display: grid;
+		grid-template-columns: 88px minmax(0, 1fr);
+		gap: 8px;
+		padding: 12px;
+	}
+
+	.reprint-server-key-table td::before {
+		content: attr(data-label);
+		font-weight: 600;
+	}
+
+	.reprint-server-key-table code {
+		white-space: normal;
+		overflow-wrap: anywhere;
+	}
+
+	.reprint-server-key-table .button {
+		margin-top: 8px;
+	}
 }

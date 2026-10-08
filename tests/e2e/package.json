@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:admin": "node --test admin-ui/*.test.js"
   },
   "dependencies": {
     "@php-wasm/node": "3.1.29",
@@ -12,6 +13,7 @@
     "mysql2": "^3.9.0"
   },
   "devDependencies": {
+    "playwright": "1.62.1",
     "vitest": "^4.0.18"
   }
 }

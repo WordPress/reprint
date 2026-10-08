@@ -128,6 +128,41 @@ enrollment, key removal, and push access. The page is an adapter over the shared
 configuration functions; it does not own the token, key, or push-authorization
 rules.
 
+## Administrator page
+
+For example, when a tool asks to copy `https://example.com`, the administrator
+copies the remote Reprint API URL, authorizes the public key shown by the tool,
+and returns to that tool to start the copy. This page saves access. It does not
+start a transfer, show transfer progress, or confirm that a tool connected.
+
+The first visit shows those three steps in order. Once a usable credential is
+saved, the URL and the next action stay at the top, followed by access controls.
+Adding another key and host details are closed until needed. Public keys and
+connection tokens are never offered as competing authentication choices: the
+host determines which one works.
+
+| Visit or host state | Next action on the page |
+| --- | --- |
+| No key enrolled; the tool already printed one | Paste that public key and choose **Authorize tool**. |
+| No key enrolled; no key printed yet | Copy the URL into the tool. The CLI help shows how to generate a public key. |
+| A key or accepted token is already saved | Copy the URL if needed, then return to the tool to start or resume. |
+| Another tool needs access | Open **Authorize another tool**. Existing keys remain visible. |
+| A key should stop working | Match its key id to the tool, then choose **Remove key**. Removing the last key returns the page to setup. |
+| A tool must change files on this site | Check **Allow push** for its key and choose **Save push access**. Checking alone changes nothing. Token hosts have a separate **Push access** section. |
+| OpenSSL is missing | Save a connection token and use the same token in the tool. Key enrollment is not offered. |
+| A token remains after moving to an OpenSSL host | **Host details** explains that it is unused and offers removal for an option-stored token. |
+| `public-keys.php` supplies keys | Edit that file. The page lists its keys without enrollment or removal forms. |
+| `secret.php` supplies a token on a token host | Use the file's token. Editing the stored option does not replace the file. |
+| The hosting provider controls push access | Read the effective permission. Per-key push forms are not offered. |
+| A multisite network is being copied | Choose a site's home URL. Network credentials can pull any site; push controls are not offered. Only network administrators can manage access. |
+| A form is rejected | Read the action result. An enrollment rejection reopens the add-key form. |
+
+Routine configuration status is a small label, not an administrator notice.
+Notices report form results and errors. The forms and disclosure sections work
+without JavaScript; JavaScript adds token generation, token visibility, and URL
+copying with visible success or manual-copy guidance. WordPress and other
+plugins' notices are not suppressed.
+
 ## Uninstalling
 
 Deleting Reprint Server through WordPress removes its stored connection token,

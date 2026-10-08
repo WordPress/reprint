@@ -37,6 +37,119 @@ require_once __DIR__ . '/lib/ReprintServerPluginTestCase.php';
 
 final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 {
+    public function testFirstVisitHasOneSetupJourneyAndNoRoutineNotices(): void
+    {
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('Setup needed', $html);
+        $this->assertStringContainsString('1. Copy the API URL', $html);
+        $this->assertStringContainsString('2. Authorize your tool', $html);
+        $this->assertStringContainsString('3. Continue in your tool', $html);
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringContainsString('reprint keygen', $html);
+        $this->assertStringNotContainsString('class="notice ', $html);
+        $this->assertStringNotContainsString('Connected for', $html);
+        $this->assertStringNotContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
+
+        $document = new DOMDocument();
+        $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+        $xpath = new DOMXPath($document);
+        $this->assertCount(1, $xpath->query('//textarea[@id="reprint_server_public_key" and @required and @aria-describedby="reprint-server-public-key-help"]'));
+        $this->assertCount(1, $xpath->query('//input[@type="submit" and @value="Authorize tool" and contains(@class, "button-primary")]'));
+    }
+
+    public function testConfiguredPagePutsConnectionBeforeAccessAndCollapsesAddingAKey(): void
+    {
+        update_option_public_keys([$this->sampleKeyEntry()]);
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('Ready for downloads', $html);
+        $this->assertStringContainsString('Return to your tool', $html);
+        $this->assertStringNotContainsString('class="notice ', $html);
+        $this->assertStringNotContainsString('Connected for', $html);
+        $this->assertStringNotContainsString('1. Copy', $html);
+        $this->assertLessThan(strpos($html, 'reprint-server-key-table'), strpos($html, 'reprint-server-api-url'));
+
+        $document = new DOMDocument();
+        $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+        $xpath = new DOMXPath($document);
+        $this->assertCount(1, $xpath->query('//details[not(@open)]/summary[text()="Authorize another tool"]'));
+        $this->assertCount(1, $xpath->query('//input[@name="reprint_server_key_push_enabled" and not(@onchange)]'));
+        $this->assertCount(1, $xpath->query('//input[@type="submit" and @value="Save push access"]'));
+    }
+
+    public function testEnrollmentErrorReopensTheAddKeyForm(): void
+    {
+        update_option_public_keys([$this->sampleKeyEntry()]);
+        $_GET['reprint_server_notice'] = 'enroll_invalid';
+        $document = new DOMDocument();
+        $document->loadHTML($this->renderAdminPage(), LIBXML_NOERROR | LIBXML_NOWARNING);
+        $xpath = new DOMXPath($document);
+        $this->assertCount(1, $xpath->query('//details[@open]/summary[text()="Authorize another tool"]'));
+        $this->assertCount(1, $xpath->query('//div[contains(@class, "notice-error")]'));
+    }
+
+    public function testTokenHostShowsOnlyUsableAuthenticationControls(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringContainsString('id="reprint_server_connection_token"', $html);
+        $this->assertStringNotContainsString('reprint_server_enroll_public_key', $html);
+        $this->assertStringNotContainsString('reprint_server_key_push_enabled', $html);
+        $this->assertStringNotContainsString('class="notice ', $html);
+    }
+
+    public function testFileManagedKeysGiveTheNextActionWithoutDisabledForms(): void
+    {
+        file_put_contents(PUBLIC_KEYS_FILE, "<?php return [];\n");
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('public-keys.php', $html);
+        $this->assertStringContainsString('Edit that file to authorize a tool', $html);
+        $this->assertStringNotContainsString('reprint_server_enroll_public_key', $html);
+        $this->assertStringNotContainsString('class="notice ', $html);
+    }
+
+    public function testNetworkJourneyDoesNotOfferTheNetworkUrlAsASiteUrl(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('1. Choose the site to copy', $html);
+        $this->assertStringContainsString('https://your-site.example/?reprint-api', $html);
+        $this->assertStringContainsString('any site in this network', $html);
+        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringNotContainsString('name="reprint_server_key_push_enabled"', $html);
+        $this->assertStringNotContainsString('class="notice ', $html);
+    }
+
+    public function testNetworkTokenSaveReportsTheSavedResult(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+        $_POST = [CONNECTION_TOKEN_OPTION => 'network-token'];
+        try {
+            SettingsPage::get_instance()->handle_network_token_save();
+        } catch (\RuntimeException $exception) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch -- The harness redirect throws before exit.
+        }
+        $this->assertSame('network-token', get_connection_token());
+        $this->assertStringContainsString('reprint_server_notice=network_token_saved', (string) $GLOBALS['reprint_server_test_redirect']);
+        $_GET['reprint_server_notice'] = 'network_token_saved';
+        $this->assertStringContainsString('Connection token saved.', $this->renderAdminPage());
+    }
+
+    public function testKeyActionsHaveDistinctNamesForEachKey(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        update_option_public_keys([$entry]);
+        $document = new DOMDocument();
+        $document->loadHTML($this->renderAdminPage(), LIBXML_NOERROR | LIBXML_NOWARNING);
+        $xpath = new DOMXPath($document);
+        foreach (['Allow push for key ', 'Save push access for key ', 'Remove key '] as $label) {
+            $this->assertCount(1, $xpath->query('//input[normalize-space(@aria-label)="' . $label . $entry['key_id'] . '"]'));
+        }
+        $this->assertCount(4, $xpath->query('//table[contains(@class, "reprint-server-key-table")]//td[@data-label]'));
+    }
+
     /** A subsite's token cannot grant access to shared network data. */
     public function testMultisiteUsesOnlyTheNetworkConnectionToken(): void
     {
@@ -394,12 +507,12 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $html = $this->renderAdminPage();
 
-        $this->assertStringContainsString('<strong>Not configured yet.</strong>', $html);
-        $this->assertStringContainsString('Enter a connection token to get started.', $html);
+        $this->assertStringContainsString('Setup needed', $html);
+        $this->assertStringContainsString('Save the token to authorize downloads', $html);
         $this->assertStringContainsString('id="reprint_server_connection_token"', $html);
         $this->assertStringContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
-        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
     }
 
     public function testTokenGeneratorDoesNotSubmitTheFormOrChangeTheStoredToken(): void
@@ -409,7 +522,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $GLOBALS['reprint_server_test_options'][CONNECTION_TOKEN_OPTION] = 'current-token';
 
         $document = new DOMDocument();
-        $document->loadHTML($this->renderAdminPage());
+        $document->loadHTML($this->renderAdminPage(), LIBXML_NOERROR | LIBXML_NOWARNING);
         $xpath = new DOMXPath($document);
         $buttons = $xpath->query('//button[contains(@class, "reprint-server-generate-token")]');
 
@@ -428,18 +541,18 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
         $html = $this->renderAdminPage();
 
-        $this->assertStringContainsString('notice notice-info inline', $html);
-        $this->assertStringContainsString('<strong>Connected for downloads.</strong>', $html);
-        $this->assertStringContainsString('The connection token cannot change files on this site.', $html);
+        $this->assertStringNotContainsString('class="notice ', $html);
+        $this->assertStringContainsString('Ready for downloads', $html);
+        $this->assertStringContainsString('Return to your tool', $html);
         $this->assertStringNotContainsString('notice notice-success inline', $html);
         $this->assertStringContainsString('You do not need push access when moving this site to another host.', $html);
         $this->assertStringContainsString('Allow push to change files on this site', $html);
         $this->assertStringContainsString('except excluded paths.', $html);
-        $this->assertStringContainsString('<form method="post" action="options.php">', $html);
+        $this->assertStringContainsString('<form method="post" action="https://example.test/wp-admin/options.php">', $html);
         $this->assertStringContainsString('name="option_page" value="reprint_server"', $html);
         $this->assertStringContainsString('action="https://example.test/wp-admin/admin-post.php"', $html);
-        // The settings form, the push form, and the key enrollment form each wrap their button.
-        $this->assertSame(3, substr_count($html, '<p class="submit">'));
+        // Token hosts show only the token and its push settings, not key enrollment.
+        $this->assertSame(2, substr_count($html, '<p class="submit">'));
         $this->assertSame([''], $GLOBALS['reprint_server_settings_error_requests']);
         $this->assertStringNotContainsString('checked="checked"', $html);
         $this->assertStringNotContainsString('<style>', $html);
@@ -496,8 +609,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
         $html = $this->renderAdminPage();
 
-        $this->assertStringContainsString('<strong>Connected for downloads and push.</strong>', $html);
-        $this->assertStringContainsString('notice notice-info inline', $html);
+        $this->assertStringContainsString('Downloads and push enabled', $html);
+        $this->assertStringNotContainsString('class="notice ', $html);
         $this->assertStringNotContainsString('notice notice-success inline', $html);
         $this->assertStringContainsString('name="reprint_server_push_enabled"', $html);
         $this->assertStringContainsString('checked="checked"', $html);
@@ -827,12 +940,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertFalse(get_enrolled_public_keys()[0]['push']);
 
         $html = $this->renderAdminPage();
-        $this->assertStringContainsString('name="reprint_server_key_push_enabled" value="1"', $html);
-        $this->assertMatchesRegularExpression(
-            '/name="reprint_server_key_push_enabled" value="1"\s+disabled="disabled"/',
-            $html,
-            'the per-key push checkbox is disabled on a network'
-        );
+        $this->assertStringNotContainsString('name="reprint_server_key_push_enabled"', $html, 'networks cannot grant push');
 
         $_GET['reprint_server_notice'] = 'key_push_multisite';
         $this->assertStringContainsString('Push is not supported on multisite networks.', $this->renderAdminPage());
@@ -845,7 +953,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('Clients authenticate with public keys', $html);
         $this->assertStringContainsString('reprint_server_enroll_public_key', $html);
         $this->assertStringContainsString('not accepted on this host', $html, 'a stored token is shown as inert');
-        $this->assertStringContainsString('No client can connect until a key is enrolled', $html);
+        $this->assertStringContainsString('2. Authorize your tool', $html);
     }
 
     public function testAdminPageShowsTheTokenStatusLineOnAnHmacHost(): void
@@ -853,7 +961,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('Clients authenticate with a connection token', $html);
-        $this->assertStringContainsString('reprint_server_enroll_public_key', $html, 'enrollment form is present even on an HMAC host');
+        $this->assertStringNotContainsString('reprint_server_enroll_public_key', $html, 'a token host cannot use newly enrolled keys');
         $this->assertStringContainsString('public keys are not used on this host', $html);
     }
 
@@ -870,12 +978,12 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('reprint_server_key_id', $html);
     }
 
-    public function testAdminPageDisablesEnrollmentWhenTheFileOverrideIsActive(): void
+    public function testAdminPageOmitsEnrollmentWhenTheFileOverrideIsActive(): void
     {
         file_put_contents(PUBLIC_KEYS_FILE, "<?php return [];\n");
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('public-keys.php', $html);
-        $this->assertStringContainsString('disabled', $html);
+        $this->assertStringNotContainsString('reprint_server_enroll_public_key', $html);
         unlink(PUBLIC_KEYS_FILE);
     }
 
@@ -911,7 +1019,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('secret.php', $html);
         $this->assertStringNotContainsString('reprint_server_remove_connection_token', $html, 'a secret.php token has no Remove button');
-        $this->assertStringContainsString('<code>secret.php</code> override is active.</strong> It is not accepted on this host.', $html);
+        $this->assertStringContainsString('secret.php is present but not accepted on this host. Remove it.', $html);
         $this->assertStringNotContainsString('Remove secret.php to use the stored option value.', $html);
     }
 
@@ -938,14 +1046,14 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertFalse($state['push_enabled']);
 
         $html = $this->renderAdminPage();
-        $this->assertStringContainsString('<strong>Not configured yet.</strong>', $html);
-        $this->assertStringContainsString('Enroll a public key', $html);
+        $this->assertStringContainsString('Setup needed', $html);
+        $this->assertStringContainsString('2. Authorize your tool', $html);
         $this->assertStringNotContainsString('name="reprint_server_push_enabled"', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
-        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
     }
 
-    public function testKeyHostWithAPushingKeyIsConnectedForDownloadsAndPush(): void
+    public function testKeyHostWithAPushingKeyReportsDownloadsAndPushAccess(): void
     {
         $entry = $this->sampleKeyEntry();
         $entry['push'] = true;
@@ -956,13 +1064,13 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertTrue($state['push_enabled']);
 
         $html = $this->renderAdminPage();
-        $this->assertStringContainsString('<strong>Connected for downloads and push.</strong>', $html);
-        $this->assertStringContainsString('At least one enrolled key can change files on this site.', $html);
+        $this->assertStringContainsString('Downloads and push enabled', $html);
+        $this->assertStringContainsString('Allow push only if a tool needs to upload, replace, or delete files', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html, 'push grants live in the key table on a key host');
         $this->assertStringContainsString('id="reprint-server-api-url"', $html);
     }
 
-    public function testKeyHostWithANonPushingKeyIsConnectedForDownloadsOnly(): void
+    public function testKeyHostWithANonPushingKeyReportsDownloadAccess(): void
     {
         update_option_public_keys([$this->sampleKeyEntry()]);
 
@@ -971,8 +1079,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertFalse($state['push_enabled']);
 
         $html = $this->renderAdminPage();
-        $this->assertStringContainsString('<strong>Connected for downloads.</strong>', $html);
-        $this->assertStringContainsString('No enrolled key can change files', $html);
+        $this->assertStringContainsString('Ready for downloads', $html);
+        $this->assertStringNotContainsString('checked="checked"', $html);
     }
 
     /** The managed policy and the multisite refusal outrank a key's push flag, as they do for a request. */
@@ -995,9 +1103,9 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
      * The key table shows the push permission a request signed with the key
      * gets, so a host policy outranks the stored flag there too.
      *
-     * @dataProvider managedKeyPushCheckboxProvider
+     * @dataProvider managedKeyPushAccessProvider
      */
-    public function testKeyPushCheckboxShowsThePermissionTheApiEnforces(string $managed_policy, bool $stored_push, bool $expect_checked): void
+    public function testReadOnlyKeyPushAccessShowsThePermissionTheApiEnforces(string $managed_policy, bool $stored_push, bool $expect_allowed): void
     {
         $entry = $this->sampleKeyEntry();
         $entry['push'] = $stored_push;
@@ -1009,12 +1117,12 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
             putenv('REPRINT_SERVER_PUSH_ENABLED');
         }
 
-        $this->assertSame(1, preg_match('/<input type="checkbox" name="reprint_server_key_push_enabled" value="1"([^>]*)>/', $html, $matches), $html);
-        $this->assertSame($expect_checked, strpos($matches[1], 'checked="checked"') !== false);
-        $this->assertStringContainsString('disabled="disabled"', $matches[1], 'the host decides, so the key cannot be changed here');
+        $this->assertStringContainsString($expect_allowed ? 'Allowed' : 'Downloads only', $html);
+        $this->assertStringContainsString('Push access is managed by your hosting provider.', $html);
+        $this->assertStringNotContainsString('reprint_server_save_key_push_access', $html, 'the host decides, so the key cannot be changed here');
     }
 
-    public static function managedKeyPushCheckboxProvider(): array
+    public static function managedKeyPushAccessProvider(): array
     {
         return [
             'host enables push for a key never granted it' => ['true', false, true],
