@@ -180,15 +180,17 @@ final class RetryLaterExitCodeTest extends TestCase {
         file_put_contents($this->root . '/proxy-status', '200');
         $result = $this->run_command('files-pull');
         $this->assertSame(0, $result['exit_code'], $result['output']);
+        $this->assertStringNotContainsString('"event":"retry"', $result['output']);
+        $this->assertSame(0, json_decode(file_get_contents($state_files[0]), true)['consecutive_interrupted_responses']);
     }
 
     public static function invalid_retry_after_headers(): array
     {
         return [
-            'missing' => ['', 60, 1],
-            'invalid' => ['not-a-delay', 60, 1],
-            'negative' => ['-1', 60, 1],
-            'second failure' => ['["0", ""]', 120, 2],
+            'missing' => ['', 15, 1],
+            'invalid' => ['not-a-delay', 15, 1],
+            'negative' => ['-1', 15, 1],
+            'second failure' => ['["0", ""]', 60, 2],
         ];
     }
 

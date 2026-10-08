@@ -424,8 +424,8 @@ request that advances the cursor resets that count.
 HTTP `429` reports `RATE_LIMITED`, including when the host sends an HTML block
 page. Before repeating a streaming request after a temporary HTTP failure,
 Reprint waits for a valid `Retry-After` header, expressed as seconds or an
-HTTP date. For `429` without a valid header, it waits 60 seconds before the
-first retry and 120 seconds before the second. The wait starts after saving
+HTTP date. For `429` without a valid header, it waits 15 seconds before the
+first retry and 60 seconds before the second. The wait starts after saving
 the durable cursor. Stopping the process during that wait does not discard
 saved transfer progress.
 

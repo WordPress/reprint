@@ -13081,7 +13081,7 @@ class ImportClient
         }
         if ($retry_after_seconds === null && $this->last_http_code === 429) {
             // A host block can last minutes even when it omits Retry-After.
-            $retry_after_seconds = 60 * ( 2 ** max(0, $count - 1) );
+            $retry_after_seconds = $count <= 1 ? 15 : 60;
         }
         if ($retry_after_seconds === null || $retry_after_seconds === 0) {
             return;
