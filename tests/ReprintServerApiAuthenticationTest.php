@@ -330,6 +330,22 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $this->assertArrayNotHasKey('status', $response['body'], 'a pull endpoint keeps the pull error shape');
     }
 
+    public function testAReleasedTokenClientIsAskedToUpdateBeforeABrokenSecretFileIsReported(): void
+    {
+        file_put_contents($this->credentials_directory . '/secret.php', "<?php return '';\n");
+        $this->startServer(['key_auth_required' => false, 'options' => $this->tokenOptions()]);
+
+        $response = $this->request([
+            'X-Auth-Signature' => str_repeat('0', 64),
+            'X-Auth-Nonce' => str_repeat('a', 32),
+            'X-Auth-Timestamp' => sprintf('%.6f', microtime(true)),
+            'X-Auth-Content-Hash' => hash('sha256', ''),
+        ]);
+
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('client_update_required', $response['body']['reason']);
+    }
+
     /** @param array{status:int,body:array<string,mixed>} $response */
     private function assertReachedDispatcher(array $response): void
     {

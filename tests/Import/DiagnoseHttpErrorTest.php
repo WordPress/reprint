@@ -188,6 +188,39 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertStringNotContainsString('--secret', $result['message']);
     }
 
+    public function testAKeyClientFacingAPluginWithoutKeySupportIsNotSentToTokens(): void
+    {
+        $result = $this->diagnoseWithKey(403, '{"error":"Missing X-Auth-Content-Hash header","code":403}');
+
+        $this->assertStringNotContainsString('--secret', $result['message']);
+    }
+
+    public function testAnOlderTokenOnlyPluginMustBeUpdatedBeforeATokenHelps(): void
+    {
+        $result = $this->diagnoseWithKey(403, '{"error":"This host accepts connection-token authentication only","code":403,"reason":"requires_token_auth"}');
+
+        $this->assertSame('AUTH_REQUIRES_TOKEN', $result['code']);
+        $this->assertStringContainsString('update the Reprint Server plugin', $result['message']);
+    }
+
+    public function testACurrentTokenOnlyPluginOnlyNeedsAToken(): void
+    {
+        $result = $this->diagnoseWithKey(403, '{"error":"This host accepts connection-token authentication only","code":403,"reason":"requires_token_auth","auth_version":2}');
+
+        $this->assertSame('AUTH_REQUIRES_TOKEN', $result['code']);
+        $this->assertStringNotContainsString('update the Reprint Server plugin', $result['message']);
+    }
+
+    public function testAKeyClientPrintsItsKeyWhenAnOlderPluginIsNotConfigured(): void
+    {
+        $result = $this->diagnoseWithKey(503, '{"error":"Export not configured: no keys are enrolled","code":503,"reason":"not_configured"}');
+
+        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
+        $this->assertStringContainsString('no keys are enrolled', $result['message']);
+        $this->assertStringContainsString('enroll this public key', $result['message']);
+        $this->assertStringContainsString('Your public key (key id ', $result['message']);
+    }
+
     /** @dataProvider notAnOlderPluginProvider */
     public function testARefusalWithoutTheVersionIsNotAlwaysBlamedOnThePlugin(string $body): void
     {

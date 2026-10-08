@@ -85,8 +85,9 @@ const AUTHENTICATION_REASONS = [
  * refusal for any reason outside AUTHENTICATION_REASONS is not about the
  * credential, so it is reported as the site sent it.
  *
- * Call this only for a token-signed request. Older plugins verify key
- * signatures, so a key request's refusal is about the key.
+ * For a token-signed request this means the plugin cannot verify the
+ * signature. Older plugins verify key signatures, so for a key request it
+ * only tells that the plugin is older, and the refusal is about the key.
  *
  * @param int   $http_code     HTTP status of the response.
  * @param mixed $decoded_body  Response body decoded as JSON.

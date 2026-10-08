@@ -13187,7 +13187,7 @@ class ImportClient
                     'message' =>
                         "The site rejected the key signature without a reason code, which an older " .
                         "Reprint Server plugin does when it does not understand key authentication.\n\n" .
-                        "Ask the site owner to update the Reprint Server plugin, or use --secret with a connection token.",
+                        "Ask the site owner to update the Reprint Server plugin.",
                 ];
             }
             if ($server_reason === 'client_update_required') {
@@ -13221,11 +13221,17 @@ class ImportClient
                 ];
             }
             if ($server_reason === 'requires_token_auth') {
+                // This client's tokens use a message older plugins do not
+                // verify, so --secret alone cannot help there.
+                $token_advice = is_older_plugin_authentication_refusal($http_code, $decoded)
+                    ? "Ask the site owner to update the Reprint Server plugin, then pass --secret=TOKEN " .
+                        "using the connection token configured under Tools > Reprint Server."
+                    : "Pass --secret=TOKEN using the connection token configured under Tools > Reprint Server.";
                 return [
                     'code' => 'AUTH_REQUIRES_TOKEN',
                     'message' =>
                         "This site's host has no OpenSSL, so it accepts connection-token authentication only.\n\n" .
-                        "Pass --secret=TOKEN using the connection token configured under Tools > Reprint Server.",
+                        $token_advice,
                 ];
             }
             if ($server_reason === 'no_keys_enrolled') {
@@ -13248,12 +13254,14 @@ class ImportClient
             if ($server_reason === 'not_configured') {
                 // A missing or broken token, a broken secret.php, or a host
                 // configuration error: only the site's message says which.
-                return [
-                    'code' => 'AUTH_NOT_CONFIGURED',
-                    'message' => is_string($server_msg)
-                        ? "The site is not set up to accept connections. The site reported: {$server_msg}"
-                        : "The site is not set up to accept connections. Set up the connection under Tools > Reprint Server.",
-                ];
+                $not_configured_message = is_string($server_msg)
+                    ? "The site is not set up to accept connections. The site reported: {$server_msg}"
+                    : "The site is not set up to accept connections. Set up the connection under Tools > Reprint Server.";
+                // Older plugins also answer not_configured when no keys are enrolled.
+                if ($using_key && is_older_plugin_authentication_refusal($http_code, $decoded)) {
+                    $not_configured_message .= "\n\nIf the site has no keys enrolled, enroll this public key under Tools > Reprint Server." . $key_hint;
+                }
+                return ['code' => 'AUTH_NOT_CONFIGURED', 'message' => $not_configured_message];
             }
             if ($server_reason === 'unknown_key') {
                 return [

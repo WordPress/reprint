@@ -636,6 +636,15 @@ function handle_api_request(array $options = []): void {
             }
             error(500, $runtime_message);
         }
+        // A released token client hears that it must update before anything
+        // about this site's configuration.
+        $client_update_error = Utils::client_update_error(Utils::request_headers());
+        if ($client_update_error !== null) {
+            if (is_push_endpoint($endpoint)) {
+                push_error(403, RequestAuthenticator::REASON_CLIENT_UPDATE_REQUIRED, $client_update_error);
+            }
+            error(403, $client_update_error, RequestAuthenticator::REASON_CLIENT_UPDATE_REQUIRED);
+        }
         // A broken secret.php only matters where the token is the scheme; a
         // key host never accepts it, so enrolled keys must still authenticate.
         if (!Utils::key_auth_required() && has_connection_token_file() && empty(get_file_connection_token())) {
