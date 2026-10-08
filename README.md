@@ -421,6 +421,20 @@ failures itself. It stops with exit `3` only after three consecutive failed
 requests do not advance the durable cursor. A successful request or a failed
 request that advances the cursor resets that count.
 
+HTTP `429` reports `RATE_LIMITED`, including when the host sends an HTML block
+page. Before repeating a streaming request after a temporary HTTP failure,
+Reprint waits for a valid `Retry-After` header, expressed as seconds or an
+HTTP date. For `429` without a valid header, it waits 60 seconds before the
+first retry and 120 seconds before the second. The wait starts after saving
+the durable cursor. Stopping the process during that wait does not discard
+saved transfer progress.
+
+While waiting, Reprint prints the HTTP failure and wait time. JSONL and compact
+output include a lifecycle record with `event: "retry"`, `http_code`,
+`error_code`, and `retry_after_seconds`; longer waits emit heartbeats every ten
+seconds. A third consecutive failure without cursor progress still exits `3`
+without another wait.
+
 After exit `3`, a caller may wait and run the same command later with the same
 state directory and filesystem root. Reprint keeps its saved progress and gives
 the later run a new internal retry allowance. Scheduling that later run is

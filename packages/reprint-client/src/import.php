@@ -467,6 +467,9 @@ class ImportClient
     /** @var int|null HTTP status received with the last streaming failure. */
     private $last_http_code = null;
 
+    /** @var string|null Retry-After from the current HTTP response. */
+    private $last_retry_after = null;
+
     /** @var bool Whether the last curl request timed out. */
     private $last_curl_timeout = false;
 
@@ -12763,6 +12766,7 @@ class ImportClient
     {
         $this->last_curl_errno = null;
         $this->last_http_code = null;
+        $this->last_retry_after = null;
         $this->last_curl_timeout = false;
         $this->last_error_code = null;
     }
@@ -13058,6 +13062,59 @@ class ImportClient
             );
             // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
         }
+
+        $retry_after_seconds = null;
+        if ($this->last_retry_after !== null) {
+            if (ctype_digit($this->last_retry_after)) {
+                $retry_after_seconds = (int) $this->last_retry_after;
+            } else {
+                // HTTP dates include the two obsolete formats hosts may still send.
+                foreach (['D, d M Y H:i:s \\G\\M\\T', 'l, d-M-y H:i:s \\G\\M\\T', 'D M j H:i:s Y'] as $format) {
+                    $retry_at = DateTimeImmutable::createFromFormat($format, $this->last_retry_after, new DateTimeZone('GMT'));
+                    $date_errors = DateTimeImmutable::getLastErrors();
+                    if ($retry_at !== false && ( $date_errors === false || ( $date_errors['warning_count'] === 0 && $date_errors['error_count'] === 0 ) )) {
+                        $retry_after_seconds = (int) max(0, ceil($retry_at->getTimestamp() - microtime(true)));
+                        break;
+                    }
+                }
+            }
+        }
+        if ($retry_after_seconds === null && $this->last_http_code === 429) {
+            // A host block can last minutes even when it omits Retry-After.
+            $retry_after_seconds = 60 * ( 2 ** max(0, $count - 1) );
+        }
+        if ($retry_after_seconds === null || $retry_after_seconds === 0) {
+            return;
+        }
+
+        $seconds_label = $retry_after_seconds === 1 ? 'second' : 'seconds';
+        $message = $exception->getMessage() . "\nWaiting {$retry_after_seconds} {$seconds_label} before retrying {$phase}.";
+        $this->audit_log("HTTP RETRY | {$phase} | {$message}", true);
+        $this->progress->clear_progress_line();
+        $this->progress->print_line($message . "\n");
+        $this->output_progress([
+            'type' => 'lifecycle',
+            'event' => 'retry',
+            'http_code' => $this->last_http_code,
+            'error_code' => $this->last_error_code,
+            'retry_after_seconds' => $retry_after_seconds,
+            'message' => $message,
+        ], true);
+
+        // The cursor was saved above. Stopping during the wait leaves it usable.
+        $retry_deadline = hrtime(true) / 1e9 + $retry_after_seconds;
+        $last_heartbeat = hrtime(true) / 1e9;
+        $remaining_seconds = $retry_after_seconds;
+        while ($remaining_seconds > 0) {
+            usleep( (int) min(1000000, ceil($remaining_seconds * 1000000)) );
+            $this->progress->tick_spinner();
+            $now = hrtime(true) / 1e9;
+            if ($now - $last_heartbeat >= 10) {
+                $this->output_progress(['heartbeat' => true, 'message' => $message], true);
+                $last_heartbeat = $now;
+            }
+            $remaining_seconds = $retry_deadline - $now;
+        }
     }
 
     /**
@@ -13333,6 +13390,15 @@ class ImportClient
             $msg .= "\n\nRun `php reprint.phar install-server` for setup " .
                      "instructions.";
             return ['code' => 'NOT_FOUND', 'message' => $msg];
+        }
+
+        if ($http_code === 429) {
+            $msg = "The source is limiting requests (HTTP 429 Too Many Requests).";
+            if ($server_msg !== null) {
+                $msg .= "\n\nThe source reported: {$server_msg}";
+            }
+            $msg .= "\n\nWait before trying again. If this continues, ask the source host to allow requests from this migration machine.";
+            return ['code' => 'RATE_LIMITED', 'message' => $msg];
         }
 
         if ($http_code === 413) {
@@ -13676,6 +13742,12 @@ class ImportClient
                 &$response_headers
             ) {
                 $len = strlen($header_line);
+
+                if (strncmp($header_line, 'HTTP/', 5) === 0) {
+                    $this->last_retry_after = null;
+                } elseif (stripos($header_line, 'Retry-After:') === 0) {
+                    $this->last_retry_after = trim(substr($header_line, strlen('Retry-After:')));
+                }
 
                 $audit_header_line = rtrim($header_line, "\r\n");
                 if (

@@ -5,6 +5,10 @@
 // phpcs:ignore WordPress.Security.NonceVerification.Missing, WordPress.Security.ValidatedSanitizedInput -- Local proxy fixture reads the request endpoint; no WordPress form is involved.
 $reprint_endpoint = $_POST['endpoint'] ?? '';
 file_put_contents('requests.log', $reprint_endpoint . "\n", FILE_APPEND);
+file_put_contents('request-times.log', json_encode([
+    'endpoint' => $reprint_endpoint,
+    'time' => microtime(true),
+]) . "\n", FILE_APPEND);
 // Supply site metadata without requiring a WordPress database. File indexes
 // and file contents below are produced by the real endpoint.
 if ($reprint_endpoint === 'preflight') {
@@ -19,6 +23,9 @@ if ($reprint_endpoint === 'preflight') {
     return;
 }
 $reprint_status = (int) file_get_contents('proxy-status');
+if (is_file('proxy-recover-at') && microtime(true) >= (float) file_get_contents('proxy-recover-at')) {
+    $reprint_status = 200;
+}
 if ($reprint_endpoint === file_get_contents('proxy-endpoint') && !in_array($reprint_status, [200, -2], true)) {
     if ($reprint_status === 0 || $reprint_status === -1) {
         if ($reprint_status === -1) {
@@ -30,7 +37,29 @@ if ($reprint_endpoint === file_get_contents('proxy-endpoint') && !in_array($repr
         return;
     }
     http_response_code($reprint_status);
-    echo 'Upstream unavailable';
+    if ($reprint_status === 429) {
+        $reprint_retry_after = is_file('proxy-retry-after') ? file_get_contents('proxy-retry-after') : '1';
+        $reprint_retry_after_sequence = json_decode($reprint_retry_after, true);
+        if (is_array($reprint_retry_after_sequence) && $reprint_retry_after_sequence !== []) {
+            $reprint_request_count = substr_count(file_get_contents('requests.log'), $reprint_endpoint . "\n");
+            $reprint_retry_after = $reprint_retry_after_sequence[min($reprint_request_count - 1, count($reprint_retry_after_sequence) - 1)];
+        }
+        $reprint_date_formats = [
+            'date' => 'D, d M Y H:i:s \\G\\M\\T',
+            'rfc850' => 'l, d-M-y H:i:s \\G\\M\\T',
+            'asctime' => 'D M j H:i:s Y',
+        ];
+        if (isset($reprint_date_formats[$reprint_retry_after])) {
+            $reprint_retry_after = gmdate($reprint_date_formats[$reprint_retry_after], time() + 2);
+        }
+        if ($reprint_retry_after !== '') {
+            header('Retry-After: ' . $reprint_retry_after);
+        }
+        header('Content-Type: text/html');
+        echo '<!doctype html><html>Too Many Requests</html>';
+    } else {
+        echo 'Upstream unavailable';
+    }
     return;
 }
 

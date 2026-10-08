@@ -521,6 +521,25 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertStringNotContainsString('not installed', $result['error']);
     }
 
+    /** @dataProvider rateLimitedResponses */
+    public function testRateLimitDoesNotReportMissingPlugin(string $body)
+    {
+        $result = $this->diagnose(429, $body);
+        $this->assertSame('RATE_LIMITED', $result['code']);
+        $this->assertStringContainsString('HTTP 429', $result['message']);
+        $this->assertStringNotContainsString('not installed', $result['message']);
+        $this->assertStringNotContainsString('install-server', $result['message']);
+    }
+
+    public static function rateLimitedResponses(): array
+    {
+        return [
+            'HTML block page' => ['<!doctype html><html>Too Many Requests</html>'],
+            'JSON block response' => ['{"error":"Too Many Requests"}'],
+            'empty response' => [''],
+        ];
+    }
+
     // ── HTML response on any status ──────────────────────────────
 
     public function testHtmlResponseOn200()

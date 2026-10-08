@@ -65,6 +65,13 @@ final class RetryLaterExitCodeTest extends TestCase {
         $this->assertSame(3, $result['exit_code'], $result['output']);
         $this->assert_error_details($result, 3, $http_status > 0 ? $http_status : 200, $http_status === -1 ? 18 : null);
         $this->assertSame(3, substr_count(file_get_contents($this->root . '/requests.log'), $endpoint . "\n"));
+        if ($http_status === 429) {
+            $request_times = $this->request_times_for($endpoint);
+            $this->assertCount(3, $request_times);
+            $this->assertGreaterThanOrEqual(0.9, $request_times[1] - $request_times[0]);
+            $this->assertGreaterThanOrEqual(0.9, $request_times[2] - $request_times[1]);
+            $this->assertStringContainsString('RATE_LIMITED', $result['output']);
+        }
 
         if ($command === 'db-index') {
             return; // This fixture has no database; the real file endpoints below can recover.
@@ -95,6 +102,93 @@ final class RetryLaterExitCodeTest extends TestCase {
             ['files-pull', 0, 'file_fetch'],
             ['files-pull', -1, 'file_fetch'],
             ['db-index', 503, 'db_index'],
+        ];
+    }
+
+    /** @dataProvider retry_after_headers */
+    public function testRateLimitWaitsThenDownloadsFromTheRealEndpoint(string $retry_after): void
+    {
+        file_put_contents($this->root . '/proxy-status', '429');
+        file_put_contents($this->root . '/proxy-retry-after', $retry_after);
+        file_put_contents($this->root . '/proxy-recover-at', (string) ( microtime(true) + 0.9 ));
+
+        $result = $this->run_command('files-pull');
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $this->assertStringContainsString('RATE_LIMITED', $result['output']);
+        $this->assertStringNotContainsString('install-server', $result['output']);
+        $request_times = $this->request_times_for('file_index');
+        $this->assertCount(2, $request_times);
+        $this->assertGreaterThanOrEqual(0.9, $request_times[1] - $request_times[0]);
+        $this->assertSame(
+            file_get_contents($this->root . '/remote/example.txt'),
+            file_get_contents($this->root . '/files' . $this->root . '/remote/example.txt')
+        );
+    }
+
+    public static function retry_after_headers(): array
+    {
+        return ['seconds' => ['1'], 'HTTP date' => ['date'], 'RFC 850 date' => ['rfc850'], 'asctime date' => ['asctime']];
+    }
+
+    public function testRateLimitWaitIsVisibleInTerminalOutput(): void
+    {
+        file_put_contents($this->root . '/proxy-status', '429');
+        file_put_contents($this->root . '/proxy-recover-at', (string) ( microtime(true) + 0.9 ));
+        $result = $this->run_command('files-pull', 'tty');
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $this->assertStringContainsString('HTTP 429 Too Many Requests', $result['output']);
+        $this->assertStringContainsString('Waiting 1 second before retrying file_index.', $result['output']);
+    }
+
+    /** @dataProvider invalid_retry_after_headers */
+    public function testRateLimitWithoutValidHeaderWaitsAndKeepsSavedProgress(string $retry_after, int $seconds, int $failures): void
+    {
+        file_put_contents($this->root . '/proxy-status', '429');
+        file_put_contents($this->root . '/proxy-retry-after', $retry_after);
+        $process = $this->start_command('files-pull');
+        try {
+            $deadline = microtime(true) + 5;
+            $retry = null;
+            do {
+                foreach (file($this->root . '/client.log', FILE_IGNORE_NEW_LINES) as $line) {
+                    $record = json_decode($line, true);
+                    if (( $record['event'] ?? null ) === 'retry') {
+                        $retry = $record;
+                        break;
+                    }
+                }
+                if ($retry !== null || !proc_get_status($process)['running']) {
+                    break;
+                }
+                usleep(20000);
+            } while (microtime(true) < $deadline);
+
+            $this->assertNotNull($retry, file_get_contents($this->root . '/client.log'));
+            $this->assertSame($seconds, $retry['retry_after_seconds']);
+            $this->assertSame('RATE_LIMITED', $retry['error_code']);
+            usleep(100000);
+            $this->assertSame($failures, substr_count(file_get_contents($this->root . '/requests.log'), "file_index\n"));
+            $state_files = glob($this->root . '/state/remotes/*/pull/state.json');
+            $this->assertCount(1, $state_files);
+            $state = json_decode(file_get_contents($state_files[0]), true);
+            $this->assertSame($failures, $state['consecutive_interrupted_responses']);
+        } finally {
+            proc_terminate($process);
+            proc_close($process);
+        }
+
+        file_put_contents($this->root . '/proxy-status', '200');
+        $result = $this->run_command('files-pull');
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+    }
+
+    public static function invalid_retry_after_headers(): array
+    {
+        return [
+            'missing' => ['', 60, 1],
+            'invalid' => ['not-a-delay', 60, 1],
+            'negative' => ['-1', 60, 1],
+            'second failure' => ['["0", ""]', 120, 2],
         ];
     }
 
@@ -179,7 +273,9 @@ final class RetryLaterExitCodeTest extends TestCase {
         foreach (explode("\n", trim($result['output'])) as $line) {
             $record = json_decode($line, true);
             $this->assertIsArray($record, $line);
-            $this->assertArrayNotHasKey('retry_after_seconds', $record);
+            if (( $record['event'] ?? null ) !== 'retry') {
+                $this->assertArrayNotHasKey('retry_after_seconds', $record);
+            }
             if (( $record['type'] ?? null ) === 'reprint_report') {
                 continue;
             }
@@ -213,19 +309,39 @@ final class RetryLaterExitCodeTest extends TestCase {
      *     @type string $output    CLI progress and errors.
      * }
      */
-    private function run_command(string $command): array
+    private function run_command(string $command, string $progress = 'jsonl'): array
+    {
+        $process = $this->start_command($command, $progress);
+        return ['exit_code' => proc_close($process), 'output' => file_get_contents($this->root . '/client.log')];
+    }
+
+    /** @return resource Running CLI process. */
+    private function start_command(string $command, string $progress = 'jsonl')
     {
         $process = proc_open(
             [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
                 $command, $this->remote_reprint_api_url, '--allow-unsafe-http',
                 '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
-                '--progress=jsonl', '--index-batch-start=100', '--index-batch-min=100', '--secret=test-secret'],
+                '--progress=' . $progress, '--index-batch-start=100', '--index-batch-min=100', '--secret=test-secret'],
             [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/client.log', 'w'], 2 => ['redirect', 1]],
             $pipes
         );
         $this->assertIsResource($process);
         fclose($pipes[0]);
-        return ['exit_code' => proc_close($process), 'output' => file_get_contents($this->root . '/client.log')];
+        return $process;
+    }
+
+    /** @return float[] Arrival times for requests to the selected endpoint. */
+    private function request_times_for(string $endpoint): array
+    {
+        $times = [];
+        foreach (file($this->root . '/request-times.log', FILE_IGNORE_NEW_LINES) as $line) {
+            $record = json_decode($line, true);
+            if ($record['endpoint'] === $endpoint) {
+                $times[] = $record['time'];
+            }
+        }
+        return $times;
     }
 
     private function remove_directory(string $directory): void
