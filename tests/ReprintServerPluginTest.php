@@ -389,7 +389,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringNotContainsString('site_export', $administrator_script);
     }
 
-    public function testUnconfiguredAdminShowsOnlyConnectionTokenSetup(): void
+    public function testUnconfiguredAdminShowsConnectionTokenSetupAndApiUrl(): void
     {
         \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $html = $this->renderAdminPage();
@@ -399,7 +399,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('id="reprint_server_connection_token"', $html);
         $this->assertStringContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
-        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
     }
 
     public function testTokenGeneratorDoesNotSubmitTheFormOrChangeTheStoredToken(): void
@@ -928,6 +928,17 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('reprint_server_notice=token_removed', (string) $GLOBALS['reprint_server_test_redirect']);
     }
 
+    public function testKeyHostWithoutCredentialsShowsApiUrlBeforeKeyEnrollment(): void
+    {
+        $this->assertFalse(get_configuration_state()['is_configured']);
+
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringContainsString('value="https://example.test/?reprint-api"', $html);
+        $this->assertStringContainsString('class="button reprint-server-copy-url"', $html);
+        $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
+    }
+
     /** A stored token is not a credential on a key host, so it does not make the site configured. */
     public function testKeyHostWithOnlyATokenIsNotConfiguredOnThePage(): void
     {
@@ -942,7 +953,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('Enroll a public key', $html);
         $this->assertStringNotContainsString('name="reprint_server_push_enabled"', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
-        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringContainsString('id="reprint-server-api-url"', $html);
     }
 
     public function testKeyHostWithAPushingKeyIsConnectedForDownloadsAndPush(): void

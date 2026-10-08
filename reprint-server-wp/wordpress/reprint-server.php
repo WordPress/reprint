@@ -347,28 +347,28 @@ class SettingsPage {
                     </p>
                     <?php $this->render_push_access_form($configuration); ?>
                 <?php endif; ?>
-
-                <hr />
-                <h2><?php echo esc_html__('Remote Reprint API URL', 'reprint'); ?></h2>
-                <p>
-                <?php
-                echo esc_html__(
-                    'Use this URL when another tool asks for the remote Reprint API URL.',
-                    'reprint'
-                );
-                ?>
-                </p>
-                <input type="text"
-                       class="regular-text code"
-                       id="reprint-server-api-url"
-                       value="<?php echo esc_attr($remote_reprint_api_url); ?>"
-                       readonly />
-                <button type="button"
-                        class="button reprint-server-copy-url"
-                        data-copied-message="<?php echo esc_attr__('Remote Reprint API URL copied.', 'reprint'); ?>">
-                    <?php echo esc_html__('Copy', 'reprint'); ?>
-                </button>
             <?php endif; ?>
+
+            <hr />
+            <h2><?php echo esc_html__('Remote Reprint API URL', 'reprint'); ?></h2>
+            <p>
+            <?php
+            echo esc_html__(
+                'Use this URL when another tool asks for the remote Reprint API URL.',
+                'reprint'
+            );
+            ?>
+            </p>
+            <input type="text"
+                   class="regular-text code"
+                   id="reprint-server-api-url"
+                   value="<?php echo esc_attr($remote_reprint_api_url); ?>"
+                   readonly />
+            <button type="button"
+                    class="button reprint-server-copy-url"
+                    data-copied-message="<?php echo esc_attr__('Remote Reprint API URL copied.', 'reprint'); ?>">
+                <?php echo esc_html__('Copy', 'reprint'); ?>
+            </button>
         </div>
         <?php
     }
