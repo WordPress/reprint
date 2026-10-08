@@ -6,6 +6,13 @@
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound
 
+// A configured key list uses the real OpenSSL host rule. Token tests leave
+// this file absent and keep modeling a host without openssl_verify().
+$reprint_push_test_public_keys_configuration_path = (string) getenv('REPRINT_PUSH_TEST_PUBLIC_KEYS_CONFIG');
+$reprint_push_test_public_keys = is_file($reprint_push_test_public_keys_configuration_path)
+    ? json_decode( (string) file_get_contents($reprint_push_test_public_keys_configuration_path), true)
+    : null;
+
 $reprint_push_test_request_log = (string) getenv('REPRINT_PUSH_TEST_REQUEST_LOG');
 $reprint_push_test_endpoint = filter_input(INPUT_GET, 'endpoint', FILTER_UNSAFE_RAW);
 if ($reprint_push_test_request_log !== '' && is_string($reprint_push_test_endpoint)) {
@@ -84,6 +91,11 @@ function plugin_basename(string $file): string {
 }
 
 function get_option(string $name, $fallback = false) {
+    global $reprint_push_test_public_keys;
+
+    if ($name === 'reprint_server_public_keys') {
+        return $reprint_push_test_public_keys ?? $fallback;
+    }
     if ($name === 'home') {
         return 'https://example.test';
     }
@@ -171,12 +183,14 @@ add_filter('reprint_server_api_options', static function ($value) use ($reprint_
     return array_merge($value, $reprint_push_test_options);
 });
 
-// This fixture models a host without openssl_verify(), so the plugin keeps
-// verifying connection tokens. The class file is loaded directly because the
-// plugin requires the Composer autoloader only inside handle_api_request().
-if (!class_exists('WordPress\\Reprint\\Server\\Utils', false)) {
-    require_once dirname(__DIR__, 2) . '/packages/reprint-server/src/class-utils.php';
+// Token tests model a host without openssl_verify(). Key tests leave the
+// production host rule unchanged. The class file is loaded directly because
+// the plugin loads its runtime only inside handle_api_request().
+if ($reprint_push_test_public_keys === null) {
+    if (!class_exists('WordPress\\Reprint\\Server\\Utils', false)) {
+        require_once dirname(__DIR__, 2) . '/packages/reprint-server/src/class-utils.php';
+    }
+    \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
 }
-\WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
 
 require_once dirname(__DIR__, 2) . '/reprint-server-wp/index.php';

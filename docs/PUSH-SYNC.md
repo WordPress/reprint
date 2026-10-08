@@ -46,8 +46,14 @@ HTTPS is required by default. `--insecure` or `REPRINT_INSECURE_TLS=1`
 allows plain HTTP and skips certificate and hostname checks for HTTPS. The
 choice is invocation-only. Over plain HTTP, an observer can read transferred
 content. Over HTTP or unverified HTTPS, an active attacker can read and modify
-it. HMAC keeps the shared secret off the wire and limits replay, but does not
-replace server verification.
+it. Request signatures keep the connection token and private key off the wire
+and limit replay, but do not replace server verification.
+
+On a host with `openssl_verify()`, push requests use an enrolled public key.
+On a host without it, they use a connection token. The client uses the key in
+`<remote-state-directory>/key.pem` unless `--private-key-path=PATH` supplies
+another key or `--secret=TOKEN` selects token authentication. A host with
+OpenSSL rejects the token; the client never falls back to another credential.
 
 Every request carries a signature over newline-joined fields: the protocol
 label (plus the key id for a key), a random nonce, a timestamp, the HTTP method,
@@ -55,13 +61,17 @@ and the URL's path and query (which name the endpoint). The label and field
 layout appear in `docs/PULL-HTTP.md`. Payloads are not signed and not hashed: TLS already
 guarantees their integrity, and signing streams was the single biggest cause of
 buffering pain. Signing cost is constant per request regardless of payload
-size. The secret travels in no URL and no body, so it never lands in an
-access log.
+size. Neither the connection token nor the private key travels in a URL or body,
+so neither lands in an access log.
 
-Authentication does not grant write authority. Connection tokens are
-download-only by default, including tokens that predate push endpoints. Except
-for the bounded recovery case below, every `push_*` operation requires current
-push authorization before upload data is read, a push directory is created, or
+Authentication does not grant write authority. Connection tokens and enrolled
+keys are download-only by default, including tokens that predate push endpoints.
+On a key host, enable **Allow push** for the key under **Tools → Reprint Server**.
+That grant applies only to that key. A token's grant or another key's grant
+cannot authorize it.
+
+Except for the bounded recovery case below, every `push_*` operation requires
+current push authorization before upload data is read, a push directory is created, or
 the document root changes; custom authentication uses the same gate.
 
 Revocation does not abandon durable recovery state. An authenticated caller
@@ -69,16 +79,39 @@ may keep calling `push_commit` only when that push session already has a durable
 commit checkpoint. Those requests converge the already-started document-root
 mutation; they cannot upload more work, inspect or remove private work, or
 start commit for another push session. Other push operations return HTTP 403
-with `reason: "push_disabled"`. This keeps token rotation or a managed policy
-change from stranding a partial commit and its maintenance marker.
+with `reason: "push_disabled"`. This keeps token rotation, key push-grant
+revocation, or a managed policy change from stranding a partial commit and its
+maintenance marker.
 
-Personal consent stores only the current connection token's SHA-256
-fingerprint. Rotating the token therefore revokes push access. A hosting
+Personal consent stores a `push` flag on each enrolled key, or the current
+connection token's SHA-256 fingerprint on a token host. Newly enrolled keys
+have no push grant. Rotating the token revokes its push access. A hosting
 provider may override local consent by defining the boolean
 `WordPress\Reprint\Server\Plugin\PUSH_ENABLED` constant before active plugins
 load or by setting `REPRINT_SERVER_PUSH_ENABLED` in the environment. Managed
 `true` enables push and managed `false` hard-disables push without abandoning
 durable commit recovery.
+
+### Pushing with an enrolled key
+
+Use the same remote Reprint API URL and state directory as the existing pull.
+If no key exists yet, generate one:
+
+```sh
+reprint keygen 'https://example.com/?reprint-api' --state-dir=./state
+```
+
+Enroll the printed public key under **Tools → Reprint Server**, then enable
+**Allow push** for that key. With saved preflight data from the pull, run:
+
+```sh
+reprint files-push 'https://example.com/?reprint-api' --state-dir=./state --fs-root=./files
+```
+
+The command finds the private key in the state directory. Omit `--secret` on
+an OpenSSL host. If the private key is stored elsewhere, pass
+`--private-key-path=/path/to/key.pem`. Push from the client requires PHP 8.1+
+for streaming uploads; see [issue #327](https://github.com/WordPress/reprint/issues/327).
 
 ## Change detection: local machine compared against itself
 
@@ -725,8 +758,10 @@ stop all writers:
 Files first, followed by full database overwrite and then selective database changes. Keep each PR focused:
 
 1. **Design doc** — this file.
-2. **Envelope auth** — headers-only signatures, which apply to every
-   request.
+2. **Envelope auth** — headers-only RSA signatures on hosts with OpenSSL,
+   HMAC elsewhere. Both cover the method and request target instead of a body
+   hash and apply to every request. End-to-end file-push tests cover key lookup
+   in the state directory, an explicit private key path, per-key grants, and resume.
 3. **Work value store** — the store itself (PR #317, which succeeded
    the closed #298).
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude

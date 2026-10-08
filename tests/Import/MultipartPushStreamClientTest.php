@@ -6,6 +6,7 @@ use PHPUnit\Framework\TestCase;
 use Site_Export_HMAC_Client;
 use MultipartPushStreamClient;
 use PushRequestSizer;
+use WordPress\Reprint\Server\PublicKeyClient;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/upload/class-multipart-push-stream-client.php';
@@ -21,9 +22,18 @@ final class MultipartPushStreamClientTest extends TestCase {
         'X-Reprint-Test-Context' => 'forwarded',
     ];
 
-    public function testSendPartPutsMultipartBytesOnTheWireBeforeFinishRequest(): void {
+    /** @dataProvider authenticationSchemes */
+    public function testSendPartPutsMultipartBytesOnTheWireBeforeFinishRequest(string $scheme): void {
         if (!function_exists('curl_init') || PHP_VERSION_ID < 80100) {
             $this->markTestSkipped('Caller-driven multipart upload requires PHP curl with CURL_READFUNC_PAUSE support.');
+        }
+        $envelope_signer = new Site_Export_HMAC_Client(self::SECRET);
+        if ($scheme === 'key') {
+            if (!function_exists('openssl_verify')) {
+                $this->markTestSkipped('Key-authenticated upload requires OpenSSL.');
+            }
+            [$private_key_pem, ] = PublicKeyClient::generate_keypair();
+            $envelope_signer = new PublicKeyClient($private_key_pem);
         }
         $listener = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
         $this->assertNotFalse($listener, (string) $error);
@@ -31,7 +41,7 @@ final class MultipartPushStreamClientTest extends TestCase {
         $client = $this->newClient([
             'remote_reprint_api_url' => 'http://' . $address . '/?reprint-api=1',
             'allow_http' => true,
-            'envelope_signer' => new Site_Export_HMAC_Client(self::SECRET),
+            'envelope_signer' => $envelope_signer,
             'chunk_bytes' => 4,
             'connect_timeout' => 2,
             'stall_timeout' => 2,
@@ -57,6 +67,9 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertTrue($client->has_sent_parts());
         $received .= $this->read_available($connection);
         $this->assertStringContainsString('Content-Type: multipart/mixed; boundary=reprint-', $received);
+        if ($envelope_signer instanceof PublicKeyClient) {
+            $this->assertStringContainsString('X-Auth-Key-Id: ' . $envelope_signer->get_key_id(), $received);
+        }
         $this->assertStringContainsString('X-Auth-Signature: ', $received);
         $this->assertStringContainsString('X-Auth-Nonce: ', $received);
         $this->assertStringContainsString('X-Auth-Timestamp: ', $received);
@@ -95,6 +108,11 @@ final class MultipartPushStreamClientTest extends TestCase {
         $this->assertSame('complete', $result['status'], (string) json_encode($result));
         $this->assertSame(3, $result['parts_sent']);
         $this->assertFalse($client->has_sent_parts());
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function authenticationSchemes(): array {
+        return ['connection token' => ['hmac'], 'public key' => ['key']];
     }
 
     /**

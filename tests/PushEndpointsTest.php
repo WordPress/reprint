@@ -38,6 +38,9 @@ final class PushEndpointsTest extends TestCase {
     private string $gate_release_path;
     private string $remote_reprint_api_url;
 
+    /** @var list<string> CLI credential flags; empty when the key is in the state directory. */
+    private array $credential_options = ['--secret=' . self::SECRET];
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -3185,7 +3188,8 @@ final class PushEndpointsTest extends TestCase {
         );
     }
 
-    public function testFilesPushCliPushesAndUpdatesACompleteLocalTree(): void
+    /** @dataProvider pushCredentials */
+    public function testFilesPushCliPushesAndUpdatesACompleteLocalTree(string $credential_source): void
     {
         $this->writeDocrootConfiguration([
             'document_root' => $this->docroot,
@@ -3193,6 +3197,7 @@ final class PushEndpointsTest extends TestCase {
         ]);
         $local_docroot = $this->root . '/cli-local-docroot';
         $state_directory = $this->root . '/cli-state';
+        $this->configurePushCredential($credential_source, $state_directory);
         mkdir($local_docroot . '/nested', 0700, true);
         mkdir($local_docroot . '/empty-directory', 0700, true);
         mkdir($local_docroot . '/preserved', 0700, true);
@@ -3374,10 +3379,12 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('', $jsonl['stderr']);
     }
 
-    public function testFilesPushCliStopsAtTheCallerDeadlineAndAnotherProcessCompletes(): void
+    /** @dataProvider pushCredentials */
+    public function testFilesPushCliStopsAtTheCallerDeadlineAndAnotherProcessCompletes(string $credential_source): void
     {
         $local_docroot = $this->root . '/cli-partial-local-docroot';
         $state_directory = $this->root . '/cli-partial-state';
+        $this->configurePushCredential($credential_source, $state_directory);
         mkdir($local_docroot, 0700, true);
         file_put_contents($local_docroot . '/value.txt', 'value');
         $push_create_requests = $this->countEndpointRequests('push_create');
@@ -3455,7 +3462,8 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('signal value', file_get_contents($this->docroot . '/value.txt'));
     }
 
-    public function testFilesPushCliContinuesAfterItIsKilledDuringAnAcceptedUpload(): void
+    /** @dataProvider pushCredentials */
+    public function testFilesPushCliContinuesAfterItIsKilledDuringAnAcceptedUpload(string $credential_source): void
     {
         if (
             !function_exists('posix_kill')
@@ -3473,6 +3481,7 @@ final class PushEndpointsTest extends TestCase {
         ]);
         $local_docroot = $this->root . '/cli-killed-local-docroot';
         $state_directory = $this->root . '/cli-killed-state';
+        $this->configurePushCredential($credential_source, $state_directory);
         mkdir($local_docroot, 0700, true);
         $contents = str_repeat('killed upload contents-', 24000);
         file_put_contents($local_docroot . '/large.bin', $contents);
@@ -3603,6 +3612,79 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('after local change', file_get_contents($this->docroot . '/value.txt'));
     }
 
+    public function testFilesPushCliRequiresAPushGrantForTheSigningKey(): void
+    {
+        $local_docroot = $this->root . '/key-grant-local-docroot';
+        $state_directory = $this->root . '/key-grant-state';
+        mkdir($local_docroot, 0700, true);
+        file_put_contents($local_docroot . '/remove.txt', 'new');
+        $this->configurePushCredential('state key', $state_directory);
+        $public_keys_configuration_path = $this->root . '/public-keys.json';
+        $entries = json_decode(file_get_contents($public_keys_configuration_path), true, 512, JSON_THROW_ON_ERROR);
+        $entries[0]['push'] = false;
+        [, $other_public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $entries[] = ['public_key' => $other_public_key, 'added_at' => 1700000000, 'push' => true];
+        file_put_contents($public_keys_configuration_path, json_encode($entries, JSON_THROW_ON_ERROR));
+
+        // The token and another key may push, but neither grants this key access.
+        $denied = $this->runFilesPushCli($local_docroot, $state_directory);
+        $this->assertSame(1, $denied['exit'], $denied['output']);
+        $this->assertSame('push_disabled', $this->lastCliCommandResult($denied['stdout'])['reason']);
+        $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
+        $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push');
+
+        $entries[0]['push'] = true;
+        file_put_contents($public_keys_configuration_path, json_encode($entries, JSON_THROW_ON_ERROR));
+        $granted = $this->runFilesPushCli($local_docroot, $state_directory);
+        $this->assertSame(0, $granted['exit'], $granted['output']);
+        $this->assertSame('complete', $this->lastCliCommandResult($granted['stdout'])['status']);
+        $this->assertSame('new', file_get_contents($this->docroot . '/remove.txt'));
+    }
+
+    public function testKeyAuthenticatedPushDoesNotAcceptTheOldConnectionToken(): void
+    {
+        $this->configurePushCredential('state key', $this->root . '/key-token-state');
+        $response = $this->requestPushEndpoint(self::SECRET, 'POST', 'push_create', str_repeat('a', 32));
+
+        $this->assertSame(403, $response['http_code'], $response['body']);
+        $this->assertSame('requires_key_auth', $response['response']['reason']);
+        $this->assertDirectoryDoesNotExist($this->reprint_directory . '/.reprint/push');
+        $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
+    }
+
+    /** @return array<string,array{0:string}> */
+    public static function pushCredentials(): array
+    {
+        return [
+            'connection token' => ['token'],
+            'key in state directory' => ['state key'],
+            'explicit private key path' => ['explicit key'],
+        ];
+    }
+
+    /** Configures the stored key and CLI credential used by a real push. */
+    private function configurePushCredential(string $credential_source, string $state_directory): void
+    {
+        if ($credential_source === 'token') {
+            return;
+        }
+        if (!function_exists('openssl_verify')) {
+            $this->markTestSkipped('Key-authenticated push requires OpenSSL.');
+        }
+        $key_path = $credential_source === 'state key'
+            ? ImportClient::key_file_path($this->remote_reprint_api_url, $state_directory)
+            : $this->root . '/private-key.pem';
+        $key = ImportClient::generate_key_file($key_path, false);
+        file_put_contents($this->root . '/public-keys.json', json_encode([[
+            'public_key' => $key['public_key'],
+            'added_at' => 1700000000,
+            'push' => true,
+        ]], JSON_THROW_ON_ERROR));
+        $this->credential_options = $credential_source === 'state key'
+            ? []
+            : ['--private-key-path=' . $key_path];
+    }
+
     /**
      * Runs the production CLI against the production endpoint router.
      *
@@ -3654,9 +3736,8 @@ final class PushEndpointsTest extends TestCase {
             $this->remote_reprint_api_url,
             '--state-dir=' . $state_directory,
             '--fs-root=' . $filesystem_root,
-            '--secret=' . self::SECRET,
             '--force-http',
-        ], $extra_options);
+        ], $this->credential_options, $extra_options);
         $process = proc_open(
             $command,
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
@@ -3956,6 +4037,7 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNotFalse($router);
         $environment = array_merge($_ENV, [
             'REPRINT_PUSH_TEST_SECRET_CONFIG' => $this->secret_configuration_path,
+            'REPRINT_PUSH_TEST_PUBLIC_KEYS_CONFIG' => $this->root . '/public-keys.json',
             'REPRINT_PUSH_TEST_AUTHORIZATION_CONFIG' => $this->push_authorization_configuration_path,
             'REPRINT_PUSH_TEST_MANAGED_PUSH_CONFIG' => $this->managed_push_configuration_path,
             'REPRINT_PUSH_TEST_CUSTOM_AUTH_CONFIG' => $this->custom_auth_configuration_path,
