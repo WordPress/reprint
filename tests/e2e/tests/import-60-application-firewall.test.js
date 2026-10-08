@@ -7,7 +7,7 @@
  * path query values. Before forwarding each streaming endpoint, it returns two
  * potentially transient HTTP errors, with a one-second Retry-After for HTTP 429.
  * The third request reaches the real E2E site, so Reprint must recover without
- * hitting its three-failure limit.
+ * exhausting its retry limit.
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
@@ -225,6 +225,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
                 ));
             for (let index = 0; index < expectedStatuses.length; index++) {
                 const expectedStatus = expectedStatuses[index];
+                const expectedFailureLimit = expectedStatus === 429 ? 4 : 3;
                 const retryLine = retryLines.find(
                     line => line.includes(`HTTP ${expectedStatus}`),
                 );
@@ -234,10 +235,10 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
                 );
                 assert.ok(
                     retryLine.includes(
-                        `consecutive_failures_without_progress=${index + 1}/3`,
+                        `consecutive_failures_without_progress=${index + 1}/${expectedFailureLimit}`,
                     ),
                     `Expected ${endpoint} HTTP ${expectedStatus} to record ` +
-                    `failure ${index + 1} of 3`,
+                    `failure ${index + 1} of ${expectedFailureLimit}`,
                 );
                 assert.ok(
                     retryLine.includes('cursor_moved=no'),
