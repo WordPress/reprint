@@ -39,11 +39,6 @@ the timestamp, the uppercase HTTP method, and the request's path and query,
 which name the endpoint. The signature never covers or hashes the body, so a
 multipart upload streams without buffering.
 
-[PR #801](https://github.com/WordPress/reprint/pull/801) removes the
-exporter's query-parameter fallback. Do not merge it as written: it ignores the
-query for pull requests, so it would also drop the `endpoint` that every client
-from 0.11.0 on sends there. It must keep reading `endpoint` from the query.
-
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
 and `multipart/form-data`. The signature covers the URL, endpoint included, and
 never the body. The separate push request contract is unchanged.
