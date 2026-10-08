@@ -28,9 +28,9 @@ its request is dispatched. When a parameter appears in both places, the
 POST value wins for JSON and form bodies. The endpoint is the exception. The
 server dispatches the query's value. When the query names none, it takes the
 body's value unless that value is a push endpoint. Released key clients send
-the endpoint in the body, so this fallback keeps them working. It ends in
-0.11.1. Existing multipart file-list uploads keep their file
-part, and their options may stay in the query string.
+the endpoint in the body, so this fallback keeps them working. Existing
+multipart file-list uploads keep their file part, and their options may stay
+in the query string.
 
 Requests are signed over newline-joined fields behind a version label. The
 connection token uses `reprint-hmac-sha256-v2`, and a key uses
@@ -39,10 +39,10 @@ the timestamp, the uppercase HTTP method, and the request's path and query,
 which name the endpoint. The signature never covers or hashes the body, so a
 multipart upload streams without buffering.
 
-Deploy this release before merging
-[PR #801](https://github.com/WordPress/reprint/pull/801), which only removes the
-exporter's query-parameter fallback. Do not remove that fallback until clients
-have moved to POST parameters.
+[PR #801](https://github.com/WordPress/reprint/pull/801) removes the
+exporter's query-parameter fallback. Do not merge it as written: it ignores the
+query for pull requests, so it would also drop the `endpoint` that every client
+from 0.11.0 on sends there. It must keep reading `endpoint` from the query.
 
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
 and `multipart/form-data`. The signature covers the URL, endpoint included, and

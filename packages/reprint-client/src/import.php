@@ -13197,6 +13197,18 @@ class ImportClient
                 ];
             }
 
+            // This client sent X-Auth-Key-Id, so a key host that asks for a
+            // key never received it.
+            if ($server_reason === 'requires_key_auth' && $using_key) {
+                return [
+                    'code' => 'AUTH_HEADERS_STRIPPED',
+                    'message' =>
+                        "Authentication headers were stripped. The site did not receive the " .
+                        "X-Auth-Key-Id header this client sent.\n\n" .
+                        "A proxy, CDN, or security plugin is removing custom " .
+                        "HTTP headers before they reach WordPress.",
+                ];
+            }
             if ($server_reason === 'requires_key_auth') {
                 return [
                     'code' => 'AUTH_REQUIRES_KEY',

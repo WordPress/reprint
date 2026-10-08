@@ -179,6 +179,15 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertStringContainsString('update the Reprint Server plugin', $result['message']);
     }
 
+    public function testAKeyClientToldToUseAKeyHadItsHeadersStripped(): void
+    {
+        $result = $this->diagnoseWithKey(403, '{"error":"This host requires key authentication; connection tokens are not accepted","code":403,"reason":"requires_key_auth","auth_version":2}');
+
+        $this->assertSame('AUTH_HEADERS_STRIPPED', $result['code']);
+        $this->assertStringContainsString('X-Auth-Key-Id', $result['message']);
+        $this->assertStringNotContainsString('--secret', $result['message']);
+    }
+
     /** @dataProvider notAnOlderPluginProvider */
     public function testARefusalWithoutTheVersionIsNotAlwaysBlamedOnThePlugin(string $body): void
     {
