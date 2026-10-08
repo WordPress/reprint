@@ -3774,7 +3774,14 @@ class ImportClient
             $log[] =
                 $decision["size_key"] . "=" . (int) ($decision["size_value"] ?? 0);
         }
+        if (isset($decision["request_interval_seconds"])) {
+            $log[] = "request_interval_seconds=" . $decision["request_interval_seconds"];
+        }
         $this->audit_log(implode(" | ", $log), false);
+        if (( $error["http_code"] ?? 0 ) === 429) {
+            // Keep the learned gap even if this is the final failed attempt.
+            $this->save_state();
+        }
     }
 
     /**
@@ -13447,6 +13454,7 @@ class ImportClient
         apply_curl_ca_bundle($ch, $this->insecure);
         apply_zipwp_access_cookie($ch, $url);
 
+        $this->wait_for_request_slot();
         $headers = [
             ...$this->get_base_headers("application/json"),
             ...($this->get_auth_headers('POST', $url, $body)),
@@ -13498,6 +13506,9 @@ class ImportClient
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
 
         if ($http_code !== 200) {
+            if ($http_code === 429) {
+                $this->handle_tuner_error('preflight', ["http_code" => 429]);
+            }
             $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url);
             return [
                 "ok" => false,
@@ -13647,6 +13658,8 @@ class ImportClient
             curl_setopt($ch, CURLOPT_POSTFIELDS, $body_for_signing);
         }
 
+        // Wait before signing so the authentication timestamp stays fresh.
+        $this->wait_for_request_slot();
         // Append auth headers now that we know the body content
         array_push($headers, ...($this->get_auth_headers('POST', $url, $body_for_signing)));
 
@@ -13949,6 +13962,37 @@ class ImportClient
             throw new TransientInterruptionException(
                 "Invalid response: missing completion chunk from server.",
             );
+        }
+    }
+
+    /** Wait for the remote API URL's learned gap across command changes. */
+    private function wait_for_request_slot(): void
+    {
+        if (!$this->tuner instanceof AdaptiveTuner) {
+            return;
+        }
+
+        $remaining_seconds = $this->tuner->get_request_wait_seconds(microtime(true));
+        if ($remaining_seconds > 0) {
+            $this->audit_log("REQUEST PACING | wait_seconds=" . $remaining_seconds, false);
+            $deadline = hrtime(true) / 1e9 + $remaining_seconds;
+            $last_heartbeat = hrtime(true) / 1e9;
+            while ($remaining_seconds > 0) {
+                usleep( (int) min(1000000, ceil($remaining_seconds * 1000000)));
+                $this->progress->tick_spinner();
+                $now = hrtime(true) / 1e9;
+                if ($now - $last_heartbeat >= 10) {
+                    $this->output_progress(['heartbeat' => true, 'message' => 'Waiting before the next source request.'], true);
+                    $last_heartbeat = $now;
+                }
+                $remaining_seconds = $deadline - $now;
+            }
+        }
+
+        $this->tuner->record_request_start(microtime(true));
+        if ($this->tuner->get_state()["request_interval_seconds"] > 0) {
+            // A replacement process must not skip the gap after this request.
+            $this->save_state();
         }
     }
 
