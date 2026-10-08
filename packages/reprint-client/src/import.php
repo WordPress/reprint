@@ -220,9 +220,12 @@ class ImportClient
 
     /**
      * Maximum number of consecutive temporary request failures with no cursor
-     * progress before the importer asks its caller to retry later.
+     * progress before the importer asks its caller to retry later, except HTTP 429.
      */
     private const MAX_CONSECUTIVE_INTERRUPTED_RESPONSES = 3;
+
+    /** HTTP 429 fallback waits; one final request follows the last wait. */
+    private const RATE_LIMIT_RETRY_DELAYS = [5, 10, 15];
 
     /** Maximum response header bytes retained for failed request audit logging. */
     private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
@@ -1159,8 +1162,9 @@ class ImportClient
             );
         }
 
-        // Exit 3 ends one retry cycle. A later CLI run gets the same internal
-        // retry allowance instead of inheriting an already exhausted count.
+        // Exit 3 ends one retry cycle. A later CLI run gets a fresh allowance
+        // after at least three failures, including a process stopped during
+        // the third HTTP 429 wait.
         if (
             $this->state->consecutive_interrupted_responses >=
             self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES
@@ -3867,7 +3871,7 @@ class ImportClient
      * PHP has memory headroom.
      * Otherwise the saved partial state leaves exit code 2 for the next process.
      * Three consecutive temporary request failures without cursor progress end
-     * the process with exit code 3.
+     * the process with exit code 3; HTTP 429 allows four attempts.
      */
     public function run_files_pull(): void
     {
@@ -13012,7 +13016,7 @@ class ImportClient
         // The current failure has not been counted yet.
         $failures = $this->get_state()->consecutive_interrupted_responses + 1;
 
-        return self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES - $failures <= 1;
+        return $this->get_interrupted_response_limit() - $failures <= 1;
     }
 
     /**
@@ -13041,17 +13045,18 @@ class ImportClient
         }
         $this->save_state();
         $count = $this->get_state()->consecutive_interrupted_responses;
+        $failure_limit = $this->get_interrupted_response_limit();
         $this->audit_log(
             "TEMPORARY REQUEST FAILURE | {$phase} | " .
                 "consecutive_failures_without_progress={$count}/" .
-                self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES .
+                $failure_limit .
                 " | cursor_moved=" .
                 ($cursor_after !== $cursor_before ? "yes" : "no") .
                 " | " . $exception->getMessage(),
             true,
         );
 
-        if ($count >= self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES) {
+        if ($count >= $failure_limit) {
             // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The remote failure is rendered only as CLI text.
             throw new RetryLaterException(
                 "The remote request failed {$count} consecutive times " .
@@ -13080,8 +13085,9 @@ class ImportClient
             }
         }
         if ($retry_after_seconds === null && $this->last_http_code === 429) {
-            // A host block can last minutes even when it omits Retry-After.
-            $retry_after_seconds = $count <= 1 ? 15 : 60;
+            // A host may omit Retry-After. Try brief waits, then let the caller
+            // schedule a later run if a longer host block remains in place.
+            $retry_after_seconds = self::RATE_LIMIT_RETRY_DELAYS[max(0, $count - 1)];
         }
         if ($retry_after_seconds === null || $retry_after_seconds === 0) {
             return;
@@ -13115,6 +13121,14 @@ class ImportClient
             }
             $remaining_seconds = $retry_deadline - $now;
         }
+    }
+
+    /** Allow one final HTTP 429 attempt after all fallback waits. */
+    private function get_interrupted_response_limit(): int
+    {
+        return $this->last_http_code === 429
+            ? count(self::RATE_LIMIT_RETRY_DELAYS) + 1
+            : self::MAX_CONSECUTIVE_INTERRUPTED_RESPONSES;
     }
 
     /**

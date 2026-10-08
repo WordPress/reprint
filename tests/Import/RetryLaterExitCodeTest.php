@@ -63,13 +63,15 @@ final class RetryLaterExitCodeTest extends TestCase {
         file_put_contents($this->root . '/proxy-endpoint', $endpoint);
         $result = $this->run_command($command);
         $this->assertSame(3, $result['exit_code'], $result['output']);
-        $this->assert_error_details($result, 3, $http_status > 0 ? $http_status : 200, $http_status === -1 ? 18 : null);
-        $this->assertSame(3, substr_count(file_get_contents($this->root . '/requests.log'), $endpoint . "\n"));
+        $expected_failures = $http_status === 429 ? 4 : 3;
+        $this->assert_error_details($result, $expected_failures, $http_status > 0 ? $http_status : 200, $http_status === -1 ? 18 : null);
+        $this->assertSame($expected_failures, substr_count(file_get_contents($this->root . '/requests.log'), $endpoint . "\n"));
         if ($http_status === 429) {
             $request_times = $this->request_times_for($endpoint);
-            $this->assertCount(3, $request_times);
-            $this->assertGreaterThanOrEqual(0.9, $request_times[1] - $request_times[0]);
-            $this->assertGreaterThanOrEqual(0.9, $request_times[2] - $request_times[1]);
+            $this->assertCount(4, $request_times);
+            for ($request = 1; $request < 4; ++$request) {
+                $this->assertGreaterThanOrEqual(0.9, $request_times[$request] - $request_times[$request - 1]);
+            }
             $this->assertStringContainsString('RATE_LIMITED', $result['output']);
         }
 
@@ -187,11 +189,32 @@ final class RetryLaterExitCodeTest extends TestCase {
     public static function invalid_retry_after_headers(): array
     {
         return [
-            'missing' => ['', 15, 1],
-            'invalid' => ['not-a-delay', 15, 1],
-            'negative' => ['-1', 15, 1],
-            'second failure' => ['["0", ""]', 60, 2],
+            'missing' => ['', 5, 1],
+            'invalid' => ['not-a-delay', 5, 1],
+            'negative' => ['-1', 5, 1],
+            'second failure' => ['["0", ""]', 10, 2],
+            'third failure' => ['["0", "0", ""]', 15, 3],
         ];
+    }
+
+    public function testRateLimitRetriesAfterFiveTenAndFifteenSecondsThenExitsThree(): void
+    {
+        file_put_contents($this->root . '/proxy-status', '429');
+        file_put_contents($this->root . '/proxy-retry-after', '');
+        $result = $this->run_command('files-pull');
+        $this->assertSame(3, $result['exit_code'], $result['output']);
+        $this->assert_error_details($result, 4, 429);
+        $request_times = $this->request_times_for('file_index');
+        $this->assertCount(4, $request_times);
+        foreach ([5, 10, 15] as $index => $seconds) {
+            $this->assertGreaterThanOrEqual($seconds - 0.1, $request_times[$index + 1] - $request_times[$index]);
+        }
+
+        file_put_contents($this->root . '/proxy-retry-after', '0');
+        $result = $this->run_command('files-pull');
+        $this->assertSame(3, $result['exit_code'], $result['output']);
+        $this->assert_error_details($result, 4, 429);
+        $this->assertCount(8, $this->request_times_for('file_index'));
     }
 
     public function testLaterRunGetsTheFullInternalRetryLimit(): void
