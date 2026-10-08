@@ -53,6 +53,11 @@ if (!defined(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE')) {
     define(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE', 300);
 }
 
+if (!defined(__NAMESPACE__ . '\\AUTH_VERSION')) {
+    // Equals WordPress\Reprint\Server\Utils::AUTH_VERSION, which may not be loaded yet.
+    define(__NAMESPACE__ . '\\AUTH_VERSION', 2);
+}
+
 /**
  * Sends a JSON error response and terminates.
  *
@@ -67,7 +72,7 @@ function error(int $code, string $message, ?string $reason = null): void {
     // This lets users preview a site before changing DNS, but also rewrites
     // application/json bodies. Octet-stream bypasses Hostinger's filter.
     header('Content-Type: application/octet-stream');
-    $body = ['error' => $message, 'code' => $code];
+    $body = ['error' => $message, 'code' => $code, 'auth_version' => AUTH_VERSION];
     if ($reason !== null) {
         $body['reason'] = $reason;
     }
@@ -102,6 +107,7 @@ function push_error(int $http_code, string $reason, string $detail): void {
         'status' => 'rejected',
         'reason' => $reason,
         'detail' => $detail,
+        'auth_version' => AUTH_VERSION,
     ]);
     exit;
 }
@@ -630,6 +636,15 @@ function handle_api_request(array $options = []): void {
             }
             error(500, $runtime_message);
         }
+        // A released token client hears that it must update before anything
+        // about this site's configuration.
+        $client_update_error = Utils::client_update_error(Utils::request_headers());
+        if ($client_update_error !== null) {
+            if (is_push_endpoint($endpoint)) {
+                push_error(403, RequestAuthenticator::REASON_CLIENT_UPDATE_REQUIRED, $client_update_error);
+            }
+            error(403, $client_update_error, RequestAuthenticator::REASON_CLIENT_UPDATE_REQUIRED);
+        }
         // A broken secret.php only matters where the token is the scheme; a
         // key host never accepts it, so enrolled keys must still authenticate.
         if (!Utils::key_auth_required() && has_connection_token_file() && empty(get_file_connection_token())) {
@@ -653,13 +668,7 @@ function handle_api_request(array $options = []): void {
                 true
             );
             $status = $is_unconfigured ? 503 : 403;
-            // Released clients print these messages as they receive them.
-            if (in_array($reason, [RequestAuthenticator::REASON_REQUIRES_KEY_AUTH, RequestAuthenticator::REASON_NO_KEYS_ENROLLED], true)) {
-                // A client that signs with a key prints its own remedy. A
-                // released client sends a token and cannot sign with a key,
-                // so enrolling one is not enough.
-                $auth_error .= '. Update the Reprint client to a version that has `reprint keygen`, run it, and enroll the printed key under Tools > Reprint Server.';
-            } elseif ($is_unconfigured) {
+            if ($is_unconfigured) {
                 $auth_error .= '. Set up the connection in WordPress admin under Tools > Reprint Server.';
             }
             if (is_push_endpoint($endpoint)) {

@@ -90,9 +90,8 @@ final class HTTPServer {
         $server = $request['server'] ?? $_SERVER;
         $get = $request['get'] ?? $_GET;
         $post = $request['post'] ?? $_POST;
-        // Push parameters travel in the signed query string. push_upload streams
-        // php://input itself; reading JSON for any push endpoint would either
-        // buffer an upload or let a control request buffer an unused body.
+        // A push endpoint travels in the signed query string, and a push upload
+        // streams php://input itself, so no push body is read here.
         $endpoint = $get['endpoint'] ?? null;
         $uses_push_request_contract = is_string($endpoint) && strpos($endpoint, 'push_') === 0;
         $body = '';
@@ -224,6 +223,17 @@ final class HTTPServer {
             if (is_array($json_data)) {
                 $params = array_merge($params, $json_data);
             }
+        }
+
+        // The endpoint is part of the signed request target, so the query's
+        // value wins. Released key clients send a pull endpoint in the body
+        // and sign the bare API URL. A push endpoint comes only from the query.
+        $body_endpoint = $params['endpoint'] ?? null;
+        unset($params['endpoint']);
+        if (array_key_exists('endpoint', $get)) {
+            $params = ['endpoint' => $get['endpoint']] + $params;
+        } elseif (is_string($body_endpoint) && strpos($body_endpoint, 'push_') !== 0) {
+            $params = ['endpoint' => $body_endpoint] + $params;
         }
 
         foreach ($params as $key => $value) {

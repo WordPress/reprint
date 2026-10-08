@@ -4,6 +4,7 @@ namespace Reprint\Importer;
 
 use PDO;
 use RuntimeException;
+use WordPress\Reprint\Server\RequestAuthenticator;
 
 /**
  * Build the fixed WordPress admin Referer for a remote Reprint API URL.
@@ -54,6 +55,51 @@ function unsupported_media_type_error_detail(): string
 		'non-text response. In that case, changing Reprint\'s Accept header to text/html would only replace this ' .
 		'response with a JavaScript challenge. Reprint cannot complete that challenge. If the firewall caused ' .
 		'it, ask the host to allowlist this machine\'s source IP address.';
+}
+
+/**
+ * Returns whether a signed request was refused by a plugin older than the client.
+ *
+ * Every authentication refusal from a plugin that speaks this protocol carries
+ * `auth_version`. An older plugin refuses the signature with its error body,
+ * which repeats the HTTP status as `code`, or with the push refusal body,
+ * whose `status` is `rejected`. Its oldest error body has no reason. A
+ * refusal for a reason outside RequestAuthenticator::AUTHENTICATION_REASONS
+ * is not about the credential, so it is reported as the site sent it.
+ *
+ * For a token-signed request this means the plugin cannot verify the
+ * signature. Older plugins verify key signatures, so for a key request it
+ * only tells that the plugin is older, and the refusal is about the key.
+ *
+ * @param int   $http_code     HTTP status of the response.
+ * @param mixed $decoded_body  Response body decoded as JSON.
+ * @return bool Whether the response is an older plugin's authentication refusal.
+ */
+function is_older_plugin_authentication_refusal(int $http_code, $decoded_body): bool
+{
+	if (!is_array($decoded_body) || is_int($decoded_body['auth_version'] ?? null)) {
+		return false;
+	}
+	$reason = $decoded_body['reason'] ?? null;
+	if ($reason !== null && !in_array($reason, RequestAuthenticator::AUTHENTICATION_REASONS, true)) {
+		return false;
+	}
+	$is_refusal_status = 401 === $http_code || 403 === $http_code
+		|| ( 503 === $http_code && in_array($reason, ['not_configured', 'no_keys_enrolled'], true) );
+	$is_reprint_body = ( $decoded_body['code'] ?? null ) === $http_code
+		|| ( $decoded_body['status'] ?? null ) === 'rejected';
+	return $is_refusal_status && $is_reprint_body;
+}
+
+/**
+ * Explain that the site's plugin cannot verify this client's signatures.
+ *
+ * @return string Actionable error detail for pull and push requests.
+ */
+function older_plugin_authentication_error_detail(): string
+{
+	return "The site's Reprint Server plugin is older than this client and does not accept its signatures.\n\n" .
+		'Update the Reprint Server plugin on the site.';
 }
 
 /**

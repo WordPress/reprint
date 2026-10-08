@@ -9,8 +9,9 @@ use RuntimeException;
  * Signs Reprint API requests with an RSA private key.
  *
  * The site holds only the public half, so nothing a site stores can produce
- * one of these signatures. The signed message covers the key id, the
- * freshness fields, the method, and the request target. The key
+ * one of these signatures. The signed message covers the protocol label,
+ * the key id, the freshness fields, the method, and the request target,
+ * whose query names the endpoint. The key
  * authenticates the sender and TLS protects the request, so no request body
  * is signed: every request is signed the way the push envelope is.
  */
@@ -143,7 +144,7 @@ final class PublicKeyClient implements EnvelopeSigner {
     }
 
     /**
-     * Returns the four X-Auth-* headers for a request.
+     * Returns the X-Auth-* headers for a request.
      *
      * @param string $method HTTP method.
      * @param string $url    Full request URL; only path and query are signed.

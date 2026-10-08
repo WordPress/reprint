@@ -17,19 +17,24 @@ require_once __DIR__ . '/../../../vendor/autoload.php';
 // accepting the connection token.
 \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
 $reprint_authentication = new \WordPress\Reprint\Server\HMACServer('zipwp-test-secret');
-if (\WordPress\Reprint\Server\HTTPServer::is_push_endpoint($_GET['endpoint'] ?? '')) {
-    $reprint_authentication_error = $reprint_authentication->verify_envelope(
-        getallheaders(),
-        $_SERVER['REQUEST_METHOD'],
-        Site_Export_HMAC_Client::request_target($_SERVER['REQUEST_URI'])
-    );
-} else {
-    $reprint_authentication_error = $reprint_authentication->verify(getallheaders(), file_get_contents('php://input'), $_FILES);
-}
+// The test reaches this router as an HTTP proxy, so PHP reports the absolute
+// request target. A site behind the proxy receives only the path and query,
+// which is what the client signed.
+$reprint_request_target = preg_replace('#^[A-Za-z][A-Za-z0-9+.-]*://[^/?]*#', '', $_SERVER['REQUEST_URI']);
+$reprint_authentication_error = $reprint_authentication->verify(
+    getallheaders(),
+    $_SERVER['REQUEST_METHOD'],
+    $reprint_request_target
+);
 if ($reprint_authentication_error !== null) {
     http_response_code(401);
     header('Content-Type: application/json');
-    echo json_encode(['error' => $reprint_authentication_error]);
+    echo json_encode([
+        'error' => $reprint_authentication_error,
+        'code' => 401,
+        'reason' => $reprint_authentication->last_error_reason(),
+        'auth_version' => \WordPress\Reprint\Server\Utils::AUTH_VERSION,
+    ]);
     return;
 }
 

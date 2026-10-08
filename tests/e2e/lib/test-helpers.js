@@ -128,7 +128,7 @@ export function createHmacClient(siteName) {
 /**
  * Make an authenticated HTTP request to the export API.
  * @param {string} siteName - Site name
- * @param {string} endpoint - API endpoint
+ * @param {string} endpoint - API endpoint name, sent in the URL query
  * @param {Object} params - Export parameters sent in the JSON body
  * @param {Object} options - Additional options (method, body, rawResponse, followRedirects, signal)
  * @returns {Promise<Object>} Parsed response or raw response
@@ -138,15 +138,16 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
     const url = new URL(options.url || getSiteUrl(siteName));
     const method = options.method || 'POST';
     const body = method === 'GET' ? '' : JSON.stringify({
-        endpoint, ...params, ...(options.body ? JSON.parse(options.body) : {}),
+        ...params, ...(options.body ? JSON.parse(options.body) : {}),
     });
+    // Every request names its endpoint in the query.
+    url.searchParams.set('endpoint', endpoint);
     if (method === 'GET') {
-        url.searchParams.set('endpoint', endpoint);
         for (const [k, v] of Object.entries(params)) {
             setApiRequestParameter(url.searchParams, k, v);
         }
     }
-    // Sign the final URL: for GET the parameters live in its query string.
+    // Sign the final URL: it carries the endpoint, and for GET the parameters too.
     const headers = client.getAuthHeaders({ method, url: url.toString() });
     headers['Accept-Encoding'] = 'gzip';
 
@@ -754,8 +755,8 @@ export function clearHookState(siteName) {
 export async function apiRequestWithFileList(siteName, filePaths, params = {}, options = {}) {
     const client = createHmacClient(siteName);
     const url = new URL(options.url || getSiteUrl(siteName));
+    url.searchParams.set('endpoint', 'file_fetch');
     const fields = new URLSearchParams();
-    fields.set('endpoint', 'file_fetch');
     for (const [k, v] of Object.entries(params)) {
         setApiRequestParameter(fields, k, v);
     }

@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { getSiteDir, getSiteUrl, getSiteSecret, createMysqlConnection, getDbName } from '../lib/test-helpers.js';
 import { ensureMultisite, runWp } from '../lib/multisite-setup.js';
-import { HmacClient } from '../lib/hmac-client.js';
+import { HmacClient, endpointUrl } from '../lib/hmac-client.js';
 
 // Network token administration only matters on a host without OpenSSL, so
 // the registry serves this site from the HMAC-only FPM pool (hmacOnly), where
@@ -15,7 +15,8 @@ const origin = new URL(getSiteUrl(site)).origin;
 const settingsUrl = `${origin}/wp-admin/network/settings.php?page=reprint-server`;
 const actionUrl = `${origin}/wp-admin/admin-post.php`;
 const option = 'reprint_server_connection_token';
-const preflightBody = JSON.stringify({ endpoint: 'preflight', multisite_mode: 'one-site-network-v1' });
+const preflightUrl = endpointUrl(`${origin}/shop/?reprint-api`, 'preflight');
+const preflightBody = JSON.stringify({ multisite_mode: 'one-site-network-v1' });
 
 describe('Multisite network token administration over HTTP', () => {
     beforeAll(async () => {
@@ -41,16 +42,16 @@ describe('Multisite network token administration over HTTP', () => {
         });
         assert.equal(save.status, 302, await save.text());
         assert.equal(save.headers.get('location'), settingsUrl);
-        const accepted = await fetch(`${origin}/shop/?reprint-api`, {
+        const accepted = await fetch(preflightUrl, {
             method: 'POST', body: preflightBody,
-            headers: { ...new HmacClient(changedToken).getAuthHeaders(preflightBody), 'Content-Type': 'application/json' },
+            headers: { ...new HmacClient(changedToken).getAuthHeaders({ url: preflightUrl }), 'Content-Type': 'application/json' },
         });
         const preflight = await accepted.json();
         assert.equal(accepted.status, 200, JSON.stringify(preflight));
         assert.equal(preflight.database.wp.multisite.selection.site_id, 7);
-        const rejected = await fetch(`${origin}/shop/?reprint-api`, {
+        const rejected = await fetch(preflightUrl, {
             method: 'POST', body: preflightBody,
-            headers: { ...new HmacClient(token).getAuthHeaders(preflightBody), 'Content-Type': 'application/json' },
+            headers: { ...new HmacClient(token).getAuthHeaders({ url: preflightUrl }), 'Content-Type': 'application/json' },
         });
         assert.equal(rejected.status, 403, await rejected.text());
     });
@@ -101,9 +102,9 @@ describe('Multisite network token administration over HTTP', () => {
             assert.ok(savedHtml.includes(`value="${changedToken}"`));
             assert.ok(savedHtml.includes('<code>secret.php</code> override is active.'));
             for (const [connectionToken, status] of [[legacyToken, 200], [changedToken, 403]]) {
-                const response = await fetch(`${origin}/shop/?reprint-api`, {
+                const response = await fetch(preflightUrl, {
                     method: 'POST', body: preflightBody,
-                    headers: { ...new HmacClient(connectionToken).getAuthHeaders(preflightBody), 'Content-Type': 'application/json' },
+                    headers: { ...new HmacClient(connectionToken).getAuthHeaders({ url: preflightUrl }), 'Content-Type': 'application/json' },
                 });
                 assert.equal(response.status, status, await response.text());
             }

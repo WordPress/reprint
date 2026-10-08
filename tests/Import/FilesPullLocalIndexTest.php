@@ -1695,7 +1695,7 @@ uksort($remote_index, static function (string $left, string $right): int {
     );
 });
 
-$endpoint = $_POST['endpoint'] ?? null;
+$endpoint = $_GET['endpoint'] ?? null;
 $request_cursor = $_POST['cursor'] ?? null;
 $selected_directories = array_map(
     'base64_decode',

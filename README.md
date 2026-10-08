@@ -279,6 +279,8 @@ accepts only a connection token shared by both sides, and a key signature is ref
 The settings page under **Tools → Reprint Server** (the network settings page on multisite) says which of the two
 the host accepts. The importer never retries with the other scheme.
 
+Key clients from v0.10.12 on work with this plugin, and this client's key signatures work with plugins from v0.10.12 on. Token authentication changed format: update the client and the plugin together. The plugin tells an older token client to update, and the client tells you to update the plugin when the site's plugin is older.
+
 **Public keys.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 3072-bit RSA key, stores
 the private half at `<state-dir>/remotes/<md5-of-url>/key.pem` with mode `0600`, and prints the key id and the
 public key as one line. Paste that line into the enrollment form under Tools → Reprint Server. In JSONL or compact

@@ -1051,4 +1051,9 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringNotContainsString('reprint_server_remove_connection_token', $html);
         $this->assertStringContainsString('This network token can pull any site in this network.', $html);
     }
+
+    public function testPluginAuthVersionMatchesTheServerPackage(): void
+    {
+        $this->assertSame(\WordPress\Reprint\Server\Utils::AUTH_VERSION, \WordPress\Reprint\Server\Plugin\AUTH_VERSION);
+    }
 }

@@ -1033,7 +1033,7 @@ PHP);
                     $remaining_bytes -= strlen($piece);
                 }
                 parse_str(substr($request, $body_start), $params);
-                if (strpos($request, "POST /?reprint-api=1 HTTP/") !== 0 || ( $params['endpoint'] ?? '' ) !== 'sql_chunk') {
+                if (strpos($request, "POST /?reprint-api=1&endpoint=sql_chunk HTTP/") !== 0) {
                     fclose($connection);
                     fclose($listener);
                     exit(4);

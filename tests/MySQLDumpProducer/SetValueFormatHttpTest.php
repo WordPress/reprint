@@ -71,7 +71,7 @@ class SetValueFormatHttpTest extends MySQLDumpProducerTestBase {
         curl_setopt_array($curl, [
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => $body,
-            CURLOPT_HTTPHEADER => (new Site_Export_HMAC_Client('database-push-test-secret'))->get_curl_headers($body),
+            CURLOPT_HTTPHEADER => (new Site_Export_HMAC_Client('database-push-test-secret'))->get_curl_headers('POST', $request['url']),
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_ENCODING => '',
             CURLOPT_TIMEOUT => 10,

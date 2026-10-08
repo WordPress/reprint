@@ -575,8 +575,10 @@ JSON responses use `push_session_id`, `blocking_push_session_id`,
 `lock_acquisition_failure`, `offset_gap`, `push_not_found`, `filesystem_error`,
 `commit_required`, `unexpected_docroot_mutation`, `corrupted_push_state`, and
 `same_device`. Authentication, authorization, and request-boundary failures
-are `missing_header`, `timestamp_expired`, `signature_mismatch`, `auth_failed`,
-`push_disabled`, `not_configured`, `invalid_request`, and `request_too_large`.
+are `auth_failed`, `missing_header`, `timestamp_expired`, `signature_mismatch`,
+`client_update_required`, `requires_key_auth`, `requires_token_auth`,
+`unknown_key`, `not_configured`, and `no_keys_enrolled`, followed by
+`push_disabled`, `invalid_request`, and `request_too_large`.
 `auth_failed` covers every other authentication failure, such as a malformed
 header value.
 

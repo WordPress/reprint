@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import {
     runImporter, getSiteUrl, getSiteSecret, getSiteDir, countAuditLogRequests,
 } from '../lib/test-helpers.js';
-import { HmacClient } from '../lib/hmac-client.js';
+import { HmacClient, endpointUrl } from '../lib/hmac-client.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: token refused on an OpenSSL host', () => {
@@ -25,11 +25,12 @@ describe('Import: token refused on an OpenSSL host', () => {
     });
 
     it('token with no keys enrolled: 503 no_keys_enrolled', async () => {
-        const body = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(tokenOnlySite) });
+        const url = endpointUrl(getSiteUrl(tokenOnlySite), 'preflight');
+        const body = JSON.stringify({ directory: getSiteDir(tokenOnlySite) });
         const token = new HmacClient(getSiteSecret(tokenOnlySite));
-        const response = await fetch(getSiteUrl(tokenOnlySite), {
+        const response = await fetch(url, {
             method: 'POST',
-            headers: { ...token.getAuthHeaders(body), 'Content-Type': 'application/json' },
+            headers: { ...token.getAuthHeaders({ url }), 'Content-Type': 'application/json' },
             body,
         });
         assert.equal(response.status, 503);

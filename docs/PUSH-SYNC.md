@@ -49,8 +49,10 @@ content. Over HTTP or unverified HTTPS, an active attacker can read and modify
 it. HMAC keeps the shared secret off the wire and limits replay, but does not
 replace server verification.
 
-Every request carries an HMAC signature over exactly four values — the
-HTTP method, the URL's path and query, a timestamp, and a random nonce. Payloads are not signed and not hashed: TLS already
+Every request carries a signature over newline-joined fields: the protocol
+label (plus the key id for a key), a random nonce, a timestamp, the HTTP method,
+and the URL's path and query (which name the endpoint). The label and field
+layout appear in `docs/PULL-HTTP.md`. Payloads are not signed and not hashed: TLS already
 guarantees their integrity, and signing streams was the single biggest cause of
 buffering pain. Signing cost is constant per request regardless of payload
 size. The secret travels in no URL and no body, so it never lands in an
@@ -253,7 +255,7 @@ not removable; its next commit request resumes the durable cursor instead.
 ## Push HTTP operations
 
 The production exporter router exposes five authenticated push operations.
-Every request uses the envelope signature described above. `push_upload` passes
+Every request uses the headers-only signature described above. `push_upload` passes
 `php://input` directly to the multipart processor instead of reading the
 complete request for authentication.
 
@@ -723,10 +725,8 @@ stop all writers:
 Files first, followed by full database overwrite and then selective database changes. Keep each PR focused:
 
 1. **Design doc** — this file.
-2. **Envelope auth** — headers-only HMAC for data routes: the
-   X-Auth-Content-Hash header carries the literal string UNSIGNED-PAYLOAD,
-   and the signature covers the method and request target instead of a
-   body hash.
+2. **Envelope auth** — headers-only signatures, which apply to every
+   request.
 3. **Work value store** — the store itself (PR #317, which succeeded
    the closed #298).
 4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude

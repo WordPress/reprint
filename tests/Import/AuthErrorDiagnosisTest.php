@@ -38,15 +38,15 @@ final class AuthErrorDiagnosisTest extends TestCase
         return $client;
     }
 
-    private function diagnose(ImportClient $client, int $status, array $body): array
+    private function diagnose(ImportClient $client, int $status, array $body, ?string $request_url = null): array
     {
         $method = new ReflectionMethod(ImportClient::class, 'diagnose_http_error');
-        return $method->invoke($client, $status, json_encode($body));
+        return $method->invoke($client, $status, json_encode($body), null, $request_url);
     }
 
     public function testRequiresKeyAuthNamesKeygen(): void
     {
-        $result = $this->diagnose($this->clientWith(['secret' => 'x']), 403, ['error' => 'msg', 'reason' => 'requires_key_auth']);
+        $result = $this->diagnose($this->clientWith(['secret' => 'x']), 403, ['error' => 'msg', 'reason' => 'requires_key_auth', 'auth_version' => 2]);
         $this->assertSame('AUTH_REQUIRES_KEY', $result['code']);
         // Quoted: an unquoted `?` is a glob in zsh and `&` backgrounds the command.
         $this->assertStringContainsString(
@@ -60,9 +60,11 @@ final class AuthErrorDiagnosisTest extends TestCase
 
     public function testRequiresTokenAuthNamesSecret(): void
     {
-        $result = $this->diagnose($this->clientWith([]), 403, ['error' => 'msg', 'reason' => 'requires_token_auth']);
+        $result = $this->diagnose($this->clientWith([]), 403, ['error' => 'msg', 'reason' => 'requires_token_auth', 'auth_version' => 2]);
         $this->assertSame('AUTH_REQUIRES_TOKEN', $result['code']);
         $this->assertStringContainsString('--secret=TOKEN', $result['message']);
+        $this->assertStringContainsString('cannot verify public-key signatures because OpenSSL is unavailable', $result['message']);
+        $this->assertStringNotContainsString('Ask the site owner', $result['message']);
     }
 
     public function testNoKeysEnrolledReprintsThePublicKey(): void
@@ -71,14 +73,14 @@ final class AuthErrorDiagnosisTest extends TestCase
         $path = $this->state_dir . '/k.pem';
         file_put_contents($path, $private_pem);
         chmod($path, 0600);
-        $result = $this->diagnose($this->clientWith(['private_key_path' => $path]), 503, ['error' => 'msg', 'reason' => 'no_keys_enrolled']);
+        $result = $this->diagnose($this->clientWith(['private_key_path' => $path]), 503, ['error' => 'msg', 'reason' => 'no_keys_enrolled', 'auth_version' => 2]);
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString($public_key, $result['message']);
     }
 
     public function testNoKeysEnrolledWithATokenNamesKeygenNotTheTokenForm(): void
     {
-        $result = $this->diagnose($this->clientWith(['secret' => 'x']), 503, ['error' => 'msg', 'reason' => 'no_keys_enrolled']);
+        $result = $this->diagnose($this->clientWith(['secret' => 'x']), 503, ['error' => 'msg', 'reason' => 'no_keys_enrolled', 'auth_version' => 2]);
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString('requires key authentication and has no keys enrolled', $result['message']);
         $this->assertStringContainsString('The connection token you passed is not accepted there', $result['message']);
@@ -96,11 +98,27 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose(
             $this->clientWith(['secret' => 'x']),
             503,
-            ['error' => 'Export not configured: no connection token is stored', 'reason' => 'not_configured']
+            ['error' => 'Export not configured: no connection token is stored', 'reason' => 'not_configured', 'auth_version' => 2]
         );
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString('The site reported: Export not configured: no connection token is stored', $result['message']);
         $this->assertStringNotContainsString('reprint keygen', $result['message']);
+        $this->assertStringNotContainsString('not set up to accept connections', $result['message']);
+    }
+
+    public function testNotConfiguredWithoutADetailDoesNotGuessWhichCredentialIsMissing(): void
+    {
+        $result = $this->diagnose(
+            $this->clientWith(['secret' => 'x']),
+            503,
+            ['reason' => 'not_configured', 'auth_version' => 2]
+        );
+        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
+        $this->assertSame(
+            'The Reprint Server plugin reported an authentication configuration error without a detail. ' .
+            'Check the connection settings under Tools > Reprint Server and the site\'s PHP error log.',
+            $result['message']
+        );
     }
 
     public function testNotConfiguredForAKeyDoesNotClaimTheHostRequiresKeys(): void
@@ -113,7 +131,7 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose(
             $this->clientWith(['private_key_path' => $path]),
             503,
-            ['error' => 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.', 'reason' => 'not_configured']
+            ['error' => 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.', 'reason' => 'not_configured', 'auth_version' => 2]
         );
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString('Invalid secret.php configuration', $result['message']);
@@ -127,21 +145,10 @@ final class AuthErrorDiagnosisTest extends TestCase
         file_put_contents($path, $private_pem);
         chmod($path, 0600);
         $client = $this->clientWith(['private_key_path' => $path]);
-        $result = $this->diagnose($client, 403, ['error' => 'msg', 'reason' => 'unknown_key']);
+        $result = $this->diagnose($client, 403, ['error' => 'msg', 'reason' => 'unknown_key', 'auth_version' => 2]);
         $this->assertSame('AUTH_UNKNOWN_KEY', $result['code']);
         $this->assertStringContainsString($public_key, $result['message']);
         $this->assertStringContainsString(\WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key), $result['message']);
-    }
-
-    public function testForbiddenWithoutReasonWhileUsingAKeySuggestsUpdatingThePlugin(): void
-    {
-        [$private_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
-        $path = $this->state_dir . '/k.pem';
-        file_put_contents($path, $private_pem);
-        chmod($path, 0600);
-        $result = $this->diagnose($this->clientWith(['private_key_path' => $path]), 403, ['error' => 'HMAC signature verification failed']);
-        $this->assertSame('AUTH_KEY_UNSUPPORTED', $result['code']);
-        $this->assertStringContainsString('update the Reprint Server plugin', $result['message']);
     }
 
     public function testRejectedKeySignatureBlamesARewrittenRequestNotTheKey(): void
@@ -153,11 +160,25 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose(
             $this->clientWith(['private_key_path' => $path]),
             403,
-            ['error' => 'Signature verification failed', 'reason' => 'signature_mismatch']
+            ['error' => 'Signature verification failed', 'reason' => 'signature_mismatch', 'auth_version' => 2],
+            'https://example.test/?reprint-api&endpoint=file_index'
         );
         $this->assertSame('AUTH_REQUEST_REWRITTEN', $result['code']);
-        $this->assertStringContainsString('this machine signed: /?reprint-api', $result['message']);
+        $this->assertStringContainsString('this machine signed: /?reprint-api&endpoint=file_index', $result['message']);
         $this->assertStringContainsString('enrolling a new one will not help', $result['message']);
+    }
+
+    public function testATokenSignatureMismatchNamesTheTokenAndTheUrl(): void
+    {
+        $result = $this->diagnose($this->clientWith(['secret' => 'x']), 403, [
+            'error' => 'HMAC signature verification failed', 'reason' => 'signature_mismatch', 'auth_version' => 2,
+        ], 'https://example.test/?reprint-api&endpoint=sql_chunk');
+
+        $this->assertSame('AUTH_SECRET_MISMATCH', $result['code']);
+        $this->assertStringContainsString('This machine signed: /?reprint-api&endpoint=sql_chunk', $result['message']);
+        $this->assertStringContainsString('--secret', $result['message']);
+        $this->assertStringContainsString('rewriting the request', $result['message']);
+        $this->assertStringContainsString('breaks both token and key signatures', $result['message']);
     }
 
     public function testNoCredentialMessageNamesBothOptions(): void
@@ -166,5 +187,14 @@ final class AuthErrorDiagnosisTest extends TestCase
         $this->assertSame('AUTH_NO_CREDENTIAL', $result['code']);
         $this->assertStringContainsString('reprint keygen', $result['message']);
         $this->assertStringContainsString('--secret', $result['message']);
+    }
+
+    public function testASignatureMismatchWithoutAKnownRequestNamesTheApiUrl(): void
+    {
+        $result = $this->diagnose($this->clientWith(['secret' => 'x']), 403, [
+            'error' => 'HMAC signature verification failed', 'reason' => 'signature_mismatch', 'auth_version' => 2,
+        ]);
+
+        $this->assertStringContainsString('This machine signed: /?reprint-api', $result['message']);
     }
 }

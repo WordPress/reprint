@@ -86,6 +86,30 @@ final class RequestUrlPathEncodingTest extends TestCase
         }
     }
 
+    public function testConstructorRejectsAFragmentBeforeCreatingRemoteState(): void
+    {
+        // Every request appends its endpoint to the API URL, which would put
+        // it inside the fragment. cURL never sends a fragment.
+        foreach ([
+            'https://example.com/?reprint-api#fragment?with=query&',
+            'https://example.com/?reprint-api#',
+            'https://example.com/#section',
+        ] as $remote_reprint_api_url) {
+            try {
+                new \ImportClient($remote_reprint_api_url, $this->root . '/state', $this->root . '/files');
+                $this->fail('A remote Reprint API URL with a fragment must be rejected: ' . $remote_reprint_api_url);
+            } catch (\InvalidArgumentException $error) {
+                $this->assertSame(
+                    'The remote Reprint API URL must not contain a fragment: ' . $remote_reprint_api_url . '. ' .
+                    'Remove # and everything after it. URL fragments are not sent to the server; ' .
+                    'the endpoint Reprint appends there would not reach the server either.',
+                    $error->getMessage()
+                );
+            }
+            $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
+        }
+    }
+
     public function testPathParametersAreBase64EncodedInPostBody(): void
     {
         $client = new \ImportClient(
@@ -122,7 +146,7 @@ final class RequestUrlPathEncodingTest extends TestCase
     }
 
     /** @dataProvider remote_api_urls */
-    public function testSuppliedUrlIsUnchangedAndDoesNotSupplyBodyParameters(string $remote_api_url): void
+    public function testSuppliedUrlOnlyGainsTheEndpointAndDoesNotSupplyBodyParameters(string $remote_api_url, string $expected_url): void
     {
         $client = new \ImportClient(
             $remote_api_url,
@@ -139,9 +163,8 @@ final class RequestUrlPathEncodingTest extends TestCase
             'directory' => ['/srv/body-directory'],
         ]);
 
-        $this->assertSame($remote_api_url, $request['url']);
+        $this->assertSame($expected_url, $request['url']);
         $this->assertSame([
-            'endpoint' => 'file_index',
             'directory' => [base64_encode('/srv/body-directory')],
             'multisite_mode' => 'one-site-network-v1',
         ], $request['params']);
@@ -150,24 +173,29 @@ final class RequestUrlPathEncodingTest extends TestCase
     public static function remote_api_urls(): array
     {
         return [
-            'plain endpoint' => ['https://example.com/export.php'],
-            'empty query' => ['https://example.com/export.php?'],
-            'routing marker' => ['https://example.com/?reprint-api'],
-            'legacy marker' => ['https://example.com/?site-export-api=1'],
-            'trailing separator' => ['https://example.com/?reprint-api&'],
-            'encoded marker' => ['https://example.com/?%72eprint%2Dapi'],
-            'array marker' => ['https://example.com/?reprint-api%5B%5D=1'],
-            'leading encoded space' => ['https://example.com/?%20reprint-api=1'],
-            'encoded null' => ['https://example.com/?reprint-api%00suffix=1'],
-            'both markers' => ['https://example.com/?site-export-api&reprint-api'],
-            'duplicate keys' => ['https://example.com/?reprint-api&route=one&route=two'],
-            'empty value' => ['https://example.com/?reprint-api&route='],
-            'semicolon' => ['https://example.com/?reprint-api=1;route=export'],
-            'encoded delimiters' => ['https://example.com/a%2fb%3fc?route=a%26b%3Dc%23d&reprint-api'],
-            'nested options' => ['https://example.com/?reprint-api&directory%5B%5D=%2Fsrv%2Furl-directory&endpoint=preflight'],
-            'fragment' => ['https://example.com/?reprint-api#fragment?with=query&'],
-            'IPv6 address' => ['http://[::1]:8080/export.php?route=export&reprint-api'],
-            'Unicode path' => ['https://example.com/łódź/?reprint-api'],
+            'plain endpoint' => ['https://example.com/export.php', 'https://example.com/export.php?endpoint=file_index'],
+            'empty query' => ['https://example.com/export.php?', 'https://example.com/export.php?endpoint=file_index'],
+            'routing marker' => ['https://example.com/?reprint-api', 'https://example.com/?reprint-api&endpoint=file_index'],
+            'legacy marker' => ['https://example.com/?site-export-api=1', 'https://example.com/?site-export-api=1&endpoint=file_index'],
+            'trailing separator' => ['https://example.com/?reprint-api&', 'https://example.com/?reprint-api&endpoint=file_index'],
+            'encoded marker' => ['https://example.com/?%72eprint%2Dapi', 'https://example.com/?%72eprint%2Dapi&endpoint=file_index'],
+            'array marker' => ['https://example.com/?reprint-api%5B%5D=1', 'https://example.com/?reprint-api%5B%5D=1&endpoint=file_index'],
+            'leading encoded space' => ['https://example.com/?%20reprint-api=1', 'https://example.com/?%20reprint-api=1&endpoint=file_index'],
+            'encoded null' => ['https://example.com/?reprint-api%00suffix=1', 'https://example.com/?reprint-api%00suffix=1&endpoint=file_index'],
+            'both markers' => ['https://example.com/?site-export-api&reprint-api', 'https://example.com/?site-export-api&reprint-api&endpoint=file_index'],
+            'duplicate keys' => ['https://example.com/?reprint-api&route=one&route=two', 'https://example.com/?reprint-api&route=one&route=two&endpoint=file_index'],
+            'empty value' => ['https://example.com/?reprint-api&route=', 'https://example.com/?reprint-api&route=&endpoint=file_index'],
+            'semicolon' => ['https://example.com/?reprint-api=1;route=export', 'https://example.com/?reprint-api=1;route=export&endpoint=file_index'],
+            'encoded delimiters' => [
+                'https://example.com/a%2fb%3fc?route=a%26b%3Dc%23d&reprint-api',
+                'https://example.com/a%2fb%3fc?route=a%26b%3Dc%23d&reprint-api&endpoint=file_index',
+            ],
+            'nested options' => [
+                'https://example.com/?reprint-api&directory%5B%5D=%2Fsrv%2Furl-directory&endpoint=preflight',
+                'https://example.com/?reprint-api&directory%5B%5D=%2Fsrv%2Furl-directory&endpoint=preflight&endpoint=file_index',
+            ],
+            'IPv6 address' => ['http://[::1]:8080/export.php?route=export&reprint-api', 'http://[::1]:8080/export.php?route=export&reprint-api&endpoint=file_index'],
+            'Unicode path' => ['https://example.com/łódź/?reprint-api', 'https://example.com/łódź/?reprint-api&endpoint=file_index'],
         ];
     }
 
@@ -236,8 +264,8 @@ final class RequestUrlPathEncodingTest extends TestCase
             $client, 'sql_chunk', $cursor, $params
         );
 
-        $this->assertSame('https://example.com/?site-export-api&route=export', $request['url']);
-        $this->assertSame(['endpoint' => 'sql_chunk'] + $params + [
+        $this->assertSame('https://example.com/?site-export-api&route=export&endpoint=sql_chunk', $request['url']);
+        $this->assertSame($params + [
             'multisite_mode' => 'one-site-network-v1',
             'cursor' => $cursor,
         ], $request['params']);

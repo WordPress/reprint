@@ -10,6 +10,7 @@ import {
     getSiteUrl, getSiteDir,
     createHmacClient,
 } from '../lib/test-helpers.js';
+import { endpointUrl } from '../lib/hmac-client.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Invalid API Parameters', () => {
@@ -63,14 +64,15 @@ describe('Import: Invalid API Parameters', () => {
     });
 
     it('a key that is not enrolled returns 403', async () => {
-        const requestBody = JSON.stringify({ endpoint: 'preflight', directory: getSiteDir(site) });
+        const url = endpointUrl(getSiteUrl(site), 'preflight');
+        const requestBody = JSON.stringify({ directory: getSiteDir(site) });
         // A credential string that is not a site name yields a key enrolled nowhere.
         const strangerClient = createHmacClient('wrong-secret-value');
-        const headers = strangerClient.getAuthHeaders({ url: getSiteUrl(site) });
+        const headers = strangerClient.getAuthHeaders({ url });
         headers['Accept-Encoding'] = 'gzip';
         headers['Content-Type'] = 'application/json';
 
-        const response = await fetch(getSiteUrl(site), { method: 'POST', headers, body: requestBody });
+        const response = await fetch(url, { method: 'POST', headers, body: requestBody });
         assert.equal(response.status, 403, 'Expected 403 for a key that is not enrolled');
 
         const body = await response.json();
@@ -82,10 +84,10 @@ describe('Import: Invalid API Parameters', () => {
     });
 
     it('missing auth headers returns 403 naming key authentication', async () => {
-        const response = await fetch(getSiteUrl(site), {
+        const response = await fetch(endpointUrl(getSiteUrl(site), 'preflight'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ endpoint: 'preflight' }),
+            body: JSON.stringify({}),
         });
         assert.equal(response.status, 403, 'Expected 403 for missing auth');
 

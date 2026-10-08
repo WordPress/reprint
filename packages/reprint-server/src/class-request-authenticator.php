@@ -12,12 +12,35 @@ namespace WordPress\Reprint\Server;
  */
 final class RequestAuthenticator {
 
+    public const REASON_CLIENT_UPDATE_REQUIRED = 'client_update_required';
     public const REASON_NOT_CONFIGURED = 'not_configured';
     public const REASON_NO_KEYS_ENROLLED = 'no_keys_enrolled';
     public const REASON_REQUIRES_KEY_AUTH = HMACServer::REASON_REQUIRES_KEY_AUTH;
     public const REASON_REQUIRES_TOKEN_AUTH = PublicKeyServer::REASON_REQUIRES_TOKEN_AUTH;
     public const REASON_UNKNOWN_KEY = PublicKeyServer::REASON_UNKNOWN_KEY;
     public const REASON_AUTH_FAILED = 'auth_failed';
+
+    /**
+     * Authentication refusal reasons shared with client error diagnosis.
+     *
+     * Use the verifier constants so changes to server reasons reach the client.
+     * Keep content_hash_mismatch for plugins using the earlier token protocol.
+     * Current plugin errors also report auth_version; older plugin errors can
+     * carry these reasons without it.
+     */
+    public const AUTHENTICATION_REASONS = [
+        self::REASON_AUTH_FAILED,
+        HMACServer::REASON_MISSING_HEADER,
+        HMACServer::REASON_TIMESTAMP_EXPIRED,
+        HMACServer::REASON_SIGNATURE_MISMATCH,
+        'content_hash_mismatch',
+        self::REASON_REQUIRES_KEY_AUTH,
+        self::REASON_REQUIRES_TOKEN_AUTH,
+        self::REASON_UNKNOWN_KEY,
+        self::REASON_NOT_CONFIGURED,
+        self::REASON_NO_KEYS_ENROLLED,
+        self::REASON_CLIENT_UPDATE_REQUIRED,
+    ];
 
     /** @var string|null */
     private $hmac_secret;
@@ -48,42 +71,16 @@ final class RequestAuthenticator {
     /**
      * Verifies one request from explicit inputs. Null on success, else an
      * error string with a stable code from last_error_reason().
-     *
-     * @param string|null $body             Raw body. Only a token signature on a pull endpoint covers it.
-     * @param array       $files            $_FILES-style uploads, hashed instead of $body when non-empty.
-     * @param bool        $is_push_endpoint True for push_* endpoints, where a token signature uses
-     *                                      envelope verification. A key signature never covers the body.
      */
-    public function verify(
-        array $headers,
-        string $method,
-        string $request_target,
-        ?string $body,
-        array $files = [],
-        bool $is_push_endpoint = false,
-        ?float $now = null
-    ): ?string {
-        $read_body = function () use ($body): ?string {
-            return $body;
-        };
-        return $this->authenticate($headers, $method, $request_target, $read_body, $files, $is_push_endpoint, $now);
-    }
-
-    /**
-     * @param callable():(string|null) $read_body Returns the raw body. Called only to verify a token
-     *                                            signature on a pull endpoint.
-     */
-    private function authenticate(
-        array $headers,
-        string $method,
-        string $request_target,
-        callable $read_body,
-        array $files,
-        bool $is_push_endpoint,
-        ?float $now
-    ): ?string {
+    public function verify(array $headers, string $method, string $request_target, ?float $now = null): ?string {
         $this->last_error_reason = null;
         $this->authenticated_key_id = null;
+
+        // A released token client signs a message this server no longer verifies.
+        $client_update_error = Utils::client_update_error($headers);
+        if ($client_update_error !== null) {
+            return $this->fail(self::REASON_CLIENT_UPDATE_REQUIRED, $client_update_error);
+        }
         $has_key_id = Utils::request_header($headers, 'X-Auth-Key-Id') !== null;
 
         if (!Utils::key_auth_required()) {
@@ -94,9 +91,7 @@ final class RequestAuthenticator {
                 return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no connection token is stored');
             }
             $hmac_server = new HMACServer($this->hmac_secret, $this->timestamp_tolerance);
-            $error = $is_push_endpoint
-                ? $hmac_server->verify_envelope($headers, $method, $request_target, $now)
-                : $hmac_server->verify($headers, $read_body(), $files, $now);
+            $error = $hmac_server->verify($headers, $method, $request_target, $now);
             if ($error !== null) {
                 return $this->fail($hmac_server->last_error_reason() ?? self::REASON_AUTH_FAILED, $error);
             }
@@ -104,8 +99,8 @@ final class RequestAuthenticator {
         }
 
         // No keys enrolled answers first: a site that upgraded with only a
-        // token stored tells its existing token clients to enroll a key
-        // rather than reporting a scheme mismatch they cannot act on.
+        // token stored tells its token clients to enroll a key rather than
+        // reporting a scheme mismatch they cannot act on.
         if (empty($this->public_keys_by_id)) {
             return $this->fail(self::REASON_NO_KEYS_ENROLLED, 'Export not configured: this host requires key authentication and no keys are enrolled');
         }
@@ -121,33 +116,14 @@ final class RequestAuthenticator {
         return null;
     }
 
-    /**
-     * Verifies the current PHP request. The push decision comes from the
-     * query-string endpoint, exactly as HTTPServer::handle_request() makes it:
-     * every push_-prefixed endpoint, known or not, uses the push request
-     * contract, so an unknown one answers "Invalid endpoint" after
-     * authenticating instead of failing its envelope signature.
-     *
-     * Only a token signature on a pull endpoint covers the body, so only that
-     * path reads php://input. A key request never buffers the body here, and
-     * a push endpoint streams php://input itself.
-     */
+    /** Verifies the current PHP request without reading its body. */
     public function verify_globals(?float $now = null): ?string {
         // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Exact request-line values are covered by the signature.
         $method = (string) ( $_SERVER['REQUEST_METHOD'] ?? '' );
         $request_target = (string) ( $_SERVER['REQUEST_URI'] ?? '' );
-        // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Routing only; the signature is the check.
-        $endpoint = isset($_GET['endpoint']) && is_string($_GET['endpoint']) ? $_GET['endpoint'] : '';
         // phpcs:enable WordPress.Security.ValidatedSanitizedInput
 
-        $is_push_endpoint = strpos($endpoint, 'push_') === 0;
-        $read_body = function (): string {
-            $body = file_get_contents('php://input');
-            return $body === false ? '' : $body;
-        };
-
-        // phpcs:ignore WordPress.Security.NonceVerification.Missing -- Request headers are covered by the signature, not a nonce field.
-        return $this->authenticate(Utils::request_headers(), $method, $request_target, $read_body, $_FILES, $is_push_endpoint, $now);
+        return $this->verify(Utils::request_headers(), $method, $request_target, $now);
     }
 
     public function last_error_reason(): ?string {

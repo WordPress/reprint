@@ -42,11 +42,10 @@ final class ExportHttpServerTest extends TestCase
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
         $config = $server->parse_http_config(
-            [],
+            ['endpoint' => 'file_index'],
             [],
             ['CONTENT_TYPE' => 'application/json; charset=utf-8'],
             json_encode([
-                'endpoint' => 'file_index',
                 'paths' => ['a', 'b'],
                 'max_execution_time' => '7',
                 'memory_threshold' => '0.7',
@@ -61,17 +60,17 @@ final class ExportHttpServerTest extends TestCase
         $this->assertTrue($config['create_table_query']);
     }
 
-    public function testJsonBodyParametersOverrideQueryParameters(): void
+    public function testJsonBodyParametersOverrideQueryParametersExceptTheEndpoint(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer();
         $config = $server->parse_http_config(
             ['endpoint' => 'preflight', 'directory' => '/query'],
             [],
             ['CONTENT_TYPE' => 'application/json'],
-            '{"endpoint":"db_index","directory":"/body"}'
+            '{"directory":"/body"}'
         );
 
-        $this->assertSame('db_index', $config['endpoint']);
+        $this->assertSame('preflight', $config['endpoint']);
         $this->assertSame('/body', $config['directory']);
     }
 
@@ -377,13 +376,34 @@ final class ExportHttpServerTest extends TestCase
         ]);
 
         $server->handle_request([
-            'get' => [],
-            'post' => ['endpoint' => 'preflight'],
+            'get' => ['endpoint' => 'preflight'],
+            'post' => [],
             'server' => ['REQUEST_METHOD' => 'POST'],
             'body' => '',
         ]);
 
         $this->assertSame([['endpoint' => 'preflight']], $calls);
+    }
+
+    /** @dataProvider bodyEndpointProvider */
+    public function testParseHttpConfigPrefersTheQueryEndpoint(array $get, array $post, string $content_type, string $body, ?string $expected): void
+    {
+        $config = ( new \WordPress\Reprint\Server\HTTPServer() )->parse_http_config($get, $post, ['CONTENT_TYPE' => $content_type], $body);
+
+        $this->assertSame($expected, $config['endpoint'] ?? null);
+    }
+
+    public static function bodyEndpointProvider(): array
+    {
+        return [
+            'form body names another' => [['reprint-api' => '', 'endpoint' => 'preflight'], ['endpoint' => 'db_index'], 'application/x-www-form-urlencoded', 'endpoint=db_index', 'preflight'],
+            'json body names another' => [['reprint-api' => '', 'endpoint' => 'preflight'], [], 'application/json', '{"endpoint":"db_index"}', 'preflight'],
+            'form body only' => [['reprint-api' => ''], ['endpoint' => 'db_index'], 'application/x-www-form-urlencoded', 'endpoint=db_index', 'db_index'],
+            'json body only' => [['reprint-api' => ''], [], 'application/json', '{"endpoint":"preflight"}', 'preflight'],
+            'json body names a push endpoint' => [['reprint-api' => ''], [], 'application/json', '{"endpoint":"push_commit"}', null],
+            'json body names a non-string endpoint' => [['reprint-api' => ''], [], 'application/json', '{"endpoint":["push_commit"]}', null],
+            'neither' => [['reprint-api' => ''], [], 'application/json', '{"directory":"/site"}', null],
+        ];
     }
 
     public function testMultipartParametersDoNotReadTheUploadBody(): void
@@ -404,8 +424,8 @@ final class ExportHttpServerTest extends TestCase
         ]);
 
         $server->handle_request([
-            'get' => [],
-            'post' => ['endpoint' => 'file_fetch', 'directory' => '/site'],
+            'get' => ['endpoint' => 'file_fetch'],
+            'post' => ['directory' => '/site'],
             'server' => [
                 'REQUEST_METHOD' => 'POST',
                 'CONTENT_TYPE' => 'multipart/form-data; boundary=file-list',
