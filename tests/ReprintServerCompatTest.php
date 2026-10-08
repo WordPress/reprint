@@ -212,8 +212,6 @@ final class ReprintServerCompatTest extends ReprintServerPluginTestCase
             '_site_export_is_push_authorized',
             '_site_export_get_push_authorization_error',
             '_site_export_update_push_authorization',
-            '_site_export_verify_hmac',
-            '_site_export_default_authenticate',
             '_site_export_handle_api_request',
         ];
 

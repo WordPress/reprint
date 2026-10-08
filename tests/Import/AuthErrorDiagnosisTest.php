@@ -54,6 +54,8 @@ final class AuthErrorDiagnosisTest extends TestCase
             $result['message']
         );
         $this->assertStringContainsString('not accepted', $result['message']);
+        // --secret wins over the stored key, so rerunning with it is refused again.
+        $this->assertStringContainsString('run the command again without --secret', $result['message']);
     }
 
     public function testRequiresTokenAuthNamesSecret(): void
@@ -63,18 +65,33 @@ final class AuthErrorDiagnosisTest extends TestCase
         $this->assertStringContainsString('--secret=TOKEN', $result['message']);
     }
 
-    public function testNotConfiguredOnKeyHostReprintsThePublicKey(): void
+    public function testNoKeysEnrolledReprintsThePublicKey(): void
     {
         [$private_pem, $public_key] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
         $path = $this->state_dir . '/k.pem';
         file_put_contents($path, $private_pem);
         chmod($path, 0600);
-        $result = $this->diagnose($this->clientWith(['private_key_path' => $path]), 503, ['error' => 'msg', 'reason' => 'not_configured']);
+        $result = $this->diagnose($this->clientWith(['private_key_path' => $path]), 503, ['error' => 'msg', 'reason' => 'no_keys_enrolled']);
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString($public_key, $result['message']);
     }
 
-    public function testNotConfiguredOnTokenHostAsksForAToken(): void
+    public function testNoKeysEnrolledWithATokenNamesKeygenNotTheTokenForm(): void
+    {
+        $result = $this->diagnose($this->clientWith(['secret' => 'x']), 503, ['error' => 'msg', 'reason' => 'no_keys_enrolled']);
+        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
+        $this->assertStringContainsString('requires key authentication and has no keys enrolled', $result['message']);
+        $this->assertStringContainsString('The connection token you passed is not accepted there', $result['message']);
+        $this->assertStringContainsString('run the command again without --secret', $result['message']);
+        // Quoted: an unquoted `?` is a glob in zsh and `&` backgrounds the command.
+        $this->assertStringContainsString(
+            "reprint keygen 'https://example.test/?reprint-api' --state-dir=" . escapeshellarg($this->state_dir),
+            $result['message']
+        );
+        $this->assertStringNotContainsString('Set one under', $result['message']);
+    }
+
+    public function testNotConfiguredRepeatsWhatTheSiteReported(): void
     {
         $result = $this->diagnose(
             $this->clientWith(['secret' => 'x']),
@@ -82,8 +99,25 @@ final class AuthErrorDiagnosisTest extends TestCase
             ['error' => 'Export not configured: no connection token is stored', 'reason' => 'not_configured']
         );
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
-        $this->assertStringContainsString('no connection token configured', $result['message']);
+        $this->assertStringContainsString('The site reported: Export not configured: no connection token is stored', $result['message']);
         $this->assertStringNotContainsString('reprint keygen', $result['message']);
+    }
+
+    public function testNotConfiguredForAKeyDoesNotClaimTheHostRequiresKeys(): void
+    {
+        // A token host with a broken secret.php answers every request, key-signed ones included.
+        [$private_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
+        $path = $this->state_dir . '/k.pem';
+        file_put_contents($path, $private_pem);
+        chmod($path, 0600);
+        $result = $this->diagnose(
+            $this->clientWith(['private_key_path' => $path]),
+            503,
+            ['error' => 'Invalid secret.php configuration. Remove it or replace it with a valid connection token.', 'reason' => 'not_configured']
+        );
+        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
+        $this->assertStringContainsString('Invalid secret.php configuration', $result['message']);
+        $this->assertStringNotContainsString('requires key authentication', $result['message']);
     }
 
     public function testUnknownKeyReprintsThePublicKeyAndId(): void

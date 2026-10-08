@@ -13133,9 +13133,12 @@ class ImportClient
         }
 
         // ── Authentication / authorization ───────────────────────
-        // 503 not_configured is an auth answer too: the site is in a state
-        // where no credential of the kind we sent can succeed.
-        if ($http_code === 401 || $http_code === 403 || ( $http_code === 503 && $server_reason === 'not_configured' )) {
+        // 503 not_configured and no_keys_enrolled are auth answers too: the
+        // site is in a state where no credential of the kind we sent can succeed.
+        $is_auth_refusal = $http_code === 401 || $http_code === 403;
+        $is_unconfigured_site = $http_code === 503
+            && in_array($server_reason, ['not_configured', 'no_keys_enrolled'], true);
+        if ($is_auth_refusal || $is_unconfigured_site) {
             $using_key = $this->public_key_client !== null;
             $key_hint = '';
             if ($using_key) {
@@ -13150,7 +13153,8 @@ class ImportClient
                         "This site's host has OpenSSL, so it accepts key authentication only; " .
                         "connection tokens are not accepted there.\n\n" .
                         "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
-                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server.",
+                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server, " .
+                        "then run the command again without --secret.",
                 ];
             }
             if ($server_reason === 'requires_token_auth') {
@@ -13161,17 +13165,32 @@ class ImportClient
                         "Pass --secret=TOKEN using the connection token configured under Tools > Reprint Server.",
                 ];
             }
-            if ($server_reason === 'not_configured') {
+            if ($server_reason === 'no_keys_enrolled') {
                 if ($using_key) {
                     $not_configured_message =
                         "This site requires key authentication but has no keys enrolled. " .
                         "Enroll this public key under Tools > Reprint Server." . $key_hint;
                 } else {
+                    // A key host keeps a stored token but never accepts it, so
+                    // setting a token there would change nothing.
                     $not_configured_message =
-                        "This site has no connection token configured. " .
-                        "Set one under Tools > Reprint Server, or enroll a key if the host supports it.";
+                        "This site's host requires key authentication and has no keys enrolled. " .
+                        "The connection token you passed is not accepted there.\n\n" .
+                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
+                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server, " .
+                        "then run the command again without --secret.";
                 }
                 return ['code' => 'AUTH_NOT_CONFIGURED', 'message' => $not_configured_message];
+            }
+            if ($server_reason === 'not_configured') {
+                // A missing or broken token, a broken secret.php, or a host
+                // configuration error: only the site's message says which.
+                return [
+                    'code' => 'AUTH_NOT_CONFIGURED',
+                    'message' => is_string($server_msg)
+                        ? "The site is not set up to accept connections. The site reported: {$server_msg}"
+                        : "The site is not set up to accept connections. Set up the connection under Tools > Reprint Server.",
+                ];
             }
             if ($server_reason === 'unknown_key') {
                 return [

@@ -210,14 +210,6 @@ function _site_export_update_push_authorization(bool $enabled): bool {
     return \WordPress\Reprint\Server\Plugin\update_push_authorization($enabled);
 }
 
-function _site_export_verify_hmac(string $secret): ?string {
-    return \WordPress\Reprint\Server\Plugin\verify_hmac($secret);
-}
-
-function _site_export_default_authenticate(): void {
-    \WordPress\Reprint\Server\Plugin\default_authenticate();
-}
-
 function _site_export_handle_api_request(array $options = []): void {
     \WordPress\Reprint\Server\Plugin\handle_api_request($options);
 }

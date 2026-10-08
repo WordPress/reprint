@@ -20,6 +20,7 @@ final class HMACServer {
      */
     public const UNSIGNED_PAYLOAD = 'UNSIGNED-PAYLOAD';
 
+    public const REASON_REQUIRES_KEY_AUTH = 'requires_key_auth';
     public const REASON_MISSING_HEADER = 'missing_header';
     public const REASON_TIMESTAMP_EXPIRED = 'timestamp_expired';
     public const REASON_SIGNATURE_MISMATCH = 'signature_mismatch';
@@ -45,6 +46,19 @@ final class HMACServer {
         return $this->last_error_reason;
     }
 
+    /**
+     * The host rule, enforced here so no embedder can accept HMAC on a host
+     * that requires keys by calling this class directly.
+     */
+    private function refuse_if_key_auth_required(): ?string {
+        $this->last_error_reason = null;
+        if (Utils::key_auth_required()) {
+            $this->last_error_reason = self::REASON_REQUIRES_KEY_AUTH;
+            return 'This host requires key authentication; connection tokens are not accepted';
+        }
+        return null;
+    }
+
     private function fail(string $message, string $reason = self::REASON_AUTH_FAILED): string {
         $this->last_error_reason = $reason;
         return $message;
@@ -60,7 +74,10 @@ final class HMACServer {
      * contents rather than $body so multipart uploads verify consistently.
      */
     public function verify(array $headers = [], ?string $body = null, array $files = [], ?float $now = null): ?string {
-        $this->last_error_reason = null;
+        $refusal = $this->refuse_if_key_auth_required();
+        if ($refusal !== null) {
+            return $refusal;
+        }
 
         $auth = $this->collect_auth_headers($headers);
         $auth_error = $this->verify_auth_headers($auth, $now);
@@ -101,7 +118,10 @@ final class HMACServer {
      * @param string $request_target The "path?query" form of the request URL.
      */
     public function verify_envelope(array $headers, string $method, string $request_target, ?float $now = null): ?string {
-        $this->last_error_reason = null;
+        $refusal = $this->refuse_if_key_auth_required();
+        if ($refusal !== null) {
+            return $refusal;
+        }
 
         $auth = $this->collect_auth_headers($headers);
         if ($auth['content_hash'] !== self::UNSIGNED_PAYLOAD) {
@@ -120,21 +140,6 @@ final class HMACServer {
         }
 
         return null;
-    }
-
-    /**
-     * Verify the current PHP request using superglobals.
-     *
-     * Returns null on success, or an error string on failure. Pull endpoints
-     * use body signatures; push uploads use verify_envelope().
-     */
-    public function verify_globals(?float $now = null): ?string {
-        $body = file_get_contents('php://input');
-        if ($body === false) {
-            $body = '';
-        }
-
-        return $this->verify(Utils::request_headers(), $body, $_FILES, $now);
     }
 
     private function collect_auth_headers(array $headers): array {
