@@ -133,6 +133,69 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
         $this->assertSame("body{color:#111}\n", $output);
     }
 
+    /**
+     * Run the generated Bash script and check the arguments received by PHP.
+     *
+     * @dataProvider startScriptHosts
+     */
+    public function testStartScriptPreservesArgumentsAndPrintedAddress(string $host): void
+    {
+        $command_dir = $this->tempDir . '/commands';
+        mkdir($command_dir);
+        // Record argv instead of starting a server which would keep the test running.
+        file_put_contents(
+            $command_dir . '/php',
+            '#!' . PHP_BINARY . "\n<?php\n" .
+                'file_put_contents(__DIR__ . "/arguments.json", json_encode(array_slice($argv, 1)));' . "\n",
+        );
+        chmod($command_dir . '/php', 0755);
+
+        $manifest = new \RuntimeManifest('other');
+        $manifest->php_ini = [
+            'memory_limit' => '256M',
+            'include_path' => 'directory with spaces:$HOME:$(printf expanded):`printf expanded`',
+            'error_log' => "quotes'\";backslash\\\nnext line",
+            'setting with spaces' => 'one argument',
+        ];
+        $filesystem_root = $this->docRoot . " spaces'\"\$HOME;";
+        $output_dir = $this->outputDir . " spaces'\"\$HOME;";
+        mkdir($filesystem_root);
+        $applier = new \PhpBuiltinApplier();
+        $applier->apply($manifest, $filesystem_root, $output_dir, ['host' => $host, 'port' => 8882]);
+
+        $process = proc_open(
+            ['bash', $output_dir . '/start.sh'],
+            [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            null,
+            ['PATH' => $command_dir . ':' . getenv('PATH')],
+        );
+        $this->assertIsResource($process);
+        $output = stream_get_contents($pipes[1]);
+        $errors = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $this->assertSame(0, proc_close($process), $errors);
+
+        $expected_arguments = [];
+        foreach ($manifest->php_ini as $key => $value) {
+            $expected_arguments[] = '-d';
+            $expected_arguments[] = $key . '=' . $value;
+        }
+        $expected_arguments = array_merge($expected_arguments, ['-S', $host . ':8882', '-t', $filesystem_root, $output_dir . '/runtime.php']);
+        $this->assertSame($expected_arguments, json_decode(file_get_contents($command_dir . '/arguments.json'), true));
+        $this->assertSame("Starting PHP built-in server...\n  http://{$host}:8882\n\n", $output);
+    }
+
+    /** @return array<string, array{0: string}> Addresses whose text must be preserved. */
+    public static function startScriptHosts(): array
+    {
+        return [
+            'ordinary address' => ['localhost'],
+            'address with punctuation' => ["local'\"\$HOME\$(printf expanded)`printf expanded`;host\nnext line"],
+        ];
+    }
+
     public function testGeneratedRuntimeKeepsJitEnabledWhenAvoidingPhp84Mode1235(): void
     {
         $runtime = file_get_contents($this->outputDir . '/runtime.php');

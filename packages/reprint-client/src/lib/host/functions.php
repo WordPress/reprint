@@ -257,28 +257,44 @@ function excluded_plugins(array $preflight_data): array
 /**
  * Extract selected INI directives from preflight's ini_get_all.
  * Only includes values that are likely to affect whether a migrated
- * site works or breaks.
+ * site works or breaks. Values must be decimal integers; sizes may use a
+ * K, M, or G suffix. Also accepts the -1 sentinel.
+ * Other values are omitted so the target keeps its defaults.
+ *
+ * @param array $preflight_data {
+ *     Source runtime settings.
+ *
+ *     @type array $runtime {
+ *         @type array $ini_get_all INI directive names mapped to their values.
+ *     }
+ * }
+ * @return array<string, string> Selected PHP INI directives with valid values.
  */
 function extract_php_ini(array $preflight_data): array
 {
     $ini_all = $preflight_data['runtime']['ini_get_all'] ?? [];
-    if (empty($ini_all)) {
+    if (!is_array($ini_all)) {
         return [];
     }
 
-    $interesting_keys = [
-        'memory_limit',
-        'upload_max_filesize',
-        'post_max_size',
-        'max_execution_time',
-        'max_input_vars',
-        'max_input_time',
+    $value_patterns = [
+        'memory_limit' => '/\A(?:-1|[0-9]+[KMG]?)\z/i',
+        'upload_max_filesize' => '/\A(?:-1|[0-9]+[KMG]?)\z/i',
+        'post_max_size' => '/\A(?:-1|[0-9]+[KMG]?)\z/i',
+        'max_execution_time' => '/\A(?:-1|[0-9]+)\z/',
+        'max_input_vars' => '/\A(?:-1|[0-9]+)\z/',
+        'max_input_time' => '/\A(?:-1|[0-9]+)\z/',
     ];
 
     $result = [];
-    foreach ($interesting_keys as $key) {
-        if (isset($ini_all[$key]) && $ini_all[$key] !== '') {
-            $result[$key] = (string) $ini_all[$key];
+    foreach ($value_patterns as $key => $pattern) {
+        $value = $ini_all[$key] ?? null;
+        if (!is_string($value) && !is_int($value)) {
+            continue;
+        }
+        $value = (string) $value;
+        if (preg_match($pattern, $value) === 1) {
+            $result[$key] = $value;
         }
     }
     return $result;

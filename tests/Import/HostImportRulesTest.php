@@ -309,6 +309,63 @@ class HostImportRulesTest extends TestCase {
         );
     }
 
+    /** Keep supported size, time, and count values from preflight. */
+    public function testExtractsNumericPhpIniSettings(): void
+    {
+        $settings = [
+            'memory_limit' => ['256M', '128m', '1G', '512k', '1048576', '-1'],
+            'upload_max_filesize' => ['64M', '1g', '1024K', '0', '-1'],
+            'post_max_size' => ['128M', '2G', '512k', '0', '-1'],
+            'max_execution_time' => ['30', '0', 60, '-1'],
+            'max_input_vars' => ['1000', '0', 2000, '-1'],
+            'max_input_time' => ['60', '0', '-1'],
+        ];
+
+        foreach ($settings as $key => $values) {
+            foreach ($values as $value) {
+                $this->assertSame(
+                    [$key => (string) $value],
+                    \extract_php_ini(['runtime' => ['ini_get_all' => [$key => $value]]]),
+                    $key . '=' . $value,
+                );
+            }
+        }
+        $this->assertSame([], \extract_php_ini([]));
+        $this->assertSame([], \extract_php_ini(['runtime' => ['ini_get_all' => ['display_errors' => '1']]]));
+    }
+
+    /** Leave malformed settings out of every host's runtime manifest. */
+    public function testOmitsMalformedPhpIniSettings(): void
+    {
+        $invalid_values = [
+            '', '256MB', '1.5', '+10', '-2', ' 10', "10\n", '10;20', '10"',
+            '10$HOME', '10`printf text`', '10$(printf text)', "10\0",
+            null, true, false, 1.5, [],
+        ];
+        $analyzers = [new \DefaultHostAnalyzer(), new \WpcloudHostAnalyzer(), new \WpengineHostAnalyzer()];
+
+        foreach (['memory_limit', 'upload_max_filesize', 'post_max_size', 'max_execution_time', 'max_input_vars', 'max_input_time'] as $key) {
+            $values = $invalid_values;
+            if (in_array($key, ['max_execution_time', 'max_input_vars', 'max_input_time'], true)) {
+                $values[] = '1K';
+            }
+            foreach ($values as $value) {
+                $preflight_data = $this->preflight([], []);
+                $preflight_data['runtime']['ini_get_all'] = [
+                    'post_max_size' => '64M',
+                    $key => $value,
+                ];
+                $expected = $key === 'post_max_size' ? [] : ['post_max_size' => '64M'];
+                foreach ($analyzers as $analyzer) {
+                    $this->assertSame($expected, $analyzer->analyze($preflight_data)->php_ini, $key . ': ' . get_class($analyzer));
+                }
+            }
+        }
+        foreach (['not an array', 10, true, null] as $ini_all) {
+            $this->assertSame([], \extract_php_ini(['runtime' => ['ini_get_all' => $ini_all]]));
+        }
+    }
+
     /**
      * Build the part of preflight which host analyzers read.
      *
