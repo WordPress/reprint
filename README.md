@@ -919,9 +919,17 @@ The SQLite file itself may be missing — the `sqlite-database-integration` plug
 creates it on the first request — but its directory must exist. The options
 apply to this run only; `apply-runtime` does not record them in state.
 
-Every field you leave out falls back to what `db-apply` recorded, as long as the
-engine matches. Name the whole connection when you point at a different MySQL
-database — otherwise you inherit `db-apply`'s host, port or password.
+The database name, host, port, user, and SQLite path fall back to what `db-apply`
+recorded, as long as the engine matches. Name the whole connection when you point
+at a different MySQL database — otherwise you inherit the recorded host, port,
+or user.
+
+The MySQL password stays in memory for the current invocation. `pull` passes it
+through to runtime setup in that same run. A later `apply-runtime` command needs
+`--target-engine=mysql --target-pass=PASS` again if the database has a nonempty
+password; otherwise it uses an empty password. Checkpoints omit the password,
+including when an older checkpoint is loaded and saved, and are written with
+mode 0600.
 
 **What gets generated:**
 

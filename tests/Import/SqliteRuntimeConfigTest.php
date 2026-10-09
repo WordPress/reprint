@@ -291,6 +291,85 @@ class SqliteRuntimeConfigTest extends TestCase
         $this->assertStringContainsString("define('DB_PASSWORD', 'wp_password');", $runtime);
     }
 
+    /** Keep the database target from state while supplying this command's password. */
+    public function testMysqlRuntimeUsesTheSuppliedPasswordWithRecordedConnectionFields(): void
+    {
+        $this->writeState(['apply' => [
+            'target_engine' => 'mysql', 'target_host' => 'db.local', 'target_port' => 3307,
+            'target_user' => 'wp_user', 'target_db' => 'wp_target',
+        ]]);
+        $runtime = $this->applyRuntime(['target_engine' => 'mysql', 'target_pass' => 'current-command-password']);
+        $this->assertStringContainsString("define('DB_HOST', 'db.local:3307');", $runtime);
+        $this->assertStringContainsString("define('DB_NAME', 'wp_target');", $runtime);
+        $this->assertStringContainsString("define('DB_USER', 'wp_user');", $runtime);
+        $this->assertStringContainsString("define('DB_PASSWORD', 'current-command-password');", $runtime);
+    }
+
+    /** A later runtime command does not inherit an earlier command's password. */
+    public function testMysqlRuntimeUsesAnEmptyPasswordAfterLoadingState(): void
+    {
+        $this->writeState(['apply' => [
+            'target_engine' => 'mysql', 'target_host' => 'db.local', 'target_port' => 3307,
+            'target_user' => 'wp_user', 'target_db' => 'wp_target',
+            'target_pass' => 'previous-command-password',
+        ]]);
+        $runtime = $this->applyRuntime([]);
+        $this->assertStringContainsString("define('DB_PASSWORD', '');", $runtime);
+        $this->assertStringNotContainsString('previous-command-password', $runtime);
+    }
+
+    /** A same-process runtime can reuse db-apply's password without saving it. */
+    public function testMysqlRuntimeUsesTheCurrentInvocationPasswordWithoutPersistingIt(): void
+    {
+        $this->writeState(['apply' => [
+            'target_engine' => 'mysql', 'target_host' => 'db.local', 'target_port' => 3307,
+            'target_user' => 'wp_user', 'target_db' => 'wp_target',
+        ]]);
+        $client = new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
+        $this->loadClientState($client);
+        $client->get_state()->apply->target_pass = 'current-invocation-password';
+        ob_start();
+        try {
+            $this->callPrivate($client, 'run_apply_runtime', [[
+                'runtime' => 'php-builtin', 'output_dir' => $this->outputDir,
+                'flat_document_root' => $this->fsRoot,
+            ]]);
+        } finally {
+            ob_end_clean();
+        }
+        $runtime = file_get_contents($this->outputDir . '/runtime.php');
+        $this->assertStringContainsString("define('DB_PASSWORD', 'current-invocation-password');", $runtime);
+        $this->assertStringNotContainsString('current-invocation-password', file_get_contents($client->pull_state_directory . '/state.json'));
+    }
+
+    /** Fresh, replaced, and interrupted older checkpoints use mode 0600. */
+    public function testPullCheckpointsUsePrivateFilePermissions(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('POSIX file modes are not available on Windows.');
+        }
+        $previous_umask = umask(0022);
+        try {
+            $client = new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
+            $client->get_state()->apply->target_pass = 'checkpoint-password';
+            // Older save_state() could stop after creating this file under umask 0022.
+            $temporary_path = $client->pull_state_directory . '/state.json.tmp';
+            file_put_contents($temporary_path, json_encode($client->get_state()->to_array()));
+            clearstatcache(true, $temporary_path);
+            $this->assertSame(0644, fileperms($temporary_path) & 0777);
+            for ($save = 0; $save < 2; ++$save) {
+                $client->save_state();
+                $path = $client->pull_state_directory . '/state.json';
+                clearstatcache(true, $path);
+                $this->assertSame(0600, fileperms($path) & 0777);
+                $this->assertSame(0022, umask());
+                $this->assertStringNotContainsString('checkpoint-password', file_get_contents($path));
+            }
+        } finally {
+            umask($previous_umask);
+        }
+    }
+
     public function testSqlitePathWithoutAnEngineIsRejected(): void
     {
         $this->writeState($this->emptyApplyState());

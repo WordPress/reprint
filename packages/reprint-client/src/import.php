@@ -6027,7 +6027,7 @@ class ImportClient
     }
 
     /**
-     * Return the local site database target recorded by db-apply.
+     * Return the recorded local database target and the current invocation's password.
      *
      * @return array {
      *     Recorded database target.
@@ -6038,7 +6038,7 @@ class ImportClient
      *     @type string      $host        MySQL host.
      *     @type int         $port        MySQL port.
      *     @type string      $user        MySQL user.
-     *     @type string      $pass        MySQL password.
+     *     @type string|null $pass        Current invocation's MySQL password; null after loading a checkpoint.
      * }
      */
     private function get_local_site_database_target(): array
@@ -7522,7 +7522,8 @@ class ImportClient
         $target_db = $target["db"];
 
         if ($save_runtime_target) {
-            // Persist target database configuration for apply-runtime.
+            // Save the connection fields for apply-runtime; keep the password
+            // in memory for runtime setup in this invocation.
             $this->get_state()->apply->target_engine = "mysql";
             $this->get_state()->apply->target_db = $target_db;
             $this->get_state()->apply->target_host = $target_host;
@@ -14396,7 +14397,8 @@ class ImportClient
      * Save pull state to disk.
      *
      * Uses atomic write (temp file + rename) to prevent corruption if
-     * the process is killed mid-write.
+     * the process is killed mid-write. Temporary and published checkpoints
+     * use mode 0600.
      */
     public function save_state(): void
     {
@@ -14420,12 +14422,28 @@ class ImportClient
             throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
         }
         $tmp_file = $this->pull_state_file . '.tmp';
-        $bytes = file_put_contents($tmp_file, $json);
-        if ($bytes === false) {
-            throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
-        }
-        if (!rename($tmp_file, $this->pull_state_file)) {
-            throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
+        $previous_umask = umask(0077);
+        try {
+            // A stopped older version may have left a temporary checkpoint
+            // with wider permissions. Restrict it before writing new state.
+            if (is_file($tmp_file) && !chmod($tmp_file, 0600)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem error, not HTML.
+                throw new RuntimeException("Failed to set state file permissions to 0600: $tmp_file");
+            }
+            $bytes = file_put_contents($tmp_file, $json);
+            if ($bytes === false) {
+                throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
+            }
+            // Request the mode explicitly because a default ACL can override umask.
+            if (!chmod($tmp_file, 0600)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem error, not HTML.
+                throw new RuntimeException("Failed to set state file permissions to 0600: $tmp_file");
+            }
+            if (!rename($tmp_file, $this->pull_state_file)) {
+                throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
+            }
+        } finally {
+            umask($previous_umask);
         }
 
         $files_pulled = $this->progress_reporter->get_batch_files_done(); // Completed in this batch
@@ -15233,7 +15251,7 @@ if (
             'type' => 'value',
             'target' => 'target_pass',
             'placeholder' => 'PASS',
-            'help' => 'Target MySQL password',
+            'help' => 'Target MySQL password for this invocation',
             'commands' => ['pull', 'pull-db', 'db-apply', 'db-rewrite-urls', 'apply-runtime'],
         ],
         [

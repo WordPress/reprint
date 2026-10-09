@@ -4,8 +4,9 @@ declare(strict_types=1);
 namespace Reprint\Importer\State;
 
 /**
- * db-apply state, including target database configuration retained so
- * apply-runtime can generate DB_* constants.
+ * db-apply state, including target connection fields retained so
+ * apply-runtime can generate DB_* constants. The password stays in memory
+ * for the current invocation and is not part of the checkpoint.
  */
 class DatabaseApplyCommandState {
 
@@ -44,7 +45,7 @@ class DatabaseApplyCommandState {
     /** @var string|null Runtime database user. */
     public ?string $target_user = null;
 
-    /** @var string|null Runtime database password. */
+    /** @var string|null Current invocation's runtime database password; not saved to disk. */
     public ?string $target_pass = null;
 
     /** @var string|null Runtime SQLite database path. */
@@ -57,10 +58,31 @@ class DatabaseApplyCommandState {
      */
     public array $remote_paths_removed_from_local_site = [];
 
+    /**
+     * Load checkpoint fields without reusing a password from an earlier schema.
+     *
+     * @param array $data {
+     *     Saved db-apply fields; older schemas may also contain target_pass, which is ignored.
+     *     @type string|null                    $site_admin                           Explicit imported administrator.
+     *     @type int                            $statements_executed                  Completed SQL statements.
+     *     @type int                            $bytes_read                           Completed SQL bytes.
+     *     @type array<string,string>|null      $rewrite_url                          Selected URL rewrite map.
+     *     @type string|null                    $nested_site_paths_file               Selected child-site path file.
+     *     @type string|null                    $target_engine                        Runtime database engine.
+     *     @type string|null                    $target_db                            Runtime database name.
+     *     @type string|null                    $target_host                          Runtime MySQL host.
+     *     @type int|null                       $target_port                          Runtime MySQL port.
+     *     @type string|null                    $target_user                          Runtime MySQL user.
+     *     @type string|null                    $target_sqlite_path                   Runtime SQLite path.
+     *     @type string[]                       $remote_paths_removed_from_local_site Local cleanup paths excluded from diff and push.
+     * }
+     * @return self State with no current-invocation password.
+     */
     public static function from_array(array $data): self
     {
         $state = new self();
         $data += ['site_admin' => null, 'nested_site_paths_file' => null];
+        unset($data['target_pass']);
         $state->site_admin = $data['site_admin'];
         \reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->statements_executed = $data['statements_executed'];
@@ -72,12 +94,30 @@ class DatabaseApplyCommandState {
         $state->target_host = $data['target_host'];
         $state->target_port = $data['target_port'];
         $state->target_user = $data['target_user'];
-        $state->target_pass = $data['target_pass'];
         $state->target_sqlite_path = $data['target_sqlite_path'];
         $state->remote_paths_removed_from_local_site = array_values($data['remote_paths_removed_from_local_site']);
         return $state;
     }
 
+    /**
+     * Serialize durable db-apply fields, leaving the current password in memory.
+     *
+     * @return array {
+     *     Saved db-apply fields.
+     *     @type string|null                    $site_admin                           Explicit imported administrator.
+     *     @type int                            $statements_executed                  Completed SQL statements.
+     *     @type int                            $bytes_read                           Completed SQL bytes.
+     *     @type array<string,string>|null      $rewrite_url                          Selected URL rewrite map.
+     *     @type string|null                    $nested_site_paths_file               Selected child-site path file.
+     *     @type string|null                    $target_engine                        Runtime database engine.
+     *     @type string|null                    $target_db                            Runtime database name.
+     *     @type string|null                    $target_host                          Runtime MySQL host.
+     *     @type int|null                       $target_port                          Runtime MySQL port.
+     *     @type string|null                    $target_user                          Runtime MySQL user.
+     *     @type string|null                    $target_sqlite_path                   Runtime SQLite path.
+     *     @type string[]                       $remote_paths_removed_from_local_site Local cleanup paths excluded from diff and push.
+     * }
+     */
     public function to_array(): array
     {
         return [
@@ -91,7 +131,6 @@ class DatabaseApplyCommandState {
             'target_host' => $this->target_host,
             'target_port' => $this->target_port,
             'target_user' => $this->target_user,
-            'target_pass' => $this->target_pass,
             'target_sqlite_path' => $this->target_sqlite_path,
             'remote_paths_removed_from_local_site' => $this->remote_paths_removed_from_local_site,
         ];
