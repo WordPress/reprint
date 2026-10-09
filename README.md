@@ -896,6 +896,10 @@ php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
 # Include $RUNTIME_DIR/nginx.conf in your nginx configuration, then reload
 ```
 
+The nginx runtime keeps document roots and host names as literal configuration
+values, including spaces and punctuation. Dollar signs and control characters
+in the document root, output path, or host are rejected before files are written.
+
 The command accepts either `--fs-root` (the raw download directory — the remote
 `document_root` path is appended automatically) or `--flat-document-root` (a
 directory created by `flat-docroot`, used as-is). These are mutually exclusive.
