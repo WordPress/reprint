@@ -4,7 +4,7 @@ Tags: migration, backup, development, synchronization
 Requires at least: 4.7
 Tested up to: 7.1
 Requires PHP: 7.2
-Stable tag: 0.10.14-dev
+Stable tag: 0.11.1-dev
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
