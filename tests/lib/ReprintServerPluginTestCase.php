@@ -390,7 +390,7 @@ if (!function_exists('submit_button')) {
 
 if (!function_exists('home_url')) {
     function home_url(string $path = ''): string {
-        return 'https://example.test/' . ltrim($path, '/');
+        return ( $GLOBALS['reprint_server_test_home_url'] ?? 'https://example.test/' ) . ltrim($path, '/');
     }
 }
 
@@ -543,6 +543,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $this->original_reprint_server_push_enabled_environment = getenv('REPRINT_SERVER_PUSH_ENABLED');
 
         $GLOBALS['reprint_server_test_multisite'] = false;
+        $GLOBALS['reprint_server_test_home_url'] = 'https://example.test/';
         $GLOBALS['reprint_server_test_user_can_manage_network'] = false;
         $GLOBALS['reprint_server_test_network_options'] = [];
         $GLOBALS['reprint_server_test_options'] = [];

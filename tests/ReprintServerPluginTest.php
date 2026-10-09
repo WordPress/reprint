@@ -45,6 +45,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringNotContainsString('reprint-server-host-details', $html);
         $this->assertStringNotContainsString('Host details', $html);
         $this->assertStringNotContainsString('Server details', $html);
+        $this->assertStringNotContainsString('--insecure', $html);
+        $this->assertStringNotContainsString('This site uses HTTP.', $html);
         $this->assertStringNotContainsString('1. Copy', $html);
         $this->assertStringNotContainsString('3. Continue', $html);
         $this->assertStringNotContainsString('class="notice ', $html);
@@ -57,6 +59,16 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertCount(1, $xpath->query('//details[not(@open)]/summary[contains(., "public key yet")]'));
         $this->assertCount(1, $xpath->query('//details[summary[contains(., "public key yet")]]//pre[contains(., "reprint keygen")]'));
         $this->assertCount(0, $xpath->query('//details[contains(@class, "reprint-server-manage-access")]'));
+    }
+
+    public function testHttpCliHelpIncludesTheRequiredFlagAndTransferWarning(): void
+    {
+        $GLOBALS['reprint_server_test_home_url'] = 'http://example.test/';
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString(htmlspecialchars("reprint keygen 'http://example.test/?reprint-api' --state-dir=./reprint-state --insecure", ENT_QUOTES), $html);
+        $this->assertStringContainsString('This site uses HTTP.', $html);
+        $this->assertStringContainsString('pass --insecure to reprint pull too', $html);
+        $this->assertStringContainsString('site data, including passwords, travels unencrypted', $html);
     }
 
     public function testExistingKeysDoNotHideAuthorizationAndManagementStartsClosed(): void

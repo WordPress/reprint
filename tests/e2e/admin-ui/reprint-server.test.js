@@ -62,7 +62,7 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         await keyHelp.focus();
         await page.keyboard.press('Enter');
         await page.getByText('Using the Reprint CLI?', { exact: true }).click();
-        assert.equal(await page.locator('.reprint-server-authorization pre').innerText(), `reprint keygen '${siteUrl}/?reprint-api' --state-dir=./reprint-state`);
+        assert.equal(await page.locator('.reprint-server-authorization pre').innerText(), `reprint keygen '${siteUrl}/?reprint-api' --state-dir=./reprint-state --insecure`);
         await keyHelp.click();
         await publicKeyField.fill('not a public key');
         await submit(page, authorizeButton);

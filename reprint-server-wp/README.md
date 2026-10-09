@@ -139,8 +139,9 @@ transfer progress, or confirm that a tool connected.
 The public-key form stays visible on normal visits, even when other keys are
 already saved. An existing key does not tell this page whether your current
 tool has access. **I don’t have a public key yet** gives the steps to get one,
-with Reprint CLI help inside it. The remote Reprint API URL stays below the
-form. Existing keys, push permissions, and unused credentials stay in the
+with Reprint CLI help inside it. For HTTP sites, that help includes the required
+`--insecure` flag and warns that transfers are unencrypted. The remote Reprint
+API URL stays below the form. Existing keys, push permissions, and unused credentials stay in the
 closed **Manage tool access** section. Results from those controls reopen it.
 There is no separate server-details section or routine status badge.
 

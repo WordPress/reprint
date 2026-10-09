@@ -222,6 +222,8 @@ class SettingsPage {
     /** Site and network pages share authorization, but each copied site needs its own API URL. */
     private function render_page(): void {
         $configuration = get_configuration_state();
+        $remote_reprint_api_url = home_url('?reprint-api');
+        $uses_http = parse_url($remote_reprint_api_url, PHP_URL_SCHEME) === 'http';
         // Nothing on the page changes which scheme this host accepts.
         $key_host = $configuration['required_scheme'] === 'key';
         $configured = $configuration['is_configured'];
@@ -294,8 +296,11 @@ class SettingsPage {
                                     <details class="reprint-server-help">
                                         <summary><?php echo esc_html__('Using the Reprint CLI?', 'reprint'); ?></summary>
                                         <p><?php echo esc_html__('Generate a key in your terminal:', 'reprint'); ?></p>
-                                        <pre><code><?php echo esc_html('reprint keygen ' . escapeshellarg(home_url('?reprint-api')) . ' --state-dir=./reprint-state'); ?></code></pre>
+                                        <pre><code><?php echo esc_html('reprint keygen ' . escapeshellarg($remote_reprint_api_url) . ' --state-dir=./reprint-state' . ( $uses_http ? ' --insecure' : '' )); ?></code></pre>
                                         <p><?php echo esc_html__('Use the same --state-dir when you run reprint pull. Keep the private key in your tool; paste only the public key here.', 'reprint'); ?></p>
+                                        <?php if ($uses_http): ?>
+                                            <p><?php echo esc_html__('This site uses HTTP. Prefer an HTTPS URL for transfers. If you use HTTP, pass --insecure to reprint pull too; site data, including passwords, travels unencrypted.', 'reprint'); ?></p>
+                                        <?php endif; ?>
                                         <p><a href="https://github.com/WordPress/reprint#quick-start"><?php echo esc_html__('Reprint CLI setup instructions', 'reprint'); ?></a></p>
                                     </details>
                                 <?php endif; ?>
@@ -331,7 +336,7 @@ class SettingsPage {
                     <label for="reprint-server-api-url"><?php echo esc_html__('Remote Reprint API URL', 'reprint'); ?></label>
                     <div class="reprint-server-url-row">
                         <input type="text" class="code" id="reprint-server-api-url"
-                               value="<?php echo esc_attr(home_url('?reprint-api')); ?>" readonly />
+                               value="<?php echo esc_attr($remote_reprint_api_url); ?>" readonly />
                         <button type="button" class="button reprint-server-copy-url"
                                 data-copied-message="<?php echo esc_attr__('Remote Reprint API URL copied.', 'reprint'); ?>"
                                 data-copy-failed-message="<?php echo esc_attr__('Could not copy automatically. Select the URL and copy it.', 'reprint'); ?>">
