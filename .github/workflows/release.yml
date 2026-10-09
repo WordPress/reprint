@@ -82,6 +82,16 @@ jobs:
       - name: Build reprint-exporter-wp.zip
         run: ./bin/build-server-plugin.sh
 
+      - name: Check the packaged plugin before publishing
+        env:
+          RELEASE_TAG: ${{ steps.release_ref.outputs.tag }}
+        run: |
+          artifact_dir="$RUNNER_TEMP/reprint-exporter-wp"
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+          unzip -q reprint-exporter-wp.zip -d "$artifact_dir"
+          php tests/server-plugin-package.php "$artifact_dir" "${RELEASE_TAG#v}"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:

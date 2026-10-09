@@ -117,7 +117,7 @@ jobs:
           git checkout -b "$BRANCH"
           ./bin/stamp-plugin-version.sh "$NEXT_DEV"
 
-          git add reprint-server-wp/index.php reprint-server-wp/lib.php
+          git add reprint-server-wp/index.php reprint-server-wp/lib.php reprint-server-wp/readme.txt
           git commit -m "Bump plugin version to $NEXT_DEV after v$VERSION release"
           git push origin "$BRANCH"
 

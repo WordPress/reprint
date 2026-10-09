@@ -9,6 +9,28 @@ copies that source to a temporary directory and removes unsupported syntax from
 the copy. The resulting plugin ZIP supports pull endpoints on PHP 5.6.20 or
 newer. Push endpoints require PHP 7.2 or newer.
 
+## Release package
+
+GitHub releases include the plugin entry point, WordPress integration and admin
+assets, uninstall routine, `readme.txt`, GPL license, and the mirrored server
+runtime. The ZIP name remains `reprint-exporter-wp.zip`, with files at its root,
+so WordPress keeps the existing installed directory when users upgrade.
+
+The WordPress.org submission proposes `reprint`, matching the existing translation
+domain. The Plugins Team must approve the final slug. A directory installation
+would use that slug as its folder name; it does not rename an existing GitHub
+installation. Do not activate both copies on the same site.
+
+`bin/stamp-plugin-version.sh` stamps the plugin header, runtime version, and
+readme stable tag before the release build. Development branches keep a `-dev`
+version; publish a ZIP built from a numbered release tag for directory review.
+The build also sets the generated readme and plugin header to PHP 5.6.20.
+
+`tests/server-plugin-package.php` checks the staged package and the ZIP
+extracted by the release workflow. It checks the maintained PHP files and admin
+assets, license, headers, versions, private-file exclusions, physical runtime
+files, and packaged autoloader before GitHub publishes the artifact.
+
 ## API Routing
 
 Many shared hosts (SiteGround, GoDaddy, etc.) block direct PHP execution inside `wp-content/plugins/` at the web server level, returning a 403 before the request ever reaches PHP. To work around this, export API requests are routed through WordPress's front controller (`index.php` at the site root), which hosts never block.

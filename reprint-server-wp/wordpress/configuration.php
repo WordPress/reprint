@@ -2,6 +2,10 @@
 
 namespace WordPress\Reprint\Server\Plugin;
 
+if (!defined('ABSPATH')) {
+    exit;
+}
+
 /**
  * UI-independent WordPress configuration integration for Reprint Server.
  *

@@ -39,8 +39,17 @@ mkdir -p \
     "$BUILD_ROOT/reprint-server-wp" \
     "$BUILD_ROOT/packages/reprint-server"
 
-cp -R "$PROJECT_ROOT/reprint-server-wp/." "$BUILD_ROOT/reprint-server-wp/"
-cp -R "$PROJECT_ROOT/packages/reprint-server/." "$BUILD_ROOT/packages/reprint-server/"
+# Copy the package roots explicitly; local credentials and development metadata
+# at those roots are not release inputs.
+for plugin_file in index.php lib.php compat.php uninstall.php readme.txt README.md composer.json; do
+    cp "$PROJECT_ROOT/reprint-server-wp/$plugin_file" "$BUILD_ROOT/reprint-server-wp/"
+done
+cp -R "$PROJECT_ROOT/reprint-server-wp/wordpress" "$BUILD_ROOT/reprint-server-wp/"
+cp "$PROJECT_ROOT/packages/reprint-server/composer.json" "$BUILD_ROOT/packages/reprint-server/"
+cp "$PROJECT_ROOT/packages/reprint-server/README.md" "$BUILD_ROOT/packages/reprint-server/"
+cp -R "$PROJECT_ROOT/packages/reprint-server/src" "$BUILD_ROOT/packages/reprint-server/"
+cp "$PROJECT_ROOT/LICENSE" "$BUILD_ROOT/reprint-server-wp/LICENSE"
+cp "$PROJECT_ROOT/LICENSE" "$BUILD_ROOT/packages/reprint-server/LICENSE"
 
 # Runtime dependencies are generated from the downgraded package below. Never
 # carry a development vendor tree, a local secret, or locally enrolled keys
@@ -87,6 +96,8 @@ sed -i.bak \
     's/^ \* Requires PHP: .*/ * Requires PHP: 5.6.20/' \
     "$BUILD_ROOT/reprint-server-wp/index.php"
 rm -f "$BUILD_ROOT/reprint-server-wp/index.php.bak"
+sed -i.bak 's/^Requires PHP: .*/Requires PHP: 5.6.20/' "$BUILD_ROOT/reprint-server-wp/readme.txt"
+rm -f "$BUILD_ROOT/reprint-server-wp/readme.txt.bak"
 
 if ! grep -Fq ' * Requires PHP: 5.6.20' "$BUILD_ROOT/reprint-server-wp/index.php"; then
     echo "Error: failed to set the generated plugin PHP requirement." >&2
@@ -100,6 +111,8 @@ COMPOSER_DISABLE_NETWORK=1 COMPOSER_MIRROR_PATH_REPOS=1 composer update \
     --no-progress \
     --prefer-dist \
     --working-dir="$BUILD_ROOT/reprint-server-wp"
+
+php "$PROJECT_ROOT/tests/server-plugin-package.php" "$BUILD_ROOT/reprint-server-wp"
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 # zip updates an existing archive in place, so remove any leftover first. The
