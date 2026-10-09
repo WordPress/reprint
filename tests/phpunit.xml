@@ -46,6 +46,7 @@
             <file>MultipartProcessorTest.php</file>
             <file>PushEndpointsTest.php</file>
             <file>ReprintServerPluginTest.php</file>
+            <file>ReprintServerPluginPackageTest.php</file>
             <file>ReprintServerPluginRuntimeLoadTest.php</file>
             <file>ReprintServerApiAuthenticationTest.php</file>
             <file>RequestAuthenticatorTest.php</file>

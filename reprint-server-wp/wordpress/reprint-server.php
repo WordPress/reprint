@@ -2,6 +2,10 @@
 
 namespace WordPress\Reprint\Server\Plugin;
 
+if (!defined('ABSPATH')) {
+    exit;
+}
+
 /** Bundled WordPress administrator adapter for Reprint Server. */
 
 class SettingsPage {
@@ -744,11 +748,6 @@ add_action('plugins_loaded', function() {
 register_activation_hook(PLUGIN_DIR . 'index.php', function() {
     if (!wp_doing_ajax() && is_admin()) {
         set_transient('reprint_server_activated', 1, 30);
-    }
-
-    $gitignore = PLUGIN_DIR . '.gitignore';
-    if (!file_exists($gitignore)) {
-        file_put_contents($gitignore, "secret.php\n");
     }
 });
 

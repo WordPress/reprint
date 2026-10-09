@@ -1,15 +1,21 @@
 <?php
 /**
  * Plugin Name: Reprint Server
- * Plugin URI: https://github.com/WordPress/playground-tools
+ * Plugin URI: https://github.com/WordPress/reprint
  * Description: Exposes the Reprint API with signed endpoints for database and file synchronization.
  * Version: 0.10.14-dev
+ * Requires at least: 4.7
  * Requires PHP: 7.2
+ * Text Domain: reprint
  * PHP 5.6 support: release builds downgrade a copy of this PHP 7.2 source and set its requirement to 5.6.20.
  * Author: WordPress Contributors
  * License: GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
  */
+
+if (!defined('ABSPATH')) {
+    exit;
+}
 
 require_once __DIR__ . '/compat.php';
 reprint_server_compat_normalize_legacy_request();
