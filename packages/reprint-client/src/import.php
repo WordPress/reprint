@@ -12567,17 +12567,36 @@ class ImportClient
     }
 
     /**
-     * Handle progress chunk.
+     * Emit source progress separately from client stages and command results.
+     * Source counters describe its current file, not completed local work.
+     *
+     * @param array $chunk {
+     *     Multipart progress part.
+     *     @type string $body JSON supplied by the source server.
+     * }
+     * @param string $phase Client phase consuming this part.
      */
     private function handle_progress(array $chunk, string $phase): void
     {
-        $body = $chunk["body"] ?? "";
-        $data = json_decode($body, true);
-        if (!$data) {
+        $data = json_decode($chunk["body"] ?? "", true);
+        if (!is_array($data) || $data === []) {
             return;
         }
 
-        $this->output_progress(array_merge(["phase" => $phase], $data));
+        $record = ["type" => "remote_progress", "phase" => $phase];
+        if (isset($data["message"]) && is_string($data["message"])) {
+            $record["remote_message"] = $data["message"];
+        }
+        $current_file = $data["current_file"] ?? [];
+        if (is_array($current_file)) {
+            foreach (["size" => "file_bytes_total", "bytes_read" => "file_bytes_read"] as $source_key => $counter_key) {
+                $value = $current_file[$source_key] ?? null;
+                if (is_int($value) && $value >= 0) {
+                    $record["remote_counters"][$counter_key] = $value;
+                }
+            }
+        }
+        $this->output_progress($record);
     }
 
     /**

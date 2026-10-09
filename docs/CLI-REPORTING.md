@@ -63,6 +63,13 @@ them. Callers must not depend on every failure having those fields.
 `label`, `pass`, and `detail` for each check. These are not copied into the final
 report, and no per-check codes are added.
 
+Source progress in JSONL uses `type: "remote_progress"`. Its `phase` names the
+client phase reading the response. Optional `remote_message` and
+`remote_counters` describe the source scan; `file_bytes_total` and
+`file_bytes_read` are non-negative integer counts for its current file. These
+records do not change client screen counters, stages, or final report fields.
+Compact output omits them.
+
 ## Reading a ticket
 
 Split the captured output into lines. Decode each whole line as JSON, ignore
