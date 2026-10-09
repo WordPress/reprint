@@ -110,7 +110,7 @@ echo json_encode([
         serverLog = join(temporaryDirectory, 'target-server.log');
         const log = openSync(serverLog, 'a');
         const generatedStartScript = readFileSync(join(runtimeDirectory, 'start.sh'), 'utf8');
-        const testStartScript = generatedStartScript.replace(`-S localhost:${port}`, `-S 127.0.0.1:${port}`);
+        const testStartScript = generatedStartScript.replace(`-S 'localhost:${port}'`, `-S '127.0.0.1:${port}'`);
         assert.notEqual(testStartScript, generatedStartScript, 'Expected the generated server to listen on localhost');
         const testStartScriptPath = join(runtimeDirectory, 'start-test.sh');
         writeFileSync(testStartScriptPath, testStartScript);

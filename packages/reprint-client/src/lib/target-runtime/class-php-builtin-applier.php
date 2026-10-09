@@ -225,6 +225,7 @@ class PhpBuiltinApplier implements RuntimeApplier
 
     /**
      * Generate a shell script that starts the built-in server.
+     * Quote settings, the listen address, and paths as individual arguments.
      * runtime.php is the router — all PHP files are require'd through it
      * so they share the same scope with constants already defined.
      */
@@ -249,15 +250,15 @@ class PhpBuiltinApplier implements RuntimeApplier
         $php_args[] = 'php';
 
         foreach ($manifest->php_ini as $key => $value) {
-            $php_args[] = "-d {$key}={$value}";
+            $php_args[] = '-d ' . escapeshellarg("{$key}={$value}");
         }
 
-        $php_args[] = '-S ' . $host . ':' . $port;
+        $php_args[] = '-S ' . escapeshellarg($host . ':' . $port);
         $php_args[] = '-t ' . escapeshellarg($filesystem_root);
         $php_args[] = escapeshellarg($runtime_path);
 
         $lines[] = 'echo "Starting PHP built-in server..."';
-        $lines[] = 'echo "  http://' . $host . ':' . $port . '"';
+        $lines[] = 'echo ' . escapeshellarg("  http://{$host}:{$port}");
         $lines[] = 'echo ""';
         $lines[] = '';
         $lines[] = implode(" \\\n    ", $php_args);
