@@ -1,37 +1,10 @@
 .reprint-server-page {
-	max-width: 980px;
+	max-width: 760px;
 }
 
-.reprint-server-header {
-	display: flex;
-	align-items: flex-start;
-	justify-content: space-between;
-	gap: 24px;
+.reprint-server-page > h1 {
 	margin: 20px 0;
-}
-
-.reprint-server-header h1 {
 	padding: 0;
-}
-
-.reprint-server-header p {
-	margin-bottom: 0;
-}
-
-.reprint-server-status {
-	flex-shrink: 0;
-	margin-top: 4px;
-	padding: 5px 10px;
-	border: 1px solid #c3c4c7;
-	border-radius: 3px;
-	background: #f6f7f7;
-	font-weight: 600;
-}
-
-.reprint-server-status-ready {
-	border-color: #68a879;
-	background: #edfaef;
-	color: #1b5e20;
 }
 
 .reprint-server-card {
@@ -55,7 +28,7 @@
 	margin-bottom: 0;
 }
 
-.reprint-server-card label {
+.reprint-server-page label {
 	font-weight: 600;
 }
 
@@ -115,22 +88,14 @@
 	overflow-wrap: anywhere;
 }
 
-.reprint-server-connection-details,
-.reprint-server-authorization {
-	margin-bottom: 20px;
+.reprint-server-connection-details {
+	margin: 24px 0;
 }
 
-.reprint-server-connection-details:last-child {
-	margin-bottom: 0;
-}
-
-.reprint-server-next-step {
-	background: #f6f7f7;
-}
-
-.reprint-server-host-details {
-	padding: 16px 24px;
-	background: transparent;
+.reprint-server-manage-access {
+	margin-top: 24px;
+	padding-top: 16px;
+	border-top: 1px solid #c3c4c7;
 }
 
 .reprint-server-key-table-wrapper {
@@ -157,11 +122,6 @@
 }
 
 @media screen and (max-width: 782px) {
-	.reprint-server-header {
-		flex-direction: column;
-		gap: 12px;
-	}
-
 	.reprint-server-card {
 		padding: 16px;
 	}

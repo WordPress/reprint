@@ -130,41 +130,41 @@ rules.
 
 ## Administrator page
 
-For example, when a tool asks to copy `https://example.com`, the administrator
-copies the remote Reprint API URL, authorizes the public key shown by the tool,
-and returns to that tool to start the copy. This page saves access. It does not
-start a transfer, show transfer progress, or confirm that a tool connected.
+For example, a tool prints a public key and asks you to authorize it. Paste that
+key into **Authorize a tool to copy this site** and choose **Authorize tool**.
+The form becomes a confirmation telling you to return to your tool to start or
+resume the copy. This page saves access. It does not start a transfer, show
+transfer progress, or confirm that a tool connected.
 
-The first visit shows those three steps in order. Once a usable credential is
-saved, **Tool access** becomes the main view. The API URL stays visible in a
-compact row, and **Authorize another tool** sits above existing keys. Its form
-is closed until needed, with CLI key-generation help inside it for both the
-first tool and later tools. After authorization, the confirmation tells the
-administrator to return to the tool to start or resume the copy. Host details
-stay closed until needed. Public keys and connection tokens are never offered
-as competing authentication choices: the host determines which one works.
+The public-key form stays visible on normal visits, even when other keys are
+already saved. An existing key does not tell this page whether your current
+tool has access. **I don’t have a public key yet** gives the steps to get one,
+with Reprint CLI help inside it. The remote Reprint API URL stays below the
+form. Existing keys, push permissions, and unused credentials stay in the
+closed **Manage tool access** section. Results from those controls reopen it.
+There is no separate server-details section or routine status badge.
 
 | Visit or host state | Next action on the page |
 | --- | --- |
-| No key enrolled; the tool already printed one | Paste that public key and choose **Authorize tool**. |
-| No key enrolled; no key printed yet | Copy the URL into the tool. The CLI help shows how to generate a public key. |
-| A key or accepted token is already saved | Manage access in **Tool access**. The URL stays available to copy; copies run in the tool. |
-| Another tool needs access | Open **Authorize another tool** above the existing keys. Paste its public key, or use the CLI help to generate one. After authorization, return to the tool. |
-| A key should stop working | Match its key id to the tool, then choose **Remove key**. Removing the last key returns the page to setup. |
-| A tool must change files on this site | Check **Allow push** for its key and choose **Save push access**. Checking alone changes nothing. Token hosts have a separate **Push access** section. |
-| OpenSSL is missing | Save a connection token and use the same token in the tool. Key enrollment is not offered. |
-| A token remains after moving to an OpenSSL host | **Host details** explains that it is unused and offers removal for an option-stored token. |
+| The tool already printed a key | Paste that public key and choose **Authorize tool**. |
+| No key printed yet | Open **I don’t have a public key yet**. Copy the API URL into the tool, then paste the key it gives you. The CLI help shows how to generate one. |
+| Other keys are saved; another tool needs access | Paste its public key into the same visible form. After authorization, return to the tool. |
+| A key should stop working | Open **Manage tool access**, match its key id to the tool, and choose **Remove key**. |
+| A tool must change files on this site | Open **Manage tool access**, check **Allow push** for its key, and choose **Save push access**. Checking alone changes nothing. Token hosts have their push controls here too. |
+| OpenSSL is missing | Save a connection token and use the same token in the tool. Key enrollment is not offered. Changing a saved token disconnects tools using the old token and revokes its push access. |
+| A token remains after moving to an OpenSSL host | **Manage tool access** explains that it is unused and offers removal for an option-stored token. |
 | `public-keys.php` supplies keys | Edit that file. The page lists its keys without enrollment or removal forms. |
 | `secret.php` supplies a token on a token host | Use the file's token. Editing the stored option does not replace the file. |
-| The hosting provider controls push access | Read the effective permission. Per-key push forms are not offered. |
+| The hosting provider controls push access | Read the effective permission. Per-key push forms are not offered. The authorization confirmation uses that permission too. |
 | A multisite network is being copied | Choose a site's home URL. Network credentials can pull any site; push controls are not offered. Only network administrators can manage access. |
-| A form is rejected | Read the action result. An enrollment rejection reopens the add-key form. |
+| A form is rejected | Read the action result. The authorization form remains visible after an enrollment rejection. |
 
-Routine configuration status is a small label, not an administrator notice.
-Notices report form results and errors. The forms and disclosure sections work
-without JavaScript; JavaScript adds token generation, token visibility, and URL
-copying with visible success or manual-copy guidance. WordPress and other
-plugins' notices are not suppressed.
+Notices report form results and errors. Successful key authorization appears
+in the main card instead of another notice. Public keys and connection tokens
+are never offered as competing choices: the host determines which one works.
+The forms and disclosure sections work without JavaScript; JavaScript adds
+token generation, token visibility, and URL copying with visible success or
+manual-copy guidance. WordPress and other plugins' notices are not suppressed.
 
 ## Uninstalling
 
