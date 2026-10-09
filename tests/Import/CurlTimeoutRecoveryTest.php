@@ -312,6 +312,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         $this->assertStringContainsString('Retry-After: 1', $audit_log);
         $this->assertStringContainsString('Set-Cookie: [redacted]', $audit_log);
         $this->assertStringNotContainsString('do-not-log-me', $audit_log);
+        $this->assertNull($reflection->getProperty('last_retry_after')->getValue($client));
     }
 
     public function testSqlDownloadPreservesHttp418AfterRetryLimit()

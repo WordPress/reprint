@@ -419,9 +419,25 @@ The command returns one of four exit codes:
 - 3: temporary transfer failure, retry the same command later
 
 Run again immediately after exit `2`. Reprint retries temporary streaming
-failures itself. It stops with exit `3` only after three consecutive failed
-requests do not advance the durable cursor. A successful request or a failed
-request that advances the cursor resets that count.
+failures itself. It stops with exit `3` when consecutive failed requests reach
+the retry limit without advancing the durable cursor. The limit is four for
+HTTP `429` and three for other temporary failures. Different temporary errors
+share this count. A successful request or a failed request that advances the
+cursor resets it.
+
+HTTP `429` reports `RATE_LIMITED`, including when the host sends an HTML block
+page. Before repeating a streaming request after a temporary HTTP failure,
+Reprint waits for a valid `Retry-After` header, expressed as seconds or an
+HTTP date. For consecutive `429` failures without a valid header, it waits
+5, 10, and 15 seconds before the three retries. The wait starts after saving
+the durable cursor. Stopping the process during that wait does not discard
+saved transfer progress. Successful requests do not gain any delay.
+
+While waiting, Reprint prints the HTTP failure and wait time. JSONL and compact
+output include a lifecycle record with `event: "retry"`, `http_code`,
+`error_code`, and `retry_after_seconds`; longer waits emit heartbeats every ten
+seconds. A fourth consecutive HTTP `429` failure without cursor progress exits
+`3` without another wait. Other temporary errors keep the three-failure limit.
 
 After exit `3`, a caller may wait and run the same command later with the same
 state directory and filesystem root. Reprint keeps its saved progress and gives
@@ -430,9 +446,10 @@ optional; without it, a person can run the command again. Exit `1` requires
 checking the error instead of scheduling an automatic retry.
 
 JSON error records on stdout and stderr for exit `3` include
-`consecutive_failures_without_progress`, which is `3` when the internal limit
-is reached. The records retain `error` and `error_code`, and include the
-reported `exception` class, `http_code` when received, and a nonzero
+`consecutive_failures_without_progress`, the failure count when the internal
+limit is reached. Repeated HTTP `429` responses report `4`; repeated other
+temporary failures report `3`. The records retain `error` and `error_code`,
+and include the reported `exception` class, `http_code` when received, and a nonzero
 `curl_errno` when available. For example, repeated HTTP 520 responses without
 transfer progress report:
 
