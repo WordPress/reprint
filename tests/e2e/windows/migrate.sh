@@ -29,10 +29,12 @@ php packages/reprint-client/src/import.php pull "$source_url/?reprint-api" \
     --flatten-to=/root/migration/site --runtime=php-builtin --start-runtime=none --output-dir=/root/migration/runtime \
     --progress=jsonl 2>&1 | tee /root/migration/pull.log
 # Also generate a runtime for the raw download, without --flatten-to.
+# A separate command supplies its password again; the other fields come from state.
 php packages/reprint-client/src/import.php apply-runtime "$source_url/?reprint-api" \
     --allow-unsafe-http \
     --private-key-path=/root/migration/key.pem \
     --state-dir=/root/migration/state --fs-root=/root/migration/files \
+    --target-engine=mysql --target-pass=migration \
     --runtime=php-builtin --start-runtime=none --output-dir=/root/migration/raw-runtime \
     --progress=jsonl 2>&1 | tee /root/migration/raw-runtime.log
 php tests/e2e/windows/verify-migration.php "$source_manifest"
