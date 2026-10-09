@@ -41,7 +41,12 @@ describe('Multisite network token administration over HTTP', () => {
             body: new URLSearchParams({ action: 'reprint_server_save_network_token', _wpnonce: nonce, [option]: changedToken }),
         });
         assert.equal(save.status, 302, await save.text());
-        assert.equal(save.headers.get('location'), settingsUrl);
+        const savedSettingsUrl = `${settingsUrl}&reprint_server_notice=network_token_saved`;
+        assert.equal(save.headers.get('location'), savedSettingsUrl);
+        const savedPage = await fetch(savedSettingsUrl, { headers: { Cookie: cookie } });
+        const savedHtml = await savedPage.text();
+        assert.equal(savedPage.status, 200, savedHtml);
+        assert.ok(savedHtml.includes('Connection token saved.'));
         const accepted = await fetch(preflightUrl, {
             method: 'POST', body: preflightBody,
             headers: { ...new HmacClient(changedToken).getAuthHeaders({ url: preflightUrl }), 'Content-Type': 'application/json' },
@@ -88,7 +93,7 @@ describe('Multisite network token administration over HTTP', () => {
             const html = await page.text();
             assert.equal(page.status, 200, html);
             assert.ok(html.includes('<code>secret.php</code> override is active.'));
-            assert.ok(html.includes('This page updates only the network option.'));
+            assert.ok(html.includes('Use the connection token from that file in your tool. This page cannot change it.'));
             assert.ok(html.includes('Remove secret.php to use the stored option value.'));
             const nonce = html.match(/name="_wpnonce" value="([^"]+)"/)?.[1];
             assert.ok(nonce);
@@ -97,8 +102,12 @@ describe('Multisite network token administration over HTTP', () => {
                 body: new URLSearchParams({ action: 'reprint_server_save_network_token', _wpnonce: nonce, [option]: changedToken }),
             });
             assert.equal(save.status, 302, await save.text());
-            const savedPage = await fetch(settingsUrl, { headers: { Cookie: cookie } });
+            const savedSettingsUrl = `${settingsUrl}&reprint_server_notice=network_token_saved`;
+            assert.equal(save.headers.get('location'), savedSettingsUrl);
+            const savedPage = await fetch(savedSettingsUrl, { headers: { Cookie: cookie } });
             const savedHtml = await savedPage.text();
+            assert.equal(savedPage.status, 200, savedHtml);
+            assert.ok(savedHtml.includes('Connection token saved.'));
             assert.ok(savedHtml.includes(`value="${changedToken}"`));
             assert.ok(savedHtml.includes('<code>secret.php</code> override is active.'));
             for (const [connectionToken, status] of [[legacyToken, 200], [changedToken, 403]]) {

@@ -38,18 +38,32 @@
 	if ( remoteReprintApiUrl && copy ) {
 		copy.addEventListener( 'click', function() {
 			var copied;
-			if ( navigator.clipboard && navigator.clipboard.writeText ) {
-				copied = navigator.clipboard.writeText( remoteReprintApiUrl.value );
-			} else {
-				remoteReprintApiUrl.select();
-				copied = Promise.resolve( document.execCommand( 'copy' ) );
-			}
-
-			copied.then( function() {
-				if ( window.wp && wp.a11y ) {
-					wp.a11y.speak( copy.dataset.copiedMessage );
+			try {
+				if ( navigator.clipboard && navigator.clipboard.writeText ) {
+					copied = navigator.clipboard.writeText( remoteReprintApiUrl.value ).then( function() {
+						return true;
+					} );
+				} else {
+					remoteReprintApiUrl.focus();
+					remoteReprintApiUrl.select();
+					copied = Promise.resolve( document.execCommand( 'copy' ) );
 				}
+			} catch ( error ) {
+				showCopyStatus( false );
+				return;
+			}
+			copied.then( showCopyStatus, function() {
+				showCopyStatus( false );
 			} );
 		} );
+	}
+
+	function showCopyStatus( copied ) {
+		var message = copied ? copy.dataset.copiedMessage : copy.dataset.copyFailedMessage;
+		if ( ! copied ) {
+			remoteReprintApiUrl.focus();
+			remoteReprintApiUrl.select();
+		}
+		document.querySelector( '.reprint-server-copy-status' ).textContent = message;
 	}
 }() );
