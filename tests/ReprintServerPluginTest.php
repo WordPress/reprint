@@ -55,23 +55,30 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $xpath = new DOMXPath($document);
         $this->assertCount(1, $xpath->query('//textarea[@id="reprint_server_public_key" and @required and @aria-describedby="reprint-server-public-key-help"]'));
         $this->assertCount(1, $xpath->query('//input[@type="submit" and @value="Authorize tool" and contains(@class, "button-primary")]'));
+        $this->assertCount(1, $xpath->query('//form[.//textarea]//details/summary[text()="Using the Reprint CLI?"]'));
     }
 
-    public function testConfiguredPagePutsConnectionBeforeAccessAndCollapsesAddingAKey(): void
+    public function testConfiguredPageGroupsAuthorizationUrlAndKeysInToolAccess(): void
     {
         update_option_public_keys([$this->sampleKeyEntry()]);
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('Ready for downloads', $html);
-        $this->assertStringContainsString('Return to your tool', $html);
+        $this->assertStringNotContainsString('Return to your tool', $html);
+        $this->assertStringNotContainsString('reprint-server-connection-heading', $html);
+        $this->assertStringNotContainsString('reprint-server-next-heading', $html);
         $this->assertStringNotContainsString('class="notice ', $html);
         $this->assertStringNotContainsString('Connected for', $html);
         $this->assertStringNotContainsString('1. Copy', $html);
+        $this->assertLessThan(strpos($html, 'reprint-server-key-table'), strpos($html, 'Authorize another tool'));
         $this->assertLessThan(strpos($html, 'reprint-server-key-table'), strpos($html, 'reprint-server-api-url'));
 
         $document = new DOMDocument();
         $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
         $xpath = new DOMXPath($document);
-        $this->assertCount(1, $xpath->query('//details[not(@open)]/summary[text()="Authorize another tool"]'));
+        $this->assertCount(1, $xpath->query('//section[@aria-labelledby="reprint-server-access-heading"]//details[not(@open)]/summary[text()="Authorize another tool" and contains(@class, "button")]'));
+        $this->assertCount(1, $xpath->query('//section[@aria-labelledby="reprint-server-access-heading"]//input[@id="reprint-server-api-url" and not(ancestor::details)]'));
+        $this->assertCount(1, $xpath->query('//input[@id="reprint-server-api-url"]'));
+        $this->assertCount(1, $xpath->query('//form[.//textarea]//details/summary[text()="Using the Reprint CLI?"]'));
         $this->assertCount(1, $xpath->query('//input[@name="reprint_server_key_push_enabled" and not(@onchange)]'));
         $this->assertCount(1, $xpath->query('//input[@type="submit" and @value="Save push access"]'));
     }
@@ -119,6 +126,56 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
         $this->assertStringNotContainsString('name="reprint_server_key_push_enabled"', $html);
         $this->assertStringNotContainsString('class="notice ', $html);
+    }
+
+    public function testConfiguredTokenHostKeepsUrlAndTokenControlsInToolAccess(): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
+        update_connection_token('saved-token');
+        $html = $this->renderAdminPage();
+        $this->assertStringNotContainsString('reprint-server-connection-heading', $html);
+        $this->assertStringNotContainsString('Authorize another tool', $html);
+        $document = new DOMDocument();
+        $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+        $xpath = new DOMXPath($document);
+        $this->assertCount(1, $xpath->query('//section[@aria-labelledby="reprint-server-access-heading"]//input[@id="reprint-server-api-url" and not(ancestor::details)]'));
+        $this->assertCount(1, $xpath->query('//details[not(@open) and summary[text()="View or change connection token"]]//input[@id="reprint_server_connection_token"]'));
+        $this->assertCount(1, $xpath->query('//details[not(@open)]/summary[text()="Push access"]'));
+    }
+
+    public function testConfiguredFileManagedKeysKeepUrlVisibleWithoutAuthorizationForms(): void
+    {
+        $entry = $this->sampleKeyEntry();
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Builds the public-keys.php fixture source.
+        file_put_contents(PUBLIC_KEYS_FILE, "<?php return [" . var_export($entry['public_key'], true) . "];\n");
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('Ready for downloads', $html);
+        $this->assertStringNotContainsString('reprint-server-connection-heading', $html);
+        $this->assertStringNotContainsString('Authorize another tool', $html);
+        $this->assertStringNotContainsString('reprint_server_enroll_public_key', $html);
+        $this->assertStringNotContainsString('reprint_server_remove_public_key', $html);
+        $document = new DOMDocument();
+        $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+        $xpath = new DOMXPath($document);
+        $this->assertCount(1, $xpath->query('//section[@aria-labelledby="reprint-server-access-heading"]//input[@id="reprint-server-api-url"]'));
+        $this->assertCount(1, $xpath->query('//table//td[normalize-space(.)="Edit public-keys.php"]'));
+    }
+
+    public function testConfiguredNetworkKeepsSiteSelectionInToolAccess(): void
+    {
+        $GLOBALS['reprint_server_test_multisite'] = true;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = true;
+        update_option_public_keys([$this->sampleKeyEntry()]);
+        $html = $this->renderAdminPage();
+        $this->assertStringContainsString('Ready for downloads', $html);
+        $this->assertStringNotContainsString('reprint-server-connection-heading', $html);
+        $this->assertStringNotContainsString('id="reprint-server-api-url"', $html);
+        $this->assertStringNotContainsString('name="reprint_server_key_push_enabled"', $html);
+        $document = new DOMDocument();
+        $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+        $xpath = new DOMXPath($document);
+        $this->assertCount(1, $xpath->query('//section[@aria-labelledby="reprint-server-access-heading"]//a[text()="Find a site in this network"]'));
+        $this->assertCount(1, $xpath->query('//section[@aria-labelledby="reprint-server-access-heading"]//code[text()="https://your-site.example/?reprint-api"]'));
     }
 
     public function testNetworkTokenSaveReportsTheSavedResult(): void
@@ -543,7 +600,9 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
         $this->assertStringNotContainsString('class="notice ', $html);
         $this->assertStringContainsString('Ready for downloads', $html);
-        $this->assertStringContainsString('Return to your tool', $html);
+        $this->assertStringNotContainsString('Return to your tool', $html);
+        $this->assertStringNotContainsString('reprint-server-connection-heading', $html);
+        $this->assertStringNotContainsString('reprint-server-next-heading', $html);
         $this->assertStringNotContainsString('notice notice-success inline', $html);
         $this->assertStringContainsString('You do not need push access when moving this site to another host.', $html);
         $this->assertStringContainsString('Allow push to change files on this site', $html);
@@ -992,7 +1051,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $_GET = ['reprint_server_notice' => 'enrolled', 'reprint_server_key_id' => '0123456789abcdef'];
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('0123456789abcdef', $html);
-        $this->assertStringContainsString('Public key enrolled', $html);
+        $this->assertStringContainsString('Tool authorized. Return to your tool to start or resume the copy.', $html);
     }
 
     public function testEnrollHandlerStoresAndRedirects(): void

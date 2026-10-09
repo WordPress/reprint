@@ -36,11 +36,29 @@ test('setup, enrollment errors, adding tools, push consent, and removal work wit
         await page.getByRole('textbox', { name: 'Public key', exact: true }).fill(publicKey);
         await submit(page, page.getByRole('button', { name: 'Authorize tool', exact: true }));
         assert.equal(await page.locator('.reprint-server-status').innerText(), 'Ready for downloads');
-        assert.match(await page.locator('.reprint-server-next-action').innerText(), /Return to your tool/);
+        assert.match(await page.locator('.notice-success').innerText(), /Tool authorized\. Return to your tool to start or resume the copy\./);
+        await page.goto(`${siteUrl}/wp-admin/tools.php?page=reprint-server`);
+        assert.equal(await page.locator('#reprint-server-connection-heading').count(), 0);
+        assert.equal(await page.locator('#reprint-server-next-heading').count(), 0);
+        assert.equal(await page.locator('.reprint-server-page .notice').count(), 0);
+        assert.equal(await page.locator('section[aria-labelledby="reprint-server-access-heading"] #reprint-server-api-url').isVisible(), true);
+        const authorizeButton = page.getByText('Authorize another tool', { exact: true });
+        const authorizeBox = await authorizeButton.boundingBox();
+        const keyTableBox = await page.locator('.reprint-server-key-table').boundingBox();
+        assert.ok(authorizeBox.y < keyTableBox.y, 'Authorization must be above the existing keys.');
         assert.equal(await page.getByRole('textbox', { name: 'Public key', exact: true }).isVisible(), false);
         const firstKeyId = await page.locator('.reprint-server-key-table tbody tr code').innerText();
 
-        await page.getByText('Authorize another tool', { exact: true }).click();
+        await authorizeButton.focus();
+        await page.keyboard.press('Enter');
+        await page.getByText('Using the Reprint CLI?', { exact: true }).click();
+        assert.equal(await page.locator('.reprint-server-authorization pre').innerText(), `reprint keygen '${siteUrl}/?reprint-api' --state-dir=./reprint-state`);
+        await page.getByText('Using the Reprint CLI?', { exact: true }).click();
+        await page.getByRole('textbox', { name: 'Public key', exact: true }).fill('not a public key');
+        await submit(page, page.getByRole('button', { name: 'Authorize tool', exact: true }));
+        assert.match(await page.locator('.notice-error').innerText(), /not a usable public key/);
+        assert.equal(await page.getByRole('textbox', { name: 'Public key', exact: true }).isVisible(), true);
+        assert.equal(await page.locator('.reprint-server-key-table tbody tr').count(), 1);
         await page.getByRole('textbox', { name: 'Public key', exact: true }).fill(publicKey);
         await submit(page, page.getByRole('button', { name: 'Authorize tool', exact: true }));
         assert.match(await page.locator('.notice-info').innerText(), /already enrolled/);
@@ -50,6 +68,8 @@ test('setup, enrollment errors, adding tools, push consent, and removal work wit
         await page.getByRole('textbox', { name: 'Public key', exact: true }).fill(generatePublicKey());
         await submit(page, page.getByRole('button', { name: 'Authorize tool', exact: true }));
         assert.equal(await page.locator('.reprint-server-key-table tbody tr').count(), 2);
+        assert.match(await page.locator('.notice-success').innerText(), /Tool authorized\. Return to your tool/);
+        assert.equal(await page.getByRole('textbox', { name: 'Public key', exact: true }).isVisible(), false);
         const secondKeyId = await page.locator('.reprint-server-key-table tbody tr code').nth(1).innerText();
 
         await page.getByRole('checkbox', { name: `Allow push for key ${firstKeyId}`, exact: true }).check();
@@ -59,6 +79,9 @@ test('setup, enrollment errors, adding tools, push consent, and removal work wit
         assert.equal(await page.getByRole('checkbox', { name: `Allow push for key ${secondKeyId}`, exact: true }).isChecked(), false);
 
         await page.setViewportSize({ width: 390, height: 844 });
+        await page.goto(`${siteUrl}/wp-admin/tools.php?page=reprint-server`);
+        const mobileAuthorizeBox = await page.getByText('Authorize another tool', { exact: true }).boundingBox();
+        assert.ok(mobileAuthorizeBox.y >= 0 && mobileAuthorizeBox.y + mobileAuthorizeBox.height <= 844, 'Adding another tool must be visible before scrolling on mobile.');
         assert.equal(await page.locator('#reprint-server-api-url').isVisible(), true);
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
         const removeButton = await page.getByRole('button', { name: `Remove key ${firstKeyId}`, exact: true }).boundingBox();
@@ -76,10 +99,15 @@ test('setup, enrollment errors, adding tools, push consent, and removal work wit
     }
 });
 
-test('URL copying reports success and falls back to manual selection when denied', async () => {
+test('configured URL copying reports success and falls back to manual selection when denied', async () => {
     const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
     try {
         const page = await login(context);
+        await page.getByRole('textbox', { name: 'Public key', exact: true }).fill(generatePublicKey());
+        await submit(page, page.getByRole('button', { name: 'Authorize tool', exact: true }));
+        const keyId = await page.locator('.reprint-server-key-table tbody tr code').innerText();
+        assert.equal(await page.locator('#reprint-server-connection-heading').count(), 0);
+        assert.equal(await page.locator('section[aria-labelledby="reprint-server-access-heading"] #reprint-server-api-url').isVisible(), true);
         await page.getByRole('button', { name: 'Copy URL', exact: true }).click();
         await page.getByRole('status').filter({ hasText: 'Remote Reprint API URL copied.' }).waitFor();
         assert.equal(await page.evaluate(() => navigator.clipboard.readText()), `${siteUrl}/?reprint-api`);
@@ -109,6 +137,8 @@ test('URL copying reports success and falls back to manual selection when denied
         assert.match(await page.getByRole('status').innerText(), /Could not copy automatically/);
         await page.setViewportSize({ width: 390, height: 844 });
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+        await submit(page, page.getByRole('button', { name: `Remove key ${keyId}`, exact: true }));
+        assert.equal(await page.locator('.reprint-server-status').innerText(), 'Setup needed');
     } finally {
         await context.close();
     }

@@ -115,10 +115,13 @@
 	overflow-wrap: anywhere;
 }
 
-.reprint-server-next-action {
-	margin-top: 20px;
-	padding-top: 16px;
-	border-top: 1px solid #dcdcde;
+.reprint-server-connection-details,
+.reprint-server-authorization {
+	margin-bottom: 20px;
+}
+
+.reprint-server-connection-details:last-child {
+	margin-bottom: 0;
 }
 
 .reprint-server-next-step {

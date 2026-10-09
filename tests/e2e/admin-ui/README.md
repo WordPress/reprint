@@ -22,8 +22,12 @@ The URL has no trailing slash. The test refuses non-loopback URLs. Use test
 credentials, never credentials for a real site.
 
 The browser covers first setup, invalid and duplicate keys, multiple keys,
-explicit per-key push consent, removal back to setup, native disclosures and
-forms with JavaScript disabled, mobile access controls, clipboard success,
-and clipboard permission failure. Host policy, credential-file precedence,
-token-only hosts, and network capability rules are covered by
+explicit per-key push consent, and removal back to setup. Configured visits
+keep authorization, the API URL, and existing keys in Tool access. Adding a tool
+is visible above the keys, CLI help stays available in that form, and a rejected
+key reopens it. Native disclosures and forms are exercised with JavaScript
+disabled, including keyboard activation. Mobile access controls and the
+configured URL's clipboard success and permission failure are also checked.
+Host policy, credential-file precedence, token-only hosts, and network
+capability rules are covered by
 `tests/ReprintServerPluginTest.php`.

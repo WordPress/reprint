@@ -231,13 +231,12 @@ class SettingsPage {
                 ? __('Downloads and push enabled', 'reprint')
                 : __('Ready for downloads', 'reprint')
             );
-        $remote_reprint_api_url = home_url('?reprint-api');
         ?>
         <div class="wrap reprint-server-page">
             <div class="reprint-server-header">
                 <div>
                     <h1><?php echo esc_html__('Reprint Server', 'reprint'); ?></h1>
-                    <p><?php echo esc_html__('Connect a tool to copy your site’s database and files. The copy runs in that tool.', 'reprint'); ?></p>
+                    <p><?php echo esc_html__('Authorize tools to download your site’s database and files. Copies run in your tool.', 'reprint'); ?></p>
                 </div>
                 <span class="reprint-server-status<?php echo $configured ? ' reprint-server-status-ready' : ''; ?>"><?php echo esc_html($status); ?></span>
             </div>
@@ -245,63 +244,23 @@ class SettingsPage {
             <?php $this->render_settings_notices(); ?>
             <?php $this->render_push_access_notice(); ?>
 
-            <section class="reprint-server-card" aria-labelledby="reprint-server-connection-heading">
-                <h2 id="reprint-server-connection-heading">
-                <?php
-                    echo esc_html(is_multisite()
-                        ? ( $configured ? __('Choose the site to copy', 'reprint') : __('1. Choose the site to copy', 'reprint') )
-                        : ( $configured ? __('Connect your tool', 'reprint') : __('1. Copy the API URL', 'reprint') )
-                    );
-                ?>
-                </h2>
-                <?php if (is_multisite()): ?>
-                    <p>
-                    <?php
-                    echo esc_html($key_host
-                        ? __('Enrolled public keys can pull any site in this network.', 'reprint')
-                        : __('This network token can pull any site in this network.', 'reprint')
-                    );
-                    ?>
-                    </p>
-                    <p><?php echo esc_html__('Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.', 'reprint'); ?></p>
-                    <p><a href="<?php echo esc_url(network_admin_url('sites.php')); ?>"><?php echo esc_html__('Find a site in this network', 'reprint'); ?></a></p>
-                    <p class="description"><?php echo esc_html__('For example:', 'reprint'); ?> <code>https://your-site.example/?reprint-api</code></p>
-                <?php else: ?>
-                    <p><?php echo esc_html__('Paste this URL into the tool that will copy this site.', 'reprint'); ?></p>
-                    <label for="reprint-server-api-url"><?php echo esc_html__('Remote Reprint API URL', 'reprint'); ?></label>
-                    <div class="reprint-server-url-row">
-                        <input type="text" class="code" id="reprint-server-api-url"
-                               value="<?php echo esc_attr($remote_reprint_api_url); ?>" readonly />
-                        <button type="button" class="button reprint-server-copy-url"
-                                data-copied-message="<?php echo esc_attr__('Remote Reprint API URL copied.', 'reprint'); ?>"
-                                data-copy-failed-message="<?php echo esc_attr__('Could not copy automatically. Select the URL and copy it.', 'reprint'); ?>">
-                            <?php echo esc_html__('Copy URL', 'reprint'); ?>
-                        </button>
-                    </div>
-                    <p class="description reprint-server-copy-status" role="status"></p>
-                    <noscript><p class="description"><?php echo esc_html__('Select the URL and copy it into your tool.', 'reprint'); ?></p></noscript>
-                    <?php if ($key_host && !$configured): ?>
-                        <details class="reprint-server-help">
-                            <summary><?php echo esc_html__('Using the Reprint CLI?', 'reprint'); ?></summary>
-                            <p><?php echo esc_html__('If reprint pull already printed a public key, paste it below. Otherwise, run this in your terminal:', 'reprint'); ?></p>
-                            <pre><code><?php echo esc_html('reprint keygen ' . escapeshellarg($remote_reprint_api_url) . ' --state-dir=./reprint-state'); ?></code></pre>
-                            <p><?php echo esc_html__('Use the same --state-dir when you run reprint pull. Keep the private key in your tool; paste only the public key here.', 'reprint'); ?></p>
-                            <p><a href="https://github.com/WordPress/reprint#quick-start"><?php echo esc_html__('Reprint CLI setup instructions', 'reprint'); ?></a></p>
-                        </details>
-                    <?php endif; ?>
-                <?php endif; ?>
-                <?php if ($configured): ?>
-                    <p class="reprint-server-next-action"><strong><?php echo esc_html__('Return to your tool', 'reprint'); ?></strong> <?php echo esc_html__('to start or resume the copy. Saving access here does not start a transfer or check the connection.', 'reprint'); ?></p>
-                <?php endif; ?>
-            </section>
+            <?php if (!$configured): ?>
+                <section class="reprint-server-card" aria-labelledby="reprint-server-connection-heading">
+                    <h2 id="reprint-server-connection-heading"><?php echo esc_html(is_multisite() ? __('1. Choose the site to copy', 'reprint') : __('1. Copy the API URL', 'reprint')); ?></h2>
+                    <?php $this->render_connection_details($configuration); ?>
+                </section>
+            <?php endif; ?>
 
             <section class="reprint-server-card" aria-labelledby="reprint-server-access-heading">
                 <h2 id="reprint-server-access-heading"><?php echo esc_html($configured ? __('Tool access', 'reprint') : __('2. Authorize your tool', 'reprint')); ?></h2>
+                <?php if ($configured): ?>
+                    <?php $this->render_connection_details($configuration); ?>
+                <?php endif; ?>
                 <?php if ($key_host): ?>
                     <p>
                     <?php
                     echo esc_html($configured
-                        ? __('These keys allow tools to download your database and files.', 'reprint')
+                        ? __('Only authorize tools you trust.', 'reprint')
                         : __('An authorized tool can download your database and files. Only add a public key from a tool you trust.', 'reprint')
                     );
                     ?>
@@ -361,6 +320,51 @@ class SettingsPage {
                     <?php $this->render_public_keys_section($configuration); ?>
                 <?php endif; ?>
             </details>
+        </div>
+        <?php
+    }
+
+    /**
+     * API URL or selected-site guidance for setup and tool access.
+     *
+     * @param array $configuration {
+     *     @type string $required_scheme Authentication scheme accepted by this host.
+     *     @type bool   $is_configured   Whether an accepted credential is saved.
+     * }
+     */
+    private function render_connection_details(array $configuration): void {
+        $remote_reprint_api_url = home_url('?reprint-api');
+        ?>
+        <div class="reprint-server-connection-details">
+            <?php if (is_multisite()): ?>
+                <p>
+                <?php
+                echo esc_html($configuration['required_scheme'] === 'key'
+                    ? __('Enrolled public keys can pull any site in this network.', 'reprint')
+                    : __('This network token can pull any site in this network.', 'reprint')
+                );
+                ?>
+                </p>
+                <p><?php echo esc_html__('Use the selected site’s home URL followed by ?reprint-api. Each pull creates a separate one-site network. Push is not supported.', 'reprint'); ?></p>
+                <p><a href="<?php echo esc_url(network_admin_url('sites.php')); ?>"><?php echo esc_html__('Find a site in this network', 'reprint'); ?></a></p>
+                <p class="description"><?php echo esc_html__('For example:', 'reprint'); ?> <code>https://your-site.example/?reprint-api</code></p>
+            <?php else: ?>
+                <?php if (!$configuration['is_configured']): ?>
+                    <p><?php echo esc_html__('Paste this URL into the tool that will copy this site.', 'reprint'); ?></p>
+                <?php endif; ?>
+                <label for="reprint-server-api-url"><?php echo esc_html__('Remote Reprint API URL', 'reprint'); ?></label>
+                <div class="reprint-server-url-row">
+                    <input type="text" class="code" id="reprint-server-api-url"
+                           value="<?php echo esc_attr($remote_reprint_api_url); ?>" readonly />
+                    <button type="button" class="button reprint-server-copy-url"
+                            data-copied-message="<?php echo esc_attr__('Remote Reprint API URL copied.', 'reprint'); ?>"
+                            data-copy-failed-message="<?php echo esc_attr__('Could not copy automatically. Select the URL and copy it.', 'reprint'); ?>">
+                        <?php echo esc_html__('Copy URL', 'reprint'); ?>
+                    </button>
+                </div>
+                <p class="description reprint-server-copy-status" role="status"></p>
+                <noscript><p class="description"><?php echo esc_html__('Select the URL and copy it into your tool.', 'reprint'); ?></p></noscript>
+            <?php endif; ?>
         </div>
         <?php
     }
@@ -446,7 +450,7 @@ class SettingsPage {
     }
 
     /**
-     * Enrollment form and the enrolled-key table.
+     * Tool authorization form followed by the enrolled-key table.
      *
      * @param array $configuration Configuration returned by get_configuration_state().
      */
@@ -459,6 +463,41 @@ class SettingsPage {
                 . esc_html__('Edit that file to authorize a tool or remove a key. This page cannot change its keys.', 'reprint') . '</p>';
         }
         ?>
+        <?php if (!$file_override && $configuration['required_scheme'] === 'key'): ?>
+            <?php if ($configuration['is_configured']): ?>
+                <?php
+                // Reopen the form after an enrollment rejection; a saved key leaves it closed.
+                // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value only opens the enrollment form.
+                $enrollment_rejected = isset($_GET['reprint_server_notice']) && is_string($_GET['reprint_server_notice'])
+                    // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value only opens the enrollment form.
+                    && strpos(sanitize_key(wp_unslash($_GET['reprint_server_notice'])), 'enroll_') === 0;
+                ?>
+                <details class="reprint-server-authorization"<?php echo $enrollment_rejected ? ' open' : ''; ?>>
+                    <summary class="button"><?php echo esc_html__('Authorize another tool', 'reprint'); ?></summary>
+            <?php endif; ?>
+            <form method="post" action="<?php echo esc_url($post_url); ?>">
+                <input type="hidden" name="action" value="reprint_server_enroll_public_key" />
+                <?php wp_nonce_field('reprint_server_enroll_public_key'); ?>
+                <p id="reprint-server-public-key-help"><?php echo esc_html__('Paste the public key shown by your tool. A PEM block or a single line is accepted. Never paste a private key.', 'reprint'); ?></p>
+                <p>
+                    <label for="reprint_server_public_key"><?php echo esc_html__('Public key', 'reprint'); ?></label>
+                    <textarea id="reprint_server_public_key" name="reprint_server_public_key" rows="4" class="large-text code" aria-describedby="reprint-server-public-key-help" spellcheck="false" required></textarea>
+                </p>
+                <?php if (!is_multisite()): ?>
+                    <details class="reprint-server-help">
+                        <summary><?php echo esc_html__('Using the Reprint CLI?', 'reprint'); ?></summary>
+                        <p><?php echo esc_html__('If reprint pull already printed a public key, paste it above. Otherwise, run this in your terminal:', 'reprint'); ?></p>
+                        <pre><code><?php echo esc_html('reprint keygen ' . escapeshellarg(home_url('?reprint-api')) . ' --state-dir=./reprint-state'); ?></code></pre>
+                        <p><?php echo esc_html__('Use the same --state-dir when you run reprint pull. Keep the private key in your tool; paste only the public key here.', 'reprint'); ?></p>
+                        <p><a href="https://github.com/WordPress/reprint#quick-start"><?php echo esc_html__('Reprint CLI setup instructions', 'reprint'); ?></a></p>
+                    </details>
+                <?php endif; ?>
+                <?php submit_button(__('Authorize tool', 'reprint')); ?>
+            </form>
+            <?php if ($configuration['is_configured']): ?>
+                </details>
+            <?php endif; ?>
+        <?php endif; ?>
         <?php if ($configuration['enrolled_keys'] !== []): ?>
         <?php if (!is_multisite() && $configuration['required_scheme'] === 'key'): ?>
             <p><?php echo esc_html__('Allow push only if a tool needs to upload, replace, or delete files in this site’s document root, except excluded paths. Downloads do not need push access.', 'reprint'); ?></p>
@@ -548,32 +587,6 @@ class SettingsPage {
             </tbody>
         </table>
         </div>
-        <?php endif; ?>
-        <?php if (!$file_override && $configuration['required_scheme'] === 'key'): ?>
-            <?php if ($configuration['is_configured']): ?>
-                <?php
-                // Reopen the form after an enrollment rejection; a saved key leaves it closed.
-                // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value only opens the enrollment form.
-                $enrollment_rejected = isset($_GET['reprint_server_notice']) && is_string($_GET['reprint_server_notice'])
-                    // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value only opens the enrollment form.
-                    && strpos(sanitize_key(wp_unslash($_GET['reprint_server_notice'])), 'enroll_') === 0;
-                ?>
-                <details class="reprint-server-help"<?php echo $enrollment_rejected ? ' open' : ''; ?>>
-                    <summary><?php echo esc_html__('Authorize another tool', 'reprint'); ?></summary>
-            <?php endif; ?>
-            <form method="post" action="<?php echo esc_url($post_url); ?>">
-                <input type="hidden" name="action" value="reprint_server_enroll_public_key" />
-                <?php wp_nonce_field('reprint_server_enroll_public_key'); ?>
-                <p id="reprint-server-public-key-help"><?php echo esc_html__('Paste the public key shown by your tool. A PEM block or a single line is accepted. Never paste a private key.', 'reprint'); ?></p>
-                <p>
-                    <label for="reprint_server_public_key"><?php echo esc_html__('Public key', 'reprint'); ?></label>
-                    <textarea id="reprint_server_public_key" name="reprint_server_public_key" rows="4" class="large-text code" aria-describedby="reprint-server-public-key-help" spellcheck="false" required></textarea>
-                </p>
-                <?php submit_button(__('Authorize tool', 'reprint'), $configuration['is_configured'] ? 'secondary' : 'primary'); ?>
-            </form>
-            <?php if ($configuration['is_configured']): ?>
-                </details>
-            <?php endif; ?>
         <?php endif; ?>
         <?php
     }
@@ -666,7 +679,7 @@ class SettingsPage {
             'managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
             'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
             'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
-            'enrolled' => ['success', __('Public key enrolled.', 'reprint')],
+            'enrolled' => ['success', __('Tool authorized. Return to your tool to start or resume the copy.', 'reprint')],
             'enroll_invalid' => ['error', __('That is not a usable public key. Paste an RSA public key of at least 3072 bits, as a PEM block or one line.', 'reprint')],
             'enroll_no_openssl' => ['error', __('This host cannot read public keys because the OpenSSL extension is missing. Clients authenticate with the connection token here.', 'reprint')],
             'enroll_duplicate' => ['info', __('That public key is already enrolled.', 'reprint')],

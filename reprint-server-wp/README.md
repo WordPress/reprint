@@ -136,17 +136,20 @@ and returns to that tool to start the copy. This page saves access. It does not
 start a transfer, show transfer progress, or confirm that a tool connected.
 
 The first visit shows those three steps in order. Once a usable credential is
-saved, the URL and the next action stay at the top, followed by access controls.
-Adding another key and host details are closed until needed. Public keys and
-connection tokens are never offered as competing authentication choices: the
-host determines which one works.
+saved, **Tool access** becomes the main view. The API URL stays visible in a
+compact row, and **Authorize another tool** sits above existing keys. Its form
+is closed until needed, with CLI key-generation help inside it for both the
+first tool and later tools. After authorization, the confirmation tells the
+administrator to return to the tool to start or resume the copy. Host details
+stay closed until needed. Public keys and connection tokens are never offered
+as competing authentication choices: the host determines which one works.
 
 | Visit or host state | Next action on the page |
 | --- | --- |
 | No key enrolled; the tool already printed one | Paste that public key and choose **Authorize tool**. |
 | No key enrolled; no key printed yet | Copy the URL into the tool. The CLI help shows how to generate a public key. |
-| A key or accepted token is already saved | Copy the URL if needed, then return to the tool to start or resume. |
-| Another tool needs access | Open **Authorize another tool**. Existing keys remain visible. |
+| A key or accepted token is already saved | Manage access in **Tool access**. The URL stays available to copy; copies run in the tool. |
+| Another tool needs access | Open **Authorize another tool** above the existing keys. Paste its public key, or use the CLI help to generate one. After authorization, return to the tool. |
 | A key should stop working | Match its key id to the tool, then choose **Remove key**. Removing the last key returns the page to setup. |
 | A tool must change files on this site | Check **Allow push** for its key and choose **Save push access**. Checking alone changes nothing. Token hosts have a separate **Push access** section. |
 | OpenSSL is missing | Save a connection token and use the same token in the tool. Key enrollment is not offered. |
