@@ -1387,6 +1387,11 @@ the caller can decide what to do — re-run the sync, ignore them, or ask the us
 Files that are subsequently downloaded successfully are automatically removed
 from the tracker. The file is deleted entirely once all entries are cleared.
 
+File errors from a file-fetch response use the same path mapping and selection
+as file downloads. Their base64 paths are decoded before local cleanup and
+remote-index invalidation. Errors during database or index work do not remove
+local files. Existing parent links are checked before a file is removed.
+
 #### `audit.log` — append-only event log
 
 Every significant event during import is recorded in `audit.log` as a
