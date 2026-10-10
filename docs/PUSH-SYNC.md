@@ -172,9 +172,14 @@ A push plan is an internal part of the sender lifecycle:
    preflight document root. The sender enters `creating`, stores the document
    root's local relative path in `sender.json`, and requests
    at most 100 target exclusions from `push_create`. If another push session
-   has an active commit, the sender stores its `blocking_push_session_id`, enters
+   has an active commit, the sender requires a 32-character lowercase hexadecimal
+   `blocking_push_session_id` before storing it and entering
    `finishing_previous_commit`, and sends one bounded `push_commit` request per
-   step until that commit finishes. It then returns to `creating`. A successful
+   step until that commit finishes. It then returns to `creating`. A malformed
+   blocking ID fails the run without leaving `creating`. A `push_not_found`
+   response while finishing the previous commit fails the run and stores
+   `creating` for the next resume. Older checkpoints with an invalid blocking ID
+   return to `creating` in one local step without sending a request. A successful
    create combines the target exclusions with at most 100 caller exclusions
    and stores the result in `excluded_paths.json` after creating the active
    `plan/` directory. The combined list stays with that plan across resume.
@@ -207,6 +212,14 @@ A push plan is an internal part of the sender lifecycle:
    sender-owned exclusions file. After the target confirms removal of a
    discarded push session, the sender removes the same files without changing
    the local index for that remote Reprint API URL.
+
+`files-push --abort` removes the local `plan/`, `excluded_paths.json`, and
+`sender.json`, plus `excluded_paths.json.tmp` and `sender.json.tmp`, under the
+Reprint process lock. It does not decode the sender checkpoint, require preflight
+or a connection credential, or send a request. It keeps the completed local index,
+pull state, and local site files unchanged. It does not cancel a target commit
+already in progress or remove staged target work. The next push starts a fresh
+local sender and may still need to finish that target commit.
 
 Until the sender stores the initial PushPlan cursor, `starting_plan` remains
 the durable phase. An interrupted start is repeated and overwrites its initial
