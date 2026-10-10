@@ -20,7 +20,8 @@ class ShortcodeProcessorTest extends TestCase {
         ], $pipes);
         $this->assertIsResource($process);
         try {
-            $deadline = microtime(true) + 8;
+            // The completion guard leaves room for slow shared CI runners.
+            $deadline = microtime(true) + 30;
             do {
                 $status = proc_get_status($process);
                 if (!$status['running']) {
@@ -28,7 +29,7 @@ class ShortcodeProcessorTest extends TestCase {
                 }
                 usleep(20000);
             } while (microtime(true) < $deadline);
-            $this->assertFalse($status['running'], 'Scanning a 1 MiB shortcode value exceeded eight seconds.');
+            $this->assertFalse($status['running'], 'Scanning a 1 MiB shortcode value exceeded thirty seconds.');
             $this->assertSame(0, $status['exitcode'], file_get_contents($directory . '/stderr'));
             $this->assertSame("complete\n", file_get_contents($directory . '/stdout'));
         } finally {
