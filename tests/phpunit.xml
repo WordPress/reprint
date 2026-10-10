@@ -24,6 +24,7 @@
             <file>BuildPdoDsnTest.php</file>
             <file>ExporterCompatibilityUtilitiesTest.php</file>
             <file>CreateDbConnectionTest.php</file>
+            <file>EstimateDatabaseBytesTest.php</file>
             <file>PushCommitTest.php</file>
             <file>ExportHttpServerTest.php</file>
             <file>WindowsPathAccessTest.php</file>
