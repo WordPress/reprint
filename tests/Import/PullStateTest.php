@@ -35,6 +35,40 @@ class PullStateTest extends TestCase
         $this->assertSame(12, $state->apply->statements_executed);
     }
 
+    /** The current invocation may reuse a password, but checkpoints contain no password field. */
+    public function testRuntimeDatabasePasswordDoesNotRoundTripThroughState(): void
+    {
+        $state = new \PullState();
+        $state->apply->target_engine = 'mysql';
+        $state->apply->target_host = 'db.local';
+        $state->apply->target_port = 3307;
+        $state->apply->target_user = 'wp_user';
+        $state->apply->target_db = 'wp_target';
+        $state->apply->target_pass = 'current-invocation-password';
+        $data = $state->to_array();
+        $this->assertArrayNotHasKey('target_pass', $data['apply']);
+        $this->assertSame('current-invocation-password', $state->apply->target_pass);
+        $resumed = \PullState::from_array($data);
+        $this->assertNull($resumed->apply->target_pass);
+        $this->assertSame('db.local', $resumed->apply->target_host);
+        $this->assertSame(3307, $resumed->apply->target_port);
+        $this->assertSame('wp_user', $resumed->apply->target_user);
+        $this->assertSame('wp_target', $resumed->apply->target_db);
+    }
+
+    /** Earlier versions wrote a password field; loading that schema must leave it behind. */
+    public function testLoadsEarlierDatabaseApplySchemaWithoutItsPassword(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        $data['apply']['target_engine'] = 'mysql';
+        $data['apply']['target_db'] = 'wp_target';
+        $data['apply']['target_pass'] = 'previous-invocation-password';
+        $state = \PullState::from_array($data);
+        $this->assertNull($state->apply->target_pass);
+        $this->assertSame('wp_target', $state->apply->target_db);
+        $this->assertArrayNotHasKey('target_pass', $state->to_array()['apply']);
+    }
+
     public function testStateRoundTripsToPersistedArraySchema(): void
     {
         $state = new \PullState();
