@@ -171,8 +171,8 @@ final class FilesPushCommandTest extends TestCase
         }
     }
 
-    /** Library callers keep the HTTP permission supplied when constructing the client. */
-    public function testDirectFilesPushAbortUsesTheClientHttpPermission(): void
+    /** Corrupt checkpoints can be cleared with the HTTP permission supplied to the client. */
+    public function testDirectFilesPushAbortClearsCorruptStateWithTheClientHttpPermission(): void
     {
         $remote = 'http://127.0.0.1:1/?reprint-api=1';
         $push_state_directory = $this->stateDirectory . '/remotes/' . md5($remote) . '/push';
@@ -185,8 +185,8 @@ final class FilesPushCommandTest extends TestCase
         $this->assertSame(0, $client->exit_code);
     }
 
-    /** Abort cannot remove sender files while another command holds the process lock. */
-    public function testFilesPushAbortRequiresTheProcessLock(): void
+    /** Abort cannot remove a corrupt checkpoint while another command holds the process lock. */
+    public function testFilesPushAbortKeepsCorruptStateWhenTheProcessLockIsHeld(): void
     {
         $remote = 'https://example.test/?reprint-api=1';
         $push_state_directory = $this->stateDirectory . '/remotes/' . md5($remote) . '/push';
