@@ -244,6 +244,88 @@ final class CommandReportTest extends TestCase {
         ];
     }
 
+    /** @dataProvider source_progress_outcomes */
+    public function testSourceProgressKeepsClientReportFieldsSeparate(string $mode, bool $fails): void
+    {
+        $this->run_command('preflight');
+        file_put_contents($this->root . '/source-progress.json', json_encode([
+            'record' => [
+                'type' => 'reprint_report', 'schema_version' => 99,
+                'status' => $fails ? 'error' : 'complete', 'command' => 'pull',
+                'event' => 'complete', 'exit_code' => 0, 'phase' => 'preflight',
+                'error' => 'Source progress text', 'error_code' => 'SOURCE_CODE',
+                'failed_stage' => 'preflight', 'http_code' => 401, 'curl_errno' => 42,
+                'consecutive_failures_without_progress' => 77,
+                'message' => 'Source scan is running',
+                'progress' => ['items' => ['unit' => 'files', 'done' => 9999, 'total' => 9999]],
+                'current_file' => ['size' => 12, 'bytes_read' => 6, 'status' => 'complete'],
+            ],
+            'fails' => $fails,
+        ]));
+        $result = $this->run_command('files-pull', ['--progress=' . $mode]);
+        $report = $this->read_report($result);
+        $this->assertSame($fails ? 1 : 0, $result['exit_code'], $result['stdout'] . $result['stderr']);
+        $this->assertSame('files-pull', $report['command']);
+        $this->assertSame($fails ? 'error' : 'complete', $report['status']);
+        $this->assertNull($report['error_code']);
+        $this->assertNull($report['failed_stage']);
+        foreach (['http_code', 'curl_errno', 'consecutive_failures_without_progress'] as $key) {
+            $this->assertArrayNotHasKey($key, $report);
+        }
+        $this->assertSame($fails ? 'Remote index failed: Source scan stopped by fixture.' : null, $report['error']);
+        $records = array_map(static function (string $line): array {
+            return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        }, explode("\n", trim($result['stdout'])));
+        $source_records = array_values(array_filter($records, static function (array $record): bool {
+            return ( $record['type'] ?? null ) === 'remote_progress';
+        }));
+        if ($mode === 'jsonl') {
+            $this->assertContains([
+                'type' => 'remote_progress', 'phase' => 'index',
+                'remote_message' => 'Source scan is running',
+                'remote_counters' => ['file_bytes_total' => 12, 'file_bytes_read' => 6],
+            ], $source_records);
+        } else {
+            $this->assertSame([], $source_records);
+            $this->assertStringNotContainsString('Source scan is running', $result['stdout']);
+        }
+        $snapshot = json_decode(file_get_contents($this->root . '/state/progress.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame($fails ? 'error' : 'complete', $snapshot['status']);
+        $this->assertNotSame('Source scan is running', $snapshot['message']);
+        $this->assertNotSame(9999, $snapshot['progress']['items']['done'] ?? null);
+    }
+
+    /** @return array<int, array{0: string, 1: bool}> Output modes and source outcomes. */
+    public static function source_progress_outcomes(): array
+    {
+        return [['jsonl', false], ['jsonl', true], ['compact', false], ['compact', true]];
+    }
+
+    /** Check source field types without changing the client's saved diagnosis. */
+    public function testSourceProgressAcceptsOnlyItsMessageAndIntegerFileCounters(): void
+    {
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
+        $stream = fopen('php://memory', 'w+b');
+        $reflection = new \ReflectionClass($client);
+        $reflection->getProperty('progress_fd')->setValue($client, $stream);
+        $reflection->getProperty('progress_output_mode')->setValue($client, 'jsonl');
+        $handler = $reflection->getMethod('handle_progress');
+        foreach (['null', 'false', '42', '"text"', '{', '[]'] as $body) {
+            $handler->invoke($client, ['body' => $body], 'files');
+        }
+        $this->assertSame(0, ftell($stream));
+        $details = ['error' => 'Client request failed', 'error_code' => 'CLIENT_CODE', 'failed_stage' => 'fetch', 'http_code' => 520];
+        $client->command_report_details = $details;
+        $handler->invoke($client, ['body' => json_encode([
+            'type' => 'lifecycle', 'status' => 'error', 'error_code' => 'SOURCE_CODE',
+            'message' => ['not text'], 'current_file' => ['size' => '12', 'bytes_read' => -1],
+        ])], 'files');
+        $this->assertSame($details, $client->command_report_details);
+        rewind($stream);
+        $this->assertSame(['type' => 'remote_progress', 'phase' => 'files'], json_decode(trim(stream_get_contents($stream)), true));
+        fclose($stream);
+    }
+
     public function testReportIsNotACliOption(): void
     {
         $result = $this->run_command('preflight', ['--report']);
