@@ -761,6 +761,139 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_sessions_directory . '/' . $push_session_id);
     }
 
+    /** A target refusal must name a usable blocking push session before it is saved. */
+    public function testSenderRejectsMalformedBlockingPushSessionIds(): void
+    {
+        $responses = [[], ['blocking_push_session_id' => null], ['blocking_push_session_id' => 17],
+            ['blocking_push_session_id' => []], ['blocking_push_session_id' => 'short'],
+            ['blocking_push_session_id' => str_repeat('z', 32)]];
+        foreach ($responses as $number => $fields) {
+            file_put_contents($this->root . '/response-overrides.json', json_encode([
+                'push_create' => ['status' => 'error', 'reason' => 'commit_required'] + $fields,
+            ]));
+            $local_docroot = $this->root . '/malformed-local-' . $number;
+            $push_state_directory = $this->root . '/malformed-state-' . $number;
+            mkdir($local_docroot);
+            $options = $this->senderOptions($local_docroot, $push_state_directory);
+            $sender = $this->startSender($options);
+            try {
+                $this->assertFalse($sender->next_step());
+                $this->assertSame('failed', $sender->get_status());
+                $this->assertSame('unexpected_response', $sender->get_reason());
+                $this->assertStringContainsString('blocking_push_session_id', $sender->get_detail());
+                $this->assertSame('creating', $sender->get_phase());
+                $this->assertFalse($sender->next_step());
+                $state = $this->loadActiveState($push_state_directory);
+                $this->assertSame('creating', $state['phase']);
+                $this->assertNull($state['blocking_push_session_id']);
+            } finally {
+                $this->closeSender($sender);
+            }
+            unlink($this->root . '/response-overrides.json');
+            $sender = $this->resumeSender($options);
+            try {
+                $this->assertTrue($sender->next_step());
+                $this->assertSame('starting_plan', $sender->get_phase());
+            } finally {
+                $this->closeSender($sender);
+            }
+        }
+    }
+
+    /** A missing target session ends this run and returns the durable phase to creating. */
+    public function testSenderCanResumeAfterTheBlockingPushSessionIsNotFound(): void
+    {
+        file_put_contents($this->root . '/response-overrides.json', json_encode([
+            'push_create' => ['status' => 'error', 'reason' => 'commit_required',
+                'blocking_push_session_id' => str_repeat('e', 32)],
+        ]));
+        $local_docroot = $this->root . '/missing-blocking-local';
+        $push_state_directory = $this->root . '/missing-blocking-state';
+        mkdir($local_docroot);
+        $options = $this->senderOptions($local_docroot, $push_state_directory);
+        $sender = $this->startSender($options);
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('finishing_previous_commit', $sender->get_phase());
+            unlink($this->root . '/response-overrides.json');
+            $this->assertFalse($sender->next_step());
+            $this->assertSame('push_not_found', $sender->get_reason());
+            $this->assertSame('creating', $sender->get_phase());
+            $this->assertFalse($sender->next_step());
+            $state = $this->loadActiveState($push_state_directory);
+            $this->assertSame('creating', $state['phase']);
+            $this->assertNull($state['blocking_push_session_id']);
+        } finally {
+            $this->closeSender($sender);
+        }
+        $sender = $this->resumeSender($options);
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('starting_plan', $sender->get_phase());
+            $this->assertSame("push_create\npush_commit\npush_create\n", file_get_contents($this->root . '/request.log'));
+        } finally {
+            $this->closeSender($sender);
+        }
+    }
+
+    /** Local abort leaves the live target session intact and sends no HTTP request. */
+    public function testFilesPushAbortDoesNotContactTheTarget(): void
+    {
+        $local_docroot = $this->root . '/abort-local';
+        $state_directory = $this->root . '/abort-cli-state';
+        mkdir($local_docroot);
+        mkdir($state_directory);
+        file_put_contents($local_docroot . '/next.txt', 'next');
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
+        $sender = $this->startSender($this->senderOptions($local_docroot, $push_state_directory));
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('starting_plan', $sender->get_phase());
+            $push_session_id = $this->loadActiveState($push_state_directory)['push_session_id'];
+        } finally {
+            $this->closeSender($sender);
+        }
+        $request_log = file_get_contents($this->root . '/request.log');
+        $this->credential_options = [];
+        $aborted = $this->runFilesPushCli($local_docroot, $state_directory, [], '/', ['--abort']);
+        $this->assertSame(0, $aborted['exit'], $aborted['output']);
+        $this->assertSame('aborted', $this->lastCliCommandResult($aborted['stdout'])['status']);
+        $this->assertSame($request_log, file_get_contents($this->root . '/request.log'));
+        $this->assertNull($this->loadActiveState($push_state_directory));
+        $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
+        $this->assertDirectoryExists($this->reprint_directory . '/.reprint/push/' . $push_session_id);
+        $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/next.txt');
+    }
+
+    /** Older senders stored the unvalidated target field in this phase. */
+    public function testSenderResumesLegacyInvalidBlockingPushSessionState(): void
+    {
+        foreach ([null, 17, [], 'short', str_repeat('z', 32)] as $number => $blocking_push_session_id) {
+            $local_docroot = $this->root . '/legacy-blocking-local-' . $number;
+            $push_state_directory = $this->root . '/legacy-blocking-state-' . $number;
+            mkdir($local_docroot);
+            $options = $this->senderOptions($local_docroot, $push_state_directory);
+            $sender = $this->startSender($options);
+            $this->closeSender($sender);
+            $state = $this->loadActiveState($push_state_directory);
+            // This is the record the old create_push_session() writer produced
+            // after a commit_required response containing the value above.
+            $state['phase'] = 'finishing_previous_commit';
+            $state['blocking_push_session_id'] = $blocking_push_session_id;
+            file_put_contents($push_state_directory . '/sender.json', json_encode($state));
+            $sender = $this->resumeSender($options);
+            try {
+                $this->assertTrue($sender->next_step());
+                $this->assertSame('creating', $sender->get_phase());
+                $this->assertFileDoesNotExist($this->root . '/request.log');
+                $this->assertNull($this->loadActiveState($push_state_directory)['blocking_push_session_id']);
+            } finally {
+                $this->closeSender($sender);
+            }
+        }
+    }
+
     public function testHighLevelSenderFinishesPreviousCommitBeforeCreatingItsPushSession(): void
     {
         $client = $this->newClient(self::SECRET);
@@ -4046,6 +4179,7 @@ final class PushEndpointsTest extends TestCase {
             'REPRINT_PUSH_TEST_DIRECTORY_CONFIG' => $this->reprint_configuration_path,
             'REPRINT_PUSH_TEST_EXCLUDED_PATHS_CONFIG' => $this->excluded_paths_configuration_path,
             'REPRINT_PUSH_TEST_REQUEST_LOG' => $this->root . '/request.log',
+            'REPRINT_PUSH_TEST_RESPONSE_CONFIG' => $this->root . '/response-overrides.json',
             'REPRINT_PUSH_TEST_GATE_ENDPOINT_CONFIG' => $this->gate_endpoint_configuration_path,
             'REPRINT_PUSH_TEST_GATE_READY' => $this->gate_ready_path,
             'REPRINT_PUSH_TEST_GATE_RELEASE' => $this->gate_release_path,

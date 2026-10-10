@@ -329,6 +329,7 @@ class CliHelpTest extends TestCase
         $this->assertDirectoryDoesNotExist($stateDirectory);
     }
 
+    /** Files-push lists local abort without adding pull-only selection options. */
     public function testFilesPushHelpShowsOnlyItsCommandOptions(): void
     {
         $output = $this->runHelp('files-push');
@@ -345,7 +346,8 @@ class CliHelpTest extends TestCase
         $this->assertStringContainsString("document root's local tree beneath --fs-root", $output);
         $this->assertStringContainsString('requires saved preflight data', $output);
         $this->assertStringContainsString('read or modify', $output);
-        $this->assertStringNotContainsString('--abort', $output);
+        $this->assertMatchesRegularExpression('/^  --abort\s+Abort current sync/m', $output);
+        $this->assertStringContainsString('needs no credential or preflight and sends no request', $output);
         $this->assertStringNotContainsString('--filter', $output);
         $this->assertStringNotContainsString('--remap', $output);
         $this->assertStringNotContainsString('--only', $output);
