@@ -14989,9 +14989,9 @@ if (
             'name' => 'abort',
             'type' => 'flag',
             'target' => 'abort',
-            'help' => 'Abort current sync (preserves downloads). For db-push, discard staged tables without changing live tables',
+            'help' => 'Abort current sync (preserves downloads). For files-push, clear only local sender state and plan. For db-push, discard staged tables without changing live tables',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'verbose',
