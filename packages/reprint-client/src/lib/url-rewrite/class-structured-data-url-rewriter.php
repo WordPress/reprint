@@ -36,6 +36,11 @@ class StructuredDataUrlRewriter
     const BLOCK_MARKUP = 'block_markup';
     const PLAIN_TEXT = 'plain_text';
 
+    private const MAX_REWRITE_DEPTH = 16;
+
+    /** Active rewrite calls, including calls made by builder codecs. */
+    private int $rewrite_depth = 0;
+
     /** There are diminishing hit rate returns when dealing with values larger than this. */
     private const VALUE_REWRITE_CACHE_MAX_INPUT_BYTES = 64 * 1024;
     private const VALUE_REWRITE_CACHE_MAX_TOTAL_BYTES = 32 * 1024 * 1024;
@@ -198,6 +203,9 @@ class StructuredDataUrlRewriter
     /**
      * Rewrite URLs in a single decoded value.
      *
+     * At most 16 rewrite calls may be active at once. Deeper encoded strings
+     * stay unchanged; shallower sibling values still receive URL rewriting.
+     *
      * @param string      $value        The decoded database value.
      * @param string|null $content_type Content type hint: null (auto-detect, plain text default),
      *                                  'block_markup' (use StructuredBlockMarkupUrlProcessor), or 'skip' (no-op).
@@ -205,101 +213,110 @@ class StructuredDataUrlRewriter
      */
     public function rewrite(string $value, ?string $content_type = null): string
     {
-        if ($value === '') {
+        if ($this->rewrite_depth >= self::MAX_REWRITE_DEPTH) {
             return $value;
         }
 
-        if ($content_type === 'skip') {
-            return $value;
-        }
-
-        if ($content_type === null) {
-            $content_type = self::PLAIN_TEXT;
-        }
-
-        $cache_key = null;
-        if (strlen($value) <= self::VALUE_REWRITE_CACHE_MAX_INPUT_BYTES) {
-            $cache_key = sha1($content_type . "\0" . $value);
-
-            $cached = $this->get_cached_value_rewrite($cache_key, $content_type, $value);
-            if ($cached !== null) {
-                return $cached;
-            }
-        }
-
-        // Quick-reject values without an HTML URL attribute, a literal source
-        // domain, an encoding marker which may hide a source-domain byte, or a
-        // registered shortcode codec which may hide a complete URL. This avoids
-        // constructing the structured parsers for most values.
-        if (!$this->maybe_contains_rewritable_urls($value)) {
-            if (
-                self::BLOCK_MARKUP !== $content_type
-                || !$this->value_might_contain_hidden_shortcode_url($value)
-            ) {
+        ++$this->rewrite_depth;
+        try {
+            if ($value === '') {
                 return $value;
             }
-        }
 
-        // Performance guard: avoid constructing the serialized-PHP parser for
-        // ordinary URL strings and block markup. The parser still owns
-        // validation once entered; this gate only skips first-byte shapes that
-        // cannot expose serialized string values for rewriting.
-        if ($this->could_be_php_serialization_with_strings($value)) {
-            $p = new PhpSerializationProcessor($value);
-            if (!$p->is_malformed()) {
-                while ($p->next_value()) {
-                    $original = $p->get_value();
-                    $rewritten = $this->rewrite($original, $content_type);
-                    if ($rewritten !== $original) {
-                        $p->set_value($rewritten);
-                    }
-                }
-                $rewritten_value = $p->get_updated_serialization();
-                if ($cache_key !== null) {
-                    $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
-                }
-                return $rewritten_value;
+            if ($content_type === 'skip') {
+                return $value;
             }
-        }
 
-        // Performance guard: avoid calling json_decode() for ordinary URL
-        // strings and block markup. JsonStringIterator still owns validation
-        // once entered; this gate only skips first non-whitespace bytes that
-        // cannot start a JSON value containing string leaves.
-        if ($this->could_be_json_with_strings($value)) {
-            $iter = new JsonStringIterator($value);
-            if (!$iter->is_malformed()) {
-                while ($iter->next_value()) {
-                    $original = $iter->get_value();
-                    $rewritten = $this->rewrite($original, $content_type);
-                    if ($rewritten !== $original) {
-                        $iter->set_value($rewritten);
-                    }
-                }
-                $rewritten_value = $iter->get_result();
-                if ($cache_key !== null) {
-                    $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
-                }
-                return $rewritten_value;
+            if ($content_type === null) {
+                $content_type = self::PLAIN_TEXT;
             }
+
+            $cache_key = null;
+            if (strlen($value) <= self::VALUE_REWRITE_CACHE_MAX_INPUT_BYTES) {
+                $cache_key = sha1($this->rewrite_depth . "\0" . $content_type . "\0" . $value);
+
+                $cached = $this->get_cached_value_rewrite($cache_key, $content_type, $value);
+                if ($cached !== null) {
+                    return $cached;
+                }
+            }
+
+            // Quick-reject values without an HTML URL attribute, a literal source
+            // domain, an encoding marker which may hide a source-domain byte, or a
+            // registered shortcode codec which may hide a complete URL. This avoids
+            // constructing the structured parsers for most values.
+            if (!$this->maybe_contains_rewritable_urls($value)) {
+                if (
+                    self::BLOCK_MARKUP !== $content_type
+                    || !$this->value_might_contain_hidden_shortcode_url($value)
+                ) {
+                    return $value;
+                }
+            }
+
+            // Performance guard: avoid constructing the serialized-PHP parser for
+            // ordinary URL strings and block markup. The parser still owns
+            // validation once entered; this gate only skips first-byte shapes that
+            // cannot expose serialized string values for rewriting.
+            if ($this->could_be_php_serialization_with_strings($value)) {
+                $p = new PhpSerializationProcessor($value);
+                if (!$p->is_malformed()) {
+                    while ($p->next_value()) {
+                        $original = $p->get_value();
+                        $rewritten = $this->rewrite($original, $content_type);
+                        if ($rewritten !== $original) {
+                            $p->set_value($rewritten);
+                        }
+                    }
+                    $rewritten_value = $p->get_updated_serialization();
+                    if ($cache_key !== null) {
+                        $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
+                    }
+                    return $rewritten_value;
+                }
+            }
+
+            // Performance guard: avoid calling json_decode() for ordinary URL
+            // strings and block markup. JsonStringIterator still owns validation
+            // once entered; this gate only skips first non-whitespace bytes that
+            // cannot start a JSON value containing string leaves.
+            if ($this->could_be_json_with_strings($value)) {
+                $iter = new JsonStringIterator($value);
+                if (!$iter->is_malformed()) {
+                    while ($iter->next_value()) {
+                        $original = $iter->get_value();
+                        $rewritten = $this->rewrite($original, $content_type);
+                        if ($rewritten !== $original) {
+                            $iter->set_value($rewritten);
+                        }
+                    }
+                    $rewritten_value = $iter->get_result();
+                    if ($cache_key !== null) {
+                        $this->set_cached_value_rewrite($cache_key, $content_type, $value, $rewritten_value);
+                    }
+                    return $rewritten_value;
+                }
+            }
+
+            // Base64 decoding is temporarily disabled for performance.
+            // The base64 transport layer in SQL is already handled by
+            // Base64ValueScanner in SqlStatementRewriter — this block
+            // was for base64-within-base64 nesting which is rare in practice.
+
+            $original_value = $value;
+            if ($content_type === self::BLOCK_MARKUP) {
+                $value = $this->rewrite_shortcode_markup($value);
+            }
+
+            $rewritten_value = $this->rewrite_urls($value, $content_type);
+            if ($cache_key !== null) {
+                $this->set_cached_value_rewrite($cache_key, $content_type, $original_value, $rewritten_value);
+            }
+
+            return $rewritten_value;
+        } finally {
+            --$this->rewrite_depth;
         }
-
-        // Base64 decoding is temporarily disabled for performance.
-        // The base64 transport layer in SQL is already handled by
-        // Base64ValueScanner in SqlStatementRewriter — this block
-        // was for base64-within-base64 nesting which is rare in practice.
-
-        $original_value = $value;
-        if ($content_type === self::BLOCK_MARKUP) {
-            $value = $this->rewrite_shortcode_markup($value);
-        }
-
-        $rewritten_value = $this->rewrite_urls($value, $content_type);
-        if ($cache_key !== null) {
-            $this->set_cached_value_rewrite($cache_key, $content_type, $original_value, $rewritten_value);
-        }
-
-        return $rewritten_value;
     }
 
     /**
