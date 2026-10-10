@@ -1114,6 +1114,29 @@ class ImportClient
             return;
         }
         if ($command === "files-push") {
+            if ($abort) {
+                $context = $options['files_push_context'] ?? self::prepare_files_push_context(
+                    $this->remote_reprint_api_url,
+                    $this->state_dir,
+                    $this->filesystem_root,
+                    $options
+                );
+                $push_state_directory = $context['push_state_directory'];
+                // Local abort does not read sender JSON or contact the target.
+                // Keep the completed local index and all pull state unchanged.
+                $this->remove_local_plan_directory(wp_join_unix_paths($push_state_directory, 'plan'));
+                foreach (['excluded_paths.json', 'excluded_paths.json.tmp', 'sender.json.tmp', 'sender.json'] as $state_file) {
+                    $state_path = wp_join_unix_paths($push_state_directory, $state_file);
+                    if (is_file($state_path) && !unlink($state_path)) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a local cleanup path to the CLI, not HTML.
+                        throw new RuntimeException('Failed to remove local files-push state: ' . $state_path . '.');
+                    }
+                }
+                $this->audit_log('ABORT files-push | Local sender state and plan cleared.');
+                $this->progress->show_lifecycle_line("Local files-push state cleared; target unchanged.\n");
+                $this->output_progress(['status' => 'aborted', 'message' => 'Local files-push state cleared; target unchanged.']);
+                return;
+            }
             if (is_file($this->pull_index_wal_path)) {
                 throw new RuntimeException(
                     "Finish or abort the interrupted files-pull before running files-push."
@@ -2407,6 +2430,7 @@ class ImportClient
      * @param array $options {
      *     Parsed files-push options.
      *
+     *     @type bool   $abort      Clear local sender state without requiring a credential.
      *     @type string $secret     HMAC connection token.
      *     @type bool   $insecure   Allow HTTP and skip HTTPS certificate checks.
      *     @type bool   $allow_http Whether the operator allowed a plain-HTTP target.
@@ -2427,12 +2451,14 @@ class ImportClient
         string $filesystem_root,
         array $options
     ): array {
-        $credential = self::resolve_credential(
-            $options,
-            self::remote_state_directory_path($remote_reprint_api_url, $state_dir)
-        );
-        if ($credential['scheme'] === null) {
-            throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
+        if (empty($options['abort'])) {
+            $credential = self::resolve_credential(
+                $options,
+                self::remote_state_directory_path($remote_reprint_api_url, $state_dir)
+            );
+            if ($credential['scheme'] === null) {
+                throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
+            }
         }
         if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
             throw new InvalidArgumentException(
@@ -16101,7 +16127,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key-path=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key-path=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]\nreprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --abort",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -16111,7 +16137,11 @@ if (
                 "Each process runs one sender until it completes, reaches a caller time or\n" .
                 "memory boundary, or receives a signal handled by this PHP runtime.\n" .
                 "Re-run the same command after exit 2.\n" .
-                "After a restart result, the next run starts a fresh plan.\n",
+                "After a restart result, the next run starts a fresh plan.\n" .
+                "--abort clears only local sender state and its plan. It keeps the\n" .
+                "completed local index, pull state, and target files unchanged.\n" .
+                "It needs no credential or preflight and sends no request. A target\n" .
+                "commit already in progress is not cancelled.\n",
             "extra" =>
                 "Progress output:\n" .
                 "  auto   Use tty on a terminal and jsonl otherwise (default)\n" .
@@ -16122,7 +16152,7 @@ if (
                 "Explicit tty, jsonl, and compact modes cannot be combined with --verbose.\n" .
                 "\n" .
                 "Exit outcomes:\n" .
-                "  0  File push complete\n" .
+                "  0  File push complete or local state aborted\n" .
                 "  2  Partial, interrupted, or restart; run the command again\n" .
                 "  1  Failed request or command error\n",
         ],
@@ -16479,7 +16509,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--insecure', '--allow-unsafe-http', '--force-http', '--verbose', '-v'],
+                ['--insecure', '--allow-unsafe-http', '--force-http', '--verbose', '-v', '--abort'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0

@@ -27,6 +27,18 @@ if ($reprint_push_test_request_log !== '' && is_string($reprint_push_test_endpoi
     );
 }
 
+// Malformed target replies still travel through the real HTTP connection.
+$reprint_push_test_response_path = (string) getenv('REPRINT_PUSH_TEST_RESPONSE_CONFIG');
+if (is_file($reprint_push_test_response_path)) {
+    $reprint_push_test_responses = json_decode( (string) file_get_contents($reprint_push_test_response_path), true);
+    if (isset($reprint_push_test_responses[$reprint_push_test_endpoint])) {
+        http_response_code(409);
+        header('Content-Type: application/json');
+        echo json_encode($reprint_push_test_responses[$reprint_push_test_endpoint]);
+        exit;
+    }
+}
+
 $reprint_push_test_gate_endpoint_path = (string) getenv('REPRINT_PUSH_TEST_GATE_ENDPOINT_CONFIG');
 $reprint_push_test_gate_endpoint = $reprint_push_test_gate_endpoint_path === ''
     ? ''

@@ -95,7 +95,7 @@ final class FilesPushCommandTest extends TestCase
 
     public function testFilesPushRejectsOptionsOutsideItsExactAllowlist(): void
     {
-        foreach (['--abort', '--filter=none', '--docroot=' . $this->localTree, '--duty=0.5'] as $rejectedOption) {
+        foreach (['--filter=none', '--docroot=' . $this->localTree, '--duty=0.5'] as $rejectedOption) {
             $result = $this->runCli([
                 'files-push',
                 'https://example.test/?reprint-api=1',
@@ -134,6 +134,60 @@ final class FilesPushCommandTest extends TestCase
             '--force-http is accepted only by files-push and db-push.',
             $rewriteUrlWithForceHttpSource['output']
         );
+    }
+
+    /** Local abort needs neither a saved preflight nor a connection credential. */
+    public function testFilesPushAbortClearsCorruptLocalActiveStateWithoutChangingOtherPaths(): void
+    {
+        $remote = 'https://example.test/?reprint-api=1';
+        $remote_state_directory = $this->stateDirectory . '/remotes/' . md5($remote);
+        $push_state_directory = $remote_state_directory . '/push';
+        mkdir($push_state_directory . '/plan', 0700, true);
+        file_put_contents($remote_state_directory . '/local_index.jsonl', "keep index\n");
+        // Deliberately corrupt sender JSON; abort must not depend on decoding it.
+        file_put_contents($push_state_directory . '/sender.json', 'unfinished JSON');
+        file_put_contents($push_state_directory . '/sender.json.tmp', 'unfinished replacement');
+        file_put_contents($push_state_directory . '/excluded_paths.json', '[]');
+        file_put_contents($push_state_directory . '/excluded_paths.json.tmp', 'unfinished replacement');
+        file_put_contents($push_state_directory . '/plan/fresh_local_index.jsonl', 'unfinished index');
+        file_put_contents($this->localTree . '/keep.txt', 'keep local file');
+        mkdir($remote_state_directory . '/pull');
+        file_put_contents($remote_state_directory . '/pull/state.json', 'keep pull state');
+        file_put_contents($remote_state_directory . '/pull/index.wal', 'keep pull journal');
+        foreach ([1, 2] as $attempt) {
+            $result = $this->runCli(['files-push', $remote, '--state-dir=' . $this->stateDirectory,
+                '--fs-root=' . $this->localTree, '--abort']);
+            $this->assertSame(0, $result['exit'], $result['output']);
+            $this->assertStringContainsString('aborted', $result['output']);
+            $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
+            $this->assertFileDoesNotExist($push_state_directory . '/sender.json.tmp');
+            $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
+            $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json.tmp');
+            $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
+            $this->assertSame("keep index\n", file_get_contents($remote_state_directory . '/local_index.jsonl'));
+            $this->assertSame('keep local file', file_get_contents($this->localTree . '/keep.txt'));
+            $this->assertSame('keep pull state', file_get_contents($remote_state_directory . '/pull/state.json'));
+            $this->assertSame('keep pull journal', file_get_contents($remote_state_directory . '/pull/index.wal'));
+        }
+    }
+
+    /** Abort cannot remove sender files while another command holds the process lock. */
+    public function testFilesPushAbortRequiresTheProcessLock(): void
+    {
+        $remote = 'https://example.test/?reprint-api=1';
+        $push_state_directory = $this->stateDirectory . '/remotes/' . md5($remote) . '/push';
+        mkdir($push_state_directory, 0700, true);
+        file_put_contents($push_state_directory . '/sender.json', 'keep active state');
+        $processLock = new \ReprintProcessLock($this->stateDirectory);
+        try {
+            $result = $this->runCli(['files-push', $remote, '--state-dir=' . $this->stateDirectory,
+                '--fs-root=' . $this->localTree, '--abort']);
+            $this->assertSame(1, $result['exit'], $result['output']);
+            $this->assertStringContainsString('Another Reprint process is using the state directory', $result['output']);
+            $this->assertSame('keep active state', file_get_contents($push_state_directory . '/sender.json'));
+        } finally {
+            $processLock->close();
+        }
     }
 
     public function testFilesPushRejectsAnInvalidProgressMode(): void

@@ -1424,3 +1424,8 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from the pull state selected by the remote Reprint API URL. No network calls are made. See [Step 6](#step-6--generate-runtime-configuration).
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+
+For `files-push`, `--abort` clears the local sender checkpoint and plan without
+contacting the target. It needs no preflight or credential. The completed local
+index, pull state, local files, and target files stay unchanged. A target commit
+already in progress is not cancelled; the next push may still need to finish it.
