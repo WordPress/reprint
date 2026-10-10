@@ -7,6 +7,56 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../packages/reprint-client/src/lib/url-rewrite/load.php';
 
 class ShortcodeProcessorTest extends TestCase {
+    /** Long incomplete candidates must not repeatedly walk the remaining text. */
+    public function testRepeatedQuotedCandidatesFinishWithinTheScanWindow(): void
+    {
+        $script = __DIR__ . '/fixtures/shortcode-scan.php';
+        $directory = sys_get_temp_dir() . '/shortcode-scan-' . bin2hex(random_bytes(6));
+        mkdir($directory);
+        $process = proc_open([PHP_BINARY, $script], [
+            0 => ['file', '/dev/null', 'r'],
+            1 => ['file', $directory . '/stdout', 'w'],
+            2 => ['file', $directory . '/stderr', 'w'],
+        ], $pipes);
+        $this->assertIsResource($process);
+        try {
+            // The completion guard leaves room for slow shared CI runners.
+            $deadline = microtime(true) + 30;
+            do {
+                $status = proc_get_status($process);
+                if (!$status['running']) {
+                    break;
+                }
+                usleep(20000);
+            } while (microtime(true) < $deadline);
+            $this->assertFalse($status['running'], 'Scanning a 1 MiB shortcode value exceeded thirty seconds.');
+            $this->assertSame(0, $status['exitcode'], file_get_contents($directory . '/stderr'));
+            $this->assertSame("complete\n", file_get_contents($directory . '/stdout'));
+        } finally {
+            if (proc_get_status($process)['running']) {
+                proc_terminate($process);
+            }
+            proc_close($process);
+            unlink($directory . '/stdout');
+            unlink($directory . '/stderr');
+            rmdir($directory);
+        }
+    }
+
+    /** Candidates inside an incomplete quote still start with their own quote state. */
+    public function testRecoversCompleteTokensInsideAnIncompleteQuotedCandidate(): void
+    {
+        $processor = new ShortcodeProcessor(
+            'Before [incomplete "text [image src=\'https://old.example/photo\'] [gallery]'
+        );
+        $this->assertTrue($processor->next_token());
+        $this->assertSame('Before [incomplete "text ', $processor->get_token_text());
+        $this->assertTrue($processor->next_shortcode('image'));
+        $this->assertSame('https://old.example/photo', $processor->get_attribute('src'));
+        $this->assertTrue($processor->next_shortcode('gallery'));
+        $this->assertFalse($processor->next_token());
+    }
+
     public function testReportsNestedOpenersAndClosersIndependently(): void
     {
         $processor = new ShortcodeProcessor(
