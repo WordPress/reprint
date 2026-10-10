@@ -8696,6 +8696,13 @@ class ImportClient
         $tracked_file = $this->get_state()->current_file ?? null;
         $tracked_bytes = $this->get_state()->current_file_bytes ?? null;
         if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+            $this->assert_local_path_parent_within_root($tracked_file);
+            $resolved_file = $this->resolve_local_path_with_missing_tail($tracked_file);
+            $root = Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format());
+            if (!Utils::path_is_same_as_or_descendant_of($resolved_file, $root)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path error rendered by the CLI, not HTML.
+                throw new RuntimeException("Refusing to resume file outside filesystem root: {$tracked_file}");
+            }
             $actual_size = filesize($tracked_file);
             if ($actual_size > $tracked_bytes) {
                 $this->audit_log(
@@ -11044,8 +11051,9 @@ class ImportClient
      *
      * For absolute targets, the target itself must be under $root.
      * For relative targets, the resolved path (parent dir + target) must be
-     * under $root. We normalize ".." segments without touching the filesystem,
-     * since the target may not exist yet.
+     * under $root. Resolve existing links before applying ".." segments,
+     * without creating missing components. Dangling links are resolved through
+     * their stored targets. Existing link loops are refused.
      *
      * @throws RuntimeException if the target escapes the root.
      */
@@ -11054,13 +11062,12 @@ class ImportClient
         string $target,
         string $root
     ): void {
-        if (Utils::str_starts_with($target, "/")) {
-            // Absolute target: must be under root
-            $resolved = Utils::normalize_path($target, Utils::native_path_format());
-        } else {
-            // Relative target: resolve against the symlink's parent directory
-            $resolved = Utils::normalize_path(wp_join_unix_paths($symlink_parent_dir, $target), Utils::native_path_format());
-        }
+        $path_format = Utils::native_path_format();
+        $absolute_target = Utils::is_absolute_path($target, $path_format)
+            ? $target
+            : wp_join_unix_paths($symlink_parent_dir, $target);
+        $resolved = $this->resolve_local_path_with_missing_tail($absolute_target);
+        $root = Utils::normalize_path_separators($root, $path_format);
 
         if (!Utils::path_is_same_as_or_descendant_of($resolved, $root)) {
             throw new RuntimeException(
@@ -11781,6 +11788,7 @@ class ImportClient
         }
 
         $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
+        $this->assert_local_path_parent_within_root($local_absolute_path);
         if ($is_first || $context->remote_file_path === null) {
             $context->remote_file_path = $path;
             $context->remote_file_size = $file_size;
@@ -12312,6 +12320,8 @@ class ImportClient
             }
         }
 
+        $this->assert_local_path_parent_within_root($local_absolute_path);
+
         if (
             (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
             (!is_dir($local_absolute_path) || is_link($local_absolute_path))
@@ -12406,6 +12416,7 @@ class ImportClient
         // Validate that the symlink target doesn't escape the filesystem root.
         $root = $this->filesystem_root;
         try {
+            $this->assert_local_path_parent_within_root($local_absolute_path);
             $this->assert_symlink_target_within_root(
                 dirname($local_absolute_path),
                 $target_for_local,
@@ -12510,6 +12521,64 @@ class ImportClient
             "message" => "Symlink: {$path} -> {$target}",
         ]);
     }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path errors are CLI text, not HTML.
+    /** Refuses writes or replacements through a parent outside the filesystem root. */
+    private function assert_local_path_parent_within_root(string $local_absolute_path): void
+    {
+        $resolved_parent = $this->resolve_local_path_with_missing_tail(dirname($local_absolute_path));
+        $root = Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format());
+        if (!Utils::path_is_same_as_or_descendant_of($resolved_parent, $root)) {
+            throw new RuntimeException(
+                "Refusing to change path outside filesystem root: {$local_absolute_path} " .
+                "(parent resolves to {$resolved_parent})"
+            );
+        }
+    }
+
+    /** Resolves links before parent segments, including links beyond a missing component. */
+    private function resolve_local_path_with_missing_tail(string $absolute_path): string
+    {
+        $path_format = Utils::native_path_format();
+        $links_followed = 0;
+        while (true) {
+            $absolute_path = Utils::normalize_path_separators($absolute_path, $path_format);
+            $share_root = $path_format === 'windows' ? Utils::windows_share_root($absolute_path) : null;
+            $path_root = '/';
+            if ($share_root !== null) {
+                $path_root = Utils::normalize_path_separators($share_root, $path_format);
+            } elseif ($path_format === 'windows' && preg_match('~^[A-Z]:/~', $absolute_path)) {
+                $path_root = substr($absolute_path, 0, 3);
+            }
+            $components = explode('/', substr($absolute_path, strlen($path_root)));
+            $resolved = $path_root;
+            foreach ($components as $index => $component) {
+                // Apply .. only after expanding the preceding link. Walk even
+                // a missing component: a later .. can return to existing paths.
+                $resolved = Utils::normalize_path(wp_join_unix_paths($resolved, $component), $path_format);
+                if (!is_link($resolved)) {
+                    continue;
+                }
+                $link_target = readlink($resolved);
+                if ($link_target === false) {
+                    throw new RuntimeException("Cannot read symlink while resolving local path: {$resolved}");
+                }
+                if (++$links_followed > 40) {
+                    throw new RuntimeException("Cannot resolve local path {$absolute_path}: more than 40 links were followed.");
+                }
+                $absolute_path = wp_join_unix_paths(
+                    Utils::is_absolute_path($link_target, $path_format)
+                        ? $link_target
+                        : wp_join_unix_paths(dirname($resolved), $link_target),
+                    implode('/', array_slice($components, $index + 1))
+                );
+                continue 2;
+            }
+            return $resolved;
+        }
+    }
+
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     /**
      * Handle an error chunk from the server.
