@@ -659,7 +659,7 @@ class ImportClient
 
         // Create directories
         if (!is_dir($this->pull_state_directory)) {
-            if (!mkdir($this->pull_state_directory, 0755, true)) {
+            if (!mkdir($this->pull_state_directory, 0700, true)) {
                 throw new RuntimeException("Failed to create directory: {$this->pull_state_directory}");
             }
         }
@@ -751,8 +751,16 @@ class ImportClient
         $timestamp = date("Y-m-d H:i:s");
         $log_line = "[{$timestamp}] {$message}\n";
 
-        // Always write to audit log
-        file_put_contents($this->audit_log_file, $log_line, FILE_APPEND);
+        // New logs start private; tighten older logs before appending.
+        $previous_umask = umask(0077);
+        try {
+            if (is_file($this->audit_log_file) && !chmod($this->audit_log_file, 0600)) {
+                throw new RuntimeException("Failed to set audit log permissions: {$this->audit_log_file}");
+            }
+            file_put_contents($this->audit_log_file, $log_line, FILE_APPEND);
+        } finally {
+            umask($previous_umask);
+        }
 
         // Output to console if verbose mode or if explicitly requested
         if ($to_console && $this->verbose_mode) {
@@ -860,10 +868,7 @@ class ImportClient
         // Mask the positional remote URL to avoid logging secrets embedded in query strings.
         $masked = $argv;
         if (isset($masked[2]) && strpos($masked[2], '-') !== 0) {
-            $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
-            if (in_array($command, ['files-push', 'db-push'], true)) {
-                $masked[2] = self::mask_url_credentials($masked[2]);
-            }
+            $masked[2] = self::mask_url_credentials($masked[2]);
         }
         foreach ($masked as $argument_index => $argument) {
             if (!is_string($argument)) {
@@ -877,6 +882,9 @@ class ImportClient
             }
             if (strpos($argument, '--target-pass=') === 0) {
                 $masked[$argument_index] = '--target-pass=***';
+            }
+            if (strpos($argument, '--mysql-password=') === 0) {
+                $masked[$argument_index] = '--mysql-password=***';
             }
         }
         $this->audit_log(
@@ -2847,7 +2855,7 @@ class ImportClient
         }
     }
 
-    /** Masks URL authority credentials without changing the URL used to name the local push state directory. */
+    /** Masks URL credentials without changing the URL used for requests or local state paths. */
     private static function mask_url_credentials(string $url): string
     {
         $masked = preg_replace(
@@ -2855,7 +2863,8 @@ class ImportClient
             '$1***@',
             $url
         );
-        return is_string($masked) ? $masked : $url;
+        $masked = is_string($masked) ? $masked : $url;
+        return preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked) ?? $masked;
     }
 
     /**
@@ -3111,7 +3120,7 @@ class ImportClient
     public function run_preflight(): void
     {
         ["url" => $url, "params" => $post_data] = $this->build_request("preflight", null);
-        $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
+        $this->audit_log("PREFLIGHT REQUEST | " . self::mask_url_credentials($url), false);
 
         // Try each User-Agent until one gets a JSON response or Reprint
         // itself refuses the request.
@@ -8722,7 +8731,7 @@ class ImportClient
         }
         ["url" => $url, "params" => $request_params] = $this->build_request("file_fetch", $cursor, $params);
         $post_data = array_merge($request_params, $post_data ?? []);
-        $this->audit_log("Downloading file fetch from {$url}");
+        $this->audit_log("Downloading file fetch from " . self::mask_url_credentials($url));
         $this->audit_log("POST data: " . json_encode($post_data));
 
         $context = new StreamingContext();
@@ -13604,7 +13613,7 @@ class ImportClient
     {
         $this->reset_request_error_state();
 
-        $this->audit_log("HTTP_REQUEST | POST | {$url}", false);
+        $this->audit_log("HTTP_REQUEST | POST | " . self::mask_url_credentials($url), false);
         $body = http_build_query($post_data);
 
         $ch = curl_init($url);
@@ -13720,7 +13729,7 @@ class ImportClient
         $this->reset_request_error_state();
 
         // Log HTTP request details
-        $log_parts = ["HTTP_REQUEST", "POST", $url];
+        $log_parts = ["HTTP_REQUEST", "POST", self::mask_url_credentials($url)];
 
         if ($post_data && isset($post_data["file_list"])) {
             $file_list_part = $post_data["file_list"];

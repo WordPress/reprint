@@ -35,7 +35,7 @@ final class ReprintProcessLock
         $normalized_state_dir = Utils::trim_right_slash($state_dir, Utils::native_path_format());
         if (
             !is_dir($state_dir)
-            && !mkdir($state_dir, 0755, true)
+            && !mkdir($state_dir, 0700, true)
             && !is_dir($state_dir)
         ) {
             throw new RuntimeException(

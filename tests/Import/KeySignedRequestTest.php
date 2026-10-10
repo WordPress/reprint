@@ -113,13 +113,18 @@ final class KeySignedRequestTest extends TestCase {
     {
         $remote_path = $this->root . '/remote/pulled.txt';
         file_put_contents($remote_path, "pulled\0contents\n");
-        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
+        $url = str_replace('http://', 'http://http-user:http-password@', $this->url);
+        $client = new \ImportClient($url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
         ( new \ReflectionMethod($client, 'initialize_credential') )->invoke(
             $client, true, ['private_key_path' => $this->private_key_path]
         );
         $client->get_state()->set_preflight_record([
             'data' => ['capabilities' => ['base64_path_parameters' => true]],
         ]);
+        $preflight = ( new \ReflectionMethod($client, 'fetch_json') )->invoke(
+            $client, \WordPress\Reprint\Server\Utils::endpoint_url($url, 'preflight'), []
+        );
+        $this->assertSame(200, $preflight['http_code']);
         $file_list_path = $this->root . '/file-list.json';
         file_put_contents($file_list_path, json_encode([['path' => base64_encode($remote_path)]]));
         $request = ( new \ReflectionMethod($client, 'build_request') )->invoke(
@@ -145,6 +150,12 @@ final class KeySignedRequestTest extends TestCase {
 
         $this->assertTrue($context->saw_completion, file_get_contents($this->root . '/server.log'));
         $this->assertSame("pulled\0contents\n", $received);
+        $audit_log = (string) file_get_contents($this->root . '/state/audit.log');
+        $this->assertStringNotContainsString('http-user', $audit_log);
+        $this->assertStringNotContainsString('http-password', $audit_log);
+        $masked_url = str_replace('http://', 'http://***@', $this->url);
+        $this->assertStringContainsString($masked_url . '&endpoint=preflight', $audit_log);
+        $this->assertStringContainsString($masked_url . '&endpoint=file_fetch', $audit_log);
     }
 
     /** @return array<string,mixed> The command report preflight printed last. */

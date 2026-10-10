@@ -133,6 +133,34 @@ final class ReprintProcessLockTest extends TestCase
         $next_process_lock->close();
     }
 
+    /** New CLI and library state directories and audit files use private modes. */
+    public function testNewStateDirectoriesAndAuditLogHavePrivateModes(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('POSIX mode bits are not enforced on Windows.');
+        }
+        $previous_umask = umask(0022);
+        try {
+            $lock = new \ReprintProcessLock($this->root . '/cli-state');
+            $lock->close();
+            $client = new \ImportClient('https://example.com/?reprint-api',
+                $this->root . '/library-state', $this->root . '/files');
+            $client->audit_log('first line');
+            clearstatcache();
+            $this->assertSame(0700, fileperms($this->root . '/cli-state') & 0777);
+            $this->assertSame(0700, fileperms($this->root . '/library-state') & 0777);
+            $this->assertSame(0600, fileperms($this->root . '/library-state/audit.log') & 0777);
+            chmod($this->root . '/library-state/audit.log', 0644);
+            $client->audit_log('second line');
+            clearstatcache();
+            $this->assertSame(0600, fileperms($this->root . '/library-state/audit.log') & 0777);
+            $this->assertStringContainsString('first line', file_get_contents($this->root . '/library-state/audit.log'));
+            $this->assertStringContainsString('second line', file_get_contents($this->root . '/library-state/audit.log'));
+        } finally {
+            umask($previous_umask);
+        }
+    }
+
     private function removeTree(string $path): void
     {
         if (!is_dir($path)) {
