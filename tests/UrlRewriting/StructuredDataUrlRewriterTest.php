@@ -606,6 +606,60 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertStringNotContainsString('\\/', $result);
     }
 
+    /** Deep string wrappers stay intact under a fixed CLI memory ceiling. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testDeepSerializedStringsStayWithinTheMemoryCeiling(): void
+    {
+        ini_set('memory_limit', '128M');
+        $rewriter = $this->createRewriter();
+        foreach ([65525, 1024 * 1024] as $input_bytes) {
+            $input = $this->wrapSerializedString('https://old-site.com/photo', $input_bytes);
+            $started_at = microtime(true);
+            $this->assertSame($input, $rewriter->rewrite($input));
+            $this->assertLessThan(2.0, microtime(true) - $started_at);
+            $this->assertLessThan(64 * 1024 * 1024, memory_get_peak_usage(true));
+        }
+        // Returning from the depth limit must not affect the next database value.
+        $this->assertSame('https://new-site.com/photo', $rewriter->rewrite('https://old-site.com/photo'));
+    }
+
+    /** A value visited near the depth limit can still be fully rewritten on its own. */
+    public function testNestedRewriteCacheRespectsTheRemainingDepth(): void
+    {
+        $rewriter = $this->createRewriter();
+        $inner = serialize(serialize(serialize('https://old-site.com/photo')));
+        $input = $inner;
+        for ($depth = 0; $depth < 15; ++$depth) {
+            $input = serialize($input);
+        }
+        $this->assertSame($input, $rewriter->rewrite($input));
+        $this->assertSame(serialize(serialize(serialize('https://new-site.com/photo'))), $rewriter->rewrite($inner));
+    }
+
+    /** Shallow siblings still rewrite while an overly nested string remains opaque. */
+    public function testDeepSerializedFieldDoesNotPreventSiblingRewriting(): void
+    {
+        $deep = $this->wrapSerializedString('https://old-site.com/deep', 65525);
+        $input = serialize(['deep' => $deep, 'url' => 'https://old-site.com/photo']);
+        $output = unserialize($this->createRewriter()->rewrite($input), ['allowed_classes' => false]);
+        $this->assertSame($deep, $output['deep']);
+        $this->assertSame('https://new-site.com/photo', $output['url']);
+    }
+
+    /** Build a long wrapper chain without repeatedly copying its complete suffix. */
+    private function wrapSerializedString(string $value, int $minimum_bytes): string
+    {
+        $prefixes = [];
+        $bytes = strlen($value);
+        while ($bytes < $minimum_bytes) {
+            $prefix = 's:' . $bytes . ':"';
+            $prefixes[] = $prefix;
+            $bytes += strlen($prefix) + 2;
+        }
+        return implode('', array_reverse($prefixes)) . $value . str_repeat('";', count($prefixes));
+    }
+
     // --- Serialized PHP ---
 
     public function testRewritesUrlInSerializedArray(): void
