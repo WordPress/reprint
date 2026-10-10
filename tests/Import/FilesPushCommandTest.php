@@ -171,6 +171,20 @@ final class FilesPushCommandTest extends TestCase
         }
     }
 
+    /** Library callers keep the HTTP permission supplied when constructing the client. */
+    public function testDirectFilesPushAbortUsesTheClientHttpPermission(): void
+    {
+        $remote = 'http://127.0.0.1:1/?reprint-api=1';
+        $push_state_directory = $this->stateDirectory . '/remotes/' . md5($remote) . '/push';
+        mkdir($push_state_directory, 0700, true);
+        file_put_contents($push_state_directory . '/sender.json', '{}');
+        $client = new ImportClient($remote, $this->stateDirectory, $this->localTree,
+            ['signal_handling_command' => 'files-push', 'insecure' => true]);
+        $client->run(['command' => 'files-push', 'abort' => true]);
+        $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
+        $this->assertSame(0, $client->exit_code);
+    }
+
     /** Abort cannot remove sender files while another command holds the process lock. */
     public function testFilesPushAbortRequiresTheProcessLock(): void
     {

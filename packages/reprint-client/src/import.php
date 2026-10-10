@@ -1115,6 +1115,7 @@ class ImportClient
         }
         if ($command === "files-push") {
             if ($abort) {
+                $options['insecure'] = $this->insecure;
                 $context = $options['files_push_context'] ?? self::prepare_files_push_context(
                     $this->remote_reprint_api_url,
                     $this->state_dir,
