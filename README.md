@@ -859,6 +859,8 @@ decodes the base64-encoded column values, detects the data format (serialized PH
 JSON, block markup, plain text), and rewrites URLs through the appropriate parser
 so that surrounding structure stays intact. Serialized PHP `s:N:` length prefixes
 are recalculated, JSON is re-encoded, and block comment attributes are updated.
+Rewriting allows at most 16 active calls through nested encoded strings. Values
+below that depth stay unchanged; shallower sibling values are still rewritten.
 
 You can map multiple domains by repeating the flag:
 
