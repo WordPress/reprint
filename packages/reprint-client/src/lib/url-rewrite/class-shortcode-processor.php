@@ -174,6 +174,14 @@ class ShortcodeProcessor {
 	private $scan_at_after_failure = null;
 
 	/**
+	 * Failed attribute suffixes, with one bit per quote state in each byte.
+	 * Lazily allocated so plain text does not need a second input-sized string.
+	 *
+	 * @var string
+	 */
+	private $failed_attribute_states = '';
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string $text Text containing possible shortcode markup.
@@ -839,10 +847,21 @@ class ShortcodeProcessor {
 			);
 		}
 
+		if ( '' === $this->failed_attribute_states ) {
+			$this->failed_attribute_states = str_repeat( "\0", $this->length );
+		}
+
 		$attributes_start = $at;
 		$first_quote_at   = null;
 		$quote            = null;
 		while ( $at < $this->length ) {
+			// The remaining scan depends only on this offset and quote state.
+			$state_bit = null === $quote ? 1 : ( '"' === $quote ? 2 : 4 );
+			$states    = ord( $this->failed_attribute_states[ $at ] );
+			if ( $states & $state_bit ) {
+				break;
+			}
+			$this->failed_attribute_states[ $at ] = chr( $states | $state_bit );
 			$byte = $this->text[ $at ];
 
 			if ( null !== $quote ) {
@@ -871,6 +890,12 @@ class ShortcodeProcessor {
 			if ( ']' !== $byte ) {
 				++$at;
 				continue;
+			}
+
+			// Only failed scans remain cached. A complete token may be scanned
+			// again after next_token() returns its preceding text token.
+			for ( $clear_at = $attributes_start; $clear_at <= $at; ++$clear_at ) {
+				$this->failed_attribute_states[ $clear_at ] = "\0";
 			}
 
 			$attributes_end = $at;
