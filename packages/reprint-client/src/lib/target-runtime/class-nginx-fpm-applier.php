@@ -17,6 +17,19 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  */
 class NginxFpmApplier implements RuntimeApplier
 {
+    /**
+     * Validate literal nginx settings before writing either runtime artifact.
+     *
+     * @param RuntimeManifest $manifest        Source runtime settings.
+     * @param string          $filesystem_root Local document root.
+     * @param string          $output_dir      Directory for generated files.
+     * @param array           $options {
+     *     Target listener settings.
+     *     @type string $host Server name; defaults to localhost.
+     *     @type int    $port Listener port; defaults to 80.
+     * }
+     * @return string[] Setup summary and reload instructions.
+     */
     public function apply(RuntimeManifest $manifest, string $filesystem_root, string $output_dir, array $options = []): array
     {
         $host = $options['host'] ?? 'localhost';
@@ -24,15 +37,23 @@ class NginxFpmApplier implements RuntimeApplier
 
         $summary = [];
 
-        // 1. Write runtime.php
         $runtime_path = wp_join_unix_paths($output_dir, 'runtime.php');
+        foreach (['document root' => $filesystem_root, 'runtime path' => $runtime_path, 'host' => $host] as $name => $value) {
+            if (preg_match('/[\x00-\x1f\x7f$]/', $value) === 1) {
+                throw new InvalidArgumentException(
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Configuration error shown as CLI text, not HTML.
+                    "Cannot use {$name} " . json_encode($value, JSON_INVALID_UTF8_SUBSTITUTE) . " in nginx configuration: dollar signs and control characters are not supported."
+                );
+            }
+        }
+        $nginx_conf = $this->generate_nginx_conf($manifest, $filesystem_root, $runtime_path, $host, $port);
+        // 1. Write runtime.php
         $runtime = generate_runtime_php($manifest, $filesystem_root);
         write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
         // 2. Write nginx.conf (includes auto_prepend_file + INI directives)
         $nginx_conf_path = wp_join_unix_paths($output_dir, 'nginx.conf');
-        $nginx_conf = $this->generate_nginx_conf($manifest, $filesystem_root, $runtime_path, $host, $port);
         write_runtime_file($nginx_conf_path, $nginx_conf);
         $summary[] = "Wrote {$nginx_conf_path}";
 
@@ -50,7 +71,8 @@ class NginxFpmApplier implements RuntimeApplier
      * Generate an nginx server block that serves static files directly
      * and routes PHP requests through PHP-FPM. INI directives and
      * auto_prepend_file are passed via fastcgi_param PHP_VALUE,
-     * so no .user.ini is needed in the fs-root.
+     * so no .user.ini is needed in the fs-root. Literal values are quoted
+     * separately from the nginx variables used for request routing.
      */
     private function generate_nginx_conf(
         RuntimeManifest $manifest,
@@ -65,8 +87,8 @@ class NginxFpmApplier implements RuntimeApplier
         $lines[] = '';
         $lines[] = 'server {';
         $lines[] = "    listen {$port};";
-        $lines[] = "    server_name {$host};";
-        $lines[] = "    root {$filesystem_root};";
+        $lines[] = "    server_name " . $this->quote_nginx_string($host) . ";";
+        $lines[] = "    root " . $this->quote_nginx_string($filesystem_root) . ";";
         $lines[] = '    index index.php index.html;';
         $lines[] = '';
         $lines[] = '    # Static files served directly by nginx — no PHP involved.';
@@ -94,12 +116,18 @@ class NginxFpmApplier implements RuntimeApplier
         // PHP_VALUE accepts newline-separated directives in a single string.
         $lines[] = '        # Runtime configuration: auto_prepend_file and INI directives';
         $lines[] = '        # from the source host, passed to PHP-FPM without .user.ini.';
-        $lines[] = '        fastcgi_param PHP_VALUE "' . implode('\n', $php_values) . '";';
+        $lines[] = '        fastcgi_param PHP_VALUE ' . $this->quote_nginx_string(implode("\n", $php_values)) . ';';
 
         $lines[] = '    }';
         $lines[] = '}';
         $lines[] = '';
 
         return implode("\n", $lines);
+    }
+
+    /** Keep configuration punctuation inside one nginx string argument. */
+    private function quote_nginx_string(string $value): string
+    {
+        return '"' . strtr($value, ['\\' => '\\\\', '"' => '\\"', "\n" => '\\n', "\r" => '\\r', "\t" => '\\t']) . '"';
     }
 }
