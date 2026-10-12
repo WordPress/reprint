@@ -12521,7 +12521,14 @@ class ImportClient
     }
 
     /**
-     * Handle an error chunk from the server.
+     * Reports a source error and invalidates selected file-fetch work.
+     *
+     * @param array $chunk {
+     *     Source multipart error part.
+     *     @type string $body JSON with error_type, base64 path, and message.
+     * }
+     * @param string $phase Client phase consuming the error.
+     * @param StreamingContext $context Open request's current local file.
      */
     private function handle_error_chunk(
         array $chunk,
@@ -12540,7 +12547,14 @@ class ImportClient
         }
 
         $error_type = $data["error_type"] ?? "unknown";
-        $path = $data["path"] ?? "";
+        $encoded_path = $data["path"] ?? "";
+        $path = "";
+        if ($encoded_path !== "") {
+            $this->assert_valid_received_path($encoded_path, "remote error path");
+            /** @var string $path Validation above checked the base64 path and source format. */
+            $path = base64_decode($encoded_path, true);
+            $path = Utils::normalize_path_separators($path, $this->get_state()->remote_path_format());
+        }
         $message = $data["message"] ?? "Error";
 
         $this->audit_log(
@@ -12553,10 +12567,30 @@ class ImportClient
             ["file_changed", "file_missing", "file_open", "file_read"],
             true,
         );
-        if ($path !== "" && $is_file_error) {
+        if ($phase === "files" && $path !== "" && $is_file_error) {
+            $selected = $this->is_selected_for_pulling($path, false, "file");
+            if (!$selected && $this->follow_symlinks) {
+                // Followed targets can be selected outside an include prefix.
+                $selected = $this->next_remote_index_contains_remote_absolute_path_prefix($path);
+            }
+            if (!$selected) {
+                $this->audit_log("Skipped file error outside the pull selection: {$path}", true);
+                return;
+            }
+            $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
+            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+                $resolved_parent = realpath(dirname($local_absolute_path));
+                $path_format = Utils::native_path_format();
+                if ($resolved_parent === false || !Utils::path_is_same_as_or_descendant_of(
+                    Utils::normalize_path_separators($resolved_parent, $path_format),
+                    Utils::normalize_path_separators($this->filesystem_root, $path_format)
+                )) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path error rendered by the CLI, not HTML.
+                    throw new RuntimeException("Refusing file error removal outside filesystem root: {$local_absolute_path}");
+                }
+            }
             $context->remote_file_path = null;
             $context->remote_file_size = null;
-            $local_absolute_path = $this->filesystem_root . $path;
             if ($context->file_handle && $context->file_path === $local_absolute_path) {
                 fclose($context->file_handle);
                 $context->file_handle = null;
@@ -12565,7 +12599,7 @@ class ImportClient
                 $context->file_bytes_written = 0;
             }
 
-            if (file_exists($local_absolute_path)) {
+            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
                 @unlink($local_absolute_path);
             }
             $this->pull_index_journal->record_remote_invalidation($path);
