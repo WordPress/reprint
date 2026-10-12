@@ -1400,6 +1400,11 @@ truncated or rotated, so it provides a complete history of the migration.
 [2025-01-15 10:31:12] FILE TRUNCATE | /tmp/reprint-state/remotes/0123456789abcdef0123456789abcdef/pull/index.wal | pull index WAL batch applied
 ```
 
+New state directories use mode `0700`. The audit log uses mode `0600`, including
+older logs on the next append. Command and request log entries mask database
+password options, URL user-info, and `SECRET_KEY` query values. Request URLs are
+unchanged.
+
 Pass `--verbose` to also print audit log entries to the console as they happen.
 This is useful for debugging but noisy for production use.
 
