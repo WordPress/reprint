@@ -2747,6 +2747,29 @@ class ImportClient
         return $contents;
     }
 
+    /**
+     * Opens the key a resolved credential read, naming its file on failure.
+     *
+     * @param array $credential {
+     *     A resolve_credential() result whose scheme is 'key'.
+     *
+     *     @type string $private_key_pem Contents of the key file.
+     *     @type string $path            The key file.
+     * }
+     * @throws InvalidArgumentException When the file does not hold an RSA private key.
+     */
+    private static function public_key_client_for_credential(array $credential): \WordPress\Reprint\Server\PublicKeyClient
+    {
+        try {
+            return new \WordPress\Reprint\Server\PublicKeyClient($credential['private_key_pem']);
+        } catch (InvalidArgumentException $exception) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error naming a local file, never HTML.
+                "The private key at {$credential['path']} could not be used: " . $exception->getMessage()
+            );
+        }
+    }
+
     /** The sentence every remote command throws when it finds no credential. */
     private static function no_credential_message(string $remote_reprint_api_url, string $state_dir): string
     {
@@ -2783,13 +2806,7 @@ class ImportClient
             return new \Site_Export_HMAC_Client($credential['secret']);
         }
         if ($credential['scheme'] === 'key') {
-            try {
-                return new \WordPress\Reprint\Server\PublicKeyClient($credential['private_key_pem']);
-            } catch (InvalidArgumentException $exception) {
-                throw new InvalidArgumentException(
-                    "The private key at {$credential['path']} could not be used: " . $exception->getMessage()
-                );
-            }
+            return self::public_key_client_for_credential($credential);
         }
         throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
     }
@@ -3103,14 +3120,7 @@ class ImportClient
             if (!class_exists(\WordPress\Reprint\Server\PublicKeyClient::class)) {
                 throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --private-key-path.');
             }
-            try {
-                $this->public_key_client = new \WordPress\Reprint\Server\PublicKeyClient($this->credential['private_key_pem']);
-            } catch (InvalidArgumentException $exception) {
-                throw new InvalidArgumentException(
-                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error naming a local file, never HTML.
-                    "The private key at {$this->credential['path']} could not be used: " . $exception->getMessage()
-                );
-            }
+            $this->public_key_client = self::public_key_client_for_credential($this->credential);
         }
     }
 
@@ -5441,6 +5451,15 @@ class ImportClient
      *                                   remain. Current pulls do not defer
      *                                   files, so this is always false.
      *     @type mixed $pullStage        Last completed pull stage.
+     *     @type array|null $key {
+     *         The key.pem in the remote state directory, which remote
+     *         commands sign with when given no --secret or
+     *         --private-key-path. Null when no key is stored.
+     *
+     *         @type string $id        Fingerprint the site lists the key under.
+     *         @type string $path      Private key file.
+     *         @type string $publicKey One-line public key to enroll on the site.
+     *     }
      *     @type array $sourceSite {
      *         Source-site values reported by preflight.
      *
@@ -5467,6 +5486,7 @@ class ImportClient
      *     hasLocalIndex: bool,
      *     hasSkippedFiles: bool,
      *     pullStage: mixed,
+     *     key: array{id: string, path: string, publicKey: string}|null,
      *     sourceSite: array{
      *         homeUrl: string|null,
      *         siteUrl: string|null,
@@ -5490,6 +5510,17 @@ class ImportClient
         $wordpress = $database["wp"] ?? [];
         $paths_urls = $wordpress["paths_urls"] ?? [];
         $runtime_manifest = runtime_manifest_for($preflight_data);
+        // With no options, credential resolution finds only the stored key.
+        $stored_key = self::resolve_credential([], $this->remote_state_directory);
+        $key = null;
+        if ($stored_key['scheme'] === 'key') {
+            $public_key_client = self::public_key_client_for_credential($stored_key);
+            $key = [
+                "id" => $public_key_client->get_key_id(),
+                "path" => $stored_key['path'],
+                "publicKey" => $public_key_client->get_public_key(),
+            ];
+        }
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
@@ -5498,6 +5529,7 @@ class ImportClient
                 filesize($this->local_index_file) > 0,
             "hasSkippedFiles" => false,
             "pullStage" => $pull->last_completed_stage,
+            "key" => $key,
             "sourceSite" => [
                 "homeUrl" => $wordpress["home"] ?? null,
                 "siteUrl" => $wordpress["siteurl"] ?? null,
@@ -16267,9 +16299,13 @@ if (
             "short" => "Print local pull metadata for host integrations as JSON",
             "usage" => "reprint pull-metadata <remote-reprint-api-url> --state-dir=DIR",
             "description" =>
-                "Prints pull lifecycle, artifact availability, and source-site\n" .
-                "metadata for host integrations. The remote Reprint API URL selects\n" .
-                "the state; no network calls are made.\n",
+                "Prints pull lifecycle, artifact availability, source-site\n" .
+                "metadata, and the stored key for host integrations. The remote\n" .
+                "Reprint API URL selects the state; no network calls are made.\n" .
+                "\n" .
+                "`key` describes <state-dir>/remotes/<md5-of-url>/key.pem, the key\n" .
+                "remote commands find automatically: its id, path, and the public\n" .
+                "key to enroll on the site. It is null when no key is stored.\n",
             "extra" =>
                 "Example:\n" .
                 "  reprint pull-metadata https://example.com --state-dir=./state | jq '.hasCompletedOnce'\n",

@@ -1364,6 +1364,17 @@ The `sourceSite` object contains the source WordPress home URL, site URL, table
 prefix, WordPress database charset, and database server charset reported by
 preflight. Each field is `null` when preflight did not report it.
 
+The `key` object describes the private key stored for this remote at
+`<remote-state-directory>/key.pem`, the key remote commands sign with when given
+no `--secret` or `--private-key-path`. It holds the key `id`, the private key
+`path`, and the one-line `publicKey` to enroll on the site. It is `null` when no
+key is stored, so a host integration can tell whether to run `keygen` and can
+enroll the existing public key again after the site reports `AUTH_UNKNOWN_KEY`:
+
+```bash
+php reprint.phar pull-metadata "$URL" --state-dir="$STATE_DIR" | jq -r '.key.publicKey'
+```
+
 #### `<remote-state-directory>/pull/volatile-files.json` — files that changed during sync
 
 During `files-pull`, a file on the source may be modified while the importer is
@@ -1431,7 +1442,7 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Both engines continue from the file group named by the cursor stored in the target. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-rewrite-urls` — Rewrites URLs directly in an existing MySQL or SQLite database. You can stop it and continue later. See [Rewrite URLs in a live database](docs/DB-REWRITE-URLS.md).
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-* `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
+* `pull-metadata` — Prints pull lifecycle, source-site metadata, and the stored key as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from the pull state selected by the remote Reprint API URL. No network calls are made. See [Step 6](#step-6--generate-runtime-configuration).
 
