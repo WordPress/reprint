@@ -12343,7 +12343,15 @@ class ImportClient
             }
         }
 
-        $this->assert_local_path_within_root(dirname($local_absolute_path));
+        // An existing root directory needs no parent creation or replacement.
+        // Check the root itself; its parent is deliberately outside the pull tree.
+        $path_format = Utils::native_path_format();
+        $is_existing_root_directory = Utils::normalize_path_separators($local_absolute_path, $path_format)
+            === Utils::normalize_path_separators($this->filesystem_root, $path_format)
+            && is_dir($local_absolute_path) && !is_link($local_absolute_path);
+        $this->assert_local_path_within_root(
+            $is_existing_root_directory ? $local_absolute_path : dirname($local_absolute_path)
+        );
 
         if (
             (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&

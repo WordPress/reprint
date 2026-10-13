@@ -643,7 +643,8 @@ directory, and symlink parts check the physical parent before replacing a path.
 A resumed file is checked before truncation or append. Retained file paths are
 checked again before source timestamps are applied because later parts may change
 the links in those paths. Preserve-local skips a blocked shared parent and keeps
-downloading other files.
+downloading other files. An empty source directory may be remapped directly onto
+an existing `--fs-root` directory.
 
 #### Pull only files.
 

@@ -211,6 +211,42 @@ final class PullSymlinkScopeTest extends TestCase
         return ['existing parent' => [''], 'missing child directory' => ['/missing']];
     }
 
+    /**
+     * Accepting an existing root directory must not allow another part to replace it.
+     *
+     * @dataProvider root_replacement_types
+     * @param string $type File or symlink part naming the root itself.
+     */
+    public function testFileAndSymlinkPartsCannotReplaceTheFilesystemRoot(string $type): void
+    {
+        $headers = ['X-Chunk-Type' => $type];
+        if ($type === 'file') {
+            $headers += ['X-File-Path' => base64_encode('/'), 'X-First-Chunk' => '1',
+                'X-Last-Chunk' => '1', 'X-File-Size' => '3'];
+        } else {
+            $headers += ['X-Symlink-Path' => base64_encode('/'), 'X-Symlink-Target' => base64_encode('safe')];
+        }
+        try {
+            $this->receive([
+                ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/keep.txt'),
+                    'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4',
+                    'X-File-Ctime' => '1234567890'], 'body' => 'keep'],
+                ['headers' => $headers, 'body' => $type === 'file' ? 'bad' : ''],
+            ]);
+        } catch (\RuntimeException $error) {
+            $this->assertStringContainsString('outside filesystem root', $error->getMessage());
+        }
+        $this->assertDirectoryExists($this->root . '/files');
+        $this->assertFalse(is_link($this->root . '/files'));
+        $this->assertSame('keep', file_get_contents($this->root . '/files/keep.txt'));
+    }
+
+    /** @return array<string,list<string>> Parts which must not replace the root directory. */
+    public static function root_replacement_types(): array
+    {
+        return ['file' => ['file'], 'symlink' => ['symlink']];
+    }
+
     /** @dataProvider received_types */
     public function testExistingParentLinkIsCheckedBeforeReplacingAPath(string $type): void
     {
