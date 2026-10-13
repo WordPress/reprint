@@ -8696,13 +8696,8 @@ class ImportClient
         $tracked_file = $this->get_state()->current_file ?? null;
         $tracked_bytes = $this->get_state()->current_file_bytes ?? null;
         if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
-            $this->assert_local_path_parent_within_root($tracked_file);
-            $resolved_file = $this->resolve_local_path_with_missing_tail($tracked_file);
-            $root = Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format());
-            if (!Utils::path_is_same_as_or_descendant_of($resolved_file, $root)) {
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path error rendered by the CLI, not HTML.
-                throw new RuntimeException("Refusing to resume file outside filesystem root: {$tracked_file}");
-            }
+            $this->assert_local_path_within_root(dirname($tracked_file));
+            $this->assert_local_path_within_root($tracked_file);
             $actual_size = filesize($tracked_file);
             if ($actual_size > $tracked_bytes) {
                 $this->audit_log(
@@ -11788,7 +11783,19 @@ class ImportClient
         }
 
         $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
-        $this->assert_local_path_parent_within_root($local_absolute_path);
+        // Skipped bodies do no local work. A new first chunk still needs its
+        // own parent check even when the previous file was skipped.
+        if ($is_first || !$context->skip_current_file) {
+            try {
+                $this->assert_local_path_within_root(dirname($local_absolute_path));
+            } catch (RuntimeException $error) {
+                if ($this->fs_root_nonempty_behavior !== 'preserve-local') {
+                    throw $error;
+                }
+                $this->skip_file_chunk($context, $path, $is_last, 'PRESERVE-LOCAL: ' . $error->getMessage());
+                return;
+            }
+        }
         if ($is_first || $context->remote_file_path === null) {
             $context->remote_file_path = $path;
             $context->remote_file_size = $file_size;
@@ -11850,6 +11857,8 @@ class ImportClient
             if ($context->file_handle) {
                 fclose($context->file_handle);
                 if ($context->file_ctime && $context->file_path) {
+                    // Later parts may have redirected the retained pathname.
+                    $this->assert_local_path_within_root($context->file_path);
                     touch($context->file_path, $context->file_ctime);
                 }
             }
@@ -11861,14 +11870,7 @@ class ImportClient
                 try {
                     $this->create_directory_if_missing($dir);
                 } catch (PreserveLocalSkipException $e) {
-                    $context->skip_current_file = true;
-                    $context->remote_file_path = null;
-                    $context->remote_file_size = null;
-                    if ($is_last) {
-                        $this->progress_reporter->complete_path(0);
-                    }
-                    $this->audit_log($e->getMessage(), true);
-                    $this->emit_skip_progress($path);
+                    $this->skip_file_chunk($context, $path, $is_last, $e->getMessage());
                     return;
                 }
             }
@@ -11953,6 +11955,7 @@ class ImportClient
 
             // Set file modification time
             if ($context->file_ctime && $context->file_path) {
+                $this->assert_local_path_within_root($context->file_path);
                 touch($context->file_path, $context->file_ctime);
             }
 
@@ -12015,6 +12018,26 @@ class ImportClient
             : sprintf("Downloading — %s files", number_format($files_done));
         $this->progress->show_progress_line($file_progress_message, $file_fraction);
         $this->output_progress($file_progress);
+    }
+
+    /**
+     * Keeps a skipped file's bodies out of the local download and progress bytes.
+     *
+     * @param StreamingContext $context Current request's skip and remote-file fields.
+     * @param string $path Remote absolute path being skipped.
+     * @param bool $is_last Whether the source marked this as its last file chunk.
+     * @param string $reason Local condition reported by the parent or directory check.
+     */
+    private function skip_file_chunk(StreamingContext $context, string $path, bool $is_last, string $reason): void
+    {
+        $context->skip_current_file = true;
+        $context->remote_file_path = null;
+        $context->remote_file_size = null;
+        if ($is_last) {
+            $this->progress_reporter->complete_path(0);
+        }
+        $this->audit_log($reason, true);
+        $this->emit_skip_progress($path);
     }
 
     /**
@@ -12320,7 +12343,7 @@ class ImportClient
             }
         }
 
-        $this->assert_local_path_parent_within_root($local_absolute_path);
+        $this->assert_local_path_within_root(dirname($local_absolute_path));
 
         if (
             (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
@@ -12416,7 +12439,7 @@ class ImportClient
         // Validate that the symlink target doesn't escape the filesystem root.
         $root = $this->filesystem_root;
         try {
-            $this->assert_local_path_parent_within_root($local_absolute_path);
+            $this->assert_local_path_within_root(dirname($local_absolute_path));
             $this->assert_symlink_target_within_root(
                 dirname($local_absolute_path),
                 $target_for_local,
@@ -12523,15 +12546,23 @@ class ImportClient
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path errors are CLI text, not HTML.
-    /** Refuses writes or replacements through a parent outside the filesystem root. */
-    private function assert_local_path_parent_within_root(string $local_absolute_path): void
+    /**
+     * Refuses a local path which resolves outside the filesystem root.
+     *
+     * Check parents before replacements and the complete retained path before
+     * timestamp changes. Earlier source parts may have changed either path.
+     *
+     * @param string $local_absolute_path Local path or parent about to be used.
+     * @throws RuntimeException When resolution fails or the path is outside the root.
+     */
+    private function assert_local_path_within_root(string $local_absolute_path): void
     {
-        $resolved_parent = $this->resolve_local_path_with_missing_tail(dirname($local_absolute_path));
+        $resolved_path = $this->resolve_local_path_with_missing_tail($local_absolute_path);
         $root = Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format());
-        if (!Utils::path_is_same_as_or_descendant_of($resolved_parent, $root)) {
+        if (!Utils::path_is_same_as_or_descendant_of($resolved_path, $root)) {
             throw new RuntimeException(
                 "Refusing to change path outside filesystem root: {$local_absolute_path} " .
-                "(parent resolves to {$resolved_parent})"
+                "(resolves to {$resolved_path})"
             );
         }
     }

@@ -120,6 +120,90 @@ final class PullSymlinkScopeTest extends TestCase
         $this->assertSame('new extended', file_get_contents($this->root . '/outside/partial/item'));
     }
 
+    /**
+     * Later source links can redirect a retained pathname before its timestamp is set.
+     *
+     * @dataProvider retained_file_paths
+     * @param bool $replace_parent Redirect the parent rather than the file itself.
+     * @param bool $start_next_file Close the partial file by starting another file.
+     */
+    public function testLaterSourceLinksCannotRedirectARetainedFileTimestamp(bool $replace_parent, bool $start_next_file): void
+    {
+        $retained_path = $replace_parent ? '/a/out/new.txt' : '/old.txt';
+        $replacement_path = $replace_parent ? '/a/out' : '/old.txt';
+        $replacement_target = $replace_parent ? 'future/../outside' : 'a/future/../outside/new.txt';
+        $failure = null;
+        try {
+            $this->receive([
+                ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode($retained_path),
+                    'X-First-Chunk' => '1', 'X-Last-Chunk' => '0', 'X-File-Size' => '8',
+                    'X-File-Ctime' => '1234567890'], 'body' => 'first'],
+                ['headers' => ['X-Chunk-Type' => 'symlink', 'X-Symlink-Path' => base64_encode($replacement_path),
+                    'X-Symlink-Target' => base64_encode($replacement_target)]],
+                ['headers' => ['X-Chunk-Type' => 'symlink', 'X-Symlink-Path' => base64_encode('/a/future'),
+                    'X-Symlink-Target' => base64_encode('..')]],
+                // The source can name a different in-root path on the closing
+                // part too. Only the retained pathname check protects touch().
+                ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/next.txt'),
+                    'X-First-Chunk' => $start_next_file ? '1' : '0', 'X-Last-Chunk' => '1',
+                    'X-File-Size' => $start_next_file ? '4' : '8'], 'body' => $start_next_file ? 'next' : 'end'],
+            ]);
+        } catch (\RuntimeException $error) {
+            $failure = $error;
+        }
+        $this->assertFileDoesNotExist($this->root . '/outside/new.txt');
+        $this->assertNotNull($failure, 'A redirected retained pathname must stop the request.');
+        $this->assertStringContainsString('outside filesystem root', $failure->getMessage());
+        $this->assertTrue(is_link($this->root . '/files/a/future'), 'The source installed the link which redirects the earlier path.');
+    }
+
+    /** @return array<string,array{bool,bool}> Parent replacement and file-closing mode. */
+    public static function retained_file_paths(): array
+    {
+        return [
+            'parent redirected before next file' => [true, true],
+            'parent redirected before closing part' => [true, false],
+            'leaf redirected before next file' => [false, true],
+            'leaf redirected before closing part' => [false, false],
+        ];
+    }
+
+    /**
+     * Preserve-local skips shared paths and continues with the next ordinary file.
+     *
+     * @dataProvider shared_parent_paths
+     * @param string $missing_tail Missing components beneath the shared directory.
+     */
+    public function testPreserveLocalSkipsAnExternalParentAndKeepsDownloading(string $missing_tail): void
+    {
+        symlink($this->root . '/outside', $this->root . '/files/shared');
+        file_put_contents($this->root . '/outside/new.txt', 'keep existing');
+        file_put_contents($this->root . '/parts.json', json_encode([
+            ['headers' => ['X-Chunk-Type' => 'file',
+                'X-File-Path' => base64_encode('/shared' . $missing_tail . '/new.txt'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'next'],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/safe.txt'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'safe'],
+            ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']],
+        ]));
+        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
+        ( new \ReflectionMethod($client, 'initialize_credential') )->invoke($client, true, ['secret' => 'test-secret']);
+        // run() selects this same mode from --on-fs-root-nonempty=preserve-local.
+        ( new \ReflectionProperty($client, 'fs_root_nonempty_behavior') )->setValue($client, 'preserve-local');
+        $complete = ( new \ReflectionMethod($client, 'fetch_file_batch') )->invoke($client, [], null);
+        $this->assertSame('keep existing', file_get_contents($this->root . '/outside/new.txt'));
+        $this->assertDirectoryDoesNotExist($this->root . '/outside/missing');
+        $this->assertSame('safe', file_get_contents($this->root . '/files/safe.txt'));
+        $this->assertTrue($complete);
+        $this->assertStringContainsString('PRESERVE-LOCAL', file_get_contents($this->root . '/state/audit.log'));
+    }
+
+    /** @return array<string,list<string>> Existing or missing shared parent components. */
+    public static function shared_parent_paths(): array
+    {
+        return ['existing parent' => [''], 'missing child directory' => ['/missing']];
+    }
+
     /** @dataProvider received_types */
     public function testExistingParentLinkIsCheckedBeforeReplacingAPath(string $type): void
     {
