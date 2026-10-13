@@ -184,9 +184,10 @@ final class PullSymlinkScopeTest extends TestCase
             ['headers' => ['X-Chunk-Type' => 'file',
                 'X-File-Path' => base64_encode('/shared' . $missing_tail . '/new.txt'),
                 'X-First-Chunk' => '1', 'X-Last-Chunk' => '1',
-                'X-File-Size' => (string) strlen($skipped_body)], 'body' => $skipped_body],
+                'X-File-Size' => (string) strlen($skipped_body), 'X-File-Ctime' => '1234567890'], 'body' => $skipped_body],
             ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/safe.txt'),
-                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'safe'],
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4',
+                'X-File-Ctime' => '1234567891'], 'body' => 'safe'],
             ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']],
         ]));
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
