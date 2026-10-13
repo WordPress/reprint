@@ -178,10 +178,13 @@ final class PullSymlinkScopeTest extends TestCase
     {
         symlink($this->root . '/outside', $this->root . '/files/shared');
         file_put_contents($this->root . '/outside/new.txt', 'keep existing');
+        // More than one cURL body callback must stay skipped without adding file bytes.
+        $skipped_body = str_repeat('skip', 32768);
         file_put_contents($this->root . '/parts.json', json_encode([
             ['headers' => ['X-Chunk-Type' => 'file',
                 'X-File-Path' => base64_encode('/shared' . $missing_tail . '/new.txt'),
-                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'next'],
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1',
+                'X-File-Size' => (string) strlen($skipped_body)], 'body' => $skipped_body],
             ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/safe.txt'),
                 'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'safe'],
             ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']],
@@ -195,6 +198,9 @@ final class PullSymlinkScopeTest extends TestCase
         $this->assertDirectoryDoesNotExist($this->root . '/outside/missing');
         $this->assertSame('safe', file_get_contents($this->root . '/files/safe.txt'));
         $this->assertTrue($complete);
+        $reporter = ( new \ReflectionProperty($client, 'progress_reporter') )->getValue($client);
+        $this->assertSame(2, $reporter->get_batch_files_done());
+        $this->assertSame(4, $client->get_state()->fetch->file_bytes_in_batch);
         $this->assertStringContainsString('PRESERVE-LOCAL', file_get_contents($this->root . '/state/audit.log'));
     }
 
