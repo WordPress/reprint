@@ -686,7 +686,14 @@ function estimate_database_bytes($database, string $engine)
 {
     try {
         if ($engine === "sqlite") {
-            $size = defined("FQDB") ? @filesize(FQDB) : false;
+            if (defined("DB_PATH")) {
+                $database_path = DB_PATH;
+            } elseif (defined("FQDB")) {
+                $database_path = FQDB;
+            } else {
+                $database_path = null;
+            }
+            $size = isset($database_path) ? @filesize($database_path) : false;
         } else {
             $size = $database->query(
                 "SELECT SUM(DATA_LENGTH) FROM INFORMATION_SCHEMA.TABLES " .
