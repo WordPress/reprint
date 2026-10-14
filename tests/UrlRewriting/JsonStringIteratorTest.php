@@ -89,11 +89,42 @@ class JsonStringIteratorTest extends TestCase
         $this->assertSame('https://new-site.com/page', json_decode($iter->get_result(), true));
     }
 
+    public function testPreservesUnchangedJsonBytesWhenReplacingAValue(): void
+    {
+        $json = "{\n  \"url\" : \"https:\\/\\/old-site.com\\/page\", \"unicode\":\"\\u20ac\"\n}";
+        $iter = new JsonStringIterator($json);
+
+        $this->assertTrue($iter->next_value());
+        $iter->set_value('https://new-site.com/page');
+
+        $this->assertSame(
+            "{\n  \"url\" : \"https://new-site.com/page\", \"unicode\":\"\\u20ac\"\n}",
+            $iter->get_result()
+        );
+    }
+
+    public function testWalksLargeJsonWithoutDecodingItsObjectTree(): void
+    {
+        $json = '{"items":[' . str_repeat('{"title":"unchanged","count":1},', 10000) . '{"url":"https://old-site.com/page"}]}';
+        $iter = new JsonStringIterator($json);
+        $last_value = null;
+
+        while ($iter->next_value()) {
+            $last_value = $iter->get_value();
+        }
+
+        $this->assertFalse($iter->is_malformed());
+        $this->assertSame('https://old-site.com/page', $last_value);
+        $this->assertSame($json, $iter->get_result());
+    }
+
     public function testMalformedJsonIsMalformed(): void
     {
-        $iter = new JsonStringIterator('{"broken":');
+        foreach (['{"broken":', '"\\uD800"', '"\\uDC00"'] as $json) {
+            $iter = new JsonStringIterator($json);
 
-        $this->assertTrue($iter->is_malformed());
-        $this->assertFalse($iter->next_value());
+            $this->assertTrue($iter->is_malformed());
+            $this->assertFalse($iter->next_value());
+        }
     }
 }
