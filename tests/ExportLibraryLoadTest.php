@@ -70,6 +70,45 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertSame('/', $roots[0]['root']);
     }
 
+    public function testPreflightReportsImporterIniDirectivesWhenIniGetAllIsDisabled(): void
+    {
+        $autoload_path = realpath(self::AUTOLOAD_PATH);
+        $this->assertNotFalse($autoload_path, 'Composer autoloader must exist');
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+
+        $result = $this->runPhpCode(
+            "<?php\nif (function_exists('ini_get_all')) { echo 'ini_get_all-not-disabled'; exit(1); }\n"
+            . "require " . var_export($autoload_path, true) . ";\n"
+            . "require " . var_export($export_path, true) . ";\n"
+            . "ob_start();\n"
+            . "\$preflight = endpoint_preflight(['directory' => '/']);\n"
+            . "ob_end_clean();\n"
+            . "echo json_encode(\$preflight['stats']['runtime']['ini_get_all'], JSON_UNESCAPED_SLASHES);\n",
+            ['-d', 'disable_functions=ini_get_all', '-d', 'memory_limit=345M', '-d', 'max_input_vars=1234']
+        );
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $ini = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
+        $directives = array_keys($ini);
+        sort($directives);
+        $this->assertSame(
+            [
+                'auto_append_file',
+                'auto_prepend_file',
+                'max_execution_time',
+                'max_input_time',
+                'max_input_vars',
+                'memory_limit',
+                'post_max_size',
+                'upload_max_filesize',
+            ],
+            $directives
+        );
+        $this->assertSame('345M', $ini['memory_limit']);
+        $this->assertSame('1234', $ini['max_input_vars']);
+    }
+
     public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
     {
         $tmp_dir = sys_get_temp_dir() . '/reprint-server-runtime-loader-test-' . uniqid('', true);
@@ -311,6 +350,7 @@ final class ExportLibraryLoadTest extends TestCase {
     }
 
     /**
+     * @param string[] $php_options PHP CLI options placed before the script, such as `-d` settings.
      * @return array {
      *     PHP runner result.
      *
@@ -319,7 +359,7 @@ final class ExportLibraryLoadTest extends TestCase {
      * }
      * @phpstan-return array{output:string,status:int}
      */
-    private function runPhpCode(string $php_code): array
+    private function runPhpCode(string $php_code, array $php_options = []): array
     {
         $tmp_dir = sys_get_temp_dir() . '/export-library-test-' . uniqid();
         mkdir($tmp_dir, 0755, true);
@@ -334,7 +374,7 @@ final class ExportLibraryLoadTest extends TestCase {
             ];
 
             $process = proc_open(
-                [PHP_BINARY, $tmp_dir . '/run.php'],
+                array_merge([PHP_BINARY], $php_options, [$tmp_dir . '/run.php']),
                 $descriptors,
                 $pipes,
                 $tmp_dir
