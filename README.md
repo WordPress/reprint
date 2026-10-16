@@ -637,6 +637,15 @@ through a symlinked parent is rejected; use the default or
 `--follow-symlinks` so Reprint can preserve the requested link path and index
 the physical target.
 
+Local symlink targets are resolved through existing links before parent segments
+are applied. Missing target paths may stay dangling inside `--fs-root`. File,
+directory, and symlink parts check the physical parent before replacing a path.
+A resumed file is checked before truncation or append. Retained file paths are
+checked again before source timestamps are applied because later parts may change
+the links in those paths. Preserve-local skips a blocked shared parent and keeps
+downloading other files. An empty source directory may be remapped directly onto
+an existing `--fs-root` directory.
+
 #### Pull only files.
 
 `pull-files` runs the file side of the high-level pull pipeline:
