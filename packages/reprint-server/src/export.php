@@ -2556,6 +2556,27 @@ function endpoint_preflight(array $config): array
         }
     }
 
+    // Some hosts disable ini_get_all(). Fall back to the directives the
+    // importer reads from runtime.ini_get_all, so add a directive here
+    // whenever the importer starts reading a new one.
+    if (function_exists("ini_get_all")) {
+        $ini_directives = ini_get_all(null, false);
+    } else {
+        $ini_directives = [];
+        foreach ([
+            "auto_prepend_file",
+            "auto_append_file",
+            "memory_limit",
+            "upload_max_filesize",
+            "post_max_size",
+            "max_execution_time",
+            "max_input_vars",
+            "max_input_time",
+        ] as $directive) {
+            $ini_directives[$directive] = ini_get($directive);
+        }
+    }
+
     // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
@@ -2627,8 +2648,9 @@ function endpoint_preflight(array $config): array
             // Every effective INI directive as computed by the PHP runtime
             // after merging php.ini, scanned .ini files, and htaccess
             // overrides.  This captures the full configuration without
-            // needing to read the .ini files themselves.
-            "ini_get_all" => ini_get_all(null, false),
+            // needing to read the .ini files themselves.  Narrowed to the
+            // importer's directives when ini_get_all() is disabled.
+            "ini_get_all" => $ini_directives,
             "temp_dir" => function_exists("sys_get_temp_dir") ? sys_get_temp_dir() : null,
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,
