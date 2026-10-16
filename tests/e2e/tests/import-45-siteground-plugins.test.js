@@ -362,6 +362,8 @@ describe.each([
                 '--allow-unsafe-http',
                 `--state-dir=${tempDir}`,
                 `--flat-document-root=${flatDir}`,
+                '--target-engine=mysql',
+                '--target-pass=e2e_password',
                 `--runtime=php-builtin`,
                 `--output-dir=${runtimeDir}`,
                 `--port=9999`,

@@ -630,6 +630,8 @@ async function main() {
     const runtimeOutDir = join(stateDir, 'runtime-out');
     mkdirSync(runtimeOutDir, { recursive: true });
     const runtimeArgs = [
+        '--target-engine=mysql',
+        `--target-pass=${REGISTRY.dbPass}`,
         '--runtime=php-builtin',
         `--output-dir=${runtimeOutDir}`,
     ];
