@@ -9735,9 +9735,9 @@ class ImportClient
      * Matches a received path against only the active preserve-local fetch batch.
      *
      * The planner already omitted preserved paths and retained legitimate updates.
-     * Read its sorted JSONL entries once for ordinary replies, keeping only the
-     * accepted path. An extra part must not consume pending requested entries:
-     * restore their byte offset when no match is found. Never read the next batch.
+     * Try the next JSONL entry for ordinary ordered replies, then binary-search
+     * the remaining batch range on a mismatch. Partial replies and extra paths
+     * must not rescan a growing prefix. Cache paths across body callbacks.
      *
      * @param string $path Validated source absolute path with normalized separators.
      * @return bool Whether the current batch requested this exact path.
@@ -9750,33 +9750,45 @@ class ImportClient
         if ($path === $this->last_unrequested_path || !is_resource($this->fetch_batch_list_handle)) {
             return false;
         }
-        $pending_offset = ftell($this->fetch_batch_list_handle);
-        while (ftell($this->fetch_batch_list_handle) < $this->get_state()->fetch->next_offset) {
-            $line = fgets($this->fetch_batch_list_handle);
-            if ($line === false) {
-                break;
-            }
-            $entry = json_decode($line, true);
-            if (!is_array($entry) || !isset($entry['path']) || !is_string($entry['path'])) {
-                continue;
-            }
-            $requested_path = base64_decode($entry['path'], true);
-            if ($requested_path === false || $requested_path === '') {
-                continue;
-            }
-            $requested_path = Utils::normalize_path_separators($requested_path, $this->get_state()->remote_path_format());
-            $comparison = strcmp($requested_path, $path);
-            if ($comparison === 0) {
-                $this->current_requested_path = $path;
-                return true;
-            }
-            if ($comparison > 0) {
-                break;
-            }
+        $lower_offset = $this->get_state()->fetch->offset;
+        $upper_offset = $this->get_state()->fetch->next_offset;
+        $middle_offset = ftell($this->fetch_batch_list_handle);
+        if ($middle_offset < $lower_offset || $middle_offset >= $upper_offset) {
+            $middle_offset = $lower_offset + intdiv($upper_offset - $lower_offset, 2);
         }
-        if (fseek($this->fetch_batch_list_handle, $pending_offset) !== 0) {
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem error rendered as CLI text.
-            throw new RuntimeException("Failed to restore the active fetch list to byte offset {$pending_offset}.");
+        while ($lower_offset < $upper_offset) {
+            if (ftell($this->fetch_batch_list_handle) !== $middle_offset) {
+                // Retained positions are record boundaries; random midpoints
+                // need alignment. The preceding byte handles an exact line start.
+                $seek_offset = $middle_offset > $lower_offset ? $middle_offset - 1 : $lower_offset;
+                if (fseek($this->fetch_batch_list_handle, $seek_offset) !== 0) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem error rendered as CLI text.
+                    throw new RuntimeException("Failed to seek the active fetch list to byte offset {$seek_offset}.");
+                }
+                if ($middle_offset > $lower_offset) {
+                    fgets($this->fetch_batch_list_handle);
+                }
+            }
+            if (ftell($this->fetch_batch_list_handle) >= $upper_offset) {
+                $upper_offset = $middle_offset;
+            } else {
+                $line = fgets($this->fetch_batch_list_handle);
+                if ($line === false) {
+                    break;
+                }
+                $entry = RemoteIndexReader::decode_index_line($line, $this->get_state()->remote_path_format());
+                $comparison = strcmp($entry['path'], $path);
+                if ($comparison === 0) {
+                    $this->current_requested_path = $path;
+                    return true;
+                }
+                if ($comparison < 0) {
+                    $lower_offset = ftell($this->fetch_batch_list_handle);
+                } else {
+                    $upper_offset = $middle_offset;
+                }
+            }
+            $middle_offset = $lower_offset + intdiv($upper_offset - $lower_offset, 2);
         }
         $this->last_unrequested_path = $path;
         return false;
