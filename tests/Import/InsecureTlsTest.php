@@ -95,6 +95,32 @@ final class InsecureTlsTest extends TestCase {
         }
     }
 
+    public function testCliRejectsMissingSchemesBeforeMakingRequests(): void
+    {
+        foreach ([['', []], ['', ['--insecure']], ['1', []]] as [$environment, $flags]) {
+            putenv('REPRINT_INSECURE_TLS=' . $environment);
+            foreach ([substr($this->http_url, 7), substr($this->http_url, 5)] as $url) {
+                $result = $this->run_cli(array_merge([
+                    PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
+                    'preflight', $url, '--secret=tls-test-secret',
+                    '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/local', '--progress=jsonl',
+                ], $flags));
+                $this->assertFileDoesNotExist($this->root . '/requests.log', $url);
+                $this->assertSame(1, $result['exit_code']);
+                $this->assertStringContainsString('must start with https:// or http://', $result['stdout'] . $result['stderr']);
+                $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
+            }
+        }
+        $result = $this->run_cli([
+            PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
+            'preflight', $this->http_url, '--secret=tls-test-secret', '--insecure',
+            '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/local', '--progress=jsonl',
+        ]);
+        $this->assertFileExists($this->root . '/requests.log');
+        $this->assertStringContainsString('POST /?reprint-api&endpoint=preflight', file_get_contents($this->root . '/requests.log'));
+        $this->assertStringContainsString('"http_code":200', $result['stdout']);
+    }
+
     public function testCliRejectsShortInsecureFlag(): void
     {
         foreach (['preflight', 'files-push', 'files-diff', 'db-push', 'post-process'] as $command) {

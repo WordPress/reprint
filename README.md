@@ -345,7 +345,7 @@ php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
 
-Reprint rejects HTTP remote Reprint API URLs before selecting remote state or making requests unless `--insecure` explicitly allows an unencrypted connection. This applies to every remote command, including local-only commands and local hosts. The supplied URL's scheme is never changed.
+Remote Reprint API URLs must start with `https://` or `http://`; URLs without a scheme and other schemes are rejected. Reprint rejects HTTP remote Reprint API URLs before selecting remote state or making requests unless `--insecure` explicitly allows an unencrypted connection. This applies to every remote command, including local-only commands and local hosts. The supplied URL's scheme is never changed.
 
 For a site with an expired, self-signed, or wrong-hostname HTTPS certificate, `--insecure` also skips certificate and hostname verification. HTTPS stays encrypted, but Reprint cannot verify the server's identity; an attacker on the connection can read or modify transferred content. This does not repair other TLS handshake failures. `REPRINT_INSECURE_TLS=1` is an alternative to the flag; unset it or set it to `0` to keep the default checks. The choice is not saved in migration state, so supply it again when resuming.
 

@@ -33,6 +33,8 @@ final class RequestUrlPathEncodingTest extends TestCase
             ['https://example.com/?reprint-api', false],
             ['https://example.com/?reprint-api', true],
             ['http://example.com/?reprint-api', true],
+            ['HTTPS://Example.com/?reprint-api', false],
+            ['HTTP://Example.com/?reprint-api', true],
         ] as [$remote_reprint_api_url, $allow_http]) {
             $client = new \ImportClient(
                 $remote_reprint_api_url,
@@ -61,6 +63,31 @@ final class RequestUrlPathEncodingTest extends TestCase
                 $this->assertStringContainsString('--insecure', $error->getMessage());
             }
             $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
+        }
+    }
+
+    public function testConstructorRequiresAnExplicitHttpOrHttpsScheme(): void
+    {
+        foreach ([
+            'example.com/?reprint-api',
+            'example.com:8080/?reprint-api',
+            '//example.com/?reprint-api',
+            'ftp://example.com/site',
+            'file:///tmp/export.json',
+            'https:example.com',
+            'https:/example.com',
+            'user:some-password@example.com',
+        ] as $remote_reprint_api_url) {
+            foreach ([false, true] as $allow_http) {
+                try {
+                    new \ImportClient($remote_reprint_api_url, $this->root . '/state', $this->root . '/files', ['allow_http' => $allow_http]);
+                    $this->fail('A remote Reprint API URL needs an explicit HTTP or HTTPS scheme.');
+                } catch (\InvalidArgumentException $error) {
+                    $this->assertStringContainsString('must start with https:// or http://', $error->getMessage());
+                    $this->assertStringNotContainsString('some-password', $error->getMessage());
+                }
+                $this->assertDirectoryDoesNotExist($this->root . '/state/remotes');
+            }
         }
     }
 
