@@ -265,6 +265,18 @@ final class UnixSymlinkPathTest extends TestCase {
         return [['latest'], ['version'], ['version/plugin.php']];
     }
 
+    /** An empty source directory can map directly onto the existing filesystem root. */
+    public function testEmptyDirectoryCanMapToTheFilesystemRoot(): void
+    {
+        $this->pull_files(['--include=' . $this->source, '--remap', $this->source, ':fs-root:/']);
+        $this->assertDirectoryExists($this->root . '/files');
+        $entries = file($this->root . '/state/remotes/' . md5($this->url) . '/pull/remote-index.jsonl', FILE_IGNORE_NEW_LINES);
+        $this->assertCount(1, $entries);
+        $entry = json_decode($entries[0], true);
+        $this->assertSame('dir', $entry['type']);
+        $this->assertSame($this->source, base64_decode($entry['path']));
+    }
+
     /**
      * Seed file-only preflight metadata, then run the real CLI, index endpoint, and file endpoint.
      *
