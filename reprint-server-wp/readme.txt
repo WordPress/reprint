@@ -1,4 +1,4 @@
-=== Reprint Server ===
+=== Reprint ===
 Contributors: adamziel
 Tags: migration, backup, development, synchronization
 Requires at least: 4.7
