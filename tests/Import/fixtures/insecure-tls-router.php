@@ -3,6 +3,8 @@
 // phpcs:disable WordPress.Security.ValidatedSanitizedInput -- Authenticate the exact incoming request.
 // phpcs:disable WordPress.Security.NonceVerification -- Reprint HMAC replaces WordPress form nonces.
 
+file_put_contents(getcwd() . '/requests.log', $_SERVER['REQUEST_METHOD'] . ' ' . $_SERVER['REQUEST_URI'] . "\n", FILE_APPEND);
+
 // Use the production request authentication and endpoint dispatch behind TLS.
 require_once __DIR__ . '/../../../vendor/autoload.php';
 // This fixture models a host without openssl_verify(), so HMACServer keeps

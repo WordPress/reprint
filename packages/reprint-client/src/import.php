@@ -691,6 +691,9 @@ class ImportClient
     /**
      * Refuses a remote Reprint API URL that no command can use.
      *
+     * A URL such as example.com/?reprint-api makes cURL guess HTTP. Require
+     * an explicit HTTP or HTTPS scheme before creating state or making requests.
+     *
      * For example, appending &endpoint=preflight to /?reprint-api#section
      * puts the endpoint after #, where cURL treats it as a URL fragment and
      * never sends it. The server would receive /?reprint-api with no endpoint.
@@ -698,10 +701,25 @@ class ImportClient
      *
      * @param string $remote_reprint_api_url Remote Reprint API URL as supplied.
      * @param bool   $allow_http             Whether an unencrypted http:// URL is accepted.
-     * @throws InvalidArgumentException When the URL uses HTTP without permission or contains a fragment.
+     * @throws InvalidArgumentException When the URL lacks an HTTP(S) prefix, uses HTTP without permission, or contains a fragment.
      */
     public static function validate_remote_reprint_api_url(string $remote_reprint_api_url, bool $allow_http): void
     {
+        // Local-only commands can select saved state without a remote URL.
+        if ($remote_reprint_api_url === '') {
+            return;
+        }
+        if (
+            strncasecmp($remote_reprint_api_url, 'https://', 8) !== 0
+            && strncasecmp($remote_reprint_api_url, 'http://', 7) !== 0
+        ) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The scheme describes rejected CLI input, never HTML output.
+                'The remote Reprint API URL must start with https:// or http://; observed scheme ' .
+                json_encode(parse_url($remote_reprint_api_url, PHP_URL_SCHEME)) . '. ' .
+                'Provide a full URL such as https://example.com/?reprint-api.'
+            );
+        }
         if (!$allow_http && strncasecmp($remote_reprint_api_url, 'http://', 7) === 0) {
             throw new InvalidArgumentException(
                 'The remote Reprint API URL you provided uses HTTP. '
