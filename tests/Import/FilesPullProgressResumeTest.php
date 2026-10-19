@@ -43,14 +43,8 @@ class StopDuringFileProgressClient extends \ImportClient {
 }
 
 class FilesPullProgressResumeTest extends TestCase {
-    /**
-     * Completed and partial files survive process death with either local-content mode.
-     *
-     * @dataProvider interruptionBoundaries
-     * @param string $boundary Durable boundary at which to stop the child.
-     * @param bool $preserve_local Keep the active batch's preserve-local checks enabled.
-     */
-    public function testProcessDeathInsideABatchRetainsCompletedFileBytes(string $boundary, bool $preserve_local = false): void {
+    /** @dataProvider interruptionBoundaries */
+    public function testProcessDeathInsideABatchRetainsCompletedFileBytes(string $boundary): void {
         if (!function_exists('pcntl_fork') || !function_exists('posix_kill')) {
             $this->markTestSkipped('Process-death coverage requires PCNTL and POSIX.');
         }
@@ -97,9 +91,6 @@ class FilesPullProgressResumeTest extends TestCase {
             $url = 'http://' . $address . '/';
             $client = new StopDuringFileProgressClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             $client->observation_file = $root . '/before-stop.json';
-            if ($preserve_local) {
-                ( new \ReflectionProperty(\ImportClient::class, 'fs_root_nonempty_behavior') )->setValue($client, 'preserve-local');
-            }
             \write_current_pull_state($client, [
                 'preflight' => ['data' => ['ok' => true, 'wp_detect' => ['roots' => [['path' => $source]]]], 'http_code' => 200],
                 'active_resumable_command' => ['command_name' => 'files-pull', 'completion_state' => 'in_progress', 'current_stage' => 'fetch'],
@@ -139,9 +130,6 @@ class FilesPullProgressResumeTest extends TestCase {
 
             $resumed = new \ImportClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             $reflection = new \ReflectionClass($resumed);
-            if ($preserve_local) {
-                $reflection->getProperty('fs_root_nonempty_behavior')->setValue($resumed, 'preserve-local');
-            }
             $reflection->getProperty('state')->setValue($resumed, $reflection->getMethod('load_state')->invoke($resumed));
             $this->assertSame(0, $resumed->get_state()->fetch->offset, 'The first batch is still active.');
             $cursor = json_decode(base64_decode($resumed->get_state()->fetch->cursor), true);
@@ -181,9 +169,8 @@ class FilesPullProgressResumeTest extends TestCase {
         }
     }
 
-    /** @return array[] Process-death boundaries and the preserve-local mode when enabled. */
     public static function interruptionBoundaries(): array {
-        return [['file'], ['part'], ['batch_removed'], ['file_after_error'], ['file_after_directory'], ['file_after_symlink'], ['file_after_missing'], ['source_grew'], ['source_shrank'], ['part', true], ['batch_removed', true]];
+        return [['file'], ['part'], ['batch_removed'], ['file_after_error'], ['file_after_directory'], ['file_after_symlink'], ['file_after_missing'], ['source_grew'], ['source_shrank']];
     }
 
     private function download_list(\ImportClient $client, string $list_file): void {

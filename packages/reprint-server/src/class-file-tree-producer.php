@@ -403,8 +403,12 @@ class FileTreeProducer
         }
 
         clearstatcache(true, $path);
-        if (Utils::is_absolute_path($path, Utils::native_path_format()) && (file_exists(Utils::source_io_path($path)) || Utils::source_is_link($path))) {
-            return $path;
+        if (Utils::is_absolute_path($path, Utils::native_path_format())) {
+            // A missing full path must not be retried beneath a source directory:
+            // that can return a different file after the requested one disappears.
+            return file_exists(Utils::source_io_path($path)) || Utils::source_is_link($path)
+                ? $path
+                : null;
         }
 
         foreach ($this->directories as $dir) {
