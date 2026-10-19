@@ -35402,6 +35402,223 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "db40dbb3133e14d01863778f741ad0ab2544e709",
+      "shortSha": "db40dbb",
+      "date": "2026-10-19T13:19:36+02:00",
+      "message": "[PHP] Resolve local link paths before applying parent segments (#881)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.11",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "preflightImporter": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 103.90767099999721,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 3847.7597920000007,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 30749.219649000002,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 38574.75412700001,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 65.29612800000177,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 41424.845816999994,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 426259.13970999996,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 127.62062200007495,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 65.69505800004117,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 2548.570479999995,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-html",
+          "elapsedMs": 93.79185,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-style-elements",
+          "elapsedMs": 26.722928,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-style-large-value",
+          "elapsedMs": 226.211797,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-literal-urls",
+          "elapsedMs": 33.15682,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-nested-html",
+          "elapsedMs": 34.294458,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-repeated-urls",
+          "elapsedMs": 34.169149,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-escaped-quotes",
+          "elapsedMs": 162.338253,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-encoded-shortcodes",
+          "elapsedMs": 313.702206,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-no-source-urls",
+          "elapsedMs": 1.024268,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-serialized-options",
+          "elapsedMs": 22.410314,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-html",
+          "elapsedMs": 54.307017,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-style-elements",
+          "elapsedMs": 98.258241,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-style-large-value",
+          "elapsedMs": 282.440283,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-literal-urls",
+          "elapsedMs": 37.741519,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-nested-html",
+          "elapsedMs": 109.236838,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-repeated-urls",
+          "elapsedMs": 77.018692,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-escaped-quotes",
+          "elapsedMs": 106.254119,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-encoded-shortcodes",
+          "elapsedMs": 244.181405,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-no-source-urls",
+          "elapsedMs": 1.169977,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-serialized-options",
+          "elapsedMs": 22.275156,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-style-elements",
+          "elapsedMs": 97.348528,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-blocks-nested-html",
+          "elapsedMs": 111.419405,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-blocks-repeated-urls",
+          "elapsedMs": 75.161063,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
