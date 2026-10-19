@@ -323,6 +323,13 @@ class ImportClient
     /** @var string Path to the replacement fetch list built during mirror planning. */
     private $fetch_list_replacement_file;
 
+    /** @var resource|null Retained fetch-list handle for the active preserve-local batch. */
+    private $fetch_batch_list_handle = null;
+    /** @var string|null Current accepted path, retained across body callbacks and extra parts. */
+    private ?string $current_requested_path = null;
+    /** @var string|null Last extra path, so its body callbacks do not repeat the lookup. */
+    private ?string $last_unrequested_path = null;
+
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
 
@@ -8862,6 +8869,26 @@ class ImportClient
             }
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+            if ($this->fs_root_nonempty_behavior === 'preserve-local') {
+                $path_header = [
+                    'file' => 'x-file-path', 'directory' => 'x-directory-path',
+                    'symlink' => 'x-symlink-path', 'missing' => 'x-file-path',
+                ][$chunk_type] ?? null;
+                if ($path_header !== null && !empty($chunk['headers'][$path_header])) {
+                    $path = Utils::normalize_path_separators(
+                        base64_decode($chunk['headers'][$path_header], true),
+                        $this->get_state()->remote_path_format()
+                    );
+                    if (!$this->current_fetch_batch_contains_path($path)) {
+                        if (!$is_streaming_body) {
+                            $this->audit_log("PRESERVE-LOCAL: skipped path absent from the current fetch batch: {$path}", true);
+                            $this->emit_skip_progress($path);
+                        }
+                        // Keep the open requested file and its counters unchanged.
+                        $chunk_type = 'unrequested';
+                    }
+                }
+            }
 
             if ($chunk_type === "metadata") {
                 $this->handle_metadata_chunk($chunk);
@@ -9660,7 +9687,27 @@ class ImportClient
             ),
         ];
 
-        $complete = $this->fetch_file_batch($post_data, $cursor);
+        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
+            $this->fetch_batch_list_handle = fopen($list_file, 'rb');
+            if ($this->fetch_batch_list_handle === false) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem error rendered as CLI text.
+                throw new RuntimeException("Failed to open the active fetch list: {$list_file}");
+            }
+        }
+        try {
+            if (is_resource($this->fetch_batch_list_handle) && fseek($this->fetch_batch_list_handle, $batch_offset) !== 0) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem error rendered as CLI text.
+                throw new RuntimeException("Failed to seek the active fetch list to byte offset {$batch_offset}.");
+            }
+            $complete = $this->fetch_file_batch($post_data, $cursor);
+        } finally {
+            if (is_resource($this->fetch_batch_list_handle)) {
+                fclose($this->fetch_batch_list_handle);
+            }
+            $this->fetch_batch_list_handle = null;
+            $this->current_requested_path = null;
+            $this->last_unrequested_path = null;
+        }
         if (!$complete) {
             return false;
         }
@@ -9682,6 +9729,57 @@ class ImportClient
         $this->save_state();
 
         return $next_offset >= filesize($list_file);
+    }
+
+    /**
+     * Matches a received path against only the active preserve-local fetch batch.
+     *
+     * The planner already omitted preserved paths and retained legitimate updates.
+     * Read its sorted JSONL entries once for ordinary replies, keeping only the
+     * accepted path. An extra part must not consume pending requested entries:
+     * restore their byte offset when no match is found. Never read the next batch.
+     *
+     * @param string $path Validated source absolute path with normalized separators.
+     * @return bool Whether the current batch requested this exact path.
+     */
+    private function current_fetch_batch_contains_path(string $path): bool
+    {
+        if ($path === $this->current_requested_path) {
+            return true;
+        }
+        if ($path === $this->last_unrequested_path || !is_resource($this->fetch_batch_list_handle)) {
+            return false;
+        }
+        $pending_offset = ftell($this->fetch_batch_list_handle);
+        while (ftell($this->fetch_batch_list_handle) < $this->get_state()->fetch->next_offset) {
+            $line = fgets($this->fetch_batch_list_handle);
+            if ($line === false) {
+                break;
+            }
+            $entry = json_decode($line, true);
+            if (!is_array($entry) || !isset($entry['path']) || !is_string($entry['path'])) {
+                continue;
+            }
+            $requested_path = base64_decode($entry['path'], true);
+            if ($requested_path === false || $requested_path === '') {
+                continue;
+            }
+            $requested_path = Utils::normalize_path_separators($requested_path, $this->get_state()->remote_path_format());
+            $comparison = strcmp($requested_path, $path);
+            if ($comparison === 0) {
+                $this->current_requested_path = $path;
+                return true;
+            }
+            if ($comparison > 0) {
+                break;
+            }
+        }
+        if (fseek($this->fetch_batch_list_handle, $pending_offset) !== 0) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem error rendered as CLI text.
+            throw new RuntimeException("Failed to restore the active fetch list to byte offset {$pending_offset}.");
+        }
+        $this->last_unrequested_path = $path;
+        return false;
     }
 
     /**
@@ -12338,6 +12436,11 @@ class ImportClient
 
     /**
      * Handle a directory chunk (create empty directory).
+     *
+     * @param array $chunk {
+     *     Multipart directory part.
+     *     @type array $headers Base64 x-directory-path and integer x-directory-ctime.
+     * }
      */
     private function handle_directory_chunk(array $chunk): void
     {
@@ -12361,12 +12464,11 @@ class ImportClient
             $remote_absolute_path
         );
 
-        // In preserve-local mode, if the directory already exists (as a real
-        // directory or via a symlink to a directory), keep it as-is.
-        // Also skip if any parent component is a symlink — we never create
-        // new directories through symlinked paths.
+        // A real directory already has the requested type. A leaf link may
+        // still need replacement after batch selection. Keep parent links
+        // intact: creating directories through them would change shared content.
         if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (is_dir($local_absolute_path)) {
+            if (is_dir($local_absolute_path) && !is_link($local_absolute_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip directory (exists): {$remote_absolute_path}", true);
                 $this->emit_skip_progress($remote_absolute_path);
                 if ($ctime > 0) {
@@ -12374,7 +12476,7 @@ class ImportClient
                 }
                 return;
             }
-            if ($this->path_traverses_symlink($local_absolute_path)) {
+            if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
                 $this->audit_log("PRESERVE-LOCAL skip directory (symlink in path): {$remote_absolute_path}", true);
                 $this->emit_skip_progress($remote_absolute_path);
                 if ($ctime > 0) {
@@ -12438,8 +12540,10 @@ class ImportClient
      * to the audit log and reported as symlink_error progress events — they
      * do not halt the pull.
      *
-     * @param array $chunk Multipart chunk with x-symlink-path, x-symlink-target,
-     *                     and x-symlink-ctime headers (all base64-encoded).
+     * @param array $chunk {
+     *     Multipart symlink part.
+     *     @type array $headers Base64 x-symlink-path and x-symlink-target, and integer x-symlink-ctime.
+     * }
      */
     private function handle_symlink_chunk(array $chunk): void
     {
@@ -12468,16 +12572,10 @@ class ImportClient
             $target,
         );
 
-        // In preserve-local mode, if something already exists at the symlink
-        // path, keep it — whether it's a file, directory, or another symlink.
-        // Also skip if any parent component is a symlink — we never create
-        // new content through symlinked directories.
+        // The batch check keeps skipped local values unchanged. A requested
+        // link may replace an earlier download, but its parent must not traverse
+        // a shared hosting link.
         if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-                $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
-                $this->emit_skip_progress($path);
-                return;
-            }
             if ($this->path_traverses_symlink(dirname($local_absolute_path))) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (symlink in path): {$path} -> {$target}", true);
                 $this->emit_skip_progress($path);
@@ -12708,6 +12806,10 @@ class ImportClient
             true,
         );
         if ($phase === "files" && $path !== "" && $is_file_error) {
+            if ($this->fs_root_nonempty_behavior === 'preserve-local' && !$this->current_fetch_batch_contains_path($path)) {
+                $this->audit_log("PRESERVE-LOCAL: skipped file error absent from the current fetch batch: {$path}", true);
+                return;
+            }
             $selected = $this->is_selected_for_pulling($path, false, "file");
             if (!$selected && $this->follow_symlinks) {
                 // Followed targets can be selected outside an include prefix.

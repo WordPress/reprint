@@ -584,6 +584,11 @@ the `--on-fs-root-nonempty` flag controls this behavior. It takes the following 
 - `--on-fs-root-nonempty=error` (default): throw an error and abort.
 - `--on-fs-root-nonempty=preserve-local`: import into the non-empty directory while preserving all existing local content.
 
+Preserve-local also checks received parts against the current fetch batch. Paths
+skipped while planning stay unchanged if the source includes them in its reply.
+Files selected for update still replace earlier downloads, including changes
+between files, directories, and links.
+
 **Filtering files**
 
 The `--filter` flag controls which files are downloaded. This is useful when the media library is large

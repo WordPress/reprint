@@ -185,7 +185,7 @@ final class PullSymlinkScopeTest extends TestCase
                 'X-File-Path' => base64_encode('/shared' . $missing_tail . '/new.txt'),
                 'X-First-Chunk' => '1', 'X-Last-Chunk' => '1',
                 'X-File-Size' => (string) strlen($skipped_body), 'X-File-Ctime' => '1234567890'], 'body' => $skipped_body],
-            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/safe.txt'),
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/zz-safe.txt'),
                 'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4',
                 'X-File-Ctime' => '1234567891'], 'body' => 'safe'],
             ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']],
@@ -194,14 +194,19 @@ final class PullSymlinkScopeTest extends TestCase
         ( new \ReflectionMethod($client, 'initialize_credential') )->invoke($client, true, ['secret' => 'test-secret']);
         // run() selects this same mode from --on-fs-root-nonempty=preserve-local.
         ( new \ReflectionProperty($client, 'fs_root_nonempty_behavior') )->setValue($client, 'preserve-local');
-        $complete = ( new \ReflectionMethod($client, 'fetch_file_batch') )->invoke($client, [], null);
+        // Use a real planned batch so both paths reach their ordinary parent checks.
+        $list_file = $client->pull_state_directory . '/fetch-list.jsonl';
+        file_put_contents($list_file,
+            json_encode(['path' => base64_encode('/shared' . $missing_tail . '/new.txt'), 'size' => strlen($skipped_body)]) . "\n" .
+            json_encode(['path' => base64_encode('/zz-safe.txt'), 'size' => 4]) . "\n");
+        $complete = ( new \ReflectionMethod($client, 'fetch_files_from_list') )->invoke($client, $list_file);
         $this->assertSame('keep existing', file_get_contents($this->root . '/outside/new.txt'));
         $this->assertDirectoryDoesNotExist($this->root . '/outside/missing');
-        $this->assertSame('safe', file_get_contents($this->root . '/files/safe.txt'));
+        $this->assertSame('safe', file_get_contents($this->root . '/files/zz-safe.txt'));
         $this->assertTrue($complete);
         $reporter = ( new \ReflectionProperty($client, 'progress_reporter') )->getValue($client);
-        $this->assertSame(2, $reporter->get_batch_files_done());
-        $this->assertSame(4, $client->get_state()->fetch->file_bytes_in_batch);
+        $this->assertSame(2, $reporter->get_file_details()['items']['done']);
+        $this->assertSame(4, $client->get_state()->fetch->file_bytes_before_batch);
         $this->assertStringContainsString('PRESERVE-LOCAL', file_get_contents($this->root . '/state/audit.log'));
     }
 
