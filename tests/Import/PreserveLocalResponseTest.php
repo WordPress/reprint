@@ -271,6 +271,34 @@ final class PreserveLocalResponseTest extends TestCase
         }
     }
 
+    /** A directory-to-link update must keep local files until the user removes them. */
+    public function testDirectoryToLinkUpdateKeepsLocalFiles(): void
+    {
+        file_put_contents($this->source . '/target', 'target bytes');
+        mkdir($this->source . '/uploads');
+        $this->pull();
+        $local_directory = $this->root . '/files/site/uploads';
+        file_put_contents($local_directory . '/photo.jpg', 'local photo');
+
+        $this->pull(true);
+        rmdir($this->source . '/uploads');
+        symlink('target', $this->source . '/uploads');
+        $this->pull();
+        $this->assertFalse(is_link($local_directory), 'The local directory still contains a local-only photo.');
+        $this->assertSame('local photo', file_get_contents($local_directory . '/photo.jpg'));
+        $this->assertSame('target bytes', file_get_contents($this->root . '/files/site/target'));
+        $this->assertStringContainsString('PRESERVE-LOCAL skip symlink (cannot remove directory without deleting contents)',
+            file_get_contents($this->root . '/state/audit.log'));
+
+        // A skipped replacement must remain available after the user empties the directory.
+        unlink($local_directory . '/photo.jpg');
+        $this->pull(true);
+        $this->pull();
+        $this->assertTrue(is_link($local_directory));
+        $this->assertSame('target', readlink($local_directory));
+        $this->assertSame('target bytes', file_get_contents($local_directory));
+    }
+
     /** @return array<string,list<string>> Selected file, directory, and link transitions. */
     public static function selected_type_changes(): array
     {
@@ -279,6 +307,8 @@ final class PreserveLocalResponseTest extends TestCase
             'directory to file' => ['directory', 'file'],
             'file to link' => ['file', 'symlink'],
             'link to directory' => ['symlink', 'directory'],
+            'directory to link' => ['directory', 'symlink'],
+            'link to file' => ['symlink', 'file'],
         ];
     }
 

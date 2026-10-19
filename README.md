@@ -587,7 +587,8 @@ the `--on-fs-root-nonempty` flag controls this behavior. It takes the following 
 Preserve-local also checks received parts against the current fetch batch. Paths
 skipped while planning stay unchanged if the source includes them in its reply.
 Files selected for update still replace earlier downloads, including changes
-between files, directories, and links.
+between files, directories, and links. A directory-to-link update keeps a
+nonempty local directory unchanged.
 
 **Filtering files**
 

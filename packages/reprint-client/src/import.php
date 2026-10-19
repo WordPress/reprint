@@ -12616,8 +12616,15 @@ class ImportClient
             return;
         }
 
-        // Remove existing file/symlink if present
-        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+        // A requested parent does not permit deleting local-only children.
+        // rmdir() removes only an empty directory, without walking its contents.
+        if ($this->fs_root_nonempty_behavior === 'preserve-local' && is_dir($local_absolute_path) && !is_link($local_absolute_path)) {
+            if (!@rmdir($local_absolute_path)) {
+                $this->audit_log("PRESERVE-LOCAL skip symlink (cannot remove directory without deleting contents): {$path} -> {$target}", true);
+                $this->emit_skip_progress($path);
+                return;
+            }
+        } elseif (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
             if (
                 !$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)
             ) {
