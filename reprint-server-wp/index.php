@@ -1,6 +1,6 @@
 <?php
 /**
- * Plugin Name: Reprint Server
+ * Plugin Name: Reprint
  * Plugin URI: https://github.com/WordPress/reprint
  * Description: Exposes the Reprint API with signed endpoints for database and file synchronization.
  * Version: 0.11.2-dev
