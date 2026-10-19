@@ -549,7 +549,9 @@ function handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
     // have enabled display_errors based on WP_DEBUG_DISPLAY).
     if (function_exists('ini_set')) {
+        // phpcs:ignore PluginCheck.CodeAnalysis.PHPErrorReporting.IniDirectiveDisplay_errors,Squiz.PHP.DiscouragedFunctions.Discouraged -- Displayed PHP errors would corrupt the API's file bytes or JSON response.
         @ini_set('display_errors', '0');
+        // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged -- API error responses use JSON rather than PHP's HTML formatting.
         @ini_set('html_errors', '0');
     }
 
@@ -579,6 +581,7 @@ function handle_api_request(array $options = []): void {
     // old symlink target). This is cheap and prevents non-deterministic failures.
     clearstatcache(true);
 
+    // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- Convert PHP failures into the API's JSON error response.
     set_error_handler(function ($errno, $errstr, $errfile, $errline) {
         $error = [
             'error' => "PHP Error: $errstr",
@@ -586,6 +589,7 @@ function handle_api_request(array $options = []): void {
             'line' => $errline,
             'type' => $errno,
         ];
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Keep failed API requests in the host error log even when WP_DEBUG is off.
         error_log('Reprint Server API error: ' . json_encode($error));
         http_response_code(500);
         // Hosts such as Hostinger rewrite domains so links and assets stay on a
@@ -603,6 +607,7 @@ function handle_api_request(array $options = []): void {
             'file' => $e->getFile(),
             'line' => $e->getLine(),
         ];
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Keep failed API requests in the host error log even when WP_DEBUG is off.
         error_log('Reprint Server API exception: ' . json_encode($error));
         http_response_code(500);
         // Hosts such as Hostinger rewrite domains so links and assets stay on a

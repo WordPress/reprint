@@ -406,6 +406,12 @@ if (!function_exists('network_admin_url')) {
     }
 }
 
+if (!function_exists('wp_parse_url')) {
+    function wp_parse_url(string $url, int $component = -1) {
+        return parse_url($url, $component);
+    }
+}
+
 if (!function_exists('add_query_arg')) {
     /** Accepts both core call shapes: (array $query, string $url) and (string $key, string $value, string $url). */
     function add_query_arg(...$args): string {
