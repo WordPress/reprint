@@ -227,7 +227,7 @@ class SettingsPage {
     private function render_page(): void {
         $configuration = get_configuration_state();
         $remote_reprint_api_url = home_url('?reprint-api');
-        $uses_http = parse_url($remote_reprint_api_url, PHP_URL_SCHEME) === 'http';
+        $uses_http = wp_parse_url($remote_reprint_api_url, PHP_URL_SCHEME) === 'http';
         // Nothing on the page changes which scheme this host accepts.
         $key_host = $configuration['required_scheme'] === 'key';
         $configured = $configuration['is_configured'];
