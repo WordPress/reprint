@@ -197,6 +197,38 @@ final class KeySignedRequestTest extends TestCase {
         $this->assertStringContainsString($masked_url . '&endpoint=file_fetch', $audit_log);
     }
 
+    /** A cursor after wp_posts must not include it in the next batch. */
+    public function testDbIndexTreatsTheLastTableCursorAsAValue(): void
+    {
+        require_once __DIR__ . '/../../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
+        $database_path = $this->root . '/source.sqlite';
+        $database = new \WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=' . $database_path . ';dbname=wp_test');
+        $database->exec('CREATE TABLE wp_posts (ID bigint PRIMARY KEY)');
+        $configuration = json_decode(file_get_contents($this->root . '/configuration.json'), true);
+        $configuration['sqlite_database_path'] = $database_path;
+        file_put_contents($this->root . '/configuration.json', json_encode($configuration));
+        $url = \WordPress\Reprint\Server\Utils::endpoint_url($this->url, 'db_index');
+        $client = new PublicKeyClient(file_get_contents($this->private_key_path));
+        $headers = [];
+        foreach ($client->get_auth_headers('POST', $url) as $name => $value) {
+            $headers[] = $name . ': ' . $value;
+        }
+        $handle = curl_init($url);
+        curl_setopt_array($handle, [CURLOPT_POSTFIELDS => [
+            'cursor' => base64_encode(json_encode(['last_table' => "zzzz\\' OR 1=1 -- "])),
+        ], CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true, CURLOPT_ENCODING => '', CURLOPT_TIMEOUT => 5]);
+        try {
+            $response = curl_exec($handle);
+            $this->assertIsString($response, curl_error($handle));
+            $this->assertSame(200, curl_getinfo($handle, CURLINFO_HTTP_CODE), $response);
+            $this->assertStringContainsString('X-Chunk-Type: completion', $response);
+            $this->assertStringNotContainsString('X-Chunk-Type: error', $response);
+            $this->assertStringNotContainsString('"name":"wp_posts"', $response, 'wp_posts sorts before the supplied last-table value.');
+        } finally {
+            curl_close($handle);
+        }
+    }
+
     /**
      * @dataProvider invalid_sql_states
      * @param mixed $state State received in the client's SQL cursor.

@@ -31,7 +31,7 @@ class SqliteDriverPDO
     /** @var object The plugin's MySQL-on-SQLite driver. */
     private $driver;
 
-    /** @var PDO Native connection for quoting, transaction checks, and the database file path. */
+    /** @var PDO Native connection for transaction checks and the database file path. */
     private $raw_pdo;
 
     /**
@@ -68,7 +68,7 @@ class SqliteDriverPDO
      */
     public function prepare(string $sql): SqliteDriverPDOStatement
     {
-        return new SqliteDriverPDOStatement($this->driver, $this->raw_pdo, $sql);
+        return new SqliteDriverPDOStatement($this->driver, $this, $sql);
     }
 
     /**
@@ -76,18 +76,37 @@ class SqliteDriverPDO
      */
     public function query(string $sql): SqliteDriverPDOStatement
     {
-        $stmt = new SqliteDriverPDOStatement($this->driver, $this->raw_pdo, $sql);
+        $stmt = new SqliteDriverPDOStatement($this->driver, $this, $sql);
         $stmt->execute();
         return $stmt;
     }
 
     /**
-     * Quotes a string for safe inclusion in a query.
-     * Delegates to the underlying raw SQLite PDO.
+     * Quotes a string for the MySQL parser which receives this adapter's queries.
+     *
+     * SQLite quoting leaves the \n in folder\new unchanged. The MySQL parser
+     * then reads it as a newline instead of two filename bytes.
+     *
+     * @see https://github.com/WordPress/sqlite-database-integration/blob/4f3aab1a5b03b00f42d7b5141ac6a11f9c752256/packages/mysql-on-sqlite/src/sqlite/class-wp-pdo-mysql-on-sqlite.php#L6914-L6938
      */
+    // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- Keep PDO's quote() signature; this adapter always quotes strings.
     public function quote(string $value, int $type = PDO::PARAM_STR): string
     {
-        return $this->raw_pdo->quote($value, $type);
+        // Adapted from the plugin's private quote_mysql_utf8_string_literal().
+        // Use strtr() so replacement bytes are never processed again.
+        $replacements = ["'" => "''"];
+        if (
+            !method_exists($this->driver, 'is_sql_mode_active')
+            || !$this->driver->is_sql_mode_active('NO_BACKSLASH_ESCAPES')
+        ) {
+            $replacements += [
+                "\\" => "\\\\",
+                "\0" => "\\0",
+                "\n" => "\\n",
+                "\r" => "\\r",
+            ];
+        }
+        return "'" . strtr($value, $replacements) . "'";
     }
 }
 
@@ -102,8 +121,8 @@ class SqliteDriverPDOStatement
     /** @var object The plugin's MySQL-on-SQLite driver. */
     private $driver;
 
-    /** @var PDO The raw SQLite PDO for quote() delegation. */
-    private $raw_pdo;
+    /** @var SqliteDriverPDO Connection supplying the active MySQL quoting rules. */
+    private $connection;
 
     /** @var string */
     private $sql;
@@ -119,13 +138,13 @@ class SqliteDriverPDOStatement
 
     /**
      * @param object $driver  WP_SQLite_Driver or WP_MySQL_On_SQLite.
-     * @param PDO    $raw_pdo The underlying SQLite connection.
-     * @param string $sql     MySQL query to execute.
+     * @param SqliteDriverPDO $connection Connection supplying MySQL quoting rules.
+     * @param string $sql MySQL query to execute.
      */
-    public function __construct($driver, PDO $raw_pdo, string $sql)
+    public function __construct($driver, SqliteDriverPDO $connection, string $sql)
     {
         $this->driver = $driver;
-        $this->raw_pdo = $raw_pdo;
+        $this->connection = $connection;
         $this->sql = $sql;
     }
 
@@ -170,7 +189,7 @@ class SqliteDriverPDOStatement
                 if (!array_key_exists($i, $params)) {
                     continue;
                 }
-                $quoted = $this->raw_pdo->quote($params[$i]);
+                $quoted = $this->connection->quote($params[$i]);
                 $sql = substr_replace($sql, $quoted, $positions[$i], 1);
             }
 
@@ -179,7 +198,7 @@ class SqliteDriverPDOStatement
                 if (!is_string($key)) {
                     continue;
                 }
-                $sql = str_replace($key, $this->raw_pdo->quote($value), $sql);
+                $sql = str_replace($key, $this->connection->quote($value), $sql);
             }
         }
 
