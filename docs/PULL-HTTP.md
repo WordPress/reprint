@@ -32,6 +32,10 @@ the endpoint in the body, so this fallback keeps them working. Existing
 multipart file-list uploads keep their file part, and their options may stay
 in the query string.
 
+For `file_fetch`, send the requested paths in the multipart `file_list` upload.
+The server ignores any `file_list_path` request parameter. That option remains
+available to direct PHP callers of `endpoint_file_fetch()`.
+
 Requests are signed over newline-joined fields behind a version label. The
 connection token uses `reprint-hmac-sha256-v2`, and a key uses
 `reprint-rsa-sha256-v1` plus its key id. The remaining fields are the nonce,

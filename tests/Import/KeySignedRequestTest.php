@@ -57,7 +57,8 @@ final class KeySignedRequestTest extends TestCase {
         $router = realpath(__DIR__ . '/../fixtures/api-authentication-router.php');
         $this->assertIsString($router);
         $this->server_process = proc_open(
-            [PHP_BINARY, '-d', 'display_errors=0', '-S', $address, '-t', $this->root . '/docroot', $router],
+            // Bound an unexpected file-list URL read: the observing listener sends no response.
+            [PHP_BINARY, '-d', 'display_errors=0', '-d', 'default_socket_timeout=1', '-S', $address, '-t', $this->root . '/docroot', $router],
             [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/server.log', 'a'], 2 => ['file', $this->root . '/server.log', 'a']],
             $pipes,
             dirname($router),
@@ -156,6 +157,84 @@ final class KeySignedRequestTest extends TestCase {
         $masked_url = str_replace('http://', 'http://***@', $this->url);
         $this->assertStringContainsString($masked_url . '&endpoint=preflight', $audit_log);
         $this->assertStringContainsString($masked_url . '&endpoint=file_fetch', $audit_log);
+    }
+
+    /**
+     * @dataProvider file_list_requests
+     * @param string $location Where the extra file-list path is sent.
+     * @param string $parameter HTTP parameter spelling.
+     * @param bool   $upload Whether the request includes an uploaded file list.
+     */
+    public function testFileFetchUsesOnlyTheUploadedList(string $location, string $parameter, bool $upload): void
+    {
+        $listener = stream_socket_server('tcp://127.0.0.1:0');
+        $this->assertIsResource($listener);
+        try {
+            $extra_file_list_url = 'http://' . stream_socket_get_name($listener, false) . '/file-list.json';
+            $remote_path = $this->root . '/remote/pulled.txt';
+            file_put_contents($remote_path, 'file selected by the upload');
+            $uploaded_list = $this->root . '/uploaded-list.json';
+            file_put_contents($uploaded_list, json_encode([['path' => base64_encode($remote_path)]]));
+            $url = \WordPress\Reprint\Server\Utils::endpoint_url($this->url, 'file_fetch');
+            $fields = ['directory' => $this->root . '/remote'];
+            if ($location === 'query') {
+                $url .= '&' . http_build_query([$parameter => $extra_file_list_url]);
+            } else {
+                $fields[$parameter] = $extra_file_list_url;
+            }
+            if ($upload) {
+                $fields['file_list'] = new \CURLFile($uploaded_list, 'application/json', 'file-list.json');
+            }
+            $client = new PublicKeyClient(file_get_contents($this->private_key_path));
+            $headers = [];
+            foreach ($client->get_auth_headers('POST', $url) as $name => $value) {
+                $headers[] = $name . ': ' . $value;
+            }
+            $body = $fields;
+            if ($location === 'json') {
+                $headers[] = 'Content-Type: application/json';
+                $body = json_encode($fields);
+            } elseif ($location === 'form') {
+                $headers[] = 'Content-Type: application/x-www-form-urlencoded';
+                $body = http_build_query($fields);
+            }
+            $handle = curl_init($url);
+            curl_setopt_array($handle, [CURLOPT_POSTFIELDS => $body, CURLOPT_HTTPHEADER => $headers,
+                CURLOPT_RETURNTRANSFER => true, CURLOPT_ENCODING => '', CURLOPT_TIMEOUT => 5]);
+            try {
+                $response = curl_exec($handle);
+                $connection = @stream_socket_accept($listener, 0);
+                if (is_resource($connection)) {
+                    fclose($connection);
+                }
+                $this->assertFalse($connection, 'The source connected to the request-supplied file-list URL.');
+                $this->assertIsString($response, curl_error($handle));
+                $this->assertSame($upload ? 200 : 400, curl_getinfo($handle, CURLINFO_HTTP_CODE), $response);
+                if ($upload) {
+                    $this->assertStringContainsString('X-File-Path: ' . base64_encode($remote_path), $response);
+                    $this->assertStringContainsString('file selected by the upload', $response);
+                    $this->assertStringContainsString('X-Chunk-Type: completion', $response);
+                } else {
+                    $this->assertSame('file_list is required for file_fetch endpoint', json_decode($response, true)['error']);
+                }
+            } finally {
+                curl_close($handle);
+            }
+        } finally {
+            fclose($listener);
+        }
+    }
+
+    /** @return array<string,array{string,string,bool}> Parameter location, spelling, and upload presence. */
+    public static function file_list_requests(): array
+    {
+        return [
+            'query without upload' => ['query', 'file_list_path', false],
+            'form without upload' => ['form', 'file-list-path', false],
+            'json without upload' => ['json', 'file_list_path', false],
+            'query with upload' => ['query', 'file-list-path', true],
+            'multipart with upload' => ['multipart', 'file_list_path', true],
+        ];
     }
 
     /** @return array<string,mixed> The command report preflight printed last. */
