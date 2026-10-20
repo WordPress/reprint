@@ -3696,7 +3696,12 @@ function path_extension_compressibility(string $path): string
  */
 function path_head_looks_like_text(string $path): bool
 {
-    // File-list entries are filesystem names, not PHP stream URLs.
+    // A client can upload a file-list entry such as ftp://host/template.neon.
+    // Its unknown extension sends it here for a byte probe. is_file()/fopen()
+    // can then contact that FTP host just to decide whether to use gzip,
+    // even though the file producer looks for this name under a local source
+    // directory. Skip stream URLs before either call. Check native absolute
+    // paths first so Windows paths such as C://site/template.neon still work.
     if (
         !Utils::is_absolute_path($path, Utils::native_path_format())
         && preg_match('~^[a-z][a-z0-9+.-]*://~i', $path) === 1
