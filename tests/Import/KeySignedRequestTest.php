@@ -237,6 +237,44 @@ final class KeySignedRequestTest extends TestCase {
         ];
     }
 
+    public function testFileFetchCursorDoesNotOpenStreamUrls(): void
+    {
+        $listener = stream_socket_server('tcp://127.0.0.1:0');
+        $this->assertIsResource($listener);
+        try {
+            $remote_path = 'ftp://' . stream_socket_get_name($listener, false) . '/example.jpg';
+            $file_list = $this->root . '/file-list.json';
+            file_put_contents($file_list, '[]');
+            $cursor = ['phase' => 'streaming', 'path' => base64_encode($remote_path), 'ctime' => -1, 'bytes' => 1];
+            $url = \WordPress\Reprint\Server\Utils::endpoint_url($this->url, 'file_fetch');
+            $client = new PublicKeyClient(file_get_contents($this->private_key_path));
+            $headers = [];
+            foreach ($client->get_auth_headers('POST', $url) as $name => $value) {
+                $headers[] = $name . ': ' . $value;
+            }
+            $handle = curl_init($url);
+            curl_setopt_array($handle, [CURLOPT_POSTFIELDS => [
+                'directory' => $this->root . '/remote', 'cursor' => base64_encode(json_encode($cursor)),
+                'file_list' => new \CURLFile($file_list, 'application/json', 'file-list.json'),
+            ], CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true, CURLOPT_ENCODING => '', CURLOPT_TIMEOUT => 5]);
+            try {
+                $response = curl_exec($handle);
+                $connection = @stream_socket_accept($listener, 0);
+                if (is_resource($connection)) {
+                    fclose($connection);
+                }
+                $this->assertFalse($connection, 'Restoring the cursor connected to its stream URL.');
+                $this->assertIsString($response, curl_error($handle));
+                $this->assertSame(400, curl_getinfo($handle, CURLINFO_HTTP_CODE), $response);
+                $this->assertStringContainsString('File cursor path', json_decode($response, true)['error']);
+            } finally {
+                curl_close($handle);
+            }
+        } finally {
+            fclose($listener);
+        }
+    }
+
     /** @return array<string,mixed> The command report preflight printed last. */
     private function runPreflight(string $private_key_path): array
     {

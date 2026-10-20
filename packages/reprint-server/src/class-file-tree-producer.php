@@ -138,6 +138,7 @@ class FileTreeProducer
      * - path: the file/dir/symlink we were processing or just finished
      * - ctime: the ctime of the file when we started (for change detection)
      * - bytes: byte offset within the file (0 if finished or non-file)
+     * Active file paths must be absolute filesystem names; byte offsets are non-negative integers.
      *
      * On resume, position within the paths array is determined by binary
      * search based on the path. This ensures correctness even when the
@@ -149,6 +150,13 @@ class FileTreeProducer
         if ($cursor === null && json_last_error() !== JSON_ERROR_NONE) {
             throw new InvalidArgumentException(
                 "Invalid cursor format: " . json_last_error_msg()
+            );
+        }
+
+        if (!is_array($cursor)) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, never HTML output.
+                'File cursor must be a JSON object or array; received ' . gettype($cursor) . '.'
             );
         }
 
@@ -173,12 +181,28 @@ class FileTreeProducer
             return;
         }
 
-        $path = isset($cursor["path"]) ? base64_decode($cursor["path"]) : null;
+        // Keep the producer's path spelling, including dot segments in absolute paths.
+        $path = null;
+        if (isset($cursor['path'])) {
+            $path = is_string($cursor['path']) ? base64_decode($cursor['path'], true) : false;
+            if ($path === false || strpos($path, "\0") !== false || !Utils::is_absolute_path($path, Utils::native_path_format())) {
+                throw new InvalidArgumentException(
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, never HTML output.
+                    'File cursor path must be base64 for an absolute filesystem path without NUL bytes; received ' . json_encode($cursor['path']) . '.'
+                );
+            }
+        }
+        $byte_offset = array_key_exists('bytes', $cursor) ? $cursor['bytes'] : 0;
+        if (!is_int($byte_offset) || $byte_offset < 0) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, never HTML output.
+                'File cursor bytes must be a non-negative integer; received ' . json_encode($byte_offset) . '.'
+            );
+        }
         if ($path !== null && $this->multisite_selection !== null) {
             $this->multisite_selection->assert_path_allowed($path);
         }
         $ctime = $cursor["ctime"] ?? null;
-        $byte_offset = $cursor["bytes"] ?? 0;
 
         $this->last_emitted_path = null;
         $this->last_emitted_ctime = null;
