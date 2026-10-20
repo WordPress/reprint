@@ -356,14 +356,19 @@ a direct embedder passes the same array to
 `WordPress\Reprint\Server\Plugin\handle_api_request()`.
 The document-root path must resolve to an existing directory. `ABSPATH` remains
 the default only for pull endpoints because it may point at a separate shared
-WordPress core tree. Push work lives in a document-root-specific private
-directory beside the resolved absolute document root unless server configuration
-supplies `reprint_directory`.
-Configured reprint directories must remain outside the document root; the HTTP
-endpoints reject an inside path because they do not yet apply the indexing and
-web-access protections described below. The plugin always excludes its logical
-installed directory from push, including when that directory is a symlink to a
-physical target outside the document root. A platform hook or embedding router
+WordPress core tree. Push requires an explicit `reprint_directory` in the trusted
+API-options array; there is no inferred directory. The host must choose a private
+push directory outside every web-served tree, on the same filesystem as the
+document root. A sibling of one document root can still be served by a parent
+virtual host, and PHP cannot enumerate those other roots. Missing configuration
+returns `not_configured` (HTTP 503) before a push session is created. Pull endpoints
+are unchanged. Existing unfinished pushes require their existing private directory
+to remain configured; selecting a new empty directory does not move their state.
+The HTTP endpoints also reject a directory inside the current document root
+because they do not yet apply the indexing and web-access protections described
+below. The plugin always excludes its logical installed directory from push,
+including when that directory is a symlink to a physical target outside the
+document root. A platform hook or embedding router
 must choose its document root, reprint directory, and excluded paths as server
 configuration; request parameters cannot select any of them.
 

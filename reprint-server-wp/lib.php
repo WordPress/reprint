@@ -522,9 +522,8 @@ function update_push_authorization(bool $enabled): bool {
  *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
- *     @type string $reprint_directory Optional. Private push storage path
- *                                     outside the document root.
- *                                     Defaults to a document-root-specific sibling.
+ *     @type string $reprint_directory Required for push. Private push directory
+ *                                     outside every web root. No default.
  *     @type string[] $excluded_paths Optional. Document-root-relative paths
  *                                    push must preserve. The Reprint Server
  *                                    plugin directory is always included when
@@ -730,6 +729,14 @@ function handle_api_request(array $options = []): void {
             $server_options['multisite'] = get_multisite_export_context();
         }
         if (HTTPServer::is_push_endpoint($endpoint)) {
+            // Hosts must provide a route and authentication which survive
+            // replacement of wp_options and deactivation of this plugin.
+            if (
+                strpos($endpoint, 'push_db_') === 0
+                && ( ( $options['database_push'] ?? false ) !== true || isset($server_options['multisite']) )
+            ) {
+                push_error(403, 'push_disabled', 'Full database push requires a host-configured standalone API route; multisite is not supported.');
+            }
             // Push changes the web server's document root. ABSPATH remains the
             // pull default because it may point at a separate shared core tree.
             if (array_key_exists('docroot', $options)) {
@@ -753,9 +760,16 @@ function handle_api_request(array $options = []): void {
             }
             $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
             $lexical_docroot = normalize_path(str_replace('\\', '/', $configured_docroot));
-            $reprint_directory = $options['reprint_directory'] ?? (
-                dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
-            );
+            $reprint_directory = $options['reprint_directory'] ?? null;
+            if (!is_string($reprint_directory) || $reprint_directory === '') {
+                // The document root's parent may be served by another virtual host.
+                // Only the host configuration can choose a directory outside all of them.
+                throw new PushConfigurationException(
+                    'Push endpoints require a configured reprint_directory outside all web roots; observed '
+                    . json_encode($reprint_directory)
+                    . '. Set reprint_directory in the reprint_server_api_options filter or handle_api_request() options.'
+                );
+            }
             $excluded_paths = $options['excluded_paths'] ?? [];
             if (!is_array($excluded_paths)) {
                 throw new PushConfigurationException('excluded_paths must be an array.');
@@ -850,11 +864,6 @@ function handle_api_request(array $options = []): void {
             }
             $server_options['push'] = $push_options;
             if (strpos($endpoint, 'push_db_') === 0) {
-                // Hosts must provide a route and authentication which survive
-                // replacement of wp_options and deactivation of this plugin.
-                if (( $options['database_push'] ?? false ) !== true || isset($server_options['multisite'])) {
-                    push_error(403, 'push_disabled', 'Full database push requires a host-configured standalone API route; multisite is not supported.');
-                }
                 $server_options['database_push'] = $push_options;
             }
         }
