@@ -36,6 +36,7 @@
             <file>ExportLibraryLoadTest.php</file>
             <file>UtilsLoadingTest.php</file>
             <file>PdoConstantsTest.php</file>
+            <file>SqliteDriverPDOTest.php</file>
             <file>JoinUnixPathsTest.php</file>
             <file>HmacServerTest.php</file>
             <file>PublicKeyClientTest.php</file>

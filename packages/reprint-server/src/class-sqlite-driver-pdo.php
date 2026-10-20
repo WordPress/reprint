@@ -31,7 +31,7 @@ class SqliteDriverPDO
     /** @var object The plugin's MySQL-on-SQLite driver. */
     private $driver;
 
-    /** @var PDO Native connection for quoting, transaction checks, and the database file path. */
+    /** @var PDO Native connection for transaction checks and the database file path. */
     private $raw_pdo;
 
     /**
@@ -68,7 +68,7 @@ class SqliteDriverPDO
      */
     public function prepare(string $sql): SqliteDriverPDOStatement
     {
-        return new SqliteDriverPDOStatement($this->driver, $this->raw_pdo, $sql);
+        return new SqliteDriverPDOStatement($this->driver, $this, $sql);
     }
 
     /**
@@ -76,18 +76,32 @@ class SqliteDriverPDO
      */
     public function query(string $sql): SqliteDriverPDOStatement
     {
-        $stmt = new SqliteDriverPDOStatement($this->driver, $this->raw_pdo, $sql);
+        $stmt = new SqliteDriverPDOStatement($this->driver, $this, $sql);
         $stmt->execute();
         return $stmt;
     }
 
     /**
-     * Quotes a string for safe inclusion in a query.
-     * Delegates to the underlying raw SQLite PDO.
+     * Quotes a string for the MySQL parser which receives this adapter's queries.
+     *
+     * SQLite quoting leaves the \n in folder\new unchanged. The MySQL parser
+     * then reads it as a newline instead of two filename bytes.
      */
+    // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- Keep PDO's quote() signature; this adapter always quotes strings.
     public function quote(string $value, int $type = PDO::PARAM_STR): string
     {
-        return $this->raw_pdo->quote($value, $type);
+        $replacements = ["'" => "''"];
+        if ($this->uses_backslash_escapes()) {
+            $replacements += ["\\" => "\\\\", "\0" => "\\0", "\n" => "\\n", "\r" => "\\r"];
+        }
+        return "'" . strtr($value, $replacements) . "'";
+    }
+
+    /** Whether the active MySQL parser interprets backslashes inside strings. */
+    public function uses_backslash_escapes(): bool
+    {
+        return !method_exists($this->driver, 'is_sql_mode_active')
+            || !$this->driver->is_sql_mode_active('NO_BACKSLASH_ESCAPES');
     }
 }
 
@@ -102,8 +116,8 @@ class SqliteDriverPDOStatement
     /** @var object The plugin's MySQL-on-SQLite driver. */
     private $driver;
 
-    /** @var PDO The raw SQLite PDO for quote() delegation. */
-    private $raw_pdo;
+    /** @var SqliteDriverPDO Connection supplying the active MySQL quoting rules. */
+    private $connection;
 
     /** @var string */
     private $sql;
@@ -119,13 +133,13 @@ class SqliteDriverPDOStatement
 
     /**
      * @param object $driver  WP_SQLite_Driver or WP_MySQL_On_SQLite.
-     * @param PDO    $raw_pdo The underlying SQLite connection.
-     * @param string $sql     MySQL query to execute.
+     * @param SqliteDriverPDO $connection Connection supplying MySQL quoting rules.
+     * @param string $sql MySQL query to execute.
      */
-    public function __construct($driver, PDO $raw_pdo, string $sql)
+    public function __construct($driver, SqliteDriverPDO $connection, string $sql)
     {
         $this->driver = $driver;
-        $this->raw_pdo = $raw_pdo;
+        $this->connection = $connection;
         $this->sql = $sql;
     }
 
@@ -148,39 +162,32 @@ class SqliteDriverPDOStatement
         $sql = $this->sql;
 
         if ($params !== null && count($params) > 0) {
-            // Find ? placeholder positions outside of string literals.
-            $positions = [];
-            $len = strlen($sql);
-            $in_single = false;
-            $in_double = false;
-            for ($i = 0; $i < $len; $i++) {
-                $ch = $sql[$i];
-                if ($ch === "'" && !$in_double) {
-                    $in_single = !$in_single;
-                } elseif ($ch === '"' && !$in_single) {
-                    $in_double = !$in_double;
-                } elseif ($ch === '?' && !$in_single && !$in_double) {
-                    $positions[] = $i;
-                }
-            }
-
-            // Replace positional placeholders from right to left so
-            // earlier offsets stay valid.
-            for ($i = count($positions) - 1; $i >= 0; $i--) {
-                if (!array_key_exists($i, $params)) {
-                    continue;
-                }
-                $quoted = $this->raw_pdo->quote($params[$i]);
-                $sql = substr_replace($sql, $quoted, $positions[$i], 1);
-            }
-
-            // Named parameters (:name style).
-            foreach ($params as $key => $value) {
-                if (!is_string($key)) {
-                    continue;
-                }
-                $sql = str_replace($key, $this->raw_pdo->quote($value), $sql);
-            }
+            // Match complete quoted tokens and comments before placeholders, so
+            // ':last' stays text and replacement values are never scanned again.
+            $quoted_strings = $this->connection->uses_backslash_escapes()
+                ? "'(?:[^'\\\\]|\\\\.|'')*'|\"(?:[^\"\\\\]|\\\\.|\"\")*\""
+                : "'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"";
+            $positional_parameter = 0;
+            $sql = preg_replace_callback(
+                '~' . $quoted_strings . '|`(?:[^`]|``)*`|/\*.*?\*/|--[\x00-\x20][^\r\n]*|\#[^\r\n]*|\?|:[A-Za-z_][A-Za-z0-9_]*~s',
+                function (array $tokens) use ($params, &$positional_parameter): string {
+                    $token = $tokens[0];
+                    if ($token === '?') {
+                        $parameter = $positional_parameter++;
+                    } elseif ($token[0] === ':') {
+                        $parameter = array_key_exists($token, $params) ? $token : substr($token, 1);
+                    } else {
+                        return $token;
+                    }
+                    if (!array_key_exists($parameter, $params)) {
+                        return $token;
+                    }
+                    return $params[$parameter] === null
+                        ? 'NULL'
+                        : $this->connection->quote( (string) $params[$parameter] );
+                },
+                $sql
+            );
         }
 
         $result = $this->driver->query($sql);
@@ -294,7 +301,8 @@ class SqliteDriverPDOStatement
         if ($this->bound_params === null) {
             $this->bound_params = [];
         }
-        $this->bound_params[$parameter] = $value;
+        // bindValue() numbers positions from 1; execute() arrays start at 0.
+        $this->bound_params[is_int($parameter) ? $parameter - 1 : $parameter] = $value;
         return true;
     }
 
