@@ -8307,6 +8307,9 @@ class ImportClient
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
                 }
+                // A source's full-text parser (for example, MySQL's ngram) may not
+                // exist on the target. Keep the index, omit unavailable parser
+                // clauses, and warn callers because default parsing can change searches.
                 if (stripos($query, 'PARSER') !== false) {
                     $tokens = ( new \WP_MySQL_Lexer($query) )->remaining_tokens();
                     if (
