@@ -3696,6 +3696,13 @@ function path_extension_compressibility(string $path): string
  */
 function path_head_looks_like_text(string $path): bool
 {
+    // File-list entries are filesystem names, not PHP stream URLs.
+    if (
+        !Utils::is_absolute_path($path, Utils::native_path_format())
+        && preg_match('~^[a-z][a-z0-9+.-]*://~i', $path) === 1
+    ) {
+        return false;
+    }
     if (!is_file($path)) {
         return false;
     }

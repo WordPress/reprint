@@ -329,6 +329,28 @@ final class ExportLibraryLoadTest extends TestCase {
         }
     }
 
+    public function testCompressionProbesKeepFilesystemPathsAndSkipStreamUrls(): void
+    {
+        $code = '<?php require base64_decode(\'' . base64_encode(self::AUTOLOAD_PATH) . '\');'
+            . 'require base64_decode(\'' . base64_encode(self::EXPORT_PATH) . '\');' . <<<'PHP'
+        chdir(__DIR__);
+        file_put_contents('text.neon', 'services: { example: Example }');
+        file_put_contents('binary.neon', "\0binary");
+        $archive = new PharData(__DIR__ . '/archive.tar');
+        $archive['text.neon'] = 'archive text';
+        echo json_encode([
+            file_fetch_paths_should_gzip([__DIR__ . '/text.neon']),
+            file_fetch_paths_should_gzip(['text.neon']),
+            file_fetch_paths_should_gzip(['binary.neon']),
+            path_head_looks_like_text('file://' . __DIR__ . '/text.neon'),
+            path_head_looks_like_text('phar://' . __DIR__ . '/archive.tar/text.neon'),
+        ]);
+        PHP;
+        $result = $this->runPhpCode($code);
+        $this->assertSame(0, $result['status'], $result['output']);
+        $this->assertSame([true, true, false, false, false], json_decode(trim($result['output']), true));
+    }
+
     private function runExportWith(string $setup_script): array
     {
         $autoload_path = realpath(self::AUTOLOAD_PATH);
