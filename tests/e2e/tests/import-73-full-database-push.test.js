@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
     createMysqlConnection, createTempDir, getDbName,
-    getHarnessKey, getSiteDir, getSiteUrl, getSiteSecret, runImporter,
+    configurePublicApiUrl, getHarnessKey, getSiteDir, getSiteUrl, getSiteSecret, runImporter,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { createSqlFidelityData } from '../lib/sql-fidelity-data.js';
@@ -83,6 +83,8 @@ require '${targetPluginDirectory}/lib.php';
                 },
             });
         }
+        // Exported home differs from the host's fixed public API address.
+        configurePublicApiUrl(sourceSite, getSiteUrl(sourceSite));
         const source = await createMysqlConnection(sourceDatabase);
         const target = await createMysqlConnection(targetDatabase);
         try {
@@ -118,6 +120,7 @@ require '${targetPluginDirectory}/lib.php';
     });
 
     afterAll(async () => {
+        configurePublicApiUrl(sourceSite, null);
         // The PHP-FPM user creates private upload files the runner cannot unlink.
         if (directory) execFileSync('sudo', ['rm', '-rf', directory]);
         const connection = await createMysqlConnection();

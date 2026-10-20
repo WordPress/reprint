@@ -33,6 +33,7 @@ final class RequestAuthenticator {
         HMACServer::REASON_MISSING_HEADER,
         HMACServer::REASON_TIMESTAMP_EXPIRED,
         HMACServer::REASON_SIGNATURE_MISMATCH,
+        HMACServer::REASON_ORIGIN_MISMATCH,
         'content_hash_mismatch',
         self::REASON_REQUIRES_KEY_AUTH,
         self::REASON_REQUIRES_TOKEN_AUTH,

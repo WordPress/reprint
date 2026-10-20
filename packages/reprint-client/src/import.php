@@ -13609,6 +13609,13 @@ class ImportClient
                 ];
             }
 
+            if ($server_reason === 'origin_mismatch') {
+                return [
+                    'code' => 'AUTH_SITE_MISMATCH',
+                    'message' => is_string($server_msg) ? $server_msg : "The request destination does not match the site's configured public API URL.",
+                ];
+            }
+
             if (!$using_key && $server_reason === 'signature_mismatch') {
                 return [
                     'code' => 'AUTH_SECRET_MISMATCH',

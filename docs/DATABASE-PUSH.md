@@ -88,6 +88,7 @@ require $plugin_directory . 'vendor/autoload.php';
 require $plugin_directory . 'lib.php';
 
 \WordPress\Reprint\Server\Plugin\handle_api_request([
+    'api_url' => 'https://example.com/reprint-database.php',
     'docroot' => '/srv/site',
     'reprint_directory' => '/srv/private/reprint',
     'database_push' => true,

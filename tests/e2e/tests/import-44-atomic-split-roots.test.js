@@ -26,7 +26,7 @@ import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
     createTempDir, cleanupTempDir,
-    getSiteDir,
+    getSiteDir, getSiteUrl,
     apiRequest,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -67,7 +67,7 @@ if (!function_exists('plugin_dir_path')) {
     function plugin_dir_path(\$file) { return rtrim(dirname(\$file), '/') . '/'; }
 }
 require_once constant('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR') . 'lib.php';
-\\WordPress\\Reprint\\Server\\Plugin\\handle_api_request();
+\\WordPress\\Reprint\\Server\\Plugin\\handle_api_request(['api_url' => '${getSiteUrl(site)}']);
 `);
 
                 // Create site's own wp-content

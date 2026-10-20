@@ -27,6 +27,7 @@ final class PublicKeyServer {
     public const REASON_MISSING_HEADER = 'missing_header';
     public const REASON_TIMESTAMP_EXPIRED = 'timestamp_expired';
     public const REASON_SIGNATURE_MISMATCH = 'signature_mismatch';
+    public const REASON_ORIGIN_MISMATCH = 'origin_mismatch';
     public const REASON_AUTH_FAILED = 'auth_failed';
 
     /** @var array<string,string> key id => one-line public key */
@@ -134,9 +135,9 @@ final class PublicKeyServer {
         }
         if ($origin !== $this->api_origin) {
             return $this->fail(
-                self::REASON_SIGNATURE_MISMATCH,
-                'This request was signed for ' . $origin . '; this API uses ' . $this->api_origin
-                . '. Connect using this site\'s configured API URL.'
+                self::REASON_ORIGIN_MISMATCH,
+                'This request names ' . $origin . '; this API uses ' . $this->api_origin
+                . '. Use the configured public API URL, or ask the host to set api_url to the address used by clients.'
             );
         }
 

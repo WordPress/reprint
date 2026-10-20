@@ -47,7 +47,7 @@ final class PublicKeyServerTest extends TestCase
         foreach (['http://s.test', 'https://other.test', 'https://s.test:8443'] as $api_url) {
             $server = new PublicKeyServer([self::$client->get_key_id() => self::$public_key], $api_url);
             $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
-            $this->assertSame(PublicKeyServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
+            $this->assertSame(PublicKeyServer::REASON_ORIGIN_MISMATCH, $server->last_error_reason());
         }
     }
 

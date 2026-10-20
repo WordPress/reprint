@@ -42,7 +42,7 @@ final class HmacServerTest extends TestCase {
         foreach (['http://s.test', 'https://other.test', 'https://s.test:8443'] as $api_url) {
             $server = new HMACServer(self::SECRET, $api_url);
             $this->assertNotNull($server->verify($headers, 'POST', self::TARGET, $this->now($headers)));
-            $this->assertSame(HMACServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
+            $this->assertSame(HMACServer::REASON_ORIGIN_MISMATCH, $server->last_error_reason());
         }
     }
 

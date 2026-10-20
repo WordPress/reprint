@@ -253,13 +253,13 @@ define('ABSPATH', '/path/to/wordpress/');
 
 require_once '/path/to/reprint-server-wp/lib.php';
 
-// Route however you like — lib.php doesn't check URLs.
+// Route however you like. Configure the public address separately from routing.
 if ($myRouter->matches('/export')) {
     // Use the default authentication: key signatures on a host with openssl_verify,
     // connection tokens elsewhere. Keys come from public-keys.php when present,
     // otherwise the public-keys option; the token from secret.php when present,
     // otherwise the connection-token option.
-    handle_api_request();
+    handle_api_request(['api_url' => 'https://example.com/export']);
 
     // Or supply your own authentication:
     handle_api_request([

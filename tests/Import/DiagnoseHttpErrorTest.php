@@ -171,6 +171,16 @@ class DiagnoseHttpErrorTest extends TestCase
         $this->assertSame('AUTH_PLUGIN_OUTDATED', $result['code']);
     }
 
+    public function testADestinationMismatchNamesBothAddressesForEitherCredential(): void
+    {
+        $detail = 'This request names https://first.test; this API uses https://second.test. Configure api_url or use the configured address.';
+        $body = json_encode(['code' => 403, 'reason' => 'origin_mismatch', 'auth_version' => 3, 'error' => $detail]);
+        foreach ([$this->diagnose(403, $body), $this->diagnoseWithKey(403, $body)] as $result) {
+            $this->assertSame('AUTH_SITE_MISMATCH', $result['code']);
+            $this->assertSame($detail, $result['message']);
+        }
+    }
+
     public function testAKeyClientIsToldWhenThePluginPredatesKeyAuthentication(): void
     {
         $result = $this->diagnoseWithKey(403, '{"error":"Missing X-Auth-Content-Hash header","code":403}');

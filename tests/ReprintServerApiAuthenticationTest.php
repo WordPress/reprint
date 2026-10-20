@@ -211,14 +211,14 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $response = $this->request($headers, $second_url);
 
         $this->assertSame(403, $response['status']);
-        $this->assertSame('signature_mismatch', $response['body']['reason']);
+        $this->assertSame('origin_mismatch', $response['body']['reason']);
         $this->assertReachedDispatcher($this->request($client->get_auth_headers('GET', $second_url), $second_url));
 
         // The destination comes from site configuration, never the Host header.
         $headers['Host'] = parse_url($first_url, PHP_URL_HOST) . ':' . parse_url($first_url, PHP_URL_PORT);
         $response = $this->request($headers, $second_url);
         $this->assertSame(403, $response['status']);
-        $this->assertSame('signature_mismatch', $response['body']['reason']);
+        $this->assertSame('origin_mismatch', $response['body']['reason']);
         unset($headers['Host']);
 
         // Merely changing the declared destination does not change the signature.
@@ -247,7 +247,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $local_url = str_replace('/?reprint-api', '/blog/?reprint-api', $url);
         $this->assertReachedDispatcher($this->request($client->get_auth_headers('GET', $public_url), $local_url));
         $response = $this->request($client->get_auth_headers('GET', $local_url), $local_url);
-        $this->assertSame('signature_mismatch', $response['body']['reason']);
+        $this->assertSame('origin_mismatch', $response['body']['reason']);
     }
 
     public function testAnInvalidConfiguredApiUrlNamesTheSetupProblem(): void

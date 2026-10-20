@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
-    getSiteSecret, getSiteDir,
+    configurePublicApiUrl, getSiteSecret, getSiteDir,
     fsRootDir,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
@@ -125,11 +125,13 @@ chown -R nginx:nginx ${sh(remoteRoot)}
 
     beforeAll(async () => {
         await ensureSite(site);
+        configurePublicApiUrl(site, importUrl());
         await startApiServer();
     });
 
     afterAll(() => {
         stopApiServer();
+        configurePublicApiUrl(site, null);
         execSync(`sudo rm -rf ${sh(remoteRoot)} 2>/dev/null || true`);
     });
 

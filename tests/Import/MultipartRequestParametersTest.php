@@ -27,6 +27,7 @@ final class MultipartRequestParametersTest extends TestCase {
         $address = stream_socket_get_name($listener, false);
         fclose($listener);
         $this->url = 'http://' . $address . '/nested%2Fapi?%72eprint-api=1&site-export-api%5Bflag%5D=1&';
+        file_put_contents($this->root . '/api-url', $this->url);
         $this->server_process = proc_open(
             [PHP_BINARY, '-S', $address, __DIR__ . '/fixtures/multipart-parameters-router.php'],
             [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/server.log', 'a'], 2 => ['file', $this->root . '/server.log', 'a']],
