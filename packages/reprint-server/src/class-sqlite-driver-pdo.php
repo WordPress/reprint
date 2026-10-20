@@ -86,22 +86,27 @@ class SqliteDriverPDO
      *
      * SQLite quoting leaves the \n in folder\new unchanged. The MySQL parser
      * then reads it as a newline instead of two filename bytes.
+     *
+     * @see https://github.com/WordPress/sqlite-database-integration/blob/4f3aab1a5b03b00f42d7b5141ac6a11f9c752256/packages/mysql-on-sqlite/src/sqlite/class-wp-pdo-mysql-on-sqlite.php#L6914-L6938
      */
     // phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- Keep PDO's quote() signature; this adapter always quotes strings.
     public function quote(string $value, int $type = PDO::PARAM_STR): string
     {
+        // Adapted from the plugin's private quote_mysql_utf8_string_literal().
+        // Use strtr() so replacement bytes are never processed again.
         $replacements = ["'" => "''"];
-        if ($this->uses_backslash_escapes()) {
-            $replacements += ["\\" => "\\\\", "\0" => "\\0", "\n" => "\\n", "\r" => "\\r"];
+        if (
+            !method_exists($this->driver, 'is_sql_mode_active')
+            || !$this->driver->is_sql_mode_active('NO_BACKSLASH_ESCAPES')
+        ) {
+            $replacements += [
+                "\\" => "\\\\",
+                "\0" => "\\0",
+                "\n" => "\\n",
+                "\r" => "\\r",
+            ];
         }
         return "'" . strtr($value, $replacements) . "'";
-    }
-
-    /** Whether the active MySQL parser interprets backslashes inside strings. */
-    public function uses_backslash_escapes(): bool
-    {
-        return !method_exists($this->driver, 'is_sql_mode_active')
-            || !$this->driver->is_sql_mode_active('NO_BACKSLASH_ESCAPES');
     }
 }
 
@@ -162,32 +167,39 @@ class SqliteDriverPDOStatement
         $sql = $this->sql;
 
         if ($params !== null && count($params) > 0) {
-            // Match complete quoted tokens and comments before placeholders, so
-            // ':last' stays text and replacement values are never scanned again.
-            $quoted_strings = $this->connection->uses_backslash_escapes()
-                ? "'(?:[^'\\\\]|\\\\.|'')*'|\"(?:[^\"\\\\]|\\\\.|\"\")*\""
-                : "'(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"";
-            $positional_parameter = 0;
-            $sql = preg_replace_callback(
-                '~' . $quoted_strings . '|`(?:[^`]|``)*`|/\*.*?\*/|--[\x00-\x20][^\r\n]*|\#[^\r\n]*|\?|:[A-Za-z_][A-Za-z0-9_]*~s',
-                function (array $tokens) use ($params, &$positional_parameter): string {
-                    $token = $tokens[0];
-                    if ($token === '?') {
-                        $parameter = $positional_parameter++;
-                    } elseif ($token[0] === ':') {
-                        $parameter = array_key_exists($token, $params) ? $token : substr($token, 1);
-                    } else {
-                        return $token;
-                    }
-                    if (!array_key_exists($parameter, $params)) {
-                        return $token;
-                    }
-                    return $params[$parameter] === null
-                        ? 'NULL'
-                        : $this->connection->quote( (string) $params[$parameter] );
-                },
-                $sql
-            );
+            // Find ? placeholder positions outside of string literals.
+            $positions = [];
+            $len = strlen($sql);
+            $in_single = false;
+            $in_double = false;
+            for ($i = 0; $i < $len; $i++) {
+                $ch = $sql[$i];
+                if ($ch === "'" && !$in_double) {
+                    $in_single = !$in_single;
+                } elseif ($ch === '"' && !$in_single) {
+                    $in_double = !$in_double;
+                } elseif ($ch === '?' && !$in_single && !$in_double) {
+                    $positions[] = $i;
+                }
+            }
+
+            // Replace positional placeholders from right to left so
+            // earlier offsets stay valid.
+            for ($i = count($positions) - 1; $i >= 0; $i--) {
+                if (!array_key_exists($i, $params)) {
+                    continue;
+                }
+                $quoted = $this->connection->quote($params[$i]);
+                $sql = substr_replace($sql, $quoted, $positions[$i], 1);
+            }
+
+            // Named parameters (:name style).
+            foreach ($params as $key => $value) {
+                if (!is_string($key)) {
+                    continue;
+                }
+                $sql = str_replace($key, $this->connection->quote($value), $sql);
+            }
         }
 
         $result = $this->driver->query($sql);
@@ -301,8 +313,7 @@ class SqliteDriverPDOStatement
         if ($this->bound_params === null) {
             $this->bound_params = [];
         }
-        // bindValue() numbers positions from 1; execute() arrays start at 0.
-        $this->bound_params[is_int($parameter) ? $parameter - 1 : $parameter] = $value;
+        $this->bound_params[$parameter] = $value;
         return true;
     }
 

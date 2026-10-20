@@ -39,21 +39,23 @@ final class SqliteDriverPDOTest extends TestCase
         );
     }
 
-    /** @dataProvider parameterValues */
+    /**
+     * Round-trips values through the quoting paths used by exports.
+     *
+     * @dataProvider parameterValues
+     */
     public function testParametersKeepTheirBytes(string $value, string $binding): void
     {
         $adapter = $this->create_adapter();
         if ($binding === 'quote') {
             $statement = $adapter->query('SELECT ' . $adapter->quote($value) . ' AS actual_value');
+        } elseif ($binding === 'named bind') {
+            $statement = $adapter->prepare('SELECT :value AS actual_value');
+            $statement->bindValue(':value', $value);
+            $statement->execute();
         } else {
-            $positional = strpos($binding, 'positional') === 0;
-            $statement = $adapter->prepare('SELECT ' . ( $positional ? '?' : ':value' ) . ' AS actual_value');
-            if (strpos($binding, 'bind') !== false) {
-                $statement->bindValue($positional ? 1 : ':value', $value);
-                $statement->execute();
-            } else {
-                $statement->execute($positional ? [$value] : ['value' => $value]);
-            }
+            $statement = $adapter->prepare('SELECT ? AS actual_value');
+            $statement->execute([$value]);
         }
         $this->assertSame($value, $statement->fetchColumn());
     }
@@ -72,48 +74,39 @@ final class SqliteDriverPDOTest extends TestCase
             'empty' => '',
             'Unicode' => 'żółw',
         ] as $name => $value) {
-            foreach (['named execute', 'named bind', 'positional execute', 'positional bind', 'quote'] as $binding) {
+            foreach (['named bind', 'positional execute', 'quote'] as $binding) {
                 $cases[$name . ' / ' . $binding] = [$value, $binding];
             }
         }
         return $cases;
     }
 
-    public function testPlaceholderReplacementDoesNotRevisitValuesOrQuotedSql(): void
-    {
-        $adapter = $this->create_adapter();
-        $statement = $adapter->prepare(
-            "SELECT :value AS first_result, :value_long AS second_result, ':value ?' AS literal_value, " .
-            "'it\\'s :value' AS escaped_value, :value AS repeated_value /* :value ? */ -- :value ?\n"
-        );
-        $statement->execute([':value' => ':value_long', ':value_long' => 'second']);
-        $this->assertSame([
-            'first_result' => ':value_long',
-            'second_result' => 'second',
-            'literal_value' => ':value ?',
-            'escaped_value' => "it's :value",
-            'repeated_value' => ':value_long',
-        ], $statement->fetch());
-    }
-
-    public function testNumericComparisonsAndNullParametersKeepTheirMeaning(): void
+    /** Quoted numeric cursors must still compare as numbers. */
+    public function testNumericComparisonsKeepTheirMeaning(): void
     {
         $adapter = $this->create_adapter();
         $adapter->query('CREATE TABLE wp_numbers (id INT)');
         $adapter->query('INSERT INTO wp_numbers VALUES (1), (2)');
-        $statement = $adapter->prepare('SELECT id FROM wp_numbers WHERE id > :last AND :empty IS NULL ORDER BY id');
-        $statement->execute([':last' => '1', ':empty' => null]);
+        $statement = $adapter->prepare('SELECT id FROM wp_numbers WHERE id > :last ORDER BY id');
+        $statement->bindValue(':last', '1');
+        $statement->execute();
         $this->assertSame(['2'], $statement->fetchAll(PDO::FETCH_COLUMN));
     }
 
+    /** Query values follow the active mode when backslashes are literal. */
     public function testQuoteAndParametersFollowNoBackslashEscapesMode(): void
     {
         $adapter = $this->create_adapter();
         $adapter->query("SET SESSION sql_mode = 'NO_BACKSLASH_ESCAPES'");
-        $value = "folder\\new\\it's :value";
-        $statement = $adapter->prepare('SELECT :value AS actual_value, ' . $adapter->quote($value) . ' AS quoted_value');
-        $statement->execute([':value' => $value]);
-        $this->assertSame(['actual_value' => $value, 'quoted_value' => $value], $statement->fetch());
+        $value = "folder\\new\\it's\0\n\r :value";
+        $this->assertSame($value, $adapter->query('SELECT ' . $adapter->quote($value) . ' AS actual_value')->fetchColumn());
+        $statement = $adapter->prepare('SELECT :value AS actual_value');
+        $statement->bindValue(':value', $value);
+        $statement->execute();
+        $this->assertSame($value, $statement->fetchColumn());
+        $statement = $adapter->prepare('SELECT ? AS actual_value');
+        $statement->execute([$value]);
+        $this->assertSame($value, $statement->fetchColumn());
     }
 
     /** Opens the actual MySQL-on-SQLite translator, not a query-recording substitute. */

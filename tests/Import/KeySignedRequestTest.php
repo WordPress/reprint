@@ -197,6 +197,7 @@ final class KeySignedRequestTest extends TestCase {
         $this->assertStringContainsString($masked_url . '&endpoint=file_fetch', $audit_log);
     }
 
+    /** A cursor after wp_posts must not include it in the next batch. */
     public function testDbIndexTreatsTheLastTableCursorAsAValue(): void
     {
         require_once __DIR__ . '/../../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
