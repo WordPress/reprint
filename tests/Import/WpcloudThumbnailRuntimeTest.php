@@ -100,7 +100,7 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
     {
         $this->write_image($this->root . '/outside/photo.png');
         [$status, $body] = $this->request($path);
-        $this->assertSame(404, $status, $body);
+        $this->assertSame(404, $status, bin2hex($body));
         $this->assertFileDoesNotExist($this->root . '/outside/photo-2x2.png');
     }
 
@@ -120,7 +120,7 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
         $this->write_image($this->root . '/outside/photo.png');
         symlink($this->root . '/outside/photo.png', $this->uploads_directory . '/photo.png');
         [$status, $body] = $this->request('/wp-content/uploads/photo-2x2.png');
-        $this->assertSame(404, $status, $body);
+        $this->assertSame(404, $status, bin2hex($body));
         $this->assertFileDoesNotExist($this->uploads_directory . '/photo-2x2.png');
     }
 
@@ -131,7 +131,7 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
         $this->write_image($outside_directory . '/photo.png');
         symlink($outside_directory, $this->uploads_directory . '/linked');
         [$status, $body] = $this->request('/wp-content/uploads/linked/photo-2x2.png');
-        $this->assertSame(404, $status, $body);
+        $this->assertSame(404, $status, bin2hex($body));
         $this->assertFileDoesNotExist($outside_directory . '/photo-2x2.png');
     }
 
@@ -140,7 +140,7 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
         $this->write_image($this->uploads_directory . '/photo.png');
         symlink($this->root . '/outside/new.png', $this->uploads_directory . '/photo-2x2.png');
         [$status, $body] = $this->request('/wp-content/uploads/photo-2x2.png');
-        $this->assertSame(404, $status, $body);
+        $this->assertSame(404, $status, bin2hex($body));
         $this->assertFileDoesNotExist($this->root . '/outside/new.png');
     }
 
@@ -158,7 +158,7 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
         mkdir($this->root . '/site/wp-content/private');
         $this->write_image($this->root . '/site/wp-content/private/photo.png');
         [$status, $body] = $this->request('/wp-content/uploads/a/wp-content/private/photo-2x2.png');
-        $this->assertSame(404, $status, $body);
+        $this->assertSame(404, $status, bin2hex($body));
         $this->assertFileDoesNotExist($this->root . '/site/wp-content/private/photo-2x2.png');
     }
 
