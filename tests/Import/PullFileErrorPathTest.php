@@ -58,6 +58,24 @@ final class PullFileErrorPathTest extends TestCase
         }
     }
 
+    public function testRemoteErrorPathIsDisplayedAsTextAfterHttpDecoding(): void
+    {
+        $client = $this->new_client();
+        $stream = fopen('php://memory', 'w+b');
+        ( new \ReflectionProperty($client, 'progress') )->setValue($client, new \TerminalProgress(true, $stream));
+        ( new \ReflectionProperty($client, 'progress_output_mode') )->setValue($client, 'tty');
+        try {
+            $this->receive_error($client, base64_encode("/remote/café\033[2J\007.txt"), 'sql');
+            rewind($stream);
+            $output = stream_get_contents($stream);
+            $this->assertStringNotContainsString("\033[2J", $output);
+            $this->assertStringContainsString('café\\x1b[2J\\x07.txt', $output);
+            $this->assertStringContainsString("\r\033[K", $output, 'Reprint still refreshes its progress line.');
+        } finally {
+            fclose($stream);
+        }
+    }
+
     /** File errors use the same remap as downloaded file parts. */
     public function testFileErrorRemovesOnlyTheMappedLocalPath(): void
     {

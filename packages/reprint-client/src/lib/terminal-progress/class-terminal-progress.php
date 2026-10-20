@@ -62,6 +62,26 @@ class TerminalProgress
         $this->verbose_mode = $verbose_mode;
     }
 
+    /**
+     * Makes control bytes visible in data before adding terminal formatting.
+     *
+     * For example, a filename containing ESC [2J must print as \x1b[2J rather
+     * than clear the screen. Keep valid UTF-8 text; show non-ASCII bytes as
+     * hex escapes when the text contains invalid UTF-8.
+     */
+    public static function escape_text(string $text): string
+    {
+        $valid_utf8 = preg_match('//u', $text) === 1;
+        return preg_replace_callback(
+            $valid_utf8 ? '/[\x00-\x1F\x7F-\x9F]/u' : '/[\x00-\x1F\x7F-\xFF]/',
+            static function (array $characters): string {
+                $character = $characters[0];
+                return sprintf('\\x%02x', ord($character[strlen($character) - 1]));
+            },
+            $text
+        );
+    }
+
     public function set_terminal_output_enabled(bool $terminal_output_enabled): void
     {
         $this->terminal_output_enabled = $terminal_output_enabled;

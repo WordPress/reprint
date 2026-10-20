@@ -49,6 +49,103 @@ final class CompactProgressOutputTest extends TestCase {
         $this->remove_directory($this->root);
     }
 
+    public function testRemotePreflightFailureIsEscapedOnlyInTerminalOutput(): void
+    {
+        $message = "source\033[2J\007\rfailed";
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => 200,
+            'body' => json_encode(['ok' => false, 'error' => $message]),
+        ]));
+        $terminal = $this->run_command('pull', ['--progress=tty']);
+        $this->assertSame(1, $terminal['exit_code']);
+        $this->assertStringNotContainsString("\033[2J", $terminal['stdout'] . $terminal['stderr']);
+        $this->assertStringContainsString('source\\x1b[2J\\x07\\x0dfailed', $terminal['stdout']);
+        $this->assertStringContainsString('source\\x1b[2J\\x07\\x0dfailed', $terminal['stderr']);
+        $this->assertStringContainsString("\033[31m", $terminal['stdout'], 'Reprint keeps its own failure color.');
+
+        $jsonl = $this->run_command('pull', ['--progress=jsonl']);
+        $this->assertSame(1, $jsonl['exit_code']);
+        $error = json_decode(trim($jsonl['stderr']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertStringContainsString($message, $error['error']);
+    }
+
+    public function testRemoteVersionsAreEscapedBeforeStageColorsAreAdded(): void
+    {
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => 500, 'body' => '{"error":"stop after preflight"}',
+            'preflight_body' => json_encode([
+                'ok' => true, 'protocol_version' => 3, 'filesystem' => ['ok' => true],
+                'database' => ['connected' => true, 'wp' => ['wp_version' => "6.9\033[2J"]],
+                'runtime' => ['phpversion' => "8.4\007"],
+                'wp_detect' => ['roots' => [['path' => $this->root . '/remote']]],
+            ]),
+        ]));
+        $result = $this->run_command('pull', ['--progress=tty']);
+        $this->assertStringNotContainsString("\033[2J", $result['stdout']);
+        $this->assertStringContainsString('WordPress 6.9\\x1b[2J, PHP 8.4\\x07', $result['stdout']);
+        $this->assertStringContainsString("\033[32m", $result['stdout'], 'Reprint keeps its own completion color.');
+    }
+
+    /** @dataProvider filenameOutputModes */
+    public function testRemoteFilenameIsEscapedInSkipOutputButNotJson(string $mode): void
+    {
+        $name = "café\033[2J\007.txt";
+        file_put_contents($this->root . '/remote/' . $name, 'remote');
+        $local_directory = $this->root . '/files' . realpath($this->root . '/remote');
+        mkdir($local_directory, 0755, true);
+        file_put_contents($local_directory . '/' . $name, 'local');
+        $this->run_command('preflight');
+        $result = $this->run_command('files-pull', ['--progress=' . $mode, '--on-fs-root-nonempty=preserve-local']);
+        $this->assertSame(0, $result['exit_code'], $result['stderr']);
+        if ($mode === 'tty') {
+            $this->assertStringNotContainsString("\033[2J", $result['stdout']);
+            $this->assertStringContainsString('café\\x1b[2J\\x07.txt', $result['stdout']);
+        } else {
+            $skipped_paths = [];
+            foreach (explode("\n", trim($result['stdout'])) as $line) {
+                $record = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+                if (( $record['type'] ?? '' ) === 'skip') {
+                    $skipped_paths[] = $record['path'];
+                }
+            }
+            $this->assertSame([realpath($this->root . '/remote') . '/' . $name], $skipped_paths);
+        }
+        $this->assertSame('local', file_get_contents($local_directory . '/' . $name));
+        $state = json_decode(file_get_contents($this->root . '/state/progress.json'), true);
+        $this->assertSame('complete', $state['status']);
+    }
+
+    /** @return array<string,array{string}> Terminal and JSONL views of the same filename. */
+    public static function filenameOutputModes(): array
+    {
+        return ['terminal' => ['tty'], 'JSONL' => ['jsonl']];
+    }
+
+    public function testErrorJsonEscapesControlsEvenWhenTextContainsAnInvalidByte(): void
+    {
+        $result = $this->run_command('files-pull', ['--progress=jsonl', "--on-fs-root-nonempty=unknown\xff\033[2J"]);
+        $this->assertSame(1, $result['exit_code']);
+        $this->assertStringNotContainsString("\033[2J", $result['stderr']);
+        $error = json_decode(trim($result['stderr']), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertStringContainsString("unknown\xef\xbf\xbd\033[2J", $error['error']);
+    }
+
+    public function testVerboseConsoleEscapesTextWithoutChangingTheAuditFile(): void
+    {
+        $client = new \ImportClient($this->remote_url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
+        $stream = fopen('php://memory', 'w+b');
+        ( new \ReflectionProperty($client, 'progress_fd') )->setValue($client, $stream);
+        ( new \ReflectionProperty($client, 'verbose_mode') )->setValue($client, true);
+        $message = "remote\033]0;title\007\rmessage";
+        $client->audit_log($message);
+        rewind($stream);
+        $console = stream_get_contents($stream);
+        fclose($stream);
+        $this->assertStringNotContainsString("\033", $console);
+        $this->assertStringContainsString('remote\\x1b]0;title\\x07\\x0dmessage', $console);
+        $this->assertStringContainsString($message, file_get_contents($this->root . '/state/audit.log'));
+    }
+
     public function testPreflightKeepsItsDataWithoutCreatingAProgressLog(): void
     {
         $plain = $this->run_command('preflight');
