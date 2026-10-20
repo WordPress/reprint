@@ -73,8 +73,8 @@ The supported options are:
   buffering `php://input`; the endpoint streams that body after authentication.
 - `docroot` — the document root for push. It must resolve to an
   existing directory and defaults to `$_SERVER['DOCUMENT_ROOT']`.
-- `reprint_directory` — the private push storage directory outside `docroot`.
-  It defaults to a document-root-specific sibling directory.
+- `reprint_directory` — required for push. Set this private push directory outside
+  every web-served tree, not just outside `docroot`. There is no default.
 - `excluded_paths` — document-root-relative paths that push must preserve. The
   Reprint Server plugin directory is also preserved automatically when it is
   below `docroot`.
@@ -82,6 +82,17 @@ The supported options are:
   upload part. It defaults to 4 MiB.
 - `maximum_commit_entries` — the maximum number of bounded entries processed
   by one `push_commit` request. It defaults to 256.
+
+Push endpoints return `not_configured` (HTTP 503) until `reprint_directory` is
+set. Pull endpoints do not need it. For a site at `/var/www/html/blog`, a sibling
+like `/var/www/html/.reprint` may still be inside another virtual host's document
+root. PHP cannot discover every document root served by the host, so the host must
+choose the private path. Keep it on the same filesystem as `docroot`, as push
+publication uses atomic renames.
+
+When upgrading a deployment with an unfinished push, configure its existing
+private directory if that directory is outside every web-served tree. Choosing a
+new empty directory will not resume the existing push session.
 
 ## Authentication
 

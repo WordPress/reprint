@@ -1352,31 +1352,44 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNotSame(realpath($this->docroot), base64_decode($push_metadata['docroot_b64'], true));
     }
 
-    public function testDefaultPushDirectoryIsSiblingOfCanonicalDocumentRoot(): void
+    /** A nested document root does not identify a private location beside it. */
+    public function testPushRequiresAnExplicitPrivateDirectory(): void
     {
         file_put_contents($this->reprint_configuration_path, '');
+        $push_session_id = str_repeat('7', 32);
+
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+
+        $this->assertSame('failed', $response['status'], (string) json_encode($response));
+        $this->assertSame('not_configured', $response['reason']);
+        $this->assertSame(503, $response['response']['http_code']);
+        $this->assertStringContainsString('reprint_directory', $response['detail']);
+        $this->assertStringContainsString('outside all web roots', $response['detail']);
+        $this->assertStringContainsString('reprint_server_api_options', $response['detail']);
+        $default_directory = dirname($this->docroot)
+            . '/.reprint-' . substr(hash('sha256', (string) realpath($this->docroot)), 0, 12);
+        $this->assertDirectoryDoesNotExist($default_directory);
+    }
+
+    /** An explicit private path still works when DOCUMENT_ROOT is a symlink. */
+    public function testConfiguredPushDirectoryUsesCanonicalDocumentRoot(): void
+    {
         $document_root_link = $this->root . '/document-root-link';
         symlink($this->docroot, $document_root_link);
-        $this->writeDocrootConfiguration([
-            'document_root' => $document_root_link,
-        ]);
+        $this->writeDocrootConfiguration(['document_root' => $document_root_link]);
         $push_session_id = str_repeat('7', 32);
+
         $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
 
         $this->assertSame('complete', $response['status'], (string) json_encode($response));
-        $canonical_docroot = realpath($this->docroot);
-        $this->assertIsString($canonical_docroot);
-        $default_reprint_directory = dirname($canonical_docroot)
-            . '/.reprint-' . substr(hash('sha256', $canonical_docroot), 0, 12);
-        $this->assertDirectoryExists($default_reprint_directory . '/.reprint/push/' . $push_session_id);
-        $lexical_document_root_reprint_directory = dirname($document_root_link)
-            . '/.reprint-' . substr(hash('sha256', $document_root_link), 0, 12);
-        $this->assertDirectoryDoesNotExist($lexical_document_root_reprint_directory);
-        $wordpress_root_reprint_directory = $this->docroot
-            . '/.reprint-' . substr(hash('sha256', (string) realpath($this->wordpress_root)), 0, 12);
-        $this->assertDirectoryDoesNotExist($wordpress_root_reprint_directory);
+        $push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
+        $this->assertDirectoryExists($push_directory);
+        $metadata = json_decode( (string) file_get_contents($push_directory . '/push.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(realpath($this->docroot), base64_decode($metadata['docroot_b64'], true));
     }
 
     public function testParentSegmentInExcludedPathReturnsNotConfigured(): void

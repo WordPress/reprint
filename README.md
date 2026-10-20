@@ -300,6 +300,12 @@ it is the only key source; the settings page shows its keys read-only and refuse
 cannot be granted push access individually, so a platform that pushes to such sites sets
 `REPRINT_SERVER_PUSH_ENABLED` (see the plugin README).
 
+Every push deployment must also configure `reprint_directory` as a private
+directory outside all web-served trees, on the same filesystem as the document
+root. There is no default. Set it through the early `reprint_server_api_options`
+filter shown in the [plugin configuration guide](reprint-server-wp/README.md#platform-configuration).
+Pull endpoints do not require this setting.
+
 **Connection tokens.** On a host without OpenSSL both sides must share the same secret string. The plugin has a UI
 screen where the user can paste the secret, and then the importer must be fed the same string through
 `--secret=TOKEN` (more details below). Alternatively, the plugin can be pre-packaged with a
