@@ -1156,8 +1156,8 @@ final class Utils
                 . json_encode($scheme) . ' and host ' . json_encode($host) . '.'
             );
         }
-        $port = $parts['port'] ?? ( $scheme === 'https' ? 443 : 80 );
         $default_port = $scheme === 'https' ? 443 : 80;
+        $port = $parts['port'] ?? $default_port;
         return $scheme . '://' . $host . ( $port === $default_port ? '' : ':' . $port );
     }
 
