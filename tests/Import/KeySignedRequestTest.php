@@ -160,6 +160,56 @@ final class KeySignedRequestTest extends TestCase {
     }
 
     /**
+     * @dataProvider invalid_sql_states
+     * @param mixed $state State received in the client's SQL cursor.
+     */
+    public function testSqlCursorReportsAnUnsupportedState($state): void
+    {
+        require_once __DIR__ . '/../../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
+        $database_path = $this->root . '/source.sqlite';
+        $database = new \WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=' . $database_path . ';dbname=wp_test');
+        $database->exec('CREATE TABLE wp_posts (ID bigint PRIMARY KEY, post_content longtext)');
+        $database->exec("INSERT INTO wp_posts VALUES (1, 'example')");
+        $configuration = json_decode(file_get_contents($this->root . '/configuration.json'), true);
+        $configuration['sqlite_database_path'] = $database_path;
+        file_put_contents($this->root . '/configuration.json', json_encode($configuration));
+        $url = \WordPress\Reprint\Server\Utils::endpoint_url($this->url, 'sql_chunk');
+        $client = new PublicKeyClient(file_get_contents($this->private_key_path));
+        $headers = [];
+        foreach ($client->get_auth_headers('POST', $url) as $name => $value) {
+            $headers[] = $name . ': ' . $value;
+        }
+        $handle = curl_init($url);
+        curl_setopt_array($handle, [CURLOPT_POSTFIELDS => [
+            'cursor' => base64_encode(json_encode(['state' => $state])),
+        ], CURLOPT_HTTPHEADER => $headers, CURLOPT_RETURNTRANSFER => true, CURLOPT_ENCODING => '', CURLOPT_TIMEOUT => 5]);
+        try {
+            $response = curl_exec($handle);
+            $this->assertIsString($response, curl_error($handle));
+            $this->assertSame(is_string($state) ? 200 : 400, curl_getinfo($handle, CURLINFO_HTTP_CODE), $response);
+            $this->assertStringContainsString(is_string($state) ? 'X-Chunk-Type: error' : '"error":', $response);
+            $this->assertStringContainsString(is_string($state)
+                ? 'Unknown SQL dump cursor state' : 'SQL dump cursor state must be a string', $response, file_get_contents($this->root . '/server.log'));
+            $this->assertStringNotContainsString('Maximum execution time', $response);
+        } finally {
+            curl_close($handle);
+        }
+    }
+
+    /** @return array<string,array{mixed}> Unsupported SQL cursor states. */
+    public static function invalid_sql_states(): array
+    {
+        return [
+            'unknown state' => ['unknown_state'],
+            'empty state' => [''],
+            'integer state' => [0],
+            'true state' => [true],
+            'false state' => [false],
+            'array state' => [[]],
+        ];
+    }
+
+    /**
      * @dataProvider file_list_requests
      * @param string $location Where the extra file-list path is sent.
      * @param string $parameter HTTP parameter spelling.

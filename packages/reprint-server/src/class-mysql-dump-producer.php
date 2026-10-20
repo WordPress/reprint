@@ -376,6 +376,12 @@ class MySQLDumpProducer
 
                 case self::STATE_FINISHED:
                     return false;
+
+                default:
+                    throw new \InvalidArgumentException(
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Cursor errors are plain API messages.
+                        'Unknown SQL dump cursor state: ' . json_encode($this->state) . '.'
+                    );
             }
         }
 
@@ -1031,6 +1037,12 @@ class MySQLDumpProducer
             }
 
             $this->state = $cursor_data["state"] ?? self::STATE_INIT;
+            if (!is_string($this->state)) {
+                throw new \InvalidArgumentException(
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Cursor errors are plain API messages.
+                    'SQL dump cursor state must be a string; received ' . json_encode($this->state) . '.'
+                );
+            }
             $this->rows_in_batch = $cursor_data["rows_in_batch"] ?? 0;
             if (!is_int($this->rows_in_batch) && !is_float($this->rows_in_batch)) {
                 throw new \InvalidArgumentException(
