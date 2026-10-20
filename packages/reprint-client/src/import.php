@@ -9893,7 +9893,21 @@ class ImportClient
             return $local_absolute_path;
         }
 
-        if ($this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)) {
+        if (
+            $this->fs_root_nonempty_behavior === 'preserve-local'
+            && is_dir($local_absolute_path) && !is_link($local_absolute_path)
+        ) {
+            // A recorded directory can now contain unrecorded local children.
+            // rmdir() keeps those children instead of walking into the directory.
+            $removed = @rmdir($local_absolute_path);
+            if (!$removed) {
+                $this->audit_log("PRESERVE-LOCAL keep directory: {$remote_deletion_root}", true);
+                return null;
+            }
+        } else {
+            $removed = $this->remove_local_absolute_path_without_following_symlinks($local_absolute_path);
+        }
+        if ($removed) {
             $this->audit_log("Deleted: {$remote_deletion_root}", false);
             return $local_absolute_path;
         }
@@ -9904,6 +9918,9 @@ class ImportClient
 
     /**
      * Derives the shallowest missing remote path that can be deleted locally.
+     *
+     * With --on-fs-root-nonempty=preserve-local, return only the missing entry.
+     * Its absence says nothing about local-only paths under its parents.
      *
      * Whenever a path stored in the locally saved remote index is missing from the
      * currently downloaded remote index, we must figure out the blast radius. What
@@ -9964,6 +9981,10 @@ class ImportClient
         ?string $nearest_existing_path_after,
         array $export_directories
     ): string {
+        if ($this->fs_root_nonempty_behavior === 'preserve-local') {
+            return $missing_remote_path;
+        }
+
         // Use an invalid path that cannot match any validated remote path so
         // both comparisons below always receive strings.
         if (null === $nearest_existing_path_before) {

@@ -1243,6 +1243,77 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
+    /**
+     * Deleting a pulled file must not remove its unrecorded local neighbors.
+     *
+     * @dataProvider preserveLocalDeletionIndexes
+     */
+    public function testPreserveLocalDeletionKeepsUnrecordedChildren(string $mode, bool $emptyRemoteIndex): void
+    {
+        mkdir($this->localTree . '/folder/local-empty', 0700, true);
+        file_put_contents($this->localTree . '/folder/local-only.txt', 'keep local contents');
+        symlink('local-only.txt', $this->localTree . '/folder/local-link');
+        $arguments = ['--mode=' . $mode, '--on-fs-root-nonempty=preserve-local'];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        $this->assertFileExists($this->localTree . '/folder/remote-deleted.txt');
+
+        $this->writeRemoteOverrides($emptyRemoteIndex ? [
+            'removed_paths' => array_merge(array_keys($this->remoteFiles), [self::PULLED_PATH]),
+        ] : [
+            'removed_paths' => ['folder/remote-deleted.txt'],
+            'pulled_contents_b64' => base64_encode('updated remote contents'),
+            'pulled_ctime' => self::REMOTE_CTIME + 1,
+        ]);
+        $this->abortFilesPull();
+        $pull = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertFileExists($this->localTree . '/folder/local-only.txt');
+        $this->assertSame('keep local contents', file_get_contents($this->localTree . '/folder/local-only.txt'));
+        $this->assertDirectoryExists($this->localTree . '/folder/local-empty');
+        $this->assertTrue(is_link($this->localTree . '/folder/local-link'));
+        $this->assertSame('local-only.txt', readlink($this->localTree . '/folder/local-link'));
+        $this->assertFileDoesNotExist($this->localTree . '/folder/remote-deleted.txt');
+        $this->assertArrayNotHasKey(
+            $this->localIndexEntryPath('folder/remote-deleted.txt'),
+            $this->readIndex($this->localIndexPath())
+        );
+        if (!$emptyRemoteIndex) {
+            $this->assertSame('updated remote contents', file_get_contents($this->localTree . '/' . self::PULLED_PATH));
+        }
+    }
+
+    /** @return array<string,array{string,bool}> Pull modes with a missing subtree or an empty remote index. */
+    public static function preserveLocalDeletionIndexes(): array
+    {
+        return [
+            'catch-up / subtree' => ['catch-up', false],
+            'catch-up / empty index' => ['catch-up', true],
+            'mirror / subtree' => ['mirror', false],
+            'mirror / empty index' => ['mirror', true],
+        ];
+    }
+
+    /** A recorded directory can be removed only while it is empty. */
+    public function testPreserveLocalDirectoryDeletionKeepsLocalChildren(): void
+    {
+        $this->writeRemoteOverrides(['added_directories' => ['recorded-empty', 'recorded-with-local-file']]);
+        $arguments = ['--on-fs-root-nonempty=preserve-local'];
+        $initial = $this->runFilesPull($arguments);
+        $this->assertSame(0, $initial['exit'], $initial['output']);
+        file_put_contents($this->localTree . '/recorded-with-local-file/local.txt', 'added locally after the pull');
+        $this->writeRemoteOverrides([]);
+        $this->abortFilesPull();
+
+        $pull = $this->runFilesPull($arguments);
+
+        $this->assertSame(0, $pull['exit'], $pull['output']);
+        $this->assertFileExists($this->localTree . '/recorded-with-local-file/local.txt');
+        $this->assertSame('added locally after the pull', file_get_contents($this->localTree . '/recorded-with-local-file/local.txt'));
+        $this->assertDirectoryDoesNotExist($this->localTree . '/recorded-empty');
+    }
+
     public function testPulledDeletionRemovesTheDerivedDirectoryRoot(): void
     {
         $this->completeFilesPull();

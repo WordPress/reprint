@@ -204,6 +204,8 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $kept = $this->seedLocalFile('/var/www/html/wp-config.php');
 
         [$client, $reflection] = $this->prepareCompleteSyncClient(['/var/www/html']);
+        // Recursive cleanup applies to the default mode, not preserve-local.
+        $reflection->getProperty('fs_root_nonempty_behavior')->setValue($client, 'error');
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $reflection->getProperty('pull_index_journal')->getValue($client)->apply_pending_records('unix');
 
@@ -473,6 +475,8 @@ class OnlyFilesPathPrefixDiffTest extends TestCase
         $outside = $this->seedLocalFile('/var/www/html/wp-config.php');
 
         [$client, $reflection] = $this->prepareClient(['/var/www/html/wp-content']);
+        // Recursive cleanup applies to the default mode, not preserve-local.
+        $reflection->getProperty('fs_root_nonempty_behavior')->setValue($client, 'error');
         $reflection->getMethod('compare_remote_indexes_and_build_fetch_list')->invoke($client);
         $reflection->getProperty('pull_index_journal')
             ->getValue($client)
