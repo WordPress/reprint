@@ -307,7 +307,8 @@ final class HTTPServer {
      * @return array<string, mixed>
      */
     public function normalize_config(array $config, array $server = []): array {
-        unset($config['_multisite']);
+        // HTTP callers upload file_list; file_list_path is for direct PHP calls.
+        unset($config['_multisite'], $config['file_list_path']);
         if ($this->multisite !== null) {
             // This existing wire value names the selected-site export format.
             // It does not require the client to create a multisite target.

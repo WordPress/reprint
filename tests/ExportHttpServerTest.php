@@ -14,6 +14,22 @@ final class ExportHttpServerTest extends TestCase
         $this->assertArrayNotHasKey('_multisite', $config);
     }
 
+    public function testHttpRequestsCannotChooseTheFileListPath(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        foreach (['file_list_path', 'file-list-path', 'file_list-path', 'file-list_path'] as $parameter) {
+            $parameters = [$parameter => '/server/file-list.json'];
+            foreach ([
+                [$parameters, [], [], ''],
+                [[], $parameters, [], ''],
+                [[], [], ['CONTENT_TYPE' => 'application/json'], json_encode($parameters)],
+            ] as [$get, $post, $request_server, $body]) {
+                $config = $server->parse_http_config(['endpoint' => 'file_fetch'] + $get, $post, $request_server, $body);
+                $this->assertSame(['endpoint' => 'file_fetch'], $server->normalize_config($config));
+            }
+        }
+    }
+
     /** Clients must support selected-site exports before reading a network source. */
     public function testMultisiteRequiresAnExplicitClientMode(): void
     {
