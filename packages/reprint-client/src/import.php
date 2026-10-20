@@ -782,7 +782,7 @@ class ImportClient
 
         // Output to console if verbose mode or if explicitly requested
         if ($to_console && $this->verbose_mode) {
-            fwrite($this->progress_fd, $log_line);
+            fwrite($this->progress_fd, "[{$timestamp}] " . TerminalProgress::escape_text($message) . "\n");
         }
     }
 
@@ -998,7 +998,7 @@ class ImportClient
                 ? " (changed {$changes} times — may be too volatile to sync)"
                 : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
             $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
-            $this->progress->show_lifecycle_line("  {$path}{$suffix}\n");
+            $this->progress->show_lifecycle_line("  " . TerminalProgress::escape_text($path) . "{$suffix}\n");
         }
 
         $this->output_progress(
@@ -2194,7 +2194,7 @@ class ImportClient
         // Emit the final JSON line after any preceding progress records.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             $this->progress->clear_progress_line();
-            $this->progress->show_lifecycle_line($result['message'] . "\n");
+            $this->progress->show_lifecycle_line(TerminalProgress::escape_text($result['message']) . "\n");
             return;
         }
         $result_json = json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE);
@@ -3725,7 +3725,7 @@ class ImportClient
         $failed_checks = [];
         foreach ($checks as $check) {
             $icon = $check["pass"] ? "PASS" : "FAIL";
-            $human_summary .= "[{$icon}] {$check["label"]}: {$check["detail"]}\n";
+            $human_summary .= "[{$icon}] " . TerminalProgress::escape_text($check["label"] . ": " . $check["detail"]) . "\n";
             if (!$check["pass"]) {
                 $failed_checks[] = "{$check["label"]}: {$check["detail"]}";
             }
@@ -3738,7 +3738,7 @@ class ImportClient
         $message = $all_pass
             ? "Migration looks feasible."
             : "Error: " . $error['message'];
-        $human_summary .= "\n{$message}\n";
+        $human_summary .= "\n" . TerminalProgress::escape_text($message) . "\n";
         $this->progress->show_lifecycle_line($human_summary);
         $this->output_progress([
             "type" => "preflight_assertion",
@@ -4841,7 +4841,7 @@ class ImportClient
                 "FOLLOW SYMLINK | indexing remote directory: {$dir}",
                 true,
             );
-            $this->progress->show_lifecycle_line("Following symlink target: {$dir}\n");
+            $this->progress->show_lifecycle_line("Following symlink target: " . TerminalProgress::escape_text($dir) . "\n");
             $this->output_progress([
                 "type" => "symlink_follow",
                 "directory" => $dir,
@@ -4877,7 +4877,7 @@ class ImportClient
                                 substr($msg, 0, 200),
                             true,
                         );
-                        $this->progress->show_lifecycle_line("  Skipped (server rejected): {$dir}\n");
+                        $this->progress->show_lifecycle_line("  Skipped (server rejected): " . TerminalProgress::escape_text($dir) . "\n");
                         $this->output_progress([
                             "type" => "symlink_follow_rejected",
                             "directory" => $dir,
@@ -5916,13 +5916,13 @@ class ImportClient
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 
-        $human_summary = "\nRuntime: {$runtime}\nSource host: {$webhost}\n";
+        $human_summary = "\nRuntime: {$runtime}\nSource host: " . TerminalProgress::escape_text($webhost) . "\n";
         if ($target_engine !== null) {
             $human_summary .= "Target database: {$target_engine}\n";
         }
         $human_summary .= "\n";
         foreach ($summary as $line) {
-            $human_summary .= "{$line}\n";
+            $human_summary .= TerminalProgress::escape_text($line) . "\n";
         }
         $this->progress->show_lifecycle_line($human_summary);
     }
@@ -7260,7 +7260,7 @@ class ImportClient
                     'message' => $skip_message,
                 ], true);
                 $this->progress->clear_progress_line();
-                $this->progress->show_lifecycle_line($skip_message . "\n");
+                $this->progress->show_lifecycle_line(TerminalProgress::escape_text($skip_message) . "\n");
             }
 
             $message = sprintf(
@@ -8302,7 +8302,7 @@ class ImportClient
                         'message' => $rewritten['message'],
                     ], true);
                     $this->progress->clear_progress_line();
-                    $this->progress->print_line($rewritten['message'] . "\n");
+                    $this->progress->print_line(TerminalProgress::escape_text($rewritten['message']) . "\n");
                 }
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
@@ -12159,7 +12159,7 @@ class ImportClient
 
     /**
      * Build a short display path for progress messages: strip leading slash,
-     * truncate from the left when too long.
+     * truncate from the left when too long, and display control bytes as text.
      */
     private function display_path(string $path): string
     {
@@ -12168,7 +12168,7 @@ class ImportClient
         if (strlen($rel) > $max) {
             $rel = "..." . substr($rel, -($max - 3));
         }
-        return $rel;
+        return TerminalProgress::escape_text($rel);
     }
 
     /**
@@ -12773,7 +12773,7 @@ class ImportClient
         }
 
         $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");
-        $this->progress->show_progress_line($error_progress_message);
+        $this->progress->show_progress_line(TerminalProgress::escape_text($error_progress_message));
         $this->output_progress(
             [
                 "type" => "error",
@@ -16925,7 +16925,7 @@ if (
             || ( $reprint_progress_output_mode === 'auto' && $reprint_progress_stream_is_tty );
         $error_code = isset($client) ? $client->last_error_code : null;
         if ($reprint_uses_terminal_progress && empty($options['verbose'])) {
-            fwrite(STDERR, ( $command === 'files-diff' ? '' : "\n" ) . "Error: " . $e->getMessage() . "\n");
+            fwrite(STDERR, ( $command === 'files-diff' ? '' : "\n" ) . "Error: " . TerminalProgress::escape_text($e->getMessage()) . "\n");
         } else {
             $error = [
                 "error" => $e->getMessage(),
@@ -16934,10 +16934,7 @@ if (
                 "file" => $e->getFile(),
                 "line" => $e->getLine(),
             ] + ( isset($client) ? $client->get_error_details($e) : [] );
-            $json = json_encode($error);
-            if ($json === false) {
-                $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';
-            }
+            $json = json_encode($error, JSON_INVALID_UTF8_SUBSTITUTE);
             fwrite(STDERR, $json . "\n");
         }
         $reprint_exit_code = $e instanceof RetryLaterException ? 3 : 1;

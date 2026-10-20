@@ -989,7 +989,7 @@ class Pull
         $dim = "\033[2m";
         $r = "\033[0m";
         $label = $this->stage_label($stage);
-        $extra = $summary ? " {$dim}— {$summary}{$r}" : "";
+        $extra = $summary ? " {$dim}— " . TerminalProgress::escape_text($summary) . "{$r}" : "";
         $this->progress->print_line("  {$green}✓{$r} {$label}{$extra}\n");
         $this->progress->set_active_label(null);
     }
@@ -1062,13 +1062,13 @@ class Pull
                 $this->progress->print_line("  {$dim}This will show the download URL and step-by-step instructions.{$r}\n");
             } else {
                 $this->progress->print_line("\n{$red}  ✗ Preflight failed{$r}\n");
-                $this->progress->print_line("  " . implode("\n  ", explode("\n", $e->getMessage())) . "\n");
+                $this->progress->print_line("  " . TerminalProgress::escape_text($e->getMessage()) . "\n");
             }
             return;
         }
 
         $this->progress->print_line("  {$red}✗ " . $this->stage_label($stage) . "{$r}\n");
-        $this->progress->print_line("    {$dim}" . $e->getMessage() . "{$r}\n\n");
+        $this->progress->print_line("    {$dim}" . TerminalProgress::escape_text($e->getMessage()) . "{$r}\n\n");
         $this->progress->print_line("  Re-run the same command to resume.\n");
     }
 

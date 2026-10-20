@@ -452,6 +452,63 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringNotContainsString("Expect: 100-continue", $request);
     }
 
+    /** @dataProvider failureOutputModes */
+    public function testRemoteFailureDetailIsEscapedOnlyForTheTerminal(string $mode): void
+    {
+        if (!function_exists('pcntl_fork')) {
+            $this->markTestSkipped('The wire response test requires pcntl.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0');
+        $this->assertIsResource($listener);
+        $address = stream_socket_get_name($listener, false);
+        $url = 'http://' . $address . '/?reprint-api=1';
+        $this->writePreflightState($url);
+        $detail = "target\033[2J\007\rrefused";
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $connection = stream_socket_accept($listener, 5);
+            if ($connection === false) {
+                exit(2);
+            }
+            stream_set_timeout($connection, 5);
+            $request = '';
+            while (strpos($request, "\r\n\r\n") === false && !feof($connection)) {
+                $bytes = fread($connection, 65536);
+                if ($bytes === false || $bytes === '') {
+                    break;
+                }
+                $request .= $bytes;
+            }
+            $body = json_encode(['status' => 'failed', 'reason' => 'forbidden', 'detail' => $detail]);
+            fwrite($connection, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body);
+            fclose($connection);
+            fclose($listener);
+            exit(0);
+        }
+        try {
+            $result = $this->runFilesPush($url, ['--secret=token', '--allow-unsafe-http', '--progress=' . $mode]);
+            pcntl_waitpid($child, $status);
+            $this->assertSame(0, pcntl_wexitstatus($status));
+            $this->assertSame(1, $result['exit'], $result['output']);
+            if ($mode === 'tty') {
+                $this->assertStringNotContainsString("\033[2J", $result['stdout']);
+                $this->assertStringContainsString('target\\x1b[2J\\x07\\x0drefused', $result['stdout']);
+            } else {
+                $record = $this->lastWorkflowResult($result['stdout']);
+                $this->assertSame($detail, $record['detail']);
+            }
+        } finally {
+            fclose($listener);
+        }
+    }
+
+    /** @return array<string,array{string}> Terminal and machine-readable views of one response. */
+    public static function failureOutputModes(): array
+    {
+        return ['terminal' => ['tty'], 'JSONL' => ['jsonl']];
+    }
+
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
     {
         $secret = 'shared-secret-' . bin2hex(random_bytes(6));
