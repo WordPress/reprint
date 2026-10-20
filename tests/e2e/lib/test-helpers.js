@@ -35,6 +35,25 @@ export function getSiteUrl(siteName, port = null) {
     return `http://127.0.0.1:${p}/?reprint-api`;
 }
 
+/** Configure one fixed public API URL for a proxy fixture; null restores the stored home URL. */
+export function configurePublicApiUrl(siteName, apiUrl) {
+    const directory = join(getSiteDir(siteName), 'wp-content', 'mu-plugins');
+    const path = join(directory, 'e2e-public-api-url.php');
+    if (apiUrl === null) {
+        execFileSync('sudo', ['rm', '-f', path]);
+        return;
+    }
+    const encodedUrl = Buffer.from(apiUrl).toString('base64');
+    const code = `<?php
+add_filter('reprint_server_api_options', static function (array $options): array {
+    $options['api_url'] = base64_decode('${encodedUrl}');
+    return $options;
+});
+`;
+    execFileSync('sudo', ['mkdir', '-p', directory]);
+    execFileSync('sudo', ['tee', path], { input: code });
+}
+
 /**
  * Get the connection token (HMAC secret) for a test site. It also selects
  * the site's harness key: see getHarnessKey().

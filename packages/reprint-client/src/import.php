@@ -13485,17 +13485,6 @@ class ImportClient
                     . $this->public_key_client->get_public_key();
             }
 
-            // Older plugins verify this client's key signatures, so only a
-            // token request can be refused for the plugin's age.
-            if (
-                $this->hmac_client !== null
-                && is_older_plugin_authentication_refusal($http_code, $decoded)
-            ) {
-                return [
-                    'code' => 'AUTH_PLUGIN_OUTDATED',
-                    'message' => older_plugin_authentication_error_detail(),
-                ];
-            }
             // Before public-key authentication was added, plugins required
             // X-Auth-Content-Hash for token requests. Key requests lack that
             // header, so those plugins return an authentication error without
@@ -13511,6 +13500,16 @@ class ImportClient
                         "The site rejected the key signature without a reason code, which an older " .
                         "Reprint Server plugin does when it does not understand key authentication.\n\n" .
                         "Update the Reprint Server plugin.",
+                ];
+            }
+            // Both current signature formats include the site's origin.
+            if (
+                ( $using_key || $this->hmac_client !== null )
+                && is_older_plugin_authentication_refusal($http_code, $decoded)
+            ) {
+                return [
+                    'code' => 'AUTH_PLUGIN_OUTDATED',
+                    'message' => older_plugin_authentication_error_detail(),
                 ];
             }
             if ($server_reason === 'client_update_required') {
@@ -13544,19 +13543,13 @@ class ImportClient
                 ];
             }
             if ($server_reason === 'requires_token_auth') {
-                // Older plugins without OpenSSL check the previous token
-                // signature format. Update them before switching from a key
-                // to this client's token signatures.
-                $token_advice = is_older_plugin_authentication_refusal($http_code, $decoded)
-                    ? "Update the Reprint Server plugin, then pass --secret=TOKEN " .
-                        "using the connection token configured under Tools > Reprint Server."
-                    : "Pass --secret=TOKEN using the connection token configured under Tools > Reprint Server.";
+                // Older plugins are handled above; this host only needs its token.
                 return [
                     'code' => 'AUTH_REQUIRES_TOKEN',
                     'message' =>
                         "This site's PHP cannot verify public-key signatures because OpenSSL is unavailable. " .
                         "Reprint therefore requires the site's connection token.\n\n" .
-                        $token_advice,
+                        "Pass --secret=TOKEN using the connection token configured under Tools > Reprint Server.",
                 ];
             }
             if ($server_reason === 'no_keys_enrolled') {
@@ -13583,10 +13576,6 @@ class ImportClient
                     ? "The Reprint Server plugin could not authenticate the request. The site reported: {$server_msg}"
                     : "The Reprint Server plugin reported an authentication configuration error without a detail. " .
                         "Check the connection settings under Tools > Reprint Server and the site's PHP error log.";
-                // Older plugins also answer not_configured when no keys are enrolled.
-                if ($using_key && is_older_plugin_authentication_refusal($http_code, $decoded)) {
-                    $not_configured_message .= "\n\nIf the site has no keys enrolled, enroll this public key under Tools > Reprint Server." . $key_hint;
-                }
                 return ['code' => 'AUTH_NOT_CONFIGURED', 'message' => $not_configured_message];
             }
             if ($server_reason === 'unknown_key') {

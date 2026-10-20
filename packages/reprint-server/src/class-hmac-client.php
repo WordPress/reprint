@@ -7,9 +7,10 @@ use WordPress\Reprint\Server\Utils;
  * HMAC client for the Reprint Server API.
  *
  * Signs every request with the shared connection token over the protocol
- * label, a nonce, a timestamp, the method, and the request target, whose
- * query names the endpoint. No request body is signed: TLS protects the
- * request.
+ * label, a nonce, a timestamp, the method, the request target, and the
+ * destination origin (scheme, host, and non-default port). The query normally
+ * names the endpoint; a body-only endpoint is not signed. No request body is
+ * signed: TLS protects the request.
  *
  * Usage:
  *   $client = new Site_Export_HMAC_Client($shared_secret);
@@ -17,7 +18,7 @@ use WordPress\Reprint\Server\Utils;
  */
 class Site_Export_HMAC_Client implements EnvelopeSigner {
 
-    public const ALGORITHM = 'reprint-hmac-sha256-v2';
+    public const ALGORITHM = 'reprint-hmac-sha256-v3';
 
     /** @var string */
     private $secret;
@@ -42,30 +43,33 @@ class Site_Export_HMAC_Client implements EnvelopeSigner {
      * fraction (the server refuses anything else), the method letters, and the
      * request target a URL.
      */
-    public static function build_message(string $nonce, string $timestamp, string $method, string $request_target): string {
+    public static function build_message(string $nonce, string $timestamp, string $method, string $request_target, string $origin): string {
         return self::ALGORITHM . "\n"
             . $nonce . "\n"
             . $timestamp . "\n"
             . strtoupper($method) . "\n"
-            . $request_target;
+            . $request_target . "\n"
+            . $origin;
     }
 
     /**
      * Returns the X-Auth-* headers for one request.
      *
      * @param string $method HTTP method.
-     * @param string $url    Full request URL. Only its path and query are signed.
+     * @param string $url    Full request URL; its origin, path, and query are signed.
      * @return array<string,string>
      */
     public function get_auth_headers(string $method, string $url): array {
         $nonce = $this->generate_nonce();
         $timestamp = $this->get_timestamp();
-        $message = self::build_message($nonce, $timestamp, $method, self::request_target($url));
+        $origin = Utils::url_origin($url);
+        $message = self::build_message($nonce, $timestamp, $method, self::request_target($url), $origin);
 
         return [
             'X-Auth-Signature' => hash_hmac('sha256', $message, $this->secret),
             'X-Auth-Nonce' => $nonce,
             'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Origin' => $origin,
         ];
     }
 

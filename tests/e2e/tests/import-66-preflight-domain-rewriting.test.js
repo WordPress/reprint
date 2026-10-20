@@ -8,12 +8,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
     apiRequest, cleanupTempDir, createTempDir, fsRootDir,
-    getSiteDir, getSiteSecret, getSiteUrl, pullStateDirectory, runImporter,
+    configurePublicApiUrl, getSiteDir, getSiteSecret, getSiteUrl, pullStateDirectory, runImporter,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Preflight domain rewriting', { timeout: 180000 }, () => {
-    const site = 'basic';
+    const site = 'preflight-domain-rewriting';
     let proxyProcess;
     let apiUrl;
     let importUrl;
@@ -37,11 +37,13 @@ describe('Import: Preflight domain rewriting', { timeout: 180000 }, () => {
         });
         const [ready] = await once(proxyProcess, 'message');
         apiUrl = `http://127.0.0.1:${ready.port}/?reprint-api`;
+        configurePublicApiUrl(site, apiUrl);
         importUrl = `${apiUrl}&directory=` +
             encodeURIComponent(getSiteDir(site));
     });
 
     afterAll(async () => {
+        configurePublicApiUrl(site, null);
         if (proxyProcess && proxyProcess.exitCode === null) {
             proxyProcess.kill('SIGTERM');
             await once(proxyProcess, 'exit');

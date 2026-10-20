@@ -58,6 +58,7 @@ final class InsecureTlsTest extends TestCase {
         fclose($output);
         $this->assertNotSame('', $tls_address, file_get_contents($this->root . '/server.log'));
         $this->https_url = 'https://' . $tls_address . '/?reprint-api';
+        file_put_contents($this->root . '/api-urls.json', json_encode([$this->http_url, $this->https_url]));
     }
 
     protected function tearDown(): void

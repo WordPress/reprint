@@ -33,12 +33,22 @@ final class PublicKeyServerTest extends TestCase
 
     private function server(): PublicKeyServer
     {
-        return new PublicKeyServer([self::$client->get_key_id() => self::$public_key]);
+        return new PublicKeyServer([self::$client->get_key_id() => self::$public_key], 'https://s.test');
     }
 
     private function now(array $headers): float
     {
         return (float) $headers['X-Auth-Timestamp'] + 1.0;
+    }
+
+    public function testEachDestinationFieldMustMatchTheConfiguredSite(): void
+    {
+        $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
+        foreach (['http://s.test', 'https://other.test', 'https://s.test:8443'] as $api_url) {
+            $server = new PublicKeyServer([self::$client->get_key_id() => self::$public_key], $api_url);
+            $this->assertNotNull($server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
+            $this->assertSame(PublicKeyServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
+        }
     }
 
     public function testRoundTripVerifies(): void
@@ -88,7 +98,7 @@ final class PublicKeyServerTest extends TestCase
     public function testUnknownKeyIdIsRejectedBeforeSignatureCheck(): void
     {
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $server = new PublicKeyServer(['0000000000000000' => self::$public_key]);
+        $server = new PublicKeyServer(['0000000000000000' => self::$public_key], 'https://s.test');
 
         $this->assertSame('Key ' . self::$client->get_key_id() . ' is not enrolled on this site', $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(PublicKeyServer::REASON_UNKNOWN_KEY, $server->last_error_reason());
@@ -236,7 +246,7 @@ final class PublicKeyServerTest extends TestCase
         $weak_key = openssl_pkey_new($keypair_options);
         $weak_public_key = Utils::normalize_public_key(openssl_pkey_get_details($weak_key)['key']);
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $server = new PublicKeyServer([self::$client->get_key_id() => $weak_public_key]);
+        $server = new PublicKeyServer([self::$client->get_key_id() => $weak_public_key], 'https://s.test');
 
         $this->assertSame(
             'Stored public key ' . self::$client->get_key_id() . ' is not an RSA key of at least 3072 bits',
@@ -248,7 +258,7 @@ final class PublicKeyServerTest extends TestCase
     public function testStoredKeyThatIsNotOneLineOfBase64IsRefused(): void
     {
         $headers = self::$client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $server = new PublicKeyServer([self::$client->get_key_id() => Utils::public_key_to_pem(self::$public_key)]);
+        $server = new PublicKeyServer([self::$client->get_key_id() => Utils::public_key_to_pem(self::$public_key)], 'https://s.test');
 
         $this->assertSame(
             'Stored public key ' . self::$client->get_key_id() . ' could not be parsed',
@@ -271,7 +281,7 @@ final class PublicKeyServerTest extends TestCase
         $other_client = new PublicKeyClient($other_private);
         $headers = $other_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         // Enroll the other client's id but with OUR public key, so the id is known and the signature is wrong.
-        $server = new PublicKeyServer([$other_client->get_key_id() => self::$public_key]);
+        $server = new PublicKeyServer([$other_client->get_key_id() => self::$public_key], 'https://s.test');
 
         $this->assertSame('Signature verification failed', $server->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
     }

@@ -55,8 +55,18 @@ final class AuthProtocolTest extends TestCase {
 	{
 		return [
 			'no headers' => [[]],
-			'a key request' => [['X-Auth-Key-Id' => 'k', 'X-Auth-Signature' => 's', 'X-Auth-Nonce' => str_repeat('a', 32), 'X-Auth-Timestamp' => '1.0']],
+			'a key request' => [['X-Auth-Origin' => 'https://s.test', 'X-Auth-Key-Id' => 'k', 'X-Auth-Signature' => 's', 'X-Auth-Nonce' => str_repeat('a', 32), 'X-Auth-Timestamp' => '1.0']],
 		];
+	}
+
+	public function testASignatureWithoutADestinationRequiresAClientUpdate(): void
+	{
+		foreach ([['X-Auth-Signature' => 's'], ['HTTP_X_AUTH_SIGNATURE' => 's', 'HTTP_X_AUTH_KEY_ID' => 'key']] as $headers) {
+			$this->assertSame(
+				'Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.',
+				Utils::client_update_error($headers)
+			);
+		}
 	}
 
 	public function testAnythingButADecimalTimestampIsInvalid(): void

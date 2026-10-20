@@ -57,8 +57,11 @@ function get_option(string $name, $fallback = false) {
     return $reprint_auth_test_configuration['options'][$name] ?? $fallback;
 }
 
-// phpcs:ignore Generic.CodeAnalysis.UnusedFunctionParameter.FoundAfterLastUsed -- WordPress test stub signature.
 function apply_filters(string $hook_name, $value) {
+    global $reprint_auth_test_configuration;
+    if ($hook_name === 'reprint_server_api_options' && array_key_exists('api_url', $reprint_auth_test_configuration)) {
+        $value['api_url'] = $reprint_auth_test_configuration['api_url'];
+    }
     return $value;
 }
 

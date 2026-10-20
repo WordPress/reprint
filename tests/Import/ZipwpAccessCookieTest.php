@@ -141,6 +141,7 @@ final class ZipwpAccessCookieTest extends TestCase {
 
     public function testPushControlAndUploadRequestsPassTheTemporarySitePage(): void
     {
+        file_put_contents($this->root . '/api-url', 'http://demo.zipwp.to/');
         $client = new \MultipartPushStreamClient([
             'remote_reprint_api_url' => 'http://demo.zipwp.to/',
             'request_context_headers' => [
@@ -180,6 +181,7 @@ final class ZipwpAccessCookieTest extends TestCase {
 
     private function create_client(string $remote_reprint_api_url, string $secret = 'zipwp-test-secret'): \ImportClient
     {
+        file_put_contents($this->root . '/api-url', $remote_reprint_api_url);
         $client = new \ImportClient($remote_reprint_api_url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
         ( new \ReflectionProperty($client, 'hmac_client') )->setValue($client, new \Site_Export_HMAC_Client($secret));
         return $client;

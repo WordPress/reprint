@@ -47,7 +47,8 @@ if (!defined(__NAMESPACE__ . '\\PUBLIC_KEYS_FILE')) {
 
 /**
  * Maximum age of a request timestamp in seconds.
- * Requests older than this are rejected to prevent replay attacks.
+ * Timestamps farther than this from the server clock are rejected.
+ * Nonces are not stored, so this does not make requests single-use.
  */
 if (!defined(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE')) {
     define(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE', 300);
@@ -55,7 +56,7 @@ if (!defined(__NAMESPACE__ . '\\TIMESTAMP_TOLERANCE')) {
 
 if (!defined(__NAMESPACE__ . '\\AUTH_VERSION')) {
     // Equals WordPress\Reprint\Server\Utils::AUTH_VERSION, which may not be loaded yet.
-    define(__NAMESPACE__ . '\\AUTH_VERSION', 2);
+    define(__NAMESPACE__ . '\\AUTH_VERSION', 3);
 }
 
 /**
@@ -515,6 +516,9 @@ function update_push_authorization(bool $enabled): bool {
  *     @type bool $database_push Optional. Enable full database overwrite only
  *                              on a host-configured standalone route whose
  *                              authentication survives replacement of wp_options.
+ *     @type string $api_url Optional. Trusted public API URL used to check the
+ *                           signed destination. Defaults to WordPress's stored
+ *                           home URL. Standalone routes must supply it.
  *     @type callable $authenticate Optional. Authenticates the request and
  *                                  owns the whole decision. Defaults to
  *                                  RequestAuthenticator with the stored
@@ -538,6 +542,7 @@ function update_push_authorization(bool $enabled): bool {
  * @phpstan-param array{
  *     database_push?:bool,
  *     authenticate?:callable,
+ *     api_url?:string,
  *     docroot?:string,
  *     reprint_directory?:string,
  *     excluded_paths?:string[],
@@ -641,8 +646,8 @@ function handle_api_request(array $options = []): void {
             }
             error(500, $runtime_message);
         }
-        // A released token client hears that it must update before anything
-        // about this site's configuration.
+        // An older key or token client hears that it must update before
+        // anything about this site's configuration.
         $client_update_error = Utils::client_update_error(Utils::request_headers());
         if ($client_update_error !== null) {
             if (is_push_endpoint($endpoint)) {
@@ -659,9 +664,26 @@ function handle_api_request(array $options = []): void {
             }
             error(503, $secret_file_message, 'not_configured');
         }
+        $api_url = array_key_exists('api_url', $options)
+            ? $options['api_url']
+            : ( function_exists('get_option') ? get_option('home') : null );
+        try {
+            if (!is_string($api_url)) {
+                throw new InvalidArgumentException('The public API URL must be a string; observed ' . gettype($api_url) . '.');
+            }
+            $api_origin = Utils::url_origin($api_url);
+        } catch (InvalidArgumentException $exception) {
+            $message = $exception->getMessage() . ' Configure api_url in reprint_server_api_options or handle_api_request() options.';
+            if (is_push_endpoint($endpoint)) {
+                push_error(503, RequestAuthenticator::REASON_NOT_CONFIGURED, $message);
+            }
+            error(503, $message, RequestAuthenticator::REASON_NOT_CONFIGURED);
+            return;
+        }
         $authenticator = new RequestAuthenticator(
             get_connection_token(),
             get_enrolled_public_keys_by_id(),
+            $api_origin,
             TIMESTAMP_TOLERANCE
         );
         $auth_error = $authenticator->verify_globals();

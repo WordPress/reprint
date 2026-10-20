@@ -23,6 +23,7 @@ register_shutdown_function(static function (): void {
 \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
 require dirname(__DIR__, 2) . '/reprint-server-wp/lib.php';
 \WordPress\Reprint\Server\Plugin\handle_api_request([
+    'api_url' => getenv('REPRINT_DB_TEST_API_URL'),
     'docroot' => ABSPATH,
     'reprint_directory' => getenv('REPRINT_DB_TEST_ROOT') . '/private',
     'database_push' => true,

@@ -8,8 +8,9 @@ use InvalidArgumentException;
  * Verifies requests signed by PublicKeyClient against enrolled public keys.
  *
  * A signature covers who sent the request, when, and the method and the
- * request target, whose query names the endpoint. No body is read: TLS
- * protects the request.
+ * request target, plus the configured destination origin. The query normally
+ * names the endpoint; a body-only endpoint is not signed. No body is read:
+ * TLS protects the request.
  *
  * The host rule is enforced here, not in a wrapper an embedder might skip:
  * on a host that does not accept key signatures this class refuses every
@@ -17,7 +18,9 @@ use InvalidArgumentException;
  */
 final class PublicKeyServer {
 
-    public const ALGORITHM = 'reprint-rsa-sha256-v1';
+    public const ALGORITHM = 'reprint-rsa-sha256-v2';
+
+    public const REASON_CLIENT_UPDATE_REQUIRED = 'client_update_required';
 
     public const REASON_REQUIRES_TOKEN_AUTH = 'requires_token_auth';
     public const REASON_UNKNOWN_KEY = 'unknown_key';
@@ -28,6 +31,9 @@ final class PublicKeyServer {
 
     /** @var array<string,string> key id => one-line public key */
     private $public_keys_by_id;
+
+    /** @var string Configured scheme, host, and non-default port. */
+    private $api_origin;
 
     /** @var int */
     private $timestamp_tolerance;
@@ -40,10 +46,12 @@ final class PublicKeyServer {
 
     /**
      * @param array<string,string> $public_keys_by_id   key id => one-line public key.
+     * @param string               $api_url             Trusted public API URL for this site.
      * @param int                  $timestamp_tolerance Seconds either side of now.
      */
-    public function __construct(array $public_keys_by_id, int $timestamp_tolerance = 300) {
+    public function __construct(array $public_keys_by_id, string $api_url, int $timestamp_tolerance = 300) {
         $this->public_keys_by_id = $public_keys_by_id;
+        $this->api_origin = Utils::url_origin($api_url);
         $this->timestamp_tolerance = $timestamp_tolerance;
     }
 
@@ -68,16 +76,23 @@ final class PublicKeyServer {
             return $this->fail(self::REASON_REQUIRES_TOKEN_AUTH, 'This host cannot verify key signatures');
         }
 
+        $client_update_error = Utils::client_update_error($headers);
+        if ($client_update_error !== null) {
+            return $this->fail(self::REASON_CLIENT_UPDATE_REQUIRED, $client_update_error);
+        }
+
         $key_id = Utils::request_header($headers, 'X-Auth-Key-Id');
         $signature_base64 = Utils::request_header($headers, 'X-Auth-Signature');
         $nonce = Utils::request_header($headers, 'X-Auth-Nonce');
         $timestamp = Utils::request_header($headers, 'X-Auth-Timestamp');
+        $origin = Utils::request_header($headers, 'X-Auth-Origin');
 
         foreach ([
             'X-Auth-Key-Id' => $key_id,
             'X-Auth-Signature' => $signature_base64,
             'X-Auth-Nonce' => $nonce,
             'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Origin' => $origin,
         ] as $name => $value) {
             if ($value === null) {
                 return $this->fail(self::REASON_MISSING_HEADER, 'Missing ' . $name . ' header');
@@ -117,7 +132,15 @@ final class PublicKeyServer {
         ) {
             return $this->fail(self::REASON_AUTH_FAILED, 'Stored public key ' . $key_id . ' is not an RSA key of at least 3072 bits');
         }
-        $message = PublicKeyClient::build_message($key_id, $nonce, $timestamp, $method, $request_target);
+        if ($origin !== $this->api_origin) {
+            return $this->fail(
+                self::REASON_SIGNATURE_MISMATCH,
+                'This request was signed for ' . $origin . '; this API uses ' . $this->api_origin
+                . '. Connect using this site\'s configured API URL.'
+            );
+        }
+
+        $message = PublicKeyClient::build_message($key_id, $nonce, $timestamp, $method, $request_target, $origin);
         $result = openssl_verify($message, $signature, $public_key, OPENSSL_ALGO_SHA256);
         Utils::drain_openssl_error_queue();
         if ($result !== 1) {

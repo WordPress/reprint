@@ -21,6 +21,38 @@ final class UtilsRequestHeaderTest extends TestCase {
         parent::tearDown();
     }
 
+    /** @dataProvider apiOriginProvider */
+    public function testApiOriginUsesSchemeHostAndNonDefaultPort(string $url, string $expected): void
+    {
+        $this->assertSame($expected, Utils::url_origin($url));
+    }
+
+    public static function apiOriginProvider(): array
+    {
+        return [
+            'HTTP' => ['http://example.test/blog/?reprint-api', 'http://example.test'],
+            'HTTPS and case' => ['HTTPS://Example.TEST/path', 'https://example.test'],
+            'default HTTPS port' => ['https://example.test:443/', 'https://example.test'],
+            'default HTTP port' => ['http://example.test:80/', 'http://example.test'],
+            'non-default port' => ['https://example.test:8443/', 'https://example.test:8443'],
+            'credentials are separate' => ['https://user:pass@example.test/', 'https://example.test'],
+            'IPv6' => ['http://[::1]:8080/', 'http://[::1]:8080'],
+        ];
+    }
+
+    /** @dataProvider invalidApiUrlProvider */
+    public function testApiOriginRequiresAnHttpUrlWithAHost(string $url): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('The API URL must use http or https and name a host');
+        Utils::url_origin($url);
+    }
+
+    public static function invalidApiUrlProvider(): array
+    {
+        return [['/relative'], ['example.test'], ['ftp://example.test'], ['https:///missing'], ['http://example.test:99999']];
+    }
+
     public function testRequestHeaderReadsEitherConventionAndTreatsEmptyAsAbsent(): void
     {
         $this->assertSame('abc', Utils::request_header(['X-Auth-Key-Id' => 'abc'], 'X-Auth-Key-Id'));

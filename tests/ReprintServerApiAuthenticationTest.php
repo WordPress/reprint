@@ -182,21 +182,99 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $this->assertStringContainsString('host-configured standalone API route', $response['body']['detail']);
     }
 
+    /**
+     * A shared credential does not make a request for one site valid on another.
+     *
+     * @dataProvider siteSignatureCredentials
+     */
+    public function testARequestNamesItsDestinationSite(bool $key_authentication): void
+    {
+        $client = $key_authentication ? $this->newKeyClient() : new Site_Export_HMAC_Client(self::TOKEN);
+        $configuration = [
+            'key_auth_required' => $key_authentication,
+            'options' => $key_authentication ? $this->keyOptions($client, false) : $this->tokenOptions(),
+        ];
+        $this->startServer($configuration);
+        $first_url = $this->endpointUrl(self::PULL_PROBE_ENDPOINT);
+        $headers = $client->get_auth_headers('GET', $first_url);
+        $this->assertReachedDispatcher($this->request($headers, $first_url));
+        $first_server = $this->server_process;
+        try {
+            // Keep the first port occupied until the second site has its own.
+            $this->startServer($configuration);
+        } finally {
+            proc_terminate($first_server);
+            proc_close($first_server);
+        }
+        $second_url = $this->endpointUrl(self::PULL_PROBE_ENDPOINT);
+        $this->assertNotSame($first_url, $second_url);
+        $response = $this->request($headers, $second_url);
+
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('signature_mismatch', $response['body']['reason']);
+        $this->assertReachedDispatcher($this->request($client->get_auth_headers('GET', $second_url), $second_url));
+
+        // The destination comes from site configuration, never the Host header.
+        $headers['Host'] = parse_url($first_url, PHP_URL_HOST) . ':' . parse_url($first_url, PHP_URL_PORT);
+        $response = $this->request($headers, $second_url);
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('signature_mismatch', $response['body']['reason']);
+        unset($headers['Host']);
+
+        // Merely changing the declared destination does not change the signature.
+        $headers['X-Auth-Origin'] = Utils::url_origin($second_url);
+        $response = $this->request($headers, $second_url);
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('signature_mismatch', $response['body']['reason']);
+    }
+
+    /** @return array<string,array{bool}> Whether each real endpoint accepts keys or a connection token. */
+    public static function siteSignatureCredentials(): array
+    {
+        return ['public key' => [true], 'connection token' => [false]];
+    }
+
+    public function testAHostCanConfigureThePublicApiUrlBehindAProxy(): void
+    {
+        $client = $this->newKeyClient();
+        $this->startServer([
+            'options' => $this->keyOptions($client, false),
+            'api_url' => 'https://public.example.test/blog/?reprint-api',
+        ]);
+        $url = $this->endpointUrl(self::PULL_PROBE_ENDPOINT);
+        $public_url = 'https://public.example.test/blog/?reprint-api=1&endpoint=' . self::PULL_PROBE_ENDPOINT;
+        // A reverse proxy forwards the signed path and query unchanged.
+        $local_url = str_replace('/?reprint-api', '/blog/?reprint-api', $url);
+        $this->assertReachedDispatcher($this->request($client->get_auth_headers('GET', $public_url), $local_url));
+        $response = $this->request($client->get_auth_headers('GET', $local_url), $local_url);
+        $this->assertSame('signature_mismatch', $response['body']['reason']);
+    }
+
+    public function testAnInvalidConfiguredApiUrlNamesTheSetupProblem(): void
+    {
+        $client = $this->newKeyClient();
+        $this->startServer(['options' => $this->keyOptions($client, false), 'api_url' => '/relative']);
+        $response = $this->request($client->get_auth_headers('GET', $this->base_url));
+        $this->assertSame(503, $response['status']);
+        $this->assertSame('not_configured', $response['body']['reason']);
+        $this->assertStringContainsString('Configure api_url', $response['body']['error']);
+    }
+
     // ── Protocol version ──
 
-    public function testKeyHostDispatchesAReleasedKeyClientsBodyEndpoint(): void
+    public function testKeyHostDispatchesABodyEndpointWithACurrentSignature(): void
     {
         $key_client = $this->newKeyClient();
         $this->startServer(['options' => $this->keyOptions($key_client, false)]);
 
-        // v0.10.12 signs the bare API URL and names the endpoint in the JSON body.
+        // A caller can sign the bare API URL and name the endpoint in the JSON body.
         $headers = $key_client->get_auth_headers('POST', $this->base_url) + ['Content-Type' => 'application/json'];
         $response = $this->request($headers, $this->base_url, 'POST', json_encode(['endpoint' => self::PULL_PROBE_ENDPOINT]));
 
         $this->assertReachedDispatcher($response);
     }
 
-    public function testAReleasedKeyClientIsAuthenticated(): void
+    public function testAReleasedKeyClientIsAskedToUpdateTheClient(): void
     {
         [$private_pem, ] = PublicKeyClient::generate_keypair();
         $key_client = new PublicKeyClient($private_pem);
@@ -222,7 +300,10 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
             'X-Auth-Timestamp' => $timestamp,
         ], $url);
 
-        $this->assertReachedDispatcher($response);
+        $this->assertSame(403, $response['status']);
+        $this->assertSame('client_update_required', $response['body']['reason']);
+        $this->assertSame(Utils::AUTH_VERSION, $response['body']['auth_version']);
+        $this->assertSame('Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.', $response['body']['error']);
     }
 
     public function testAReleasedTokenClientIsAskedToUpdateTheClient(): void
@@ -241,7 +322,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         // this message.
         $this->assertSame(403, $response['status']);
         $this->assertSame('client_update_required', $response['body']['reason']);
-        $this->assertSame(2, $response['body']['auth_version']);
+        $this->assertSame(Utils::AUTH_VERSION, $response['body']['auth_version']);
         $this->assertSame('Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.', $response['body']['error']);
     }
 
@@ -252,7 +333,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $response = $this->request([]);
 
         $this->assertSame('missing_header', $response['body']['reason']);
-        $this->assertSame(2, $response['body']['auth_version']);
+        $this->assertSame(Utils::AUTH_VERSION, $response['body']['auth_version']);
     }
 
     public function testAPushAuthenticationErrorCarriesTheVersion(): void
@@ -263,7 +344,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
 
         $this->assertSame('rejected', $response['body']['status']);
         $this->assertSame('requires_key_auth', $response['body']['reason']);
-        $this->assertSame(2, $response['body']['auth_version']);
+        $this->assertSame(Utils::AUTH_VERSION, $response['body']['auth_version']);
     }
 
     public function testASignatureOverAnotherEndpointIsRejected(): void
@@ -443,13 +524,14 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
     private function startServer(array $configuration, array $php_settings = []): void
     {
         $configuration['credentials_directory'] = $this->credentials_directory;
-        file_put_contents($this->configuration_path, json_encode($configuration, JSON_THROW_ON_ERROR));
 
         $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error);
         $this->assertNotFalse($listener, (string) $error);
         $address = stream_socket_get_name($listener, false);
         $this->assertIsString($address);
         fclose($listener);
+        $configuration['options']['home'] = $configuration['options']['home'] ?? 'http://' . $address;
+        file_put_contents($this->configuration_path, json_encode($configuration, JSON_THROW_ON_ERROR));
         $router = realpath(__DIR__ . '/fixtures/api-authentication-router.php');
         $this->assertNotFalse($router);
 

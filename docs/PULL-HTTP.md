@@ -22,13 +22,13 @@ in the POST body. For example, POST to
 [PR #800](https://github.com/WordPress/reprint/pull/800) ships the POST client
 and the compatible exporter together. The exporter still reads export
 parameters from the query string, where clients sent them before the POST
-transport. A released token client, recognised by its
-`X-Auth-Content-Hash` header, is refused with `client_update_required` before
-its request is dispatched. When a parameter appears in both places, the
+transport. An older key or token client whose signature lacks
+`X-Auth-Origin`, or sends the obsolete `X-Auth-Content-Hash` header, is refused
+with `client_update_required` before its request is dispatched. When a parameter appears in both places, the
 POST value wins for JSON and form bodies. The endpoint is the exception. The
 server dispatches the query's value. When the query names none, it takes the
-body's value unless that value is a push endpoint. Released key clients send
-the endpoint in the body, so this fallback keeps them working. Existing
+body's value unless that value is a push endpoint. Direct callers can still
+name a pull endpoint in the body while signing the bare API URL. Existing
 multipart file-list uploads keep their file part, and their options may stay
 in the query string.
 
@@ -37,15 +37,23 @@ The server ignores any `file_list_path` request parameter. That option remains
 available to direct PHP callers of `endpoint_file_fetch()`.
 
 Requests are signed over newline-joined fields behind a version label. The
-connection token uses `reprint-hmac-sha256-v2`, and a key uses
-`reprint-rsa-sha256-v1` plus its key id. The remaining fields are the nonce,
-the timestamp, the uppercase HTTP method, and the request's path and query,
-which name the endpoint. The signature never covers or hashes the body, so a
-multipart upload streams without buffering.
+connection token uses `reprint-hmac-sha256-v3`, and a key uses
+`reprint-rsa-sha256-v2` plus its key id. The remaining fields, in order, are the
+nonce, timestamp, uppercase HTTP method, request path and query, and destination
+origin. There is no trailing newline. The origin is the URL scheme, hostname,
+and non-default port, for example `https://example.com:8443`. Both signers send
+it as `X-Auth-Origin`. The verifier compares it with the trusted public API URL
+before accepting the signature. It never derives that expected address from
+incoming headers. The signature never covers or hashes the body, so a multipart
+upload streams without buffering.
+
+This is authentication generation 3 and requires both client and plugin
+v0.11.3 or later. See [public API URL configuration](../reprint-server-wp/README.md#public-api-url)
+for WordPress defaults, standalone routes, and reverse proxies.
 
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
-and `multipart/form-data`. The signature covers the URL, endpoint included, and
-never the body. The separate push request contract is unchanged.
+and `multipart/form-data`. The signature covers the destination origin and the path and query. An
+endpoint supplied only in the body is not signed, nor is the rest of the body. The separate push request contract is unchanged.
 
 The client sends URL-encoded forms for preflight and streaming pull commands.
 File-list downloads retain multipart uploads, with options before

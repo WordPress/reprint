@@ -125,6 +125,7 @@ $reprint_push_test_excluded_paths_b64 = json_decode(
     true
 );
 $reprint_push_test_options = [
+    'api_url' => (string) getenv('REPRINT_PUSH_TEST_API_URL'),
     'excluded_paths' => is_array($reprint_push_test_excluded_paths_b64)
         ? array_map(
             static function ($encoded_path) {

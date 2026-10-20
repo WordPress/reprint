@@ -3,8 +3,8 @@
  *
  * Both classes sign the newline-joined message the PHP clients build: the
  * algorithm label, the key id (keys only), nonce, timestamp, uppercase
- * method, and request target (path?query). The request target's query names
- * the endpoint, so a signature covers the endpoint it was made for. Any change
+ * method, request target (path?query), and destination origin (scheme, host,
+ * and non-default port). An endpoint in the query is signed with that target. Any change
  * to Site_Export_HMAC_Client::build_message() or
  * PublicKeyClient::build_message() must be mirrored here.
  *
@@ -22,7 +22,7 @@ export function endpointUrl(apiUrl, endpoint) {
 }
 
 export class HmacClient {
-    static ALGORITHM = 'reprint-hmac-sha256-v2';
+    static ALGORITHM = 'reprint-hmac-sha256-v3';
 
     constructor(secret) {
         this.secret = secret;
@@ -31,15 +31,16 @@ export class HmacClient {
     /** @param {{method?: string, url: string}} options url is the full request URL, endpoint included. */
     getAuthHeaders({ method = 'POST', url } = {}) {
         if (typeof url !== 'string' || url === '') {
-            throw new Error('HmacClient needs the full request URL: the signature covers its path and query.');
+            throw new Error('HmacClient needs the full request URL: the signature covers its origin, path, and query.');
         }
         const nonce = randomBytes(16).toString('hex');
         const timestamp = (Date.now() / 1000).toFixed(6);
-        const message = [HmacClient.ALGORITHM, nonce, timestamp, method.toUpperCase(), KeySigner.requestTarget(url)].join('\n');
+        const message = [HmacClient.ALGORITHM, nonce, timestamp, method.toUpperCase(), KeySigner.requestTarget(url), new URL(url).origin].join('\n');
         return {
             'X-Auth-Signature': createHmac('sha256', this.secret).update(message).digest('hex'),
             'X-Auth-Nonce': nonce,
             'X-Auth-Timestamp': timestamp,
+            'X-Auth-Origin': new URL(url).origin,
         };
     }
 
@@ -53,7 +54,7 @@ export class HmacClient {
  * No body is signed: TLS protects the request.
  */
 export class KeySigner {
-    static ALGORITHM = 'reprint-rsa-sha256-v1';
+    static ALGORITHM = 'reprint-rsa-sha256-v2';
 
     /**
      * @param {string} privateKeyPem RSA private key in PEM form.
@@ -82,7 +83,7 @@ export class KeySigner {
         return parsedUrl.pathname + parsedUrl.search;
     }
 
-    buildMessage(nonce, timestamp, method, requestTarget) {
+    buildMessage(nonce, timestamp, method, requestTarget, origin) {
         return [
             KeySigner.ALGORITHM,
             this.keyId,
@@ -90,6 +91,7 @@ export class KeySigner {
             timestamp,
             method.toUpperCase(),
             requestTarget,
+            origin,
         ].join('\n');
     }
 
@@ -100,11 +102,11 @@ export class KeySigner {
      */
     getAuthHeaders({ method = 'POST', url } = {}) {
         if (typeof url !== 'string' || url === '') {
-            throw new Error('KeySigner needs the full request URL: the signature covers its path and query.');
+            throw new Error('KeySigner needs the full request URL: the signature covers its origin, path, and query.');
         }
         const nonce = randomBytes(16).toString('hex');
         const timestamp = (Date.now() / 1000).toFixed(6);
-        const message = this.buildMessage(nonce, timestamp, method, KeySigner.requestTarget(url));
+        const message = this.buildMessage(nonce, timestamp, method, KeySigner.requestTarget(url), new URL(url).origin);
         // sign('sha256') on an RSA key is PKCS#1 v1.5, the same as
         // openssl_sign(..., OPENSSL_ALGO_SHA256) on the PHP side.
         const signature = sign('sha256', Buffer.from(message), this.privateKey).toString('base64');
@@ -113,6 +115,7 @@ export class KeySigner {
             'X-Auth-Signature': signature,
             'X-Auth-Nonce': nonce,
             'X-Auth-Timestamp': timestamp,
+            'X-Auth-Origin': new URL(url).origin,
         };
     }
 

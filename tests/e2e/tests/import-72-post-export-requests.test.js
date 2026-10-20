@@ -1,4 +1,4 @@
-import { describe, it, beforeAll, afterAll } from 'vitest';
+import { describe, it, beforeAll, afterAll, beforeEach, afterEach } from 'vitest';
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureSite } from '../lib/site-setup.js';
 import {
-    createTempDir, cleanupTempDir, getSiteDir, getSiteUrl, getSiteSecret,
+    configurePublicApiUrl, createTempDir, cleanupTempDir, getSiteDir, getSiteUrl, getSiteSecret,
     runImporter, createMysqlConnection, fsRootDir, pullStateDirectory,
     assertPullPipelineComplete, writeTestHooks, removeTestHooks, createHmacClient,
 } from '../lib/test-helpers.js';
@@ -37,6 +37,9 @@ describe('Export: POST body parameters with a query routing marker', () => {
         firewallUrl = `http://127.0.0.1:${ready.port}/?reprint-api`;
     });
 
+    beforeEach(() => configurePublicApiUrl(site, firewallUrl));
+    afterEach(() => configurePublicApiUrl(site, null));
+
     afterAll(async () => {
         if (firewall && firewall.exitCode === null) {
             firewall.kill('SIGTERM');
@@ -50,6 +53,7 @@ describe('Export: POST body parameters with a query routing marker', () => {
     });
 
     it('accepts legacy query parameters for GET exports and multipart uploads', async () => {
+        configurePublicApiUrl(site, null);
         const url = new URL(getSiteUrl(site));
         url.searchParams.delete('reprint-api');
         url.searchParams.set('site-export-api', '');
@@ -178,6 +182,7 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
     });
 
     it('dispatches the query endpoint and ignores a POST application/json endpoint', async () => {
+        configurePublicApiUrl(site, null);
         const params = { endpoint: 'preflight', directory: getSiteDir(site) };
         const url = `${endpointUrl(getSiteUrl(site), 'db_index')}&directory=/missing-query-directory`;
         const response = await fetch(url, {
@@ -234,6 +239,6 @@ function test_hook_before_sql_batch(&$sql, $cursor) {
         assert.equal(response.status, 403);
         const body = await response.json();
         assert.ok(body.error);
-        assert.equal(body.auth_version, 2);
+        assert.equal(body.auth_version, 3);
     });
 });

@@ -1339,12 +1339,8 @@ class MultipartPushStreamClient
         $detail = is_string($response['detail'] ?? null) ? $response['detail'] : 'HTTP ' . $http_code;
         // files-push and db-push reuse the saved preflight, so a client
         // upgraded during a project meets an older plugin's refusal here.
-        // Older plugins verify key signatures, so only a token request is
-        // refused for the plugin's age.
-        if (
-            $this->envelope_signer instanceof \Site_Export_HMAC_Client
-            && is_older_plugin_authentication_refusal($http_code, $response)
-        ) {
+        // Older plugins cannot verify either current site-bound signature.
+        if (is_older_plugin_authentication_refusal($http_code, $response)) {
             $detail = older_plugin_authentication_error_detail();
         }
         return [

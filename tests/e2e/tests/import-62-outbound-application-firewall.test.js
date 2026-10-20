@@ -26,7 +26,7 @@ import {
     createMysqlConnection,
     createTempDir,
     fsRootDir,
-    getSiteDir,
+    configurePublicApiUrl, getSiteDir,
     getSiteSecret,
     getSiteUrl,
     pullStateDirectory,
@@ -88,6 +88,7 @@ describe('Import: Outbound application firewall compatibility', { timeout: 24000
         importUrl =
             `${firewallOrigin}/?reprint-api&directory=` +
             encodeURIComponent(getSiteDir(site));
+        configurePublicApiUrl(site, importUrl);
 
         const connection = await createMysqlConnection();
         await connection.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
@@ -110,6 +111,7 @@ describe('Import: Outbound application firewall compatibility', { timeout: 24000
     }, 360000);
 
     afterAll(async () => {
+        configurePublicApiUrl(site, null);
         cleanupTempDir(outputDirectory);
 
         if (firewallProcess && firewallProcess.exitCode === null) {

@@ -98,7 +98,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testAuthClockSkew()
     {
-        $result = $this->diagnose(403, '{"error":"Request timestamp expired. Difference: 400.00 seconds, max allowed: 300 seconds","code":403,"reason":"timestamp_expired","auth_version":2}');
+        $result = $this->diagnose(403, '{"error":"Request timestamp expired. Difference: 400.00 seconds, max allowed: 300 seconds","code":403,"reason":"timestamp_expired","auth_version":3}');
         $this->assertSame('AUTH_CLOCK_SKEW', $result['code']);
         $this->assertStringContainsString('400.00 seconds', $result['message']);
     }
@@ -107,7 +107,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testAuthHeadersStripped()
     {
-        $result = $this->diagnose(403, '{"error":"Missing X-Auth-Signature header","code":403,"reason":"missing_header","auth_version":2}');
+        $result = $this->diagnose(403, '{"error":"Missing X-Auth-Signature header","code":403,"reason":"missing_header","auth_version":3}');
         $this->assertSame('AUTH_HEADERS_STRIPPED', $result['code']);
         $this->assertStringContainsString('Missing X-Auth-Signature', $result['message']);
     }
@@ -122,7 +122,7 @@ class DiagnoseHttpErrorTest extends TestCase
      */
     public function testReasonCodeDecidesTheDiagnosisWhateverTheMessage(string $reason, string $expected_code)
     {
-        $result = $this->diagnose(403, json_encode(['error' => 'Die Anfrage wurde abgelehnt', 'code' => 403, 'reason' => $reason, 'auth_version' => 2]));
+        $result = $this->diagnose(403, json_encode(['error' => 'Die Anfrage wurde abgelehnt', 'code' => 403, 'reason' => $reason, 'auth_version' => 3]));
         $this->assertSame($expected_code, $result['code']);
     }
 
@@ -137,7 +137,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testReasonCodeOutranksAMessageThatNamesAnotherFailure()
     {
-        $body = json_encode(['error' => 'Missing X-Auth-Signature header', 'code' => 403, 'reason' => 'auth_failed', 'auth_version' => 2]);
+        $body = json_encode(['error' => 'Missing X-Auth-Signature header', 'code' => 403, 'reason' => 'auth_failed', 'auth_version' => 3]);
         $result = $this->diagnose(403, $body);
         $this->assertSame('AUTH_FAILED', $result['code']);
     }
@@ -164,11 +164,11 @@ class DiagnoseHttpErrorTest extends TestCase
         return $reflection->getMethod('diagnose_http_error')->invoke($client, $http_code, $body, null);
     }
 
-    public function testAnOlderPluginsKeySignatureMismatchIsNotBlamedOnThePlugin(): void
+    public function testAnOlderPluginsKeySignatureRequiresAPluginUpdate(): void
     {
-        $result = $this->diagnoseWithKey(403, '{"error":"Signature verification failed","code":403,"reason":"signature_mismatch"}');
+        $result = $this->diagnoseWithKey(403, '{"error":"Signature verification failed","code":403,"reason":"signature_mismatch","auth_version":2}');
 
-        $this->assertSame('AUTH_REQUEST_REWRITTEN', $result['code']);
+        $this->assertSame('AUTH_PLUGIN_OUTDATED', $result['code']);
     }
 
     public function testAKeyClientIsToldWhenThePluginPredatesKeyAuthentication(): void
@@ -182,7 +182,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testAKeyClientToldToUseAKeyHadItsHeadersStripped(): void
     {
-        $result = $this->diagnoseWithKey(403, '{"error":"This host requires key authentication; connection tokens are not accepted","code":403,"reason":"requires_key_auth","auth_version":2}');
+        $result = $this->diagnoseWithKey(403, '{"error":"This host requires key authentication; connection tokens are not accepted","code":403,"reason":"requires_key_auth","auth_version":3}');
 
         $this->assertSame('AUTH_HEADERS_STRIPPED', $result['code']);
         $this->assertStringContainsString('X-Auth-Key-Id', $result['message']);
@@ -200,27 +200,25 @@ class DiagnoseHttpErrorTest extends TestCase
     {
         $result = $this->diagnoseWithKey(403, '{"error":"This host accepts connection-token authentication only","code":403,"reason":"requires_token_auth"}');
 
-        $this->assertSame('AUTH_REQUIRES_TOKEN', $result['code']);
+        $this->assertSame('AUTH_PLUGIN_OUTDATED', $result['code']);
         $this->assertStringContainsString('Update the Reprint Server plugin', $result['message']);
         $this->assertStringNotContainsString('Ask the site owner', $result['message']);
     }
 
     public function testACurrentTokenOnlyPluginOnlyNeedsAToken(): void
     {
-        $result = $this->diagnoseWithKey(403, '{"error":"This host accepts connection-token authentication only","code":403,"reason":"requires_token_auth","auth_version":2}');
+        $result = $this->diagnoseWithKey(403, '{"error":"This host accepts connection-token authentication only","code":403,"reason":"requires_token_auth","auth_version":3}');
 
         $this->assertSame('AUTH_REQUIRES_TOKEN', $result['code']);
         $this->assertStringNotContainsString('update the Reprint Server plugin', $result['message']);
     }
 
-    public function testAKeyClientPrintsItsKeyWhenAnOlderPluginIsNotConfigured(): void
+    public function testAKeyClientAsksForAPluginUpdateWhenAnOlderPluginIsNotConfigured(): void
     {
         $result = $this->diagnoseWithKey(503, '{"error":"Export not configured: no keys are enrolled","code":503,"reason":"not_configured"}');
 
-        $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
-        $this->assertStringContainsString('no keys are enrolled', $result['message']);
-        $this->assertStringContainsString('enroll this public key', $result['message']);
-        $this->assertStringContainsString('Your public key (key id ', $result['message']);
+        $this->assertSame('AUTH_PLUGIN_OUTDATED', $result['code']);
+        $this->assertStringContainsString('Update the Reprint Server plugin', $result['message']);
     }
 
     /** @dataProvider notAnOlderPluginProvider */
@@ -241,7 +239,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testANewerPluginVersionRepeatsWhatTheSiteSaid(): void
     {
-        $result = $this->diagnose(403, '{"error":"This site accepts Reprint authentication version 3 and the client sent version 2. Update whichever of the Reprint client and the Reprint Server plugin is older.","code":403,"reason":"client_update_required","auth_version":3}');
+        $result = $this->diagnose(403, '{"error":"This site accepts Reprint authentication version 4 and the client sent version 3. Update whichever of the Reprint client and the Reprint Server plugin is older.","code":403,"reason":"client_update_required","auth_version":4}');
 
         $this->assertSame('AUTH_VERSION_MISMATCH', $result['code']);
         $this->assertStringContainsString('version 3', $result['message']);
@@ -266,7 +264,7 @@ class DiagnoseHttpErrorTest extends TestCase
 
     public function testAuthUnknownServerMessage()
     {
-        $result = $this->diagnose(403, '{"error":"Some future error we haven\'t seen","code":403,"reason":"auth_failed","auth_version":2}');
+        $result = $this->diagnose(403, '{"error":"Some future error we haven\'t seen","code":403,"reason":"auth_failed","auth_version":3}');
         $this->assertSame('AUTH_FAILED', $result['code']);
         $this->assertStringContainsString("Some future error", $result['message']);
     }

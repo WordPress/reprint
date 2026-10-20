@@ -36,12 +36,22 @@ final class HmacServerTest extends TestCase {
         return (float) $headers['X-Auth-Timestamp'] + 1.0;
     }
 
+    public function testEachDestinationFieldMustMatchTheConfiguredSite(): void
+    {
+        $headers = $this->headers();
+        foreach (['http://s.test', 'https://other.test', 'https://s.test:8443'] as $api_url) {
+            $server = new HMACServer(self::SECRET, $api_url);
+            $this->assertNotNull($server->verify($headers, 'POST', self::TARGET, $this->now($headers)));
+            $this->assertSame(HMACServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
+        }
+    }
+
     public function testValidRequestVerifies(): void
     {
         $headers = $this->headers();
-        $server = new HMACServer(self::SECRET);
+        $server = new HMACServer(self::SECRET, self::URL);
 
-        $this->assertSame(['X-Auth-Signature', 'X-Auth-Nonce', 'X-Auth-Timestamp'], array_keys($headers));
+        $this->assertSame(['X-Auth-Signature', 'X-Auth-Nonce', 'X-Auth-Timestamp', 'X-Auth-Origin'], array_keys($headers));
         $this->assertNull($server->verify($headers, 'POST', self::TARGET, $this->now($headers)));
         $this->assertNull($server->last_error_reason());
     }
@@ -49,8 +59,8 @@ final class HmacServerTest extends TestCase {
     public function testBuildMessageIsNewlineDelimitedInSpecOrder(): void
     {
         $this->assertSame(
-            "reprint-hmac-sha256-v2\nn\nt\nPOST\n/?reprint-api&endpoint=sql_chunk",
-            Site_Export_HMAC_Client::build_message('n', 't', 'post', '/?reprint-api&endpoint=sql_chunk')
+            "reprint-hmac-sha256-v3\nn\nt\nPOST\n/?reprint-api&endpoint=sql_chunk\nhttps://s.test",
+            Site_Export_HMAC_Client::build_message('n', 't', 'post', '/?reprint-api&endpoint=sql_chunk', 'https://s.test')
         );
     }
 
@@ -58,7 +68,7 @@ final class HmacServerTest extends TestCase {
     public function testEachSignedInputIsBound(string $method, string $target): void
     {
         $headers = $this->headers();
-        $server = new HMACServer(self::SECRET);
+        $server = new HMACServer(self::SECRET, self::URL);
 
         $this->assertSame('HMAC signature verification failed', $server->verify($headers, $method, $target, $this->now($headers)));
         $this->assertSame(HMACServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
@@ -77,7 +87,7 @@ final class HmacServerTest extends TestCase {
     public function testWrongSecretIsRejected(): void
     {
         $headers = $this->headers();
-        $server = new HMACServer('other-secret');
+        $server = new HMACServer('other-secret', self::URL);
 
         $this->assertSame('HMAC signature verification failed', $server->verify($headers, 'POST', self::TARGET, $this->now($headers)));
         $this->assertSame(HMACServer::REASON_SIGNATURE_MISMATCH, $server->last_error_reason());
@@ -89,7 +99,7 @@ final class HmacServerTest extends TestCase {
         $headers = $this->headers();
         $now = $this->now($headers);
         unset($headers[$header_name]);
-        $server = new HMACServer(self::SECRET);
+        $server = new HMACServer(self::SECRET, self::URL);
 
         $this->assertSame('Missing ' . $header_name . ' header', $server->verify($headers, 'POST', self::TARGET, $now));
         $this->assertSame(HMACServer::REASON_MISSING_HEADER, $server->last_error_reason());
@@ -108,7 +118,7 @@ final class HmacServerTest extends TestCase {
     {
         $headers = $this->headers() + ['X-Auth-Content-Hash' => hash('sha256', '')];
         Utils::override_key_auth_required_for_tests(true);
-        $server = new HMACServer(self::SECRET);
+        $server = new HMACServer(self::SECRET, self::URL);
 
         $server->verify($headers, 'POST', self::TARGET, $this->now($headers));
         $this->assertSame(HMACServer::REASON_CLIENT_UPDATE_REQUIRED, $server->last_error_reason());
@@ -117,7 +127,7 @@ final class HmacServerTest extends TestCase {
     public function testExpiredTimestampIsRejected(): void
     {
         $headers = $this->headers();
-        $server = new HMACServer(self::SECRET);
+        $server = new HMACServer(self::SECRET, self::URL);
 
         $error = $server->verify($headers, 'POST', self::TARGET, (float) $headers['X-Auth-Timestamp'] + 301.0);
         $this->assertStringContainsString('timestamp expired', (string) $error);
@@ -131,7 +141,7 @@ final class HmacServerTest extends TestCase {
         $headers = $client->get_envelope_auth_headers('POST', $url);
 
         $this->assertInstanceOf(EnvelopeSigner::class, $client);
-        $this->assertNull(( new HMACServer(self::SECRET) )->verify(
+        $this->assertNull(( new HMACServer(self::SECRET, self::URL) )->verify(
             $headers,
             'POST',
             '/?reprint-api&endpoint=push_create&push_session_id=0123456789abcdef0123456789abcdef',
@@ -143,7 +153,7 @@ final class HmacServerTest extends TestCase {
     {
         $curl_headers = ( new Site_Export_HMAC_Client(self::SECRET) )->get_curl_headers('POST', self::URL);
 
-        $this->assertCount(3, $curl_headers);
+        $this->assertCount(4, $curl_headers);
         $this->assertStringStartsWith('X-Auth-Signature: ', $curl_headers[0]);
     }
 
@@ -158,7 +168,7 @@ final class HmacServerTest extends TestCase {
     {
         $headers = $this->headers();
         Utils::override_key_auth_required_for_tests(true);
-        $server = new HMACServer(self::SECRET);
+        $server = new HMACServer(self::SECRET, self::URL);
 
         $this->assertSame(
             'This host requires key authentication; connection tokens are not accepted',

@@ -47,7 +47,9 @@ allows plain HTTP and skips certificate and hostname checks for HTTPS. The
 choice is invocation-only. Over plain HTTP, an observer can read transferred
 content. Over HTTP or unverified HTTPS, an active attacker can read and modify
 it. Request signatures keep the connection token and private key off the wire
-and limit replay, but do not replace server verification.
+and reject requests older than the timestamp window, but do not replace server
+verification. Nonces are not stored; the same signed request can be accepted
+again within that window on the site it names.
 
 On a host with `openssl_verify()`, push requests use an enrolled public key.
 On a host without it, they use a connection token. The client uses the key in
@@ -57,8 +59,12 @@ OpenSSL rejects the token; the client never falls back to another credential.
 
 Every request carries a signature over newline-joined fields: the protocol
 label (plus the key id for a key), a random nonce, a timestamp, the HTTP method,
-and the URL's path and query (which name the endpoint). The label and field
-layout appear in `docs/PULL-HTTP.md`. Payloads are not signed and not hashed: TLS already
+the URL's path and query (which name the endpoint), and its scheme, hostname,
+and non-default port. The latter is sent as `X-Auth-Origin` and compared with
+the host's configured public API URL, not incoming headers. Both client and
+plugin must be v0.11.3 or later. WordPress defaults to its stored home URL;
+standalone routes and hosts using another public address supply `api_url`.
+The label and field layout appear in `docs/PULL-HTTP.md`. Payloads are not signed and not hashed: TLS already
 guarantees their integrity, and signing streams was the single biggest cause of
 buffering pain. Signing cost is constant per request regardless of payload
 size. Neither the connection token nor the private key travels in a URL or body,
@@ -772,8 +778,8 @@ Files first, followed by full database overwrite and then selective database cha
 
 1. **Design doc** — this file.
 2. **Envelope auth** — headers-only RSA signatures on hosts with OpenSSL,
-   HMAC elsewhere. Both cover the method and request target instead of a body
-   hash and apply to every request. End-to-end file-push tests cover key lookup
+   HMAC elsewhere. Both cover the method, request target, and configured
+   destination origin instead of a body hash and apply to every request. End-to-end file-push tests cover key lookup
    in the state directory, an explicit private key path, per-key grants, and resume.
 3. **Work value store** — the store itself (PR #317, which succeeded
    the closed #298).

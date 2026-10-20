@@ -22,6 +22,7 @@ class SetValueFormatHttpTest extends MySQLDumpProducerTestBase {
         fclose($socket);
         $this->remote_reprint_api_url = 'http://' . $address . '/';
         $environment = getenv();
+        $environment['REPRINT_DB_TEST_API_URL'] = $this->remote_reprint_api_url;
         $environment['REPRINT_DB_TEST_ROOT'] = $this->root;
         $this->server = proc_open([PHP_BINARY, '-d', 'post_max_size=2M', '-S', $address, __DIR__ . '/../fixtures/database-push-router.php'], [['pipe', 'r'], ['file', $this->root . '/server.log', 'a'], ['file', $this->root . '/server.log', 'a']], $pipes, null, $environment);
         fclose($pipes[0]);

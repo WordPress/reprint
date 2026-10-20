@@ -6,7 +6,8 @@ namespace WordPress\Reprint\Server;
  * Verifies requests signed by Site_Export_HMAC_Client.
  *
  * A signature covers the protocol label, a nonce, a timestamp, the method,
- * and the request target, whose query names the endpoint. No body is read:
+ * the request target, and the configured destination origin. The query normally
+ * names the endpoint; a body-only endpoint is not signed. No body is read:
  * TLS protects the request, and a push endpoint streams php://input itself.
  */
 final class HMACServer {
@@ -21,14 +22,23 @@ final class HMACServer {
     /** @var string */
     private $secret;
 
+    /** @var string Configured scheme, host, and non-default port. */
+    private $api_origin;
+
     /** @var int */
     private $timestamp_tolerance;
 
     /** @var string|null */
     private $last_error_reason = null;
 
-    public function __construct(string $secret, int $timestamp_tolerance = 300) {
+    /**
+     * @param string $secret Stored connection token.
+     * @param string $api_url Trusted public API URL for this site.
+     * @param int $timestamp_tolerance Seconds either side of now.
+     */
+    public function __construct(string $secret, string $api_url, int $timestamp_tolerance = 300) {
         $this->secret = $secret;
+        $this->api_origin = Utils::url_origin($api_url);
         $this->timestamp_tolerance = $timestamp_tolerance;
     }
 
@@ -49,7 +59,7 @@ final class HMACServer {
     public function verify(array $headers, string $method, string $request_target, ?float $now = null): ?string {
         $this->last_error_reason = null;
 
-        // A released token client signs a message this server no longer verifies.
+        // Older token signatures did not name their destination site.
         $client_update_error = Utils::client_update_error($headers);
         if ($client_update_error !== null) {
             return $this->fail(self::REASON_CLIENT_UPDATE_REQUIRED, $client_update_error);
@@ -63,10 +73,12 @@ final class HMACServer {
         $signature = Utils::request_header($headers, 'X-Auth-Signature');
         $nonce = Utils::request_header($headers, 'X-Auth-Nonce');
         $timestamp = Utils::request_header($headers, 'X-Auth-Timestamp');
+        $origin = Utils::request_header($headers, 'X-Auth-Origin');
         foreach ([
             'X-Auth-Signature' => $signature,
             'X-Auth-Nonce' => $nonce,
             'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Origin' => $origin,
         ] as $name => $value) {
             if ($value === null) {
                 return $this->fail(self::REASON_MISSING_HEADER, 'Missing ' . $name . ' header');
@@ -78,7 +90,15 @@ final class HMACServer {
             return $this->fail($freshness_error[0], $freshness_error[1]);
         }
 
-        $message = \Site_Export_HMAC_Client::build_message($nonce, $timestamp, $method, $request_target);
+        if ($origin !== $this->api_origin) {
+            return $this->fail(
+                self::REASON_SIGNATURE_MISMATCH,
+                'This request was signed for ' . $origin . '; this API uses ' . $this->api_origin
+                . '. Connect using this site\'s configured API URL.'
+            );
+        }
+
+        $message = \Site_Export_HMAC_Client::build_message($nonce, $timestamp, $method, $request_target, $origin);
         if (!hash_equals(hash_hmac('sha256', $message, $this->secret), $signature)) {
             return $this->fail(self::REASON_SIGNATURE_MISMATCH, 'HMAC signature verification failed');
         }

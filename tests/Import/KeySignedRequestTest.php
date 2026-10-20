@@ -38,9 +38,17 @@ final class KeySignedRequestTest extends TestCase {
         $this->private_key_path = $this->root . '/enrolled.pem';
         file_put_contents($this->private_key_path, $private_key_pem);
         chmod($this->private_key_path, 0600);
+
+
+        $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error);
+        $this->assertIsResource($listener, (string) $error);
+        $address = stream_socket_get_name($listener, false);
+        fclose($listener);
+        $this->url = 'http://' . $address . '/?reprint-api';
         file_put_contents($this->root . '/configuration.json', json_encode([
             'credentials_directory' => $this->root . '/credentials',
             'options' => [
+                'home' => $this->url,
                 'reprint_server_public_keys' => [[
                     'public_key' => $public_key,
                     'added_at' => 1700000000,
@@ -48,12 +56,6 @@ final class KeySignedRequestTest extends TestCase {
                 ]],
             ],
         ], JSON_THROW_ON_ERROR));
-
-        $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error);
-        $this->assertIsResource($listener, (string) $error);
-        $address = stream_socket_get_name($listener, false);
-        fclose($listener);
-        $this->url = 'http://' . $address . '/?reprint-api';
         $router = realpath(__DIR__ . '/../fixtures/api-authentication-router.php');
         $this->assertIsString($router);
         $this->server_process = proc_open(

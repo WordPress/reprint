@@ -1138,23 +1138,52 @@ final class Utils
         return $headers;
     }
 
-    /** The protocol generation every plugin authentication error reports as auth_version. */
-    public const AUTH_VERSION = 2;
+    /**
+     * Returns the scheme, host, and non-default port used to name a request's site.
+     *
+     * Paths, queries, and URL credentials are not part of the origin. The request
+     * target signs the path and query separately. The server derives its origin
+     * from trusted configuration, not from the request's Host header.
+     */
+    public static function url_origin(string $url): string
+    {
+        $parts = parse_url($url);
+        $scheme = strtolower( (string) ( $parts['scheme'] ?? '' ));
+        $host = strtolower( (string) ( $parts['host'] ?? '' ));
+        if (!in_array($scheme, ['http', 'https'], true) || $host === '') {
+            throw new \InvalidArgumentException(
+                'The API URL must use http or https and name a host; observed scheme '
+                . json_encode($scheme) . ' and host ' . json_encode($host) . '.'
+            );
+        }
+        $port = $parts['port'] ?? ( $scheme === 'https' ? 443 : 80 );
+        $default_port = $scheme === 'https' ? 443 : 80;
+        return $scheme . '://' . $host . ( $port === $default_port ? '' : ':' . $port );
+    }
 
-    /** The first client release that signs tokens with the v2 message. */
-    public const AUTH_VERSION_CLIENT_RELEASE = '0.11.0';
+    /** The protocol generation every plugin authentication error reports as auth_version. */
+    public const AUTH_VERSION = 3;
+
+    /** The first client release that includes the destination origin in signatures. */
+    public const AUTH_VERSION_CLIENT_RELEASE = '0.11.3';
 
     /**
-     * Refuses a released token client. Every released token client sends
-     * X-Auth-Content-Hash on every request, and no key client or v2 token
-     * client sends it. Released key clients sign the key message this server
-     * verifies, so they pass here.
+     * Refuses the older key and token signatures which did not name a site.
+     *
+     * An unsigned request is left to the verifier. Every current signed request
+     * includes X-Auth-Origin and omits the obsolete X-Auth-Content-Hash header.
      *
      * @param array<string,mixed> $headers Request headers in either convention.
-     * @return string|null Null unless the request comes from a released token client.
+     * @return string|null Update instructions for an older signed request.
      */
     public static function client_update_error(array $headers): ?string {
-        if (self::request_header($headers, 'X-Auth-Content-Hash') === null) {
+        if (
+            self::request_header($headers, 'X-Auth-Content-Hash') === null
+            && (
+                self::request_header($headers, 'X-Auth-Signature') === null
+                || self::request_header($headers, 'X-Auth-Origin') !== null
+            )
+        ) {
             return null;
         }
         return 'Update the Reprint client to version ' . self::AUTH_VERSION_CLIENT_RELEASE . ' or later.';

@@ -21,6 +21,12 @@
     "post-requests": {
       "port": 8153
     },
+    "application-firewall": {
+      "port": 8197
+    },
+    "preflight-domain-rewriting": {
+      "port": 8198
+    },
     "basic": {
       "port": 8081
     },

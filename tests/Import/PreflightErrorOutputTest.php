@@ -131,13 +131,13 @@ final class PreflightErrorOutputTest extends TestCase {
         return [
             'Reprint authentication refusal' => [
                 403,
-                '{"error":"This host accepts key authentication only","code":403,"reason":"requires_key_auth","auth_version":2}',
+                '{"error":"This host accepts key authentication only","code":403,"reason":"requires_key_auth","auth_version":3}',
                 'AUTH_REQUIRES_KEY',
                 false,
             ],
             'Reprint not configured' => [
                 503,
-                '{"error":"Export not configured: no keys are enrolled","code":503,"reason":"not_configured","auth_version":2}',
+                '{"error":"Export not configured: no keys are enrolled","code":503,"reason":"not_configured","auth_version":3}',
                 'AUTH_NOT_CONFIGURED',
                 false,
             ],

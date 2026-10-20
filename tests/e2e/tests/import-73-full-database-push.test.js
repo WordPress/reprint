@@ -66,6 +66,7 @@ register_shutdown_function(static function () {
 });
 require '${targetPluginDirectory}/lib.php';
 \\WordPress\\Reprint\\Server\\Plugin\\handle_api_request([
+    'api_url' => '${getSiteUrl(targetSite)}',
     'docroot' => ABSPATH, 'reprint_directory' => '${privateDirectory}', 'database_push' => true,
 ]);
 `;

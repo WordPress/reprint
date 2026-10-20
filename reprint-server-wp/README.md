@@ -101,7 +101,40 @@ page cannot delete that file. `HMACServer` itself refuses on a
 host with OpenSSL, so embedders that call it directly must move to
 `RequestAuthenticator`.
 
-Every authentication error body carries `auth_version`. Embedders that write their own authentication error JSON must include `"auth_version": 2`, or current token clients report the plugin as outdated. A request with `X-Auth-Content-Hash`, which every released token client sends, is refused with `client_update_required` (HTTP 403).
+Every authentication error body carries `auth_version`. Embedders that write their own authentication error JSON must include `"auth_version": 3`, or current clients report the plugin as outdated. Update both the client and plugin to v0.11.3 or later: older key and token signatures omit `X-Auth-Origin` and receive `client_update_required` (HTTP 403). The obsolete `X-Auth-Content-Hash` header also requests that update.
+
+### Public API URL
+
+A request sent to `https://first.example/?reprint-api` names
+`https://first.example` in its signed `X-Auth-Origin` header. A second site at
+`https://second.example` refuses that request, even if it has the same public
+key or connection token. The method, path, and query remain signed separately.
+
+The expected address comes from WordPress's stored `home` option, not the
+incoming `Host` or forwarded headers. The scheme and hostname are lowercased;
+port 80 for HTTP and port 443 for HTTPS are omitted. Other ports remain part
+of the address. Connect using that public address.
+
+A host serving the API at another address, including a preview domain or reverse
+proxy, must set a fixed `api_url` through `reprint_server_api_options`:
+
+```php
+add_filter('reprint_server_api_options', static function (array $options): array {
+    $options['api_url'] = 'https://preview.example/blog/?reprint-api';
+    return $options;
+});
+```
+
+Standalone routes pass the same `api_url` in `handle_api_request()` options.
+They must supply it when WordPress is not loaded. If a host filters `home`
+using request headers, it must also supply a fixed `api_url`. Do not construct
+this setting from `Host`, forwarded headers, or `X-Auth-Origin`; it is trusted
+host configuration. Direct users of `RequestAuthenticator`, `PublicKeyServer`,
+and `HMACServer` must now pass the site's public API URL to their constructors.
+
+An invalid or missing public URL returns HTTP 503 with `not_configured` and
+setup instructions. Custom `authenticate` callbacks still make their own
+whole authentication decision.
 
 ### Public keys
 

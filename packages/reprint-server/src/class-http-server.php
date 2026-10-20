@@ -226,7 +226,7 @@ final class HTTPServer {
         }
 
         // The endpoint is part of the signed request target, so the query's
-        // value wins. Released key clients send a pull endpoint in the body
+        // value wins. Direct callers may still send a pull endpoint in the body
         // and sign the bare API URL. A push endpoint comes only from the query.
         $body_endpoint = $params['endpoint'] ?? null;
         unset($params['endpoint']);

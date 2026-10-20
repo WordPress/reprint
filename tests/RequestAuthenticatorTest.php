@@ -66,7 +66,7 @@ final class RequestAuthenticatorTest extends TestCase
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
         Utils::override_key_auth_required_for_tests(false);
-        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys(), 'https://s.test');
 
         $this->assertNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertNull($authenticator->authenticated_key_id());
@@ -76,7 +76,7 @@ final class RequestAuthenticatorTest extends TestCase
     {
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
         Utils::override_key_auth_required_for_tests(false);
-        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys(), 'https://s.test');
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_REQUIRES_TOKEN_AUTH, $authenticator->last_error_reason());
@@ -87,7 +87,7 @@ final class RequestAuthenticatorTest extends TestCase
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
         Utils::override_key_auth_required_for_tests(false);
-        $authenticator = new RequestAuthenticator(null, $this->keys());
+        $authenticator = new RequestAuthenticator(null, $this->keys(), 'https://s.test');
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NOT_CONFIGURED, $authenticator->last_error_reason());
@@ -97,7 +97,7 @@ final class RequestAuthenticatorTest extends TestCase
     public function testKeyHostVerifiesKeyAndIgnoresToken(): void
     {
         $headers = self::$key_client->get_auth_headers('POST', 'https://s.test/?reprint-api');
-        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys(), 'https://s.test');
 
         $this->assertNull($authenticator->verify($headers, 'POST', '/?reprint-api', $this->now($headers)));
         $this->assertSame(self::$key_client->get_key_id(), $authenticator->authenticated_key_id());
@@ -107,7 +107,7 @@ final class RequestAuthenticatorTest extends TestCase
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys());
+        $authenticator = new RequestAuthenticator(self::SECRET, $this->keys(), 'https://s.test');
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_REQUIRES_KEY_AUTH, $authenticator->last_error_reason());
@@ -122,7 +122,7 @@ final class RequestAuthenticatorTest extends TestCase
     {
         $hmac = new Site_Export_HMAC_Client(self::SECRET);
         $headers = $hmac->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $authenticator = new RequestAuthenticator(self::SECRET, []);
+        $authenticator = new RequestAuthenticator(self::SECRET, [], 'https://s.test');
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NO_KEYS_ENROLLED, $authenticator->last_error_reason());
@@ -131,7 +131,7 @@ final class RequestAuthenticatorTest extends TestCase
     public function testKeyHostWithNoKeysAnswersNoKeysEnrolledRegardlessOfToken(): void
     {
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $authenticator = new RequestAuthenticator(self::SECRET, []);
+        $authenticator = new RequestAuthenticator(self::SECRET, [], 'https://s.test');
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_NO_KEYS_ENROLLED, $authenticator->last_error_reason());
@@ -140,7 +140,7 @@ final class RequestAuthenticatorTest extends TestCase
     public function testKeyHostReportsUnknownKey(): void
     {
         $headers = self::$key_client->get_auth_headers('GET', 'https://s.test/?reprint-api');
-        $authenticator = new RequestAuthenticator(null, ['0000000000000000' => self::$public_key]);
+        $authenticator = new RequestAuthenticator(null, ['0000000000000000' => self::$public_key], 'https://s.test');
 
         $this->assertNotNull($authenticator->verify($headers, 'GET', '/?reprint-api', $this->now($headers)));
         $this->assertSame(RequestAuthenticator::REASON_UNKNOWN_KEY, $authenticator->last_error_reason());
@@ -156,10 +156,11 @@ final class RequestAuthenticatorTest extends TestCase
             'HTTP_X_AUTH_SIGNATURE' => $headers['X-Auth-Signature'],
             'HTTP_X_AUTH_NONCE' => $headers['X-Auth-Nonce'],
             'HTTP_X_AUTH_TIMESTAMP' => $headers['X-Auth-Timestamp'],
+            'HTTP_X_AUTH_ORIGIN' => $headers['X-Auth-Origin'],
         ];
         $_GET = ['reprint-api' => '', 'endpoint' => 'push_status'];
         $_FILES = [];
-        $authenticator = new RequestAuthenticator(null, $this->keys());
+        $authenticator = new RequestAuthenticator(null, $this->keys(), 'https://s.test');
 
         $this->assertNull($authenticator->verify_globals($this->now($headers)));
     }
@@ -175,9 +176,9 @@ final class RequestAuthenticatorTest extends TestCase
         // Token host, key host with keys, key host with none: the content hash wins each time.
         foreach ([[false, $this->keys()], [true, $this->keys()], [true, []]] as [$key_host, $keys]) {
             Utils::override_key_auth_required_for_tests($key_host);
-            $authenticator = new RequestAuthenticator(self::SECRET, $keys);
+            $authenticator = new RequestAuthenticator(self::SECRET, $keys, 'https://s.test');
 
-            $this->assertSame('Update the Reprint client to version 0.11.0 or later.', $authenticator->verify($released_client_headers, 'POST', '/?reprint-api'));
+            $this->assertSame('Update the Reprint client to version ' . Utils::AUTH_VERSION_CLIENT_RELEASE . ' or later.', $authenticator->verify($released_client_headers, 'POST', '/?reprint-api'));
             $this->assertSame(RequestAuthenticator::REASON_CLIENT_UPDATE_REQUIRED, $authenticator->last_error_reason());
         }
     }

@@ -48,6 +48,9 @@ final class RequestAuthenticator {
     /** @var array<string,string> */
     private $public_keys_by_id;
 
+    /** @var string Trusted public API URL for this site. */
+    private $api_url;
+
     /** @var int */
     private $timestamp_tolerance;
 
@@ -60,11 +63,13 @@ final class RequestAuthenticator {
     /**
      * @param string|null          $hmac_secret         Stored connection token, or null when none.
      * @param array<string,string> $public_keys_by_id   Enrolled keys, key id => one-line public key.
+     * @param string               $api_url             Trusted public API URL for this site.
      * @param int                  $timestamp_tolerance Seconds either side of now.
      */
-    public function __construct(?string $hmac_secret, array $public_keys_by_id, int $timestamp_tolerance = 300) {
+    public function __construct(?string $hmac_secret, array $public_keys_by_id, string $api_url, int $timestamp_tolerance = 300) {
         $this->hmac_secret = $hmac_secret === '' ? null : $hmac_secret;
         $this->public_keys_by_id = $public_keys_by_id;
+        $this->api_url = $api_url;
         $this->timestamp_tolerance = $timestamp_tolerance;
     }
 
@@ -76,7 +81,7 @@ final class RequestAuthenticator {
         $this->last_error_reason = null;
         $this->authenticated_key_id = null;
 
-        // A released token client signs a message this server no longer verifies.
+        // Older key and token signatures did not name their destination site.
         $client_update_error = Utils::client_update_error($headers);
         if ($client_update_error !== null) {
             return $this->fail(self::REASON_CLIENT_UPDATE_REQUIRED, $client_update_error);
@@ -90,7 +95,7 @@ final class RequestAuthenticator {
             if ($this->hmac_secret === null) {
                 return $this->fail(self::REASON_NOT_CONFIGURED, 'Export not configured: no connection token is stored');
             }
-            $hmac_server = new HMACServer($this->hmac_secret, $this->timestamp_tolerance);
+            $hmac_server = new HMACServer($this->hmac_secret, $this->api_url, $this->timestamp_tolerance);
             $error = $hmac_server->verify($headers, $method, $request_target, $now);
             if ($error !== null) {
                 return $this->fail($hmac_server->last_error_reason() ?? self::REASON_AUTH_FAILED, $error);
@@ -107,7 +112,7 @@ final class RequestAuthenticator {
         if (!$has_key_id) {
             return $this->fail(self::REASON_REQUIRES_KEY_AUTH, 'This host requires key authentication; connection tokens are not accepted');
         }
-        $public_key_server = new PublicKeyServer($this->public_keys_by_id, $this->timestamp_tolerance);
+        $public_key_server = new PublicKeyServer($this->public_keys_by_id, $this->api_url, $this->timestamp_tolerance);
         $error = $public_key_server->verify($headers, $method, $request_target, $now);
         if ($error !== null) {
             return $this->fail($public_key_server->last_error_reason() ?? self::REASON_AUTH_FAILED, $error);

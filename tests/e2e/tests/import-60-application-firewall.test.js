@@ -29,7 +29,7 @@ import {
     createMysqlConnection,
     createTempDir,
     fsRootDir,
-    getSiteDir,
+    configurePublicApiUrl, getSiteDir,
     getSiteSecret,
     getSiteUrl,
     pullStateDirectory,
@@ -39,7 +39,7 @@ import {
 import { ensureSite } from '../lib/site-setup.js';
 
 describe('Import: Application firewall compatibility', { timeout: 240000 }, () => {
-    const site = 'basic';
+    const site = 'application-firewall';
     const importDb = 'e2e_app_firewall_60';
     const acceptedUserAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ' +
         'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -71,6 +71,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         const [readyMessage] = await once(firewallProcess, 'message');
         firewallOrigin = `http://127.0.0.1:${readyMessage.port}`;
         importUrl = `${firewallOrigin}/?reprint-api`;
+        configurePublicApiUrl(site, importUrl);
 
         const connection = await createMysqlConnection();
         await connection.query(`DROP DATABASE IF EXISTS \`${importDb}\``);
@@ -102,6 +103,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
     }
 
     afterAll(async () => {
+        configurePublicApiUrl(site, null);
         cleanupTempDir(outputDirectory);
 
         if (firewallProcess && firewallProcess.exitCode === null) {

@@ -5,6 +5,7 @@ namespace Reprint\Importer;
 use PDO;
 use RuntimeException;
 use WordPress\Reprint\Server\RequestAuthenticator;
+use WordPress\Reprint\Server\Utils;
 
 /**
  * Build the fixed WordPress admin Referer for a remote Reprint API URL.
@@ -67,9 +68,8 @@ function unsupported_media_type_error_detail(): string
  * refusal for a reason outside RequestAuthenticator::AUTHENTICATION_REASONS
  * is not about the credential, so it is reported as the site sent it.
  *
- * For a token-signed request this means the plugin cannot verify the
- * signature. Older plugins verify key signatures, so for a key request it
- * only tells that the plugin is older, and the refusal is about the key.
+ * Older plugins cannot verify the current site-bound key or token signature.
+ * A current or newer generation reports its own credential error unchanged.
  *
  * @param int   $http_code     HTTP status of the response.
  * @param mixed $decoded_body  Response body decoded as JSON.
@@ -77,7 +77,11 @@ function unsupported_media_type_error_detail(): string
  */
 function is_older_plugin_authentication_refusal(int $http_code, $decoded_body): bool
 {
-	if (!is_array($decoded_body) || is_int($decoded_body['auth_version'] ?? null)) {
+	if (!is_array($decoded_body)) {
+		return false;
+	}
+	$auth_version = $decoded_body['auth_version'] ?? null;
+	if (is_int($auth_version) && $auth_version >= Utils::AUTH_VERSION) {
 		return false;
 	}
 	$reason = $decoded_body['reason'] ?? null;

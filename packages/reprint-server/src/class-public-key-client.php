@@ -11,13 +11,14 @@ use RuntimeException;
  * The site holds only the public half, so nothing a site stores can produce
  * one of these signatures. The signed message covers the protocol label,
  * the key id, the freshness fields, the method, and the request target,
- * whose query names the endpoint. The key
+ * plus the destination origin (scheme, host, and non-default port). The query
+ * normally names the endpoint; a body-only endpoint is not signed. The key
  * authenticates the sender and TLS protects the request, so no request body
  * is signed: every request is signed the way the push envelope is.
  */
 final class PublicKeyClient implements EnvelopeSigner {
 
-    public const ALGORITHM = 'reprint-rsa-sha256-v1';
+    public const ALGORITHM = 'reprint-rsa-sha256-v2';
 
     /** @var resource|object Private key handle: openssl_pkey_get_private() returns a resource on PHP 7 and an OpenSSLAsymmetricKey object on PHP 8. */
     private $private_key;
@@ -133,32 +134,36 @@ final class PublicKeyClient implements EnvelopeSigner {
         string $nonce,
         string $timestamp,
         string $method,
-        string $request_target
+        string $request_target,
+        string $origin
     ): string {
         return self::ALGORITHM . "\n"
             . $key_id . "\n"
             . $nonce . "\n"
             . $timestamp . "\n"
             . strtoupper($method) . "\n"
-            . $request_target;
+            . $request_target . "\n"
+            . $origin;
     }
 
     /**
      * Returns the X-Auth-* headers for a request.
      *
      * @param string $method HTTP method.
-     * @param string $url    Full request URL; only path and query are signed.
+     * @param string $url    Full request URL; its origin, path, and query are signed.
      * @return array<string,string>
      */
     public function get_auth_headers(string $method, string $url): array {
         $nonce = $this->generate_nonce();
         $timestamp = $this->get_timestamp();
+        $origin = Utils::url_origin($url);
         $message = self::build_message(
             $this->key_id,
             $nonce,
             $timestamp,
             $method,
-            \Site_Export_HMAC_Client::request_target($url)
+            \Site_Export_HMAC_Client::request_target($url),
+            $origin
         );
         $signature = '';
         if (!openssl_sign($message, $signature, $this->private_key, OPENSSL_ALGO_SHA256)) {
@@ -170,6 +175,7 @@ final class PublicKeyClient implements EnvelopeSigner {
             'X-Auth-Signature' => base64_encode($signature),
             'X-Auth-Nonce' => $nonce,
             'X-Auth-Timestamp' => $timestamp,
+            'X-Auth-Origin' => $origin,
         ];
     }
 

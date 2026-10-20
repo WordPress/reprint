@@ -16,7 +16,7 @@ require_once __DIR__ . '/../../../vendor/autoload.php';
 // This fixture models a host without openssl_verify(), so HMACServer keeps
 // accepting the connection token.
 \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
-$reprint_authentication = new \WordPress\Reprint\Server\HMACServer('zipwp-test-secret');
+$reprint_authentication = new \WordPress\Reprint\Server\HMACServer('zipwp-test-secret', trim(file_get_contents('api-url')));
 // The test reaches this router as an HTTP proxy, so PHP reports the absolute
 // request target. A site behind the proxy receives only the path and query,
 // which is what the client signed.

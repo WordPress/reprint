@@ -4169,6 +4169,7 @@ final class PushEndpointsTest extends TestCase {
         $router = realpath(__DIR__ . '/fixtures/push-endpoint-router.php');
         $this->assertNotFalse($router);
         $environment = array_merge($_ENV, [
+            'REPRINT_PUSH_TEST_API_URL' => 'http://' . $address,
             'REPRINT_PUSH_TEST_SECRET_CONFIG' => $this->secret_configuration_path,
             'REPRINT_PUSH_TEST_PUBLIC_KEYS_CONFIG' => $this->root . '/public-keys.json',
             'REPRINT_PUSH_TEST_AUTHORIZATION_CONFIG' => $this->push_authorization_configuration_path,

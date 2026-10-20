@@ -880,14 +880,16 @@ final class MultipartPushStreamClientTest extends TestCase {
     }
 
     /**
-     * An older plugin does not know the version 2 endpoint names, so it
-     * refuses the signature. Its push endpoints answer with the push refusal
-     * shape, and neither answer carries auth_version.
+     * Older plugins refuse current signatures. Generation 2 reports its
+     * auth_version; earlier plugins omit it. Both use the push refusal shape.
      *
      * @return array<string,array{0:string,1:array<string,mixed>}>
      */
     public static function olderPluginAuthenticationRefusals(): array {
         return [
+            'generation 2 signature' => ['403 Forbidden', [
+                'status' => 'rejected', 'reason' => 'signature_mismatch', 'detail' => 'HMAC signature verification failed', 'auth_version' => 2,
+            ]],
             'push refusal' => ['403 Forbidden', [
                 'status' => 'rejected', 'reason' => 'missing_header', 'detail' => 'Missing X-Auth-Content-Hash header',
             ]],
@@ -912,16 +914,16 @@ final class MultipartPushStreamClientTest extends TestCase {
         );
     }
 
-    public function testPushRequestRefusedByAnOlderPluginForAKeyKeepsTheSiteDetail(): void {
-        // Older plugins verify the key message this client signs, so their key refusals are genuine.
+    public function testPushRequestRefusedByAnOlderPluginForAKeyAsksForAPluginUpdate(): void {
+        // Generation 2 plugins cannot verify the destination field in a key signature.
         [$private_key_pem, ] = \WordPress\Reprint\Server\PublicKeyClient::generate_keypair();
         $result = $this->sendPushRequestAnsweredWith('403 Forbidden', [
-            'status' => 'rejected', 'reason' => 'unknown_key', 'detail' => 'Unknown key',
+            'status' => 'rejected', 'reason' => 'signature_mismatch', 'detail' => 'Signature verification failed', 'auth_version' => 2,
         ], new \WordPress\Reprint\Server\PublicKeyClient($private_key_pem));
 
         $this->assertSame('failed', $result['status']);
-        $this->assertSame('unknown_key', $result['reason']);
-        $this->assertSame('Unknown key', $result['detail']);
+        $this->assertSame('signature_mismatch', $result['reason']);
+        $this->assertStringContainsString('Update the Reprint Server plugin on the site.', $result['detail']);
     }
 
     public function testUploadRefusedByAnOlderPluginAsksForAPluginUpdate(): void {
