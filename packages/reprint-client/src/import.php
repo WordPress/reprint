@@ -8307,6 +8307,69 @@ class ImportClient
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
                 }
+                if (stripos($query, 'PARSER') !== false) {
+                    $tokens = ( new \WP_MySQL_Lexer($query) )->remaining_tokens();
+                    if (
+                        ( $tokens[0]->id ?? null ) === \WP_MySQL_Lexer::CREATE_SYMBOL
+                        && ( $tokens[1]->id ?? null ) === \WP_MySQL_Lexer::TABLE_SYMBOL
+                    ) {
+                        $table_name = $tokens[2]->get_value();
+                        $index_name = null;
+                        $omitted_bytes = 0;
+                        foreach ($tokens as $token_index => $token) {
+                            if ($token->id === \WP_MySQL_Lexer::FULLTEXT_SYMBOL) {
+                                $index_name_position = $token_index + 1;
+                                if (in_array($tokens[$index_name_position]->id, [
+                                    \WP_MySQL_Lexer::KEY_SYMBOL,
+                                    \WP_MySQL_Lexer::INDEX_SYMBOL,
+                                ], true)) {
+                                    ++$index_name_position;
+                                }
+                                $index_name = $tokens[$index_name_position]->get_value();
+                            }
+                            if (
+                                $token->id !== \WP_MySQL_Lexer::WITH_SYMBOL
+                                || ( $tokens[$token_index + 1]->id ?? null ) !== \WP_MySQL_Lexer::PARSER_SYMBOL
+                                || !isset($tokens[$token_index + 2])
+                            ) {
+                                continue;
+                            }
+                            $parser_token = $tokens[$token_index + 2];
+                            $parser_name = $parser_token->get_value();
+                            $parser_result = $connection->query(
+                                "SELECT PLUGIN_NAME FROM INFORMATION_SCHEMA.PLUGINS " .
+                                "WHERE PLUGIN_NAME = ? AND PLUGIN_TYPE = 'FTPARSER' AND PLUGIN_STATUS = 'ACTIVE'",
+                                [$parser_name]
+                            );
+                            $parser_is_available = $parser_result->fetchColumn() !== false;
+                            $parser_result->closeCursor();
+                            if ($parser_is_available) {
+                                continue;
+                            }
+
+                            // Token offsets refer to the original query, including executable
+                            // comment wrappers. Leave those wrappers and the index intact.
+                            $clause_bytes = $parser_token->start + $parser_token->length - $token->start;
+                            $query = substr_replace($query, '', $token->start - $omitted_bytes, $clause_bytes);
+                            $omitted_bytes += $clause_bytes;
+                            $message = "The target has no active full-text parser '{$parser_name}'. " .
+                                "Omitting it from index '{$index_name}' on table '{$table_name}' and using the default parser; " .
+                                "search matches and ranking may change.";
+                            $this->audit_log($message, false);
+                            $this->output_progress([
+                                'type' => 'warning',
+                                'phase' => 'sql',
+                                'reason' => 'unsupported_fulltext_parser',
+                                'table' => $table_name,
+                                'index' => $index_name,
+                                'parser' => $parser_name,
+                                'message' => $message,
+                            ], true);
+                            $this->progress->clear_progress_line();
+                            $this->progress->print_line(TerminalProgress::escape_text($message) . "\n");
+                        }
+                    }
+                }
                 // The exporter applies its packet-size cap to each statement.
                 // Keep each MySQL command within that cap even when one
                 // resumable group contains several complete statements.

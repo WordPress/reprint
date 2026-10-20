@@ -871,6 +871,30 @@ are recalculated, JSON is re-encoded, and block comment attributes are updated.
 Rewriting allows at most 16 active calls through nested encoded strings. Values
 below that depth stay unchanged; shallower sibling values are still rewritten.
 
+For MySQL and MariaDB targets, `db-apply` and `db-pull --sql-output=mysql`
+check named full-text parsers in exported `CREATE TABLE` statements against
+the target's active full-text parser plugins. If a parser is unavailable,
+Reprint omits that index's `WITH PARSER` clause and keeps the index and its
+columns. The target's default parser is used instead, so search matches and
+ranking may change. Supported parsers remain unchanged. The saved `db.sql`
+is never edited by this fallback.
+
+Each omitted parser produces a JSONL warning, an audit-log entry, and a
+message in terminal mode. Callers can detect the warning by its `type` and
+`reason` fields:
+
+```json
+{
+  "type": "warning",
+  "phase": "sql",
+  "reason": "unsupported_fulltext_parser",
+  "table": "wp_articles",
+  "index": "content_search",
+  "parser": "ngram",
+  "message": "The target has no active full-text parser 'ngram'. Omitting it from index 'content_search' on table 'wp_articles' and using the default parser; search matches and ranking may change."
+}
+```
+
 You can map multiple domains by repeating the flag:
 
 ```bash
