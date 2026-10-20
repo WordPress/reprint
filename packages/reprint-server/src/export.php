@@ -67,9 +67,10 @@ $streaming_context = null;
  * Content-Type header, an output stream, and the global $streaming_context so
  * error handlers can emit structured error chunks mid-stream.
  *
- * @param bool $require_headers If true, throws when headers were already sent
- *                              (use for endpoints that can't degrade gracefully).
- * @param bool $gzip If true, emit Content-Encoding: gzip and compress the body.
+ * If output started before Reprint loaded, send uncompressed multipart data.
+ * The client can read its boundary and metadata from the response body.
+ *
+ * @param bool $gzip If true and headers can still be sent, compress the body.
  * @return array {
  *     Multipart stream context.
  *
@@ -78,7 +79,7 @@ $streaming_context = null;
  * }
  * @phpstan-return array{gz: GzipOutputStream, boundary: string}
  */
-function begin_multipart_stream(bool $require_headers = false, bool $gzip = true): array
+function begin_multipart_stream(bool $gzip = true): array
 {
     global $streaming_context;
 
@@ -107,12 +108,6 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
      */
     $boundary = "boundary-" . bin2hex(Utils::generate_random_bytes(16));
     $can_send_headers = !headers_sent();
-
-    if ($require_headers && !$can_send_headers) {
-        throw new RuntimeException(
-            "Cannot begin multipart stream: headers already sent"
-        );
-    }
 
     if ($can_send_headers) {
         @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
@@ -466,12 +461,14 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
         return true;
     }
 
-    http_response_code(500);
-    // Hosts such as Hostinger rewrite domains so links and assets stay on a
-    // preview domain while the stored site URL still uses the real domain.
-    // This lets users preview a site before changing DNS, but also rewrites
-    // application/json bodies. Octet-stream bypasses Hostinger's filter.
-    @header("Content-Type: application/octet-stream");
+    if (!headers_sent()) {
+        http_response_code(500);
+        // Hosts such as Hostinger rewrite domains so links and assets stay on a
+        // preview domain while the stored site URL still uses the real domain.
+        // This lets users preview a site before changing DNS, but also rewrites
+        // application/json bodies. Octet-stream bypasses Hostinger's filter.
+        @header("Content-Type: application/octet-stream");
+    }
     echo json_encode($error);
     exit(1);
 });
@@ -497,12 +494,14 @@ set_exception_handler(function ($e) {
         return;
     }
 
-    http_response_code(500);
-    // Hosts such as Hostinger rewrite domains so links and assets stay on a
-    // preview domain while the stored site URL still uses the real domain.
-    // This lets users preview a site before changing DNS, but also rewrites
-    // application/json bodies. Octet-stream bypasses Hostinger's filter.
-    header("Content-Type: application/octet-stream");
+    if (!headers_sent()) {
+        http_response_code(500);
+        // Hosts such as Hostinger rewrite domains so links and assets stay on a
+        // preview domain while the stored site URL still uses the real domain.
+        // This lets users preview a site before changing DNS, but also rewrites
+        // application/json bodies. Octet-stream bypasses Hostinger's filter.
+        header("Content-Type: application/octet-stream");
+    }
     echo json_encode($error);
     exit(1);
 });
@@ -783,7 +782,7 @@ function detect_wp_roots(array $start_paths): array
 }
 
 /**
- * Streams SQL dump fragments as gzipped multipart chunks.
+ * Streams SQL dump fragments as multipart chunks, gzipped when headers allow.
  */
 function endpoint_sql_chunk(
     array $config,
@@ -903,7 +902,7 @@ function endpoint_sql_chunk(
     }
 
 
-    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(true);
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
 
     // E2E test hook: after gzip stream initialization
     if (getenv('REPRINT_SERVER_TEST_MODE')) {
@@ -2678,10 +2677,14 @@ function endpoint_preflight(array $config): array
     // preview domain while the stored site URL still uses the real domain.
     // This lets users preview a site before changing DNS, but also rewrites
     // application/json bodies. Octet-stream bypasses Hostinger's filter.
-    header("Content-Type: application/octet-stream");
+    if (!headers_sent()) {
+        header("Content-Type: application/octet-stream");
+    }
     $json = json_encode($response);
     if ($json === false) {
-        http_response_code(500);
+        if (!headers_sent()) {
+            http_response_code(500);
+        }
         echo '{"error":"Failed to serialize preflight response: ' . json_last_error_msg() . '"}';
     } else {
         echo $json;
@@ -2806,7 +2809,7 @@ function stream_file_producer(
 ): array {
     prepare_streaming_response();
 
-    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, $gzip);
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream($gzip);
 
     // E2E test hook: after gzip stream initialization (file producer)
     if (getenv('REPRINT_SERVER_TEST_MODE')) {
