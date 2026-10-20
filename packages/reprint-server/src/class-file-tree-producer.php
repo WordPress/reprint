@@ -185,10 +185,10 @@ class FileTreeProducer
         $path = null;
         if (isset($cursor['path'])) {
             $path = is_string($cursor['path']) ? base64_decode($cursor['path'], true) : false;
-            if ($path === false || strpos($path, "\0") !== false || !Utils::is_absolute_path($path, Utils::native_path_format())) {
+            if ($path === false) {
                 throw new InvalidArgumentException(
                     // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, never HTML output.
-                    'File cursor path must be base64 for an absolute filesystem path without NUL bytes; received ' . json_encode($cursor['path']) . '.'
+                    'File cursor path must be valid base64; received ' . json_encode($cursor['path']) . '.'
                 );
             }
         }
@@ -197,6 +197,13 @@ class FileTreeProducer
             throw new InvalidArgumentException(
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, never HTML output.
                 'File cursor bytes must be a non-negative integer; received ' . json_encode($byte_offset) . '.'
+            );
+        }
+        // A zero position marks a completed entry, including a missing relative path.
+        if ($path !== null && $byte_offset > 0 && (strpos($path, "\0") !== false || !Utils::is_absolute_path($path, Utils::native_path_format()))) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, never HTML output.
+                'File cursor path must be an absolute filesystem path without NUL bytes when resuming file bytes; received ' . json_encode($path) . '.'
             );
         }
         if ($path !== null && $this->multisite_selection !== null) {

@@ -66,6 +66,18 @@ final class CursorValidationTest extends FileSyncProducerTestBase
         }
     }
 
+    public function testCursorAfterAMissingRelativePathContinuesWithTheNextFile(): void
+    {
+        $directory = $this->createTestDirectory('cursor-missing-relative', ['next.txt' => 'next contents']);
+        $paths = ['missing.txt', 'next.txt'];
+        $first = new FileTreeProducer($directory, ['paths' => $paths]);
+        $this->assertTrue($first->next_chunk());
+        $this->assertSame('missing', $first->get_current_chunk()['type']);
+        $resumed = new FileTreeProducer($directory, ['paths' => $paths, 'cursor' => $first->get_reentrancy_cursor()]);
+        $this->assertTrue($resumed->next_chunk());
+        $this->assertSame('next contents', $resumed->get_current_chunk()['data']);
+    }
+
     public function testServerGeneratedCursorResumesAnAbsolutePathWithDotSegments(): void
     {
         $directory = $this->createTestDirectory('cursor-spelling', ['test.txt' => 'test']);
