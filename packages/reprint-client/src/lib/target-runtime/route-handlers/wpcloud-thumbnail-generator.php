@@ -33,6 +33,12 @@ function wpcloud_thumbnail_generator_code(): string
 	$uri = $_SERVER['REQUEST_URI'] ?? '';
 	$path = parse_url($uri, PHP_URL_PATH);
 	if (!$path) return;
+	$path = rawurldecode($path);
+
+	// uploads/../../../private/photo-2x2.png must not select an image outside
+	// uploads. Check decoded segments before any filesystem calls, including
+	// backslashes which Windows treats as directory separators.
+	if (strpos($path, "\0") !== false || preg_match('#(?:^|/)\.\.(?:/|$)#', str_replace('\\', '/', $path))) return;
 
 	// Only handle requests inside /wp-content/uploads/
 	if (strpos($path, '/wp-content/uploads/') === false) return;
@@ -49,11 +55,19 @@ function wpcloud_thumbnail_generator_code(): string
 	$thumb_path = WP_CONTENT_DIR . '/' . $relative;
 
 	// If the thumbnail already exists on disk, let the server handle it
-	if (file_exists($thumb_path)) return;
+	if (file_exists($thumb_path) || is_link($thumb_path)) return;
 
 	// Derive the original (unsized) file path
-	$original_path = preg_replace('/-\d+x\d+(\.\w+)$/', '$1', $thumb_path);
-	if (!file_exists($original_path)) return;
+	$original_path = realpath(preg_replace('/-\d+x\d+(\.\w+)$/', '$1', $thumb_path));
+	$uploads_directory = realpath(WP_CONTENT_DIR . '/uploads');
+	$thumbnail_directory = realpath(dirname($thumb_path));
+	if ($original_path === false || $uploads_directory === false || $thumbnail_directory === false) return;
+
+	// A link inside uploads can still point elsewhere. Both the source image
+	// and the directory receiving the thumbnail must resolve inside uploads.
+	$uploads_prefix = rtrim($uploads_directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+	if (strpos($original_path, $uploads_prefix) !== 0) return;
+	if ($thumbnail_directory !== $uploads_directory && strpos($thumbnail_directory, $uploads_prefix) !== 0) return;
 
 	// Load the original image with GD
 	$src = null;
