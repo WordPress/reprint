@@ -16,6 +16,21 @@ if (!is_array($reprint_auth_test_configuration)) {
     $reprint_auth_test_configuration = [];
 }
 
+if (isset($reprint_auth_test_configuration['sqlite_database_path'])) {
+    require_once dirname(__DIR__, 2) . '/lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
+    define('SQLITE_DB_DROPIN_VERSION', '1.0');
+    $reprint_auth_test_database = new WP_PDO_MySQL_On_SQLite(
+        'mysql-on-sqlite:path=' . $reprint_auth_test_configuration['sqlite_database_path'] . ';dbname=wp_test'
+    );
+    // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- SQLite integration exposes its loaded database under this global name.
+    $GLOBALS['@pdo'] = $reprint_auth_test_database;
+    // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited -- Supply the real SQLite driver's WordPress database context.
+    $GLOBALS['wpdb'] = (object) ['dbh' => $reprint_auth_test_database, 'prefix' => 'wp_'];
+    ini_set('error_log', dirname($reprint_auth_test_configuration['sqlite_database_path']) . '/server.log');
+    // An old producer can spin here; bound that failed test with PHP's own limit.
+    set_time_limit(1);
+}
+
 if (isset($reprint_auth_test_configuration['key_auth_required'])) {
     \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(
         $reprint_auth_test_configuration['key_auth_required'] === true

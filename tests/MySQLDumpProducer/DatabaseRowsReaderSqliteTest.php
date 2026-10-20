@@ -232,6 +232,26 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
         );
     }
 
+    public function testSqlDumpResumesAfterEveryFragmentWithGeneratedStates(): void
+    {
+        $cursor = null;
+        $sql = '';
+        $steps = 0;
+        do {
+            $producer = new MySQLDumpProducer($this->open_database(), ['cursor' => $cursor, 'batch_size' => 1]);
+            $more = $producer->next_sql_fragment();
+            if ($more) {
+                $sql .= $producer->get_sql_fragment() . "\n";
+                $cursor = $producer->get_reentrancy_cursor();
+            }
+            $producer->close();
+            $this->assertLessThan(40, ++$steps);
+        } while ($more);
+        $this->assertStringContainsString('INSERT INTO `wp_posts`', $sql);
+        $this->assertStringContainsString(base64_encode('https://old.example/one'), $sql);
+        $this->assertStringContainsString(base64_encode('https://old.example/two'), $sql);
+    }
+
     private function open_database(): WP_PDO_MySQL_On_SQLite
     {
         $database = new WP_PDO_MySQL_On_SQLite(
