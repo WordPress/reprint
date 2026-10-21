@@ -368,7 +368,8 @@ The HTTP endpoints also reject a directory inside the current document root
 because they do not yet apply the indexing and web-access protections described
 below. The plugin always excludes its logical installed directory from push,
 including when that directory is a symlink to a physical target outside the
-document root. A platform hook or embedding router
+document root. If the physical target is also inside the document root, both
+document-root-relative paths are excluded. A platform hook or embedding router
 must choose its document root, reprint directory, and excluded paths as server
 configuration; request parameters cannot select any of them.
 

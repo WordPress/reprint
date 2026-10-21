@@ -776,7 +776,6 @@ function handle_api_request(array $options = []): void {
             }
             $canonical_plugin_directory = realpath(PLUGIN_DIR);
             $plugin_directory = rtrim($canonical_plugin_directory === false ? PLUGIN_DIR : $canonical_plugin_directory, '/\\');
-            $logical_plugin_path_added = false;
             if (defined('WP_PLUGIN_DIR') && function_exists('plugin_basename')) {
                 // Keep the registered installation path lexical until its
                 // document-root-relative name is known. realpath() would turn a
@@ -834,16 +833,16 @@ function handle_api_request(array $options = []): void {
                         );
                     }
                     $excluded_paths[] = $logical_plugin_relative_path;
-                    $logical_plugin_path_added = true;
                 }
             }
             $plugin_relative_path = Utils::relative_path_under(
                 $plugin_directory,
                 $docroot
             );
+            // The installed alias and its target can both be inside the document
+            // root. Exclude both names rather than choosing one of them.
             if (
-                !$logical_plugin_path_added
-                && $plugin_relative_path !== null
+                $plugin_relative_path !== null
                 && $plugin_relative_path !== ''
             ) {
                 $excluded_paths[] = str_replace('\\', '/', $plugin_relative_path);
