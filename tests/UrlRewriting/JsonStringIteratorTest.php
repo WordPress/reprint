@@ -89,6 +89,16 @@ class JsonStringIteratorTest extends TestCase
         $this->assertSame('https://new-site.com/page', json_decode($iter->get_result(), true));
     }
 
+    public function testDeepObjectsWithManyStringsFitWithinTheMemoryLimit(): void
+    {
+        $command = escapeshellarg(PHP_BINARY) . ' -d memory_limit=128M '
+            . escapeshellarg(__DIR__ . '/fixtures/json-string-memory.php') . ' 2>&1';
+        exec($command, $output, $exit);
+
+        $this->assertSame(0, $exit, implode("\n", $output));
+        $this->assertSame(['complete'], $output);
+    }
+
     public function testMalformedJsonIsMalformed(): void
     {
         $iter = new JsonStringIterator('{"broken":');

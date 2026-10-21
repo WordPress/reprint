@@ -35,15 +35,11 @@ class JsonStringIterator
     /** @var bool Whether any value has been modified via set_value(). */
     private bool $changed = false;
 
-    /**
-     * Paths to all string leaf values in the decoded structure.
-     * Each path is an array of keys/indices leading to a string value.
-     * @var array<int, array<int, string|int>>
-     */
-    private array $paths = [];
+    /** @var Generator|null Traversal paused at the current string leaf. */
+    private ?Generator $strings = null;
 
-    /** @var int Current cursor position. -1 means before the first value. */
-    private int $cursor = -1;
+    /** @var string Reference to the current decoded string, not a copy of its path. */
+    private string $current_value = '';
 
     public function __construct(string $json)
     {
@@ -56,7 +52,6 @@ class JsonStringIterator
         }
 
         $this->valid = true;
-        $this->enumerate($this->decoded, []);
     }
 
     /**
@@ -80,8 +75,12 @@ class JsonStringIterator
         if (!$this->valid) {
             return false;
         }
-        $this->cursor++;
-        return $this->cursor < count($this->paths);
+        if ($this->strings === null) {
+            $this->strings = $this->enumerate($this->decoded);
+        } else {
+            $this->strings->next();
+        }
+        return $this->strings->valid();
     }
 
     /**
@@ -91,7 +90,7 @@ class JsonStringIterator
      */
     public function get_value(): string
     {
-        return $this->navigate($this->paths[$this->cursor]);
+        return $this->current_value;
     }
 
     /**
@@ -101,8 +100,7 @@ class JsonStringIterator
      */
     public function set_value(string $new_value): void
     {
-        $path = $this->paths[$this->cursor];
-        $this->setAtPath($path, $new_value);
+        $this->current_value = $new_value;
         $this->changed = true;
     }
 
@@ -122,52 +120,26 @@ class JsonStringIterator
     }
 
     /**
-     * Recursively enumerate all string leaf values and record their paths.
+     * Visit strings by reference so set_value() edits the decoded tree in place.
+     *
+     * Retain only the active traversal. Recording a full path for every leaf
+     * multiplies memory use by the nesting depth, even for a small JSON value.
      *
      * @param mixed $data The current node in the decoded structure.
-     * @param array<int, string|int> $path The path of keys leading to this node.
+     * @return Generator<int, null> Traversal positions, with the current string retained by reference.
      */
-    private function enumerate($data, array $path): void
+    private function enumerate(&$data): Generator
     {
         if (is_string($data)) {
-            $this->paths[] = $path;
+            $this->current_value = &$data;
+            yield null;
             return;
         }
 
         if (is_array($data)) {
-            foreach ($data as $key => $value) {
-                $this->enumerate($value, array_merge($path, [$key]));
+            foreach ($data as &$value) {
+                yield from $this->enumerate($value);
             }
         }
-    }
-
-    /**
-     * Navigate the decoded structure to the value at $path.
-     *
-     * @param array<int, string|int> $path
-     * @return string
-     */
-    private function navigate(array $path): string
-    {
-        $node = $this->decoded;
-        foreach ($path as $key) {
-            $node = $node[$key];
-        }
-        return $node;
-    }
-
-    /**
-     * Set the value at $path in the decoded structure.
-     *
-     * @param array<int, string|int> $path
-     * @param string $value
-     */
-    private function setAtPath(array $path, string $value): void
-    {
-        $ref = &$this->decoded;
-        foreach ($path as $key) {
-            $ref = &$ref[$key];
-        }
-        $ref = $value;
     }
 }
