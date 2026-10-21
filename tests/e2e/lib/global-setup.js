@@ -1,5 +1,6 @@
 /**
  * Vitest globalSetup — checks the recorded WP-CLI before tests provision sites.
+ * Individual tests provision their own sites via ensureSite() in beforeAll.
  * Concurrent setup calls can share the helper's atomic cache replacement.
  */
 import { execFileSync } from 'node:child_process';
