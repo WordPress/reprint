@@ -10,7 +10,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: update-build-inputs
+  # GitHub replaces older pending runs in the same group. Keep each PR's
+  # tests separate while publishing runs still share one group.
+  group: update-build-inputs-${{ github.event.pull_request.number || 'updates' }}
   cancel-in-progress: false
 
 jobs:
