@@ -634,6 +634,24 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('https://new-site.com/photo', $rewriter->rewrite('https://old-site.com/photo'));
     }
 
+    /** Container depth is separate from nested serialized string wrappers. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testDeepSerializedContainersStayUnchangedWithinTheMemoryCeiling(): void
+    {
+        ini_set('memory_limit', '64M');
+        $rewriter = $this->createRewriter(['https://old-site.com' => 'https://longer-destination.example']);
+        foreach (['a:1:{i:0;', 'O:8:"stdClass":1:{s:3:"key";'] as $prefix) {
+            $input = str_repeat($prefix, 100000) . serialize('https://old-site.com/photo') . str_repeat('}', 100000);
+            $started_at = microtime(true);
+            $this->assertSame($input, $rewriter->rewrite($input));
+            $this->assertLessThan(2.0, microtime(true) - $started_at);
+            $this->assertLessThan(48 * 1024 * 1024, memory_get_peak_usage(true));
+        }
+        $this->assertSame('https://longer-destination.example/photo', $rewriter->rewrite('https://old-site.com/photo'));
+        $this->assertSame('a:broken https://longer-destination.example/photo', $rewriter->rewrite('a:broken https://old-site.com/photo'));
+    }
+
     /** Many string leaves under deeply nested JSON arrays stay within the memory ceiling. */
     #[RunInSeparateProcess]
     #[PreserveGlobalState(false)]

@@ -390,6 +390,37 @@ class PhpSerializationProcessorTest extends TestCase
     // Malformed input
     // ---------------------------------------------------------------
 
+    /** @dataProvider containerPrefixes */
+    public function testContainerNestingLimitKeepsSupportedValuesRewritable(string $prefix): void
+    {
+        foreach ([0, 1, 511, 512, 513] as $depth) {
+            $input = str_repeat($prefix, $depth) . serialize('https://source.test/photo') . str_repeat('}', $depth);
+            $processor = new PhpSerializationProcessor($input);
+            if ($depth > 512) {
+                $this->assertTrue($processor->is_malformed());
+                $this->assertTrue($processor->exceeded_nesting_limit());
+                $this->assertFalse($processor->next_value());
+                $this->assertSame($input, $processor->get_updated_serialization());
+                continue;
+            }
+            $this->assertFalse($processor->is_malformed());
+            $this->assertTrue($processor->next_value());
+            $this->assertSame('https://source.test/photo', $processor->get_value());
+            $processor->set_value('https://destination.test/photo');
+            $this->assertFalse($processor->next_value());
+            $this->assertSame(
+                str_repeat($prefix, $depth) . serialize('https://destination.test/photo') . str_repeat('}', $depth),
+                $processor->get_updated_serialization()
+            );
+        }
+    }
+
+    /** @return array<string,array{string}> Serialized arrays and ordinary objects. */
+    public static function containerPrefixes(): array
+    {
+        return ['array' => ['a:1:{i:0;'], 'object' => ['O:8:"stdClass":1:{s:3:"key";']];
+    }
+
     public function testMalformedInputIsMalformed(): void
     {
         $p = new PhpSerializationProcessor('not serialized');
