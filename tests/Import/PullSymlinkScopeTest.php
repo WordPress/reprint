@@ -56,6 +56,64 @@ final class PullSymlinkScopeTest extends TestCase
         }
     }
 
+    public function testFileFetchRejectsUnrequestedChangesBeforeTouchingLocalFiles(): void
+    {
+        foreach (['file', 'directory', 'symlink', 'error'] as $type) {
+            file_put_contents($this->root . '/files/keep.txt', 'keep');
+            $headers = ['X-Chunk-Type' => $type];
+            $body = '';
+            if ($type === 'error') {
+                $body = json_encode(['error_type' => 'file_missing', 'path' => base64_encode('/keep.txt')]);
+            } else {
+                $headers['X-' . ucfirst($type) . '-Path'] = base64_encode('/keep.txt');
+                if ($type === 'file') {
+                    $headers += ['X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '3'];
+                    $body = 'new';
+                } elseif ($type === 'symlink') {
+                    $headers['X-Symlink-Target'] = base64_encode('requested.txt');
+                }
+            }
+            try {
+                $this->receive([['headers' => $headers, 'body' => $body]], ['/requested.txt']);
+            } catch (\RuntimeException $error) {
+                $this->assertStringContainsString('not requested in this file batch', $error->getMessage());
+            }
+            $this->assertFileExists($this->root . '/files/keep.txt');
+            $this->assertFalse(is_link($this->root . '/files/keep.txt'));
+            $this->assertSame('keep', file_get_contents($this->root . '/files/keep.txt'));
+        }
+    }
+
+    public function testRequestedUpdatesAndContinuedChunksStillArrive(): void
+    {
+        file_put_contents($this->root . '/files/existing.txt', 'old');
+        $this->receive([
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/existing.txt'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '0', 'X-File-Size' => '6'], 'body' => 'new'],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/existing.txt'),
+                'X-First-Chunk' => '0', 'X-Last-Chunk' => '1', 'X-File-Size' => '6'], 'body' => 'est'],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/next.txt'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'next'],
+        ], ['/existing.txt', '/next.txt']);
+        $this->assertSame('newest', file_get_contents($this->root . '/files/existing.txt'));
+        $this->assertSame('next', file_get_contents($this->root . '/files/next.txt'));
+    }
+
+    public function testPathlessRequestErrorsKeepTheSourceMessage(): void
+    {
+        $failure = null;
+        try {
+            $this->receive([['headers' => ['X-Chunk-Type' => 'error'], 'body' => json_encode([
+                'error_type' => 'exception', 'path' => '',
+                'message' => 'Cannot read the stored Windows link target.',
+            ])]], ['/selected.txt']);
+        } catch (\RuntimeException $error) {
+            $failure = $error;
+        }
+        $this->assertNotNull($failure);
+        $this->assertStringContainsString('Remote files failed: Cannot read the stored Windows link target.', $failure->getMessage());
+    }
+
     /**
      * Existing links must be resolved before the following parent segments.
      * @dataProvider target_tails
@@ -278,49 +336,6 @@ final class PullSymlinkScopeTest extends TestCase
     public static function received_types(): array
     {
         return ['file' => ['file'], 'directory' => ['directory'], 'symlink' => ['symlink']];
-    }
-
-    public function testFileFetchRejectsUnrequestedChangesBeforeTouchingLocalFiles(): void
-    {
-        foreach (['file', 'directory', 'symlink', 'error'] as $type) {
-            file_put_contents($this->root . '/files/keep.txt', 'keep');
-            $headers = ['X-Chunk-Type' => $type];
-            $body = '';
-            if ($type === 'error') {
-                $body = json_encode(['error_type' => 'file_missing', 'path' => base64_encode('/keep.txt')]);
-            } else {
-                $headers['X-' . ucfirst($type) . '-Path'] = base64_encode('/keep.txt');
-                if ($type === 'file') {
-                    $headers += ['X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '3'];
-                    $body = 'new';
-                } elseif ($type === 'symlink') {
-                    $headers['X-Symlink-Target'] = base64_encode('requested.txt');
-                }
-            }
-            try {
-                $this->receive([['headers' => $headers, 'body' => $body]], ['/requested.txt']);
-            } catch (\RuntimeException $error) {
-                $this->assertStringContainsString('not requested in this file batch', $error->getMessage());
-            }
-            $this->assertFileExists($this->root . '/files/keep.txt');
-            $this->assertFalse(is_link($this->root . '/files/keep.txt'));
-            $this->assertSame('keep', file_get_contents($this->root . '/files/keep.txt'));
-        }
-    }
-
-    public function testRequestedUpdatesAndContinuedChunksStillArrive(): void
-    {
-        file_put_contents($this->root . '/files/existing.txt', 'old');
-        $this->receive([
-            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/existing.txt'),
-                'X-First-Chunk' => '1', 'X-Last-Chunk' => '0', 'X-File-Size' => '6'], 'body' => 'new'],
-            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/existing.txt'),
-                'X-First-Chunk' => '0', 'X-Last-Chunk' => '1', 'X-File-Size' => '6'], 'body' => 'est'],
-            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/next.txt'),
-                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'next'],
-        ], ['/existing.txt', '/next.txt']);
-        $this->assertSame('newest', file_get_contents($this->root . '/files/existing.txt'));
-        $this->assertSame('next', file_get_contents($this->root . '/files/next.txt'));
     }
 
     /**

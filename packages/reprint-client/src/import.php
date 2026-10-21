@@ -8985,9 +8985,9 @@ class ImportClient
                     $error = json_decode($chunk['body'] ?? '', true);
                     $encoded_path = is_array($error) ? ( $error['path'] ?? null ) : null;
                 }
-                if (is_string($encoded_path)) {
-                    // Error parts use the same non-strict decoding as handle_error_chunk().
-                    $remote_absolute_path = base64_decode($encoded_path);
+                if (is_string($encoded_path) && $encoded_path !== '') {
+                    // An empty path names a request error, not a file to change.
+                    $remote_absolute_path = base64_decode($encoded_path, true);
                     while ($requested_paths->valid() && $requested_paths->current() !== $remote_absolute_path) {
                         $requested_paths->next();
                     }
