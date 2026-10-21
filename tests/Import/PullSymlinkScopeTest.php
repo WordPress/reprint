@@ -86,6 +86,13 @@ final class PullSymlinkScopeTest extends TestCase
 
     public function testRequestedUpdatesAndContinuedChunksStillArrive(): void
     {
+        // A resumed response can begin after already completed batch entries.
+        $requested_paths = [];
+        for ($index = 0; $index < 128; ++$index) {
+            $requested_paths[] = '/earlier/' . sprintf('%04d', $index);
+        }
+        $requested_paths[] = '/existing.txt';
+        $requested_paths[] = '/next.txt';
         file_put_contents($this->root . '/files/existing.txt', 'old');
         $this->receive([
             ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/existing.txt'),
@@ -94,7 +101,7 @@ final class PullSymlinkScopeTest extends TestCase
                 'X-First-Chunk' => '0', 'X-Last-Chunk' => '1', 'X-File-Size' => '6'], 'body' => 'est'],
             ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/next.txt'),
                 'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'next'],
-        ], ['/existing.txt', '/next.txt']);
+        ], $requested_paths);
         $this->assertSame('newest', file_get_contents($this->root . '/files/existing.txt'));
         $this->assertSame('next', file_get_contents($this->root . '/files/next.txt'));
     }
