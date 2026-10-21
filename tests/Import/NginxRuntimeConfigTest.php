@@ -82,7 +82,13 @@ class NginxRuntimeConfigTest extends TestCase {
         fclose($listener);
         $port = (int) substr(strrchr($address, ':'), 1);
         $applier = new \NginxFpmApplier();
-        $applier->apply(new \RuntimeManifest('other'), $root, $this->directory . '/runtime', ['port' => $port]);
+        $manifest = new \RuntimeManifest('other');
+        $manifest->sqlite = ['plugin_source' => '', 'plugin_dir' => $this->directory,
+            'db_dir' => $root, 'db_file' => 'custom data.sqlite'];
+        foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+            file_put_contents($root . '/custom data.sqlite' . $suffix, 'database bytes');
+        }
+        $applier->apply($manifest, $root, $this->directory . '/runtime', ['port' => $port]);
         $config = "daemon off;\nmaster_process off;\npid {$this->directory}/nginx.pid;\nerror_log {$this->directory}/nginx.log;\nevents {}\nhttp {\naccess_log off;\n"
             . file_get_contents($this->directory . '/runtime/nginx.conf') . "\n}\n";
         file_put_contents($this->directory . '/nginx.conf', $config);
@@ -100,6 +106,12 @@ class NginxRuntimeConfigTest extends TestCase {
                 usleep(20000);
             } while (microtime(true) < $deadline);
             $this->assertSame('literal document root', $body, file_get_contents($this->directory . '/stderr'));
+            $context = stream_context_create(['http' => ['ignore_errors' => true]]);
+            foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+                $body = file_get_contents('http://' . $address . '/custom%20data.sqlite' . $suffix, false, $context);
+                $this->assertStringContainsString('404', $http_response_header[0]);
+                $this->assertStringNotContainsString('database bytes', $body);
+            }
         } finally {
             proc_terminate($process);
             proc_close($process);

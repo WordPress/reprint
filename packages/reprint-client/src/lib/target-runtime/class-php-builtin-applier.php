@@ -29,7 +29,7 @@ class PhpBuiltinApplier implements RuntimeApplier
         // 1. Write runtime.php (base layers + CLI-server routing)
         $runtime_path = wp_join_unix_paths($output_dir, 'runtime.php');
         $runtime = generate_runtime_php($manifest, $filesystem_root);
-        $runtime .= $this->generate_cli_server_routing($options);
+        $runtime .= $this->generate_cli_server_routing($manifest, $options);
         write_runtime_file($runtime_path, $runtime);
         $summary[] = "Wrote {$runtime_path}";
 
@@ -57,7 +57,7 @@ class PhpBuiltinApplier implements RuntimeApplier
      * This code only runs under php -S (guarded by php_sapi_name check).
      * It's appended to runtime.php after the base layers.
      */
-    private function generate_cli_server_routing(array $options): string
+    private function generate_cli_server_routing(RuntimeManifest $manifest, array $options): string
     {
         $wordpress_index_php = $options['wordpress_index_php'] ?? '';
         $wp_core_dir = '';
@@ -92,6 +92,19 @@ class PhpBuiltinApplier implements RuntimeApplier
         $lines[] = '    }';
         $lines[] = '}';
         $lines[] = '';
+        if ($manifest->sqlite !== null) {
+            $lines[] = '// Database files are runtime data, not static site content.';
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Generates PHP literals, not diagnostic output.
+            $lines[] = '$sqlite_files = ' . var_export(reprint_runtime_sqlite_artifact_paths($manifest), true) . ';';
+            $lines[] = 'foreach ($request_roots as $root) {';
+            $lines[] = '    $requested_file = realpath($root . $decoded_path);';
+            $lines[] = '    if ($requested_file !== false && in_array($requested_file, $sqlite_files, true)) {';
+            $lines[] = '        http_response_code(404);';
+            $lines[] = '        return;';
+            $lines[] = '    }';
+            $lines[] = '}';
+            $lines[] = '';
+        }
         $lines[] = '// Support PATH_INFO URLs like /file.php/extra/path.';
         $lines[] = '// Walk the path segments to find the first .php file that exists,';
         $lines[] = '// then split into SCRIPT_NAME and PATH_INFO. Document-root files';

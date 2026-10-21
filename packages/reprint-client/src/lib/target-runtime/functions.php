@@ -111,6 +111,7 @@ function generate_runtime_php(RuntimeManifest $manifest, string $filesystem_root
     if ($manifest->sqlite !== null) {
         $lines[] = generate_sqlite_loader_code($manifest->sqlite);
         $lines[] = '';
+
     }
 
     // Route handlers
@@ -384,4 +385,24 @@ function write_runtime_file(string $path, string $content): void
         mkdir($dir, 0755, true);
     }
     file_put_contents($path, $content);
+}
+
+/**
+ * Files used by the local SQLite runtime must not be served as site content.
+ *
+ * @param RuntimeManifest $manifest Active runtime configuration.
+ * @return string[] Local absolute paths of the database and its companions.
+ */
+function reprint_runtime_sqlite_artifact_paths(RuntimeManifest $manifest): array
+{
+    if ($manifest->sqlite === null) {
+        return [];
+    }
+    $database_path = wp_join_unix_paths($manifest->sqlite['db_dir'], $manifest->sqlite['db_file']);
+    $paths = [];
+    foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+        $path = $database_path . $suffix;
+        $paths[] = realpath($path) ?: $path;
+    }
+    return $paths;
 }

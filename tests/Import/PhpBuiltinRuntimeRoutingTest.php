@@ -78,6 +78,46 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
         rmdir($dir);
     }
 
+    public function testHttpRequestsDoNotServeTheConfiguredSqliteFiles(): void
+    {
+        $database_directory = $this->docRoot . '/wp-content/database';
+        mkdir($database_directory);
+        $manifest = new \RuntimeManifest('other');
+        $manifest->sqlite = ['plugin_source' => '', 'plugin_dir' => $this->outputDir,
+            'db_dir' => $database_directory, 'db_file' => 'custom data.sqlite'];
+        foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+            file_put_contents($database_directory . '/custom data.sqlite' . $suffix, 'database bytes');
+        }
+        file_put_contents($this->docRoot . '/site.css', 'ordinary static content');
+        ( new \PhpBuiltinApplier() )->apply($manifest, $this->docRoot, $this->outputDir);
+        $listener = stream_socket_server('tcp://127.0.0.1:0');
+        $address = stream_socket_get_name($listener, false);
+        fclose($listener);
+        $process = proc_open([PHP_BINARY, '-S', $address, '-t', $this->docRoot, $this->outputDir . '/runtime.php'],
+            [0 => ['file', '/dev/null', 'r'], 1 => ['file', $this->tempDir . '/server.log', 'a'], 2 => ['file', $this->tempDir . '/server.log', 'a']], $pipes);
+        $this->assertIsResource($process);
+        try {
+            for ($attempt = 0; $attempt < 100; ++$attempt) {
+                $connection = @stream_socket_client('tcp://' . $address, $number, $message, 0.1);
+                if ($connection) {
+                    fclose($connection);
+                    break;
+                }
+                usleep(20000);
+            }
+            $context = stream_context_create(['http' => ['ignore_errors' => true]]);
+            foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+                $body = file_get_contents('http://' . $address . '/wp-content/database/custom%20data.sqlite' . $suffix, false, $context);
+                $this->assertStringContainsString('404', $http_response_header[0]);
+                $this->assertStringNotContainsString('database bytes', $body);
+            }
+            $this->assertSame('ordinary static content', file_get_contents('http://' . $address . '/site.css'));
+        } finally {
+            proc_terminate($process);
+            proc_close($process);
+        }
+    }
+
     private function runRuntime(string $requestUri): string
     {
         $oldServer = $_SERVER;
