@@ -575,12 +575,14 @@ class ShortcodeProcessor {
 	}
 
 	/**
-	 * Replaces the current attribute value with minimal lexical changes.
+	 * Replaces the current attribute value without changing its delimiters.
 	 *
-	 * Existing quotes are retained when possible. An unquoted value gains
-	 * quotes only when the replacement cannot be represented unquoted. The
-	 * method refuses values containing both unescaped quote delimiters when
-	 * quoting is required.
+	 * Only the value bytes are replaced. A shortcode may sit inside another
+	 * grammar, such as an HTML attribute value, which uses a quote byte as its
+	 * own delimiter. Switching or adding shortcode quotes would then end that
+	 * outer value early. The method therefore refuses a quoted replacement
+	 * containing an unescaped copy of its delimiter, and an unquoted
+	 * replacement which cannot remain unquoted.
 	 *
 	 * @param string $value Replacement attribute value.
 	 * @return bool Whether the update was enqueued.
@@ -591,49 +593,31 @@ class ShortcodeProcessor {
 			return false;
 		}
 
-		$start  = $attribute['value_start'];
-		$length = $attribute['value_length'];
-		$text   = $value;
-		$quote  = $attribute['quote'];
+		$quote = $attribute['quote'];
 
 		if ( null !== $quote ) {
 			if ( $this->contains_unescaped_quote( $value, $quote ) ) {
-				$alternate_quote = '"' === $quote ? "'" : '"';
-				if ( $this->contains_unescaped_quote( $value, $alternate_quote ) ) {
-					return false;
-				}
-
-				$start  = $attribute['value_start'] - 1;
-				$length = $attribute['value_length'] + 2;
-				$text   = $alternate_quote . $value . $alternate_quote;
+				return false;
 			}
 		} else {
-			$requires_quotes = ! $this->can_use_unquoted_attribute_value( $value );
-			if (
-				! $requires_quotes &&
-				! $this->has_self_closing_flag &&
-				count( $this->attributes ) - 1 === $this->attribute_index &&
-				'' !== $value &&
-				'/' === $value[ strlen( $value ) - 1 ]
-			) {
-				$requires_quotes = true;
+			if ( ! $this->can_use_unquoted_attribute_value( $value ) ) {
+				return false;
 			}
 
-			if ( $requires_quotes ) {
-				if ( ! $this->contains_unescaped_quote( $value, '"' ) ) {
-					$text = '"' . $value . '"';
-				} elseif ( ! $this->contains_unescaped_quote( $value, "'" ) ) {
-					$text = "'" . $value . "'";
-				} else {
-					return false;
-				}
+			// A trailing slash before `]` would be read as a self-closing flag.
+			if (
+				! $this->has_self_closing_flag &&
+				count( $this->attributes ) - 1 === $this->attribute_index &&
+				'/' === $value[ strlen( $value ) - 1 ]
+			) {
+				return false;
 			}
 		}
 
 		$this->lexical_updates[ $this->get_attribute_update_key( $this->attribute_index ) ] = array(
-			'start'  => $start,
-			'length' => $length,
-			'text'   => $text,
+			'start'  => $attribute['value_start'],
+			'length' => $attribute['value_length'],
+			'text'   => $value,
 			'value'  => $value,
 		);
 

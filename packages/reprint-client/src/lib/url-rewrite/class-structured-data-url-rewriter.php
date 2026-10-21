@@ -354,7 +354,10 @@ class StructuredDataUrlRewriter
                     $known_body_tokens[$token_start],
                     $body
                 );
-                if ($rewritten_body !== $body) {
+                if (
+                    $rewritten_body !== $body
+                    && !$this->adds_html_syntax_bytes($body, $rewritten_body)
+                ) {
                     $shortcodes->set_modifiable_text($rewritten_body);
                 }
                 continue;
@@ -397,13 +400,42 @@ class StructuredDataUrlRewriter
                         self::PLAIN_TEXT
                     );
                 }
-                if ($rewritten_attribute_value !== $attribute_value) {
+                if (
+                    $rewritten_attribute_value !== $attribute_value
+                    && !$this->adds_html_syntax_bytes($attribute_value, $rewritten_attribute_value)
+                ) {
                     $shortcodes->set_attribute_value($rewritten_attribute_value);
                 }
             }
         }
 
         return $shortcodes->get_updated_text();
+    }
+
+    /**
+     * Return whether a shortcode rewrite adds bytes that end HTML syntax.
+     *
+     * This pass edits raw bytes before HTML tokenization, so a shortcode can
+     * sit inside an HTML attribute value, such as
+     * <a title="[vc_btn link='url:...']">. A new quote, whitespace, `<`, `>`
+     * or backtick there could end that HTML value or tag and expose the rest
+     * of the stored value as new attributes. URL-base replacement and the
+     * registered codecs do not need extra copies of these bytes; this check
+     * keeps a future codec from adding them.
+     */
+    private function adds_html_syntax_bytes( string $original, string $rewritten ): bool
+    {
+        $original_counts = count_chars($original, 1);
+        foreach (count_chars($rewritten, 1) as $byte => $rewritten_count) {
+            if (
+                strpos("\"'<>`\t\n\f\r ", chr($byte)) !== false
+                && $rewritten_count > ( $original_counts[$byte] ?? 0 )
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function value_might_contain_hidden_shortcode_url(string $value): bool

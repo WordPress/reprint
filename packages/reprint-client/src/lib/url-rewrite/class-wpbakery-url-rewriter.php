@@ -147,7 +147,7 @@ class WPBakeryUrlRewriter {
 			}
 
 			$parts[ $index ] = substr( $cell, 0, $prefix_length )
-				. $this->encode_url_component( $rewritten_content );
+				. $this->encode_url_component_in_markup( $rewritten_content );
 		}
 
 		return implode( '', $parts );
@@ -232,7 +232,7 @@ class WPBakeryUrlRewriter {
 				continue;
 			}
 
-			$fields[ $index ] = 'url:' . $this->encode_url_component( $rewritten_url );
+			$fields[ $index ] = 'url:' . $this->encode_url_component_in_markup( $rewritten_url );
 		}
 
 		return implode( '|', $fields );
@@ -244,5 +244,17 @@ class WPBakeryUrlRewriter {
 			array( '!', "'", '(', ')', '*' ),
 			rawurlencode( $value )
 		);
+	}
+
+	/**
+	 * Encode a value stored directly in shortcode markup, keeping `%27`.
+	 *
+	 * Unlike the Base64-wrapped forms, these values are written back inside
+	 * shortcode and possibly HTML attribute values. A literal apostrophe there
+	 * could end a single-quoted delimiter. WPBakery decodes `%27` to the same
+	 * apostrophe.
+	 */
+	private function encode_url_component_in_markup( string $value ): string {
+		return str_replace( "'", '%27', $this->encode_url_component( $value ) );
 	}
 }

@@ -1,5 +1,6 @@
 <?php
 
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use WordPress\DataLiberation\Shortcode\ShortcodeProcessor;
 
@@ -114,6 +115,33 @@ class ShortcodeProcessorTest extends TestCase {
             "Before [builder image='https://new.example/file.jpg' label=wide] After",
             $processor->get_updated_text()
         );
+    }
+
+    /**
+     * The shortcode may sit inside an outer grammar that uses the other quote
+     * byte as its own delimiter, so an update never switches or adds quotes.
+     */
+    #[DataProvider('delimiterChangingUpdateProvider')]
+    public function testAttributeUpdateRefusesToChangeDelimiters(string $input, string $value): void
+    {
+        $processor = new ShortcodeProcessor($input);
+
+        $this->assertTrue($processor->next_shortcode('builder'));
+        $this->assertTrue($processor->next_attribute());
+        $this->assertFalse($processor->set_attribute_value($value));
+        $this->assertSame($input, $processor->get_updated_text());
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function delimiterChangingUpdateProvider(): array
+    {
+        return [
+            'single-quoted value gains an apostrophe' => ["[builder link='https://old.example/']", "https://new.example/'"],
+            'double-quoted value gains a double quote' => ['[builder link="https://old.example/"]', 'https://new.example/"'],
+            'unquoted value gains an apostrophe' => ['[builder link=https://old.example/x]', "https://new.example/'"],
+            'unquoted value gains whitespace' => ['[builder link=https://old.example/x]', 'https://new.example/ x'],
+            'unquoted last value gains a trailing slash' => ['[builder link=https://old.example/x]', 'https://new.example/x/'],
+        ];
     }
 
     public function testAttributeUpdateKeepsEscapedDelimiterBytes(): void

@@ -1799,6 +1799,53 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
     }
 
+    /**
+     * A shortcode inside an HTML attribute must keep that attribute's bounds.
+     * Switching the vc_link quotes to `"` used to end title="..." early.
+     */
+    #[DataProvider('shortcodeInsideHtmlAttributeProvider')]
+    public function testShortcodeRewriteInsideHtmlAttributeKeepsHtmlAttributes(
+        string $input,
+        string $expected
+    ): void {
+        $rewriter = $this->createRewriter();
+        $output = $rewriter->rewrite($input, 'block_markup');
+
+        $this->assertSame($expected, $output);
+        $this->assertSame(
+            $this->getHtmlAttributeNames($input),
+            $this->getHtmlAttributeNames($output)
+        );
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function shortcodeInsideHtmlAttributeProvider(): array
+    {
+        return [
+            'single-quoted vc_link with an encoded apostrophe' => [
+                '<a href="https://old-site.com/page" title="[vc_btn link=\'url:https%3A%2F%2Fold-site.com%2F%27|title:x onmouseover=alert(document.cookie) y\']">click</a>',
+                '<a href="https://new-site.com/page" title="[vc_btn link=\'url:https%3A%2F%2Fnew-site.com%2F%27|title:x onmouseover=alert(document.cookie) y\']">click</a>',
+            ],
+            'double-quoted vc_link inside a single-quoted HTML attribute' => [
+                '<a href="https://old-site.com/page" title=\'[vc_btn link="url:https%3A%2F%2Fold-site.com%2F%27|title:x onmouseover=alert(1) y"]\'>click</a>',
+                '<a href="https://new-site.com/page" title=\'[vc_btn link="url:https%3A%2F%2Fnew-site.com%2F%27|title:x onmouseover=alert(1) y"]\'>click</a>',
+            ],
+            'unquoted vc_link with an encoded apostrophe' => [
+                '<a href="https://old-site.com/page" title="[vc_btn link=url:https%3A%2F%2Fold-site.com%2F%27] onmouseover=alert(1)//">click</a>',
+                '<a href="https://new-site.com/page" title="[vc_btn link=url:https%3A%2F%2Fnew-site.com%2F%27] onmouseover=alert(1)//">click</a>',
+            ],
+        ];
+    }
+
+    /** @return list<string> */
+    private function getHtmlAttributeNames(string $html): array
+    {
+        $processor = new WP_HTML_Tag_Processor($html);
+        $this->assertTrue($processor->next_tag('a'));
+
+        return $processor->get_attribute_names_with_prefix('');
+    }
+
     public function testLeavesUnknownEncodedShortcodeBodiesOpaque(): void
     {
         $rewriter = $this->createRewriter();
