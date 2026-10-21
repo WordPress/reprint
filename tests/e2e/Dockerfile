@@ -30,16 +30,15 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 # Create nginx user
 RUN groupadd -f nginx && useradd -r -g nginx -s /usr/sbin/nologin nginx 2>/dev/null || true
 
-# WP-CLI
-RUN curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar \
-    && chmod +x /tmp/wp-cli.phar
-
 # Composer
 RUN curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
 
 # Copy project
 COPY . /app
 WORKDIR /app
+
+# WP-CLI
+RUN tests/e2e/ci/download-wp-cli.sh
 
 # Install PHP dependencies (vendor/ is gitignored)
 RUN composer install --no-dev --no-interaction --prefer-dist

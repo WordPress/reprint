@@ -105,10 +105,7 @@ jobs:
         working-directory: tests/e2e
         run: |
           # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
-          if [ ! -f /tmp/wp-cli.phar ]; then
-            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
-            chmod +x /tmp/wp-cli.phar
-          fi
+          ci/download-wp-cli.sh
 
           # Provision the "basic" site
           node --input-type=module <<'NODESCRIPT'
