@@ -14181,11 +14181,14 @@ class ImportClient
                 // If no parser yet, we might be receiving an error response
                 if (!$parser) {
                     $error_body .= $data;
+                    // A site's index.php may send whitespace before Reprint can
+                    // set Content-Type. Drop only that prefix, across reads.
+                    $error_body = ltrim($error_body, " \t\r\n");
                     if (strlen($error_body) > 65536) {
                         $error_body = substr($error_body, -65536);
                     }
 
-                    // Strict fallback: if body starts with a boundary line, parse it.
+                    // Strict fallback: after whitespace, require a boundary line.
                     if (strncmp($error_body, "--boundary-", 11) === 0) {
                         $line_end = strpos($error_body, "\n");
                         if ($line_end !== false) {
@@ -14217,9 +14220,9 @@ class ImportClient
                         );
                         $logged_no_parser = true;
                     }
-                }
-
-                if ($parser) {
+                } else {
+                    // A newly detected parser already received this read in
+                    // $error_body. Feed only subsequent reads here.
                     $parser->feed($data);
                 }
 

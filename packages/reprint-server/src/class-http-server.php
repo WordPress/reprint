@@ -115,7 +115,7 @@ final class HTTPServer {
     }
 
     /**
-     * Emits CORS headers and terminates OPTIONS preflight requests.
+     * Emits CORS headers when possible and terminates OPTIONS preflight requests.
      *
      * Must be called BEFORE authentication runs — browsers send
      * preflight OPTIONS without credentials, so the consumer must not
@@ -126,8 +126,8 @@ final class HTTPServer {
      * without the secret cannot export anything regardless of origin.
      *
      * For OPTIONS requests this terminates the process. For all other
-     * methods it just emits the headers and returns so the caller can
-     * continue with authentication and dispatch.
+     * methods it emits headers only if they have not been sent, then returns
+     * so the caller can continue with authentication and dispatch.
      *
      * @param string|true $origin The Access-Control-Allow-Origin value,
      *     or true as a shorthand for '*'.
@@ -155,7 +155,9 @@ final class HTTPServer {
         }
 
         $emit_header = ($io['header'] ?? null) ?? static function (string $h): void {
-            header($h);
+            if (!headers_sent()) {
+                header($h);
+            }
         };
         $terminate = ($io['exit'] ?? null) ?? static function (): void {
             exit;
