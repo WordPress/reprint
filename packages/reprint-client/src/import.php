@@ -1727,6 +1727,12 @@ class ImportClient
             foreach ($this->get_state()->apply->remote_paths_removed_from_local_site as $document_root_relative_path) {
                 $excluded_paths[] = base64_encode(ltrim(wp_join_unix_paths($document_root, $document_root_relative_path), '/'));
             }
+            foreach ($this->local_sqlite_artifact_paths() as $local_absolute_path) {
+                $local_relative_path = Utils::relative_path_under($local_absolute_path, $this->filesystem_root);
+                if ($local_relative_path !== null) {
+                    $excluded_paths[] = base64_encode($local_relative_path);
+                }
+            }
             $excluded_paths_path = wp_join_unix_paths($plan_directory, 'local_exclusions.json');
             if (file_put_contents($excluded_paths_path, json_encode($excluded_paths, JSON_THROW_ON_ERROR)) === false) {
                 throw new RuntimeException('Failed to write local exclusions: ' . $excluded_paths_path . '.');
@@ -2005,6 +2011,14 @@ class ImportClient
         $memory_limit_bytes = $memory_limit_value === '' || $memory_limit_value === '-1'
             ? -1
             : Utils::parse_size($memory_limit_value);
+        $excluded_paths = $this->get_state()->apply->remote_paths_removed_from_local_site;
+        $local_document_root = $this->path_mapper()->remote_path_to_local_path($document_root);
+        foreach ($this->local_sqlite_artifact_paths() as $local_absolute_path) {
+            $document_root_relative_path = Utils::relative_path_under($local_absolute_path, $local_document_root);
+            if ($document_root_relative_path !== null) {
+                $excluded_paths[] = $document_root_relative_path;
+            }
+        }
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
             'document_root' => $document_root,
@@ -2020,7 +2034,7 @@ class ImportClient
             'allow_http' => $options['allow_http'] ?? false,
             'insecure' => $this->insecure,
             'chunk_bytes' => $chunk_bytes,
-            'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
+            'excluded_paths' => $excluded_paths,
         ];
 
         $resuming = is_file(wp_join_unix_paths($context['push_state_directory'], 'sender.json'));
@@ -2211,6 +2225,25 @@ class ImportClient
     {
         return $this->progress_output_mode === 'tty'
             || ( $this->progress_output_mode === 'auto' && $this->is_tty );
+    }
+
+    /**
+     * Local database files belong to db-push, not the filesystem comparison.
+     *
+     * @return string[] Local absolute paths of the active SQLite database and its companions.
+     */
+    private function local_sqlite_artifact_paths(): array
+    {
+        $apply = $this->get_state()->apply;
+        if ($apply->target_engine !== 'sqlite' || $apply->target_sqlite_path === null) {
+            return [];
+        }
+        $database_path = Utils::realpath_with_missing_tail($apply->target_sqlite_path);
+        $paths = [];
+        foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+            $paths[] = $database_path . $suffix;
+        }
+        return $paths;
     }
 
     /**

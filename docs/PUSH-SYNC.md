@@ -829,3 +829,9 @@ Files first, followed by full database overwrite and then selective database cha
     returns the exact committed state the driver needs to retry. The commit step
     gets the main budgeted loop: process until a deadline or operation limit,
     return progress, and let the driver re-enter until complete.
+
+The active local SQLite database is not part of files-diff or files-push.
+Both commands derive its path from the saved db-apply target and exclude that
+file, its `-wal`, `-shm`, and `-journal` companions, and its
+`.reprint-import.lock` file. Other SQLite files remain ordinary site content.
+Use db-push to transfer the active local database.
