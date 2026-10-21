@@ -43,21 +43,28 @@ test('build and benchmark jobs leave publishing to separate jobs', async () => {
     }
 });
 
-test('dependency updates enable auto-merge for the generated PR and commit', async () => {
-    for (const filename of ['update-build-inputs.yml', 'update-playground-inputs.yml']) {
+test('dependency updates reuse one PR per updater with the built-in token', async () => {
+    for (const updater of ['build', 'playground']) {
+        const filename = `update-${updater}-inputs.yml`;
         const source = await readFile(new URL(filename, workflows), 'utf8');
-        const step = source.split(/(?=^      - )/m).find((part) => part.includes('name: Enable auto-merge'));
-        assert.ok(step, `${filename} must enable auto-merge after opening the update PR.`);
-        assert.match(source, /id: update_pr/, filename);
-        assert.match(step, /if: steps\.update_pr\.outputs\.pull-request-number != ''/, filename);
-        assert.match(step, /gh pr merge --squash --auto --match-head-commit "\$EXPECTED_COMMIT" "\$PR_NUMBER"/, filename);
-        assert.match(step, /PR_NUMBER: \$\{\{ steps\.update_pr\.outputs\.pull-request-number \}\}/, filename);
-        assert.match(step, /EXPECTED_COMMIT: \$\{\{ steps\.update_pr\.outputs\.pull-request-head-sha \}\}/, filename);
-        assert.match(step, /GH_TOKEN: \$\{\{ secrets\.DEPENDENCY_UPDATES_TOKEN \}\}/, filename);
-        assert.doesNotMatch(step, /--admin/, filename);
-        assert.match(source, /token: \$\{\{ secrets\.DEPENDENCY_UPDATES_TOKEN \}\}/, filename);
-        assert.doesNotMatch(source, /secrets\.GH_TOKEN/, filename);
-        assert.match(source, /gh api user --silent/, filename);
+        const step = source.split(/(?=^      - )/m).find((part) => part.includes('uses: peter-evans/create-pull-request@'));
+        assert.ok(step, `${filename} must open or update its dependency PR.`);
+        assert.match(step, /token: \$\{\{ github\.token \}\}/, filename);
+        assert.equal(step.match(/^          branch: (.+)$/m)?.[1], `codex/update-${updater}-inputs`, filename);
+        assert.doesNotMatch(source, /branch-suffix:|secrets\.|gh pr merge/, filename);
+        assert.match(source, /^permissions:\n  contents: read$/m, filename);
+        const section = source.slice(source.indexOf('\njobs:\n'));
+        const jobs = [...section.matchAll(/^  ([\w-]+):\s*$/gm)];
+        for (let index = 0; index < jobs.length; ++index) {
+            const name = jobs[index][1];
+            const body = section.slice(jobs[index].index, jobs[index + 1]?.index);
+            if (name === 'update') {
+                assert.match(body, /if: github\.event_name != 'pull_request'/, filename);
+                assert.match(body, /^    permissions:\n      contents: write\n      pull-requests: write$/m, filename);
+            } else {
+                assert.doesNotMatch(body, /^      [\w-]+: write$/m, `${filename}: ${name}`);
+            }
+        }
         assert.ok(source.includes("${{ github.event.pull_request.number || 'updates' }}"), `${filename}: PR tests must not share the publisher's pending slot.`);
     }
 });
