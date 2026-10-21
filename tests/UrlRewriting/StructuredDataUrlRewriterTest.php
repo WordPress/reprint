@@ -624,6 +624,22 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('https://new-site.com/photo', $rewriter->rewrite('https://old-site.com/photo'));
     }
 
+    /** Many string leaves under deeply nested JSON arrays stay within the memory ceiling. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testDeepJsonArraysWithManyLeavesStayWithinTheMemoryCeiling(): void
+    {
+        ini_set('memory_limit', '128M');
+        $rewriter = $this->createRewriter();
+        foreach ([16000, 350000] as $empty_leaves) {
+            $input = str_repeat('[', 511) . '"https://old-site.com/"' . str_repeat(',""', $empty_leaves) . str_repeat(']', 511);
+            $started_at = microtime(true);
+            $this->assertSame(str_replace('old-site.com', 'new-site.com', $input), $rewriter->rewrite($input));
+            $this->assertLessThan(2.0, microtime(true) - $started_at);
+            $this->assertLessThan(64 * 1024 * 1024, memory_get_peak_usage(true));
+        }
+    }
+
     /** A value visited near the depth limit can still be fully rewritten on its own. */
     public function testNestedRewriteCacheRespectsTheRemainingDepth(): void
     {
