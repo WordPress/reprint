@@ -116,6 +116,27 @@ class ShortcodeProcessorTest extends TestCase {
         );
     }
 
+    public function testAttributeUpdatesDoNotChangeQuoteDelimiters(): void
+    {
+        foreach (["[image src='before']", '[image src="before"]', '[image src=before]'] as $input) {
+            $processor = new ShortcodeProcessor($input);
+            $this->assertTrue($processor->next_shortcode('image'));
+            $this->assertTrue($processor->next_attribute());
+            $this->assertFalse($processor->set_attribute_value('after " and \' here'));
+            $this->assertSame($input, $processor->get_updated_text());
+        }
+    }
+
+    public function testAttributeUpdateDoesNotSwitchToTheOtherQuote(): void
+    {
+        $input = "[image src='before']";
+        $processor = new ShortcodeProcessor($input);
+        $this->assertTrue($processor->next_shortcode('image'));
+        $this->assertTrue($processor->next_attribute());
+        $this->assertFalse($processor->set_attribute_value("after's"));
+        $this->assertSame($input, $processor->get_updated_text());
+    }
+
     public function testAttributeUpdateKeepsEscapedDelimiterBytes(): void
     {
         $input = '[builder data="{\"url\":\"https://old.example/file\",\"label\":\"it\'s here\"}"]';

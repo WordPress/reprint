@@ -577,10 +577,9 @@ class ShortcodeProcessor {
 	/**
 	 * Replaces the current attribute value with minimal lexical changes.
 	 *
-	 * Existing quotes are retained when possible. An unquoted value gains
-	 * quotes only when the replacement cannot be represented unquoted. The
-	 * method refuses values containing both unescaped quote delimiters when
-	 * quoting is required.
+	 * Keep the original delimiter, including an unquoted value. A shortcode
+	 * can sit inside an HTML attribute; adding or switching quotes can close
+	 * that outer attribute. Refuse replacements that need different delimiters.
 	 *
 	 * @param string $value Replacement attribute value.
 	 * @return bool Whether the update was enqueued.
@@ -598,14 +597,7 @@ class ShortcodeProcessor {
 
 		if ( null !== $quote ) {
 			if ( $this->contains_unescaped_quote( $value, $quote ) ) {
-				$alternate_quote = '"' === $quote ? "'" : '"';
-				if ( $this->contains_unescaped_quote( $value, $alternate_quote ) ) {
-					return false;
-				}
-
-				$start  = $attribute['value_start'] - 1;
-				$length = $attribute['value_length'] + 2;
-				$text   = $alternate_quote . $value . $alternate_quote;
+				return false;
 			}
 		} else {
 			$requires_quotes = ! $this->can_use_unquoted_attribute_value( $value );
@@ -620,13 +612,7 @@ class ShortcodeProcessor {
 			}
 
 			if ( $requires_quotes ) {
-				if ( ! $this->contains_unescaped_quote( $value, '"' ) ) {
-					$text = '"' . $value . '"';
-				} elseif ( ! $this->contains_unescaped_quote( $value, "'" ) ) {
-					$text = "'" . $value . "'";
-				} else {
-					return false;
-				}
+				return false;
 			}
 		}
 
