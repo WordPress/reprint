@@ -1406,6 +1406,74 @@ final class PushEndpointsTest extends TestCase {
         $this->assertArrayNotHasKey('trace', $response['response']);
     }
 
+    public function testSymlinkedPluginInsideDocumentRootExcludesBothPaths(): void
+    {
+        $physical_plugin_path = 'shared/reprint';
+        $physical_plugin_directory = $this->docroot . '/' . $physical_plugin_path;
+        $logical_plugin_path = 'wp-content/plugins/reprint';
+        $logical_plugin_directory = $this->docroot . '/' . $logical_plugin_path;
+        mkdir($physical_plugin_directory, 0700, true);
+        mkdir(dirname($logical_plugin_directory), 0700, true);
+        foreach (['index.php', 'lib.php', 'compat.php'] as $file) {
+            copy(dirname(__DIR__) . '/reprint-server-wp/' . $file, $physical_plugin_directory . '/' . $file);
+        }
+        symlink(dirname(__DIR__) . '/vendor', $physical_plugin_directory . '/vendor');
+        symlink($physical_plugin_directory, $logical_plugin_directory);
+        $plugin_index_hash = hash_file('sha256', $physical_plugin_directory . '/index.php');
+        $this->writeExcludedPaths([]);
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'wp_plugin_dir' => dirname($logical_plugin_directory),
+            'plugin_basename' => 'reprint/index.php',
+            'plugin_directory' => $physical_plugin_directory,
+        ]);
+        $client = $this->newClient(self::SECRET);
+        $push_session_id = str_repeat('b', 32);
+        $create = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        foreach ([$physical_plugin_path, $logical_plugin_path] as $plugin_path) {
+            $upload = $this->sendUploadRequest($client, $push_session_id, [[
+                'type' => 'file', 'path' => $plugin_path . '/index.php',
+                'total_bytes' => 4, 'offset' => 0, 'payload' => 'new!',
+            ]]);
+            $this->assertSame('failed', $upload['status'], (string) json_encode($upload));
+            $this->assertSame('invalid_request', $upload['reason']);
+            $delete = $this->sendUploadRequest($client, $push_session_id, [[
+                'type' => 'delete-list', 'offset' => 0, 'complete' => true,
+                'payload' => $plugin_path . "\0",
+            ]]);
+            $this->assertSame('failed', $delete['status'], (string) json_encode($delete));
+            $this->assertSame('invalid_request', $delete['reason']);
+        }
+        $this->assertEqualsCanonicalizing([
+            base64_encode($physical_plugin_path), base64_encode($logical_plugin_path),
+        ], $create['response']['excluded_paths_b64']);
+        $delete_parent = $this->sendUploadRequest($client, $push_session_id, [[
+            'type' => 'delete-list', 'offset' => 0, 'complete' => true, 'payload' => "shared\0",
+        ]]);
+        $this->assertSame('failed', $delete_parent['status'], (string) json_encode($delete_parent));
+        $this->assertSame('invalid_request', $delete_parent['reason']);
+
+        $sibling_path = 'shared/other/file.txt';
+        $upload = $this->sendUploadRequest($client, $push_session_id, [
+            ['type' => 'file', 'path' => $sibling_path, 'total_bytes' => 4, 'offset' => 0, 'payload' => 'safe'],
+            ['type' => 'delete-list', 'offset' => 0, 'complete' => true, 'payload' => ''],
+        ]);
+        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
+        do {
+            $commit = $client->send_push_request('POST', 'push_commit', [
+                'push_session_id' => $push_session_id,
+            ], ['accepted']);
+            $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
+        } while ($commit['response']['send_next_request']);
+        $this->assertSame('safe', file_get_contents($this->docroot . '/' . $sibling_path));
+        $this->assertTrue(is_link($logical_plugin_directory));
+        $this->assertSame($plugin_index_hash, hash_file('sha256', $physical_plugin_directory . '/index.php'));
+    }
+
     public function testSymlinkedPluginLogicalPathIsExcludedFromPush(): void
     {
         $physical_plugin_directory = realpath(dirname(__DIR__) . '/reprint-server-wp');
