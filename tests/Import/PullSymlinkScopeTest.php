@@ -280,6 +280,58 @@ final class PullSymlinkScopeTest extends TestCase
         return ['file' => ['file'], 'directory' => ['directory'], 'symlink' => ['symlink']];
     }
 
+    public function testIntermediateIndexLinksCheckTheirParentAsWellAsTheirTarget(): void
+    {
+        // A local directory alias may already point to a shared sibling tree.
+        symlink($this->root . '/outside', $this->root . '/files/alias');
+        mkdir($this->root . '/files/files');
+        file_put_contents($this->root . '/files/files/value', 'selected target');
+        $client = $this->receive([]);
+        $client->get_state()->set_preflight_record([
+            'data' => ['wp_detect' => ['roots' => [['path' => '/']]]],
+        ]);
+        file_put_contents($this->root . '/parts.json', json_encode([
+            ['headers' => ['X-Chunk-Type' => 'index_batch'], 'body' => json_encode([
+                ['path' => base64_encode('/alias/new-link'), 'type' => 'link',
+                    'target' => base64_encode('../files/value'), 'intermediate' => true],
+                ['path' => base64_encode('/files/value'), 'type' => 'file'],
+            ])],
+            ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']],
+        ]));
+        ( new \ReflectionMethod($client, 'fetch_next_remote_index') )->invoke($client);
+        ( new \ReflectionMethod($client, 'recreate_intermediate_symlinks') )->invoke($client);
+
+        $this->assertFalse(is_link($this->root . '/outside/new-link'));
+        $this->assertSame('selected target', file_get_contents($this->root . '/files/files/value'));
+    }
+
+    public function testRemoteDeletionDoesNotFollowARepointedLocalParent(): void
+    {
+        $client = $this->receive([['headers' => ['X-Chunk-Type' => 'file',
+            'X-File-Path' => base64_encode('/parent/child/keep.txt'),
+            'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'keep']]);
+        // The user moves a pulled directory and leaves an alias between pulls.
+        rename($this->root . '/files/parent', $this->root . '/outside/parent');
+        symlink($this->root . '/outside/parent', $this->root . '/files/parent');
+
+        $removed = ( new \ReflectionMethod($client, 'remove_remote_path_locally') )->invoke($client, '/parent/child');
+
+        $this->assertNull($removed);
+        $this->assertSame('keep', file_get_contents($this->root . '/outside/parent/child/keep.txt'));
+    }
+
+    public function testRemoteDeletionCanUnlinkAnExternalLeafWithoutFollowingIt(): void
+    {
+        file_put_contents($this->root . '/outside/keep.txt', 'keep');
+        symlink($this->root . '/outside', $this->root . '/files/alias');
+        $client = $this->receive([]);
+        $removed = ( new \ReflectionMethod($client, 'remove_remote_path_locally') )->invoke($client, '/alias');
+
+        $this->assertSame($this->root . '/files/alias', $removed);
+        $this->assertFalse(is_link($removed));
+        $this->assertSame('keep', file_get_contents($this->root . '/outside/keep.txt'));
+    }
+
     /**
      * Run the production file-fetch dispatcher over a real HTTP response.
      *

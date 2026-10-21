@@ -5091,6 +5091,9 @@ class ImportClient
             // Validate that the symlink target doesn't escape the filesystem root.
             $root = $this->filesystem_root;
             try {
+                // An in-root target does not mean the link's parent is in-root.
+                // A local alias can point out to a shared directory and back in.
+                $this->assert_local_path_within_root(dirname($local_absolute_path));
                 $this->assert_symlink_target_within_root(
                     dirname($local_absolute_path),
                     $symlink_target,
@@ -9948,6 +9951,8 @@ class ImportClient
             $local_absolute_path = $this->path_mapper()->remote_path_to_local_path(
                 $remote_deletion_root
             );
+            // Unlinking a leaf symlink is fine; traversing an external parent is not.
+            $this->assert_local_path_within_root(dirname($local_absolute_path));
         } catch (RuntimeException $e) {
             $this->audit_log(
                 "Security: refusing to delete invalid path '{$remote_deletion_root}': " . $e->getMessage(),
