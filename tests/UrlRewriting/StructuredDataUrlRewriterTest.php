@@ -82,6 +82,16 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
     }
 
+    public function testShortcodeRewriteRetainsTheEnclosingHtmlAttribute(): void
+    {
+        $input = '<a title="[vc_btn link=\'url:https%3A%2F%2Fold-site.com%2F%27|title:x data-extra=changed y\']">Read</a>';
+        $output = $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+        $html = new WP_HTML_Tag_Processor($output);
+        $this->assertTrue($html->next_tag('a'));
+        $this->assertNull($html->get_attribute('data-extra'));
+        $this->assertSame('[vc_btn link=\'url:https%3A%2F%2Fold-site.com%2F%27|title:x data-extra=changed y\']', $html->get_attribute('title'));
+    }
+
     /** An empty child-path list still selects the multisite parser path. */
     public function testOrdinaryImportsKeepTheRawStyleAndBlockPaths(): void
     {
