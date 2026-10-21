@@ -752,22 +752,26 @@ final class FilesPullLocalIndexTest extends TestCase
         );
     }
 
-    public function testMirrorRejectsAStateDirectoryInsideTheFilesystemRoot(): void
+    public function testFilePullRejectsAStateDirectoryInsideTheFilesystemRoot(): void
     {
-        $mirror = $this->runCli([
-            'files-pull',
-            $this->targetUrl,
-            '--state-dir=' . $this->rawFileRoot . '/state-inside',
-            '--fs-root=' . $this->rawFileRoot,
-            '--secret=test-secret',
-            '--mode=mirror',
-        ]);
+        foreach (['catch-up', 'mirror'] as $mode) {
+            foreach (['pull', 'pull-files', 'files-pull'] as $command) {
+                $result = $this->runCli([
+                    $command,
+                    $this->targetUrl,
+                    '--state-dir=' . $this->rawFileRoot . '/state-inside',
+                    '--fs-root=' . $this->rawFileRoot,
+                    '--secret=test-secret',
+                    '--mode=' . $mode,
+                ]);
 
-        $this->assertSame(1, $mirror['exit'], $mirror['output']);
-        $this->assertStringContainsString(
-            '--mode=mirror requires --state-dir to be outside --fs-root.',
-            $mirror['output']
-        );
+                $this->assertSame(1, $result['exit'], $result['output']);
+                $this->assertStringContainsString(
+                    'File pulls require --state-dir to be outside --fs-root.',
+                    $result['output']
+                );
+            }
+        }
     }
 
     public function testMirrorAppliesIncludedPathsAfterLocalRemapping(): void

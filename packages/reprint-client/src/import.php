@@ -1318,14 +1318,13 @@ class ImportClient
             );
             if (
                 !$abort
-                && $this->files_pull_mode === "mirror"
                 && Utils::relative_path_under(
                     $absolute_state_directory,
                     $this->filesystem_root
                 ) !== null
             ) {
                 throw new InvalidArgumentException(
-                    "--mode=mirror requires --state-dir to be outside --fs-root."
+                    "File pulls require --state-dir to be outside --fs-root."
                 );
             }
             $this->get_state()->files_pull_mode = $this->files_pull_mode;

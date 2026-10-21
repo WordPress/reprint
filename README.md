@@ -577,8 +577,8 @@ To fetch plugins skipped by a completed pull, start another `pull-files` with
 with that flag. This cannot restore plugin activation removed by an earlier
 import. Runtime setup itself does not connect to or edit the database.
 
-Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
-files must not appear in the local tree being compared. The selected mode is
+File pulls require `--state-dir` to be outside `--fs-root` in both modes.
+Downloaded files must not replace the state used to resume a pull. The selected mode is
 saved when `files-pull` starts. To switch modes, first run the same command with
 `--abort`, then start it again with the other `--mode` value.
 
