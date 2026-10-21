@@ -38,6 +38,7 @@ jobs:
             echo "::error::DEPENDENCY_UPDATES_TOKEN is missing. Add an Actions secret with Contents: write and Pull requests: write for $GITHUB_REPOSITORY."
             exit 1
           fi
+          gh api user --silent
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: trunk

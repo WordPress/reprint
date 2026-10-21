@@ -57,6 +57,7 @@ test('dependency updates enable auto-merge for the generated PR and commit', asy
         assert.doesNotMatch(step, /--admin/, filename);
         assert.match(source, /token: \$\{\{ secrets\.DEPENDENCY_UPDATES_TOKEN \}\}/, filename);
         assert.doesNotMatch(source, /secrets\.GH_TOKEN/, filename);
+        assert.match(source, /gh api user --silent/, filename);
     }
 });
 
