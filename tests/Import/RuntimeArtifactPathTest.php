@@ -93,6 +93,15 @@ class RuntimeArtifactPathTest extends TestCase
         $this->assertFileExists($canonicalOutputDir . '/start.sh');
         $this->assertFileExists($canonicalOutputDir . '/start.json');
 
+        // Runtime startup must use the CLI version exercised by the harness.
+        $package = json_decode(file_get_contents(__DIR__ . '/../e2e/package.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame($package['dependencies']['@php-wasm/node'], $package['dependencies']['@wp-playground/cli']);
+        $this->assertSame($package['dependencies']['@php-wasm/universal'], $package['dependencies']['@wp-playground/cli']);
+        $this->assertStringContainsString(
+            'npx --yes @wp-playground/cli@' . $package['dependencies']['@wp-playground/cli'] . ' server',
+            file_get_contents($canonicalOutputDir . '/start.sh')
+        );
+
         $startConfig = json_decode(
             file_get_contents($canonicalOutputDir . '/start.json'),
             true,

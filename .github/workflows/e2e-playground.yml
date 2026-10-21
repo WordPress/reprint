@@ -39,7 +39,7 @@ jobs:
         shard: [1, 2, 3, 4]
     env:
       PLAYGROUND_PHP_VERSION: '8.3'
-      WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
+      WP_MYSQL_PARSER_EXTENSION: '1'
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -75,21 +75,21 @@ jobs:
 
       - name: Install E2E dependencies
         working-directory: tests/e2e
-        run: npm install
+        run: npm ci
 
-      - name: Install Playground CLI
-        run: npm install -g @wp-playground/cli@3.1.54
+      - name: Test PHP.wasm extension checksums
+        run: node --test tests/e2e/ci/php-wasm-runner.test.mjs
 
       - name: Verify Playground CLI PHP works
         run: |
           echo "=== Playground CLI version ==="
-          npx @wp-playground/cli --version || echo "no --version flag"
+          tests/e2e/node_modules/.bin/wp-playground-cli --version || echo "no --version flag"
 
           echo "=== Test PHP execution ==="
-          npx @wp-playground/cli php -- -r "echo 'Hello from Playground PHP ' . PHP_VERSION . PHP_EOL;"
+          tests/e2e/node_modules/.bin/wp-playground-cli php -- -r "echo 'Hello from Playground PHP ' . PHP_VERSION . PHP_EOL;"
 
           echo "=== Test PHAR with mount ==="
-          npx @wp-playground/cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
+          tests/e2e/node_modules/.bin/wp-playground-cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
 
       - name: Verify wp_mysql_parser extension is selected
         env:
@@ -154,7 +154,7 @@ jobs:
         working-directory: tests/e2e
         # Run every test file once across four runners because each WASM PHP
         # invocation has substantial startup overhead.
-        run: npx vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000
+        run: npx --no-install vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000
 
       - name: Debug logs
         if: always()

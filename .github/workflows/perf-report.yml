@@ -141,7 +141,7 @@ jobs:
 
       - name: Install e2e dependencies
         working-directory: tests/e2e
-        run: npm install
+        run: npm ci
 
       - name: Download wp-cli
         run: tests/e2e/ci/download-wp-cli.sh
@@ -162,7 +162,7 @@ jobs:
           BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
           PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
           PLAYGROUND_PHP_VERSION: '8.3'
-          WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
+          WP_MYSQL_PARSER_EXTENSION: '1'
         run: node benchmark/bench-pull.mjs
 
       - name: Reset benchmark sites before trunk
@@ -192,7 +192,7 @@ jobs:
           # comparison shows a constant ~10× "improvement" attributable to
           # the parser, on every PR — which has nothing to do with what
           # the PR actually changes. Keep both sides on the same parser.
-          WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
+          WP_MYSQL_PARSER_EXTENSION: '1'
         # Don't fail the whole job if trunk's bench fails — we still want
         # to publish the PR's numbers.
         continue-on-error: true

@@ -49,7 +49,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
@@ -72,7 +72,7 @@ jobs:
 
       - name: Install e2e dependencies
         working-directory: host/tests/e2e
-        run: npm install
+        run: npm ci
 
       - name: Download wp-cli
         run: tests/e2e/ci/download-wp-cli.sh
