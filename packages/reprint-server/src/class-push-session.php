@@ -1129,6 +1129,9 @@ final class PushSession {
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
             throw new PushException(self::ERROR_LOCK_ACQUISITION_FAILURE, 'In-flight work already occupies the slot: ' . $inflight['path_b64'] . '.');
         }
+        // An earlier part may have installed a symlink at a parent path.
+        // Check before inspecting or removing the leaf through that parent.
+        $this->ensure_private_parent($target, false);
         $identity = $this->lstat_path($target);
         if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($target) !== null) {
             throw new InvalidArgumentException('Explicit empty directory ' . base64_encode($path) . ' conflicts with completed work descendants.');
@@ -1199,6 +1202,9 @@ final class PushSession {
         if ($inflight !== null && base64_decode($inflight['path_b64'], true) !== $path) {
             throw new PushException(self::ERROR_LOCK_ACQUISITION_FAILURE, 'In-flight work already occupies the slot: ' . $inflight['path_b64'] . '.');
         }
+        // An earlier part may have installed a symlink at a parent path.
+        // Check before inspecting or removing the leaf through that parent.
+        $this->ensure_private_parent($target, false);
         $identity = $this->lstat_path($target);
         if ($identity !== null && $identity['type'] === 'directory' && $this->first_directory_entry($target) !== null) {
             throw new InvalidArgumentException('Work symlink ' . base64_encode($path) . ' conflicts with completed work descendants.');
