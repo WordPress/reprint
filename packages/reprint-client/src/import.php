@@ -1321,8 +1321,8 @@ class ImportClient
             if (
                 !$abort
                 && Utils::relative_path_under(
-                    $absolute_state_directory,
-                    $this->filesystem_root
+                    Utils::normalize_path_separators($absolute_state_directory, Utils::native_path_format()),
+                    Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format())
                 ) !== null
             ) {
                 throw new InvalidArgumentException(
