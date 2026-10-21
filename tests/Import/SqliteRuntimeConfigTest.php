@@ -381,6 +381,39 @@ class SqliteRuntimeConfigTest extends TestCase
         );
     }
 
+    public function testDefaultSqlitePathEscapesTerminalTextWithoutChangingTheFilename(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('Control characters are not valid Windows filenames.');
+        }
+        $content_directory = "/remote/wp-content\033[2J\ncafé";
+        $this->writeState(['preflight' => ['data' => ['database' => ['wp' => [
+            'paths_urls' => ['content_dir' => $content_directory],
+        ]]]]]);
+        $client = new \ImportClient('https://source.example/export.php', $this->stateDir, $this->fsRoot);
+        $this->loadClientState($client);
+        $stream = fopen('php://memory', 'w+b');
+        $this->assertIsResource($stream);
+        $this->setPrivate($client, 'progress', new \TerminalProgress(true, $stream));
+        try {
+            $target = $this->callPrivate($client, 'resolve_database_target', [
+                ['target_engine' => 'sqlite'], [], 'mysql', 'db-apply',
+            ]);
+            [$connection] = $this->callPrivate($client, 'create_target_database_connection', [$target]);
+            $target_path = $client->get_state()->apply->target_sqlite_path;
+            $this->assertStringContainsString($content_directory, $target_path);
+            $this->assertFileExists($target_path);
+            rewind($stream);
+            $output = stream_get_contents($stream);
+            $this->assertStringContainsString('SQLite path: ' . \TerminalProgress::escape_text($target_path), $output);
+            $this->assertStringNotContainsString($content_directory, $output);
+            $this->assertStringContainsString($target_path, file_get_contents($this->stateDir . '/audit.log'));
+            $this->assertIsObject($connection);
+        } finally {
+            fclose($stream);
+        }
+    }
+
     public function testDefaultSqlitePathKeepsTheRootContentDirectory(): void
     {
         if (!extension_loaded('pdo_sqlite')) {
