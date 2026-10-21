@@ -238,3 +238,16 @@ jobs:
         with:
           header: pull-pipeline-perf
           path: tests/e2e/bench-results.md
+
+  ci-result:
+    name: Performance result
+    needs: [build-pr-phar, build-trunk-phar, bench]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

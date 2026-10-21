@@ -104,3 +104,16 @@ jobs:
           path: |
             ${{ runner.temp }}/source.*.log
             migration-logs/
+
+  ci-result:
+    name: Windows migration result
+    needs: [php-reader, windows-to-linux]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

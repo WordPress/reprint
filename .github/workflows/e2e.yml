@@ -377,3 +377,16 @@ jobs:
           docker logs reprint-e2e-mysql8-target 2>/dev/null || true
           echo "--- PHP processes ---"
           ps aux | grep php || true
+
+  ci-result:
+    name: E2E result
+    needs: [build-phar, build-server-plugin, e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"
