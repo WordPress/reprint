@@ -91,6 +91,16 @@ class NginxFpmApplier implements RuntimeApplier
         $lines[] = "    root " . $this->quote_nginx_string($filesystem_root) . ";";
         $lines[] = '    index index.php index.html;';
         $lines[] = '';
+        foreach (reprint_runtime_sqlite_artifact_paths($manifest) as $local_absolute_path) {
+            $local_relative_path = \WordPress\Reprint\Server\Utils::relative_path_under($local_absolute_path, realpath($filesystem_root) ?: $filesystem_root);
+            if ($local_relative_path === null) {
+                continue;
+            }
+            if (preg_match('/[\x00-\x1f\x7f$]/', $local_relative_path) === 1) {
+                throw new InvalidArgumentException('Cannot use the SQLite database path in nginx configuration: dollar signs and control characters are not supported.');
+            }
+            $lines[] = '    location = ' . $this->quote_nginx_string('/' . $local_relative_path) . ' { return 404; }';
+        }
         $lines[] = '    # Static files served directly by nginx — no PHP involved.';
         $lines[] = '    location / {';
         $lines[] = '        try_files $uri $uri/ /index.php?$args;';
