@@ -37,6 +37,27 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
         }
     }
 
+    public function testNumericLiteralFormattingRejectsTextValues(): void
+    {
+        // Legacy SQLite sources can store text under numeric column metadata.
+        // Check the formatter directly; the current SQLite driver uses STRICT tables.
+        $producer = new MySQLDumpProducer(new PDO('sqlite::memory:'));
+        $format = new ReflectionMethod($producer, 'format_value');
+        foreach (['0', '-12', '18446744073709551615', '.5', '1.25e-10'] as $value) {
+            $this->assertSame($value, $format->invoke($producer, $value, 'BIGINT'));
+        }
+        foreach (['1); SELECT 7; --', '', 'NULL', 'INF', 'NaN', '0xFF'] as $value) {
+            try {
+                $format->invoke($producer, $value, 'BIGINT');
+            } catch (RuntimeException $error) {
+                $this->assertStringContainsString('Cannot export nonnumeric value', $error->getMessage());
+                $this->assertStringContainsString(base64_encode($value), $error->getMessage());
+                continue;
+            }
+            $this->fail('A nonnumeric value was emitted as a numeric literal.');
+        }
+    }
+
     public function testFloatingPointValuesAndResumedKeysWithMultibyteDecimalSeparator(): void
     {
         $locale = setlocale(LC_NUMERIC, 0);
