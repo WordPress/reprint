@@ -1267,19 +1267,8 @@ class MySQLDumpProducer
             return "NULL";
         }
 
-        if ($this->row_reader->is_numeric_type($data_type)) {
-            // Legacy SQLite tables may retain text in numeric columns.
-            // Column metadata alone does not make these bytes a SQL literal.
-            $numeric_value = (string) $value;
-            if (!is_numeric($numeric_value)) {
-                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Base64 value and column type are CLI text, not HTML.
-                throw new \RuntimeException(
-                    "Cannot export nonnumeric value (base64: " . base64_encode($numeric_value)
-                    . ") from a " . $data_type . " column."
-                );
-                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-            }
-            return $numeric_value;
+        if ($this->is_bare_numeric_literal($value, $data_type)) {
+            return (string) $value;
         }
 
         if ($value === "" && $this->row_reader->is_spatial_type($data_type)) {
@@ -1303,6 +1292,20 @@ class MySQLDumpProducer
     }
 
     /**
+     * Checks whether a numeric column value can be written into the dump unquoted.
+     *
+     * The declared column type does not prove the stored value is a number:
+     * SQLite keeps any text in an INTEGER- or REAL-declared column. A value
+     * which is not a plain decimal literal goes through the base64 string path
+     * instead, so its bytes can never become SQL syntax.
+     */
+    private function is_bare_numeric_literal($value, $data_type)
+    {
+        return $this->row_reader->is_numeric_type($data_type) &&
+            preg_match('/\A[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\z/', (string) $value) === 1;
+    }
+
+    /**
      * Estimates the byte length of format_value()'s output without actually
      * encoding. Used by format_row_for_insert() to decide whether a row
      * would exceed max_statement_size before doing the expensive encoding.
@@ -1313,7 +1316,7 @@ class MySQLDumpProducer
             return 4; // NULL
         }
 
-        if ($this->row_reader->is_numeric_type($data_type)) {
+        if ($this->is_bare_numeric_literal($value, $data_type)) {
             return strlen((string) $value);
         }
 

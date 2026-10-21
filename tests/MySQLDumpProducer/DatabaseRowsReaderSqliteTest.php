@@ -37,24 +37,21 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
         }
     }
 
-    public function testNumericLiteralFormattingRejectsTextValues(): void
+    public function testNumericLiteralFormattingEncodesTextValues(): void
     {
         // Legacy SQLite sources can store text under numeric column metadata.
         // Check the formatter directly; the current SQLite driver uses STRICT tables.
         $producer = new MySQLDumpProducer(new PDO('sqlite::memory:'));
         $format = new ReflectionMethod($producer, 'format_value');
-        foreach (['0', '-12', '18446744073709551615', '.5', '1.25e-10'] as $value) {
+        $estimate = new ReflectionMethod($producer, 'estimate_formatted_size');
+        foreach (['0', '-12', '+12', '18446744073709551615', '.5', '1.', '1.25e-10', '1E+3'] as $value) {
             $this->assertSame($value, $format->invoke($producer, $value, 'BIGINT'));
+            $this->assertSame(strlen($value), $estimate->invoke($producer, $value, 'BIGINT'));
         }
-        foreach (['1); SELECT 7; --', '', 'NULL', 'INF', 'NaN', '0xFF'] as $value) {
-            try {
-                $format->invoke($producer, $value, 'BIGINT');
-            } catch (RuntimeException $error) {
-                $this->assertStringContainsString('Cannot export nonnumeric value', $error->getMessage());
-                $this->assertStringContainsString(base64_encode($value), $error->getMessage());
-                continue;
-            }
-            $this->fail('A nonnumeric value was emitted as a numeric literal.');
+        foreach (['1); SELECT 7; --', '', 'NULL', 'INF', 'NaN', '0xFF', ' 1', '1 ', "1\n"] as $value) {
+            $expected = $value === '' ? "''" : "FROM_BASE64('" . base64_encode($value) . "')";
+            $this->assertSame($expected, $format->invoke($producer, $value, 'BIGINT'));
+            $this->assertSame(strlen($expected), $estimate->invoke($producer, $value, 'BIGINT'));
         }
     }
 
@@ -271,6 +268,33 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
         $this->assertStringContainsString('INSERT INTO `wp_posts`', $sql);
         $this->assertStringContainsString(base64_encode('https://old.example/one'), $sql);
         $this->assertStringContainsString(base64_encode('https://old.example/two'), $sql);
+    }
+
+    public function testSqlDumpEncodesTextStoredInNumericColumnsAsBase64(): void
+    {
+        // A table without STRICT keeps text which does not look like a number
+        // in an INTEGER- or REAL-declared column.
+        $sqlite = new PDO('sqlite:' . $this->database_path);
+        $sqlite->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $sqlite->exec('CREATE TABLE wp_counters (id INTEGER PRIMARY KEY, hits BIGINT, menu_order INT)');
+        $injection = "0); DROP TABLE wp_users; -- ";
+        $statement = $sqlite->prepare('INSERT INTO wp_counters VALUES (?, ?, ?)');
+        $statement->execute([1, $injection, '1e3,(5,FROM_BASE64(0x41)']);
+        $statement->execute([2, 42, -15]);
+        $statement->execute([3, '', '-']);
+        $sqlite = null;
+
+        $producer = new MySQLDumpProducer($this->open_database(), ['tables_to_process' => ['wp_counters']]);
+        $sql = '';
+        while ($producer->next_sql_fragment()) {
+            $sql .= $producer->get_sql_fragment() . "\n";
+        }
+        $producer->close();
+
+        $this->assertStringNotContainsString('wp_users', $sql);
+        $this->assertStringContainsString("(1,FROM_BASE64('" . base64_encode($injection) . "'),FROM_BASE64('" . base64_encode('1e3,(5,FROM_BASE64(0x41)') . "'))", $sql);
+        $this->assertStringContainsString('(2,42,-15)', $sql);
+        $this->assertStringContainsString("(3,'',FROM_BASE64('" . base64_encode('-') . "'))", $sql);
     }
 
     private function open_database(): WP_PDO_MySQL_On_SQLite
