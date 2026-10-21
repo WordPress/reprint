@@ -774,6 +774,27 @@ final class FilesPullLocalIndexTest extends TestCase
         }
     }
 
+    public function testStatePlacementResolvesAnAliasBeforeFollowingParentSegments(): void
+    {
+        mkdir($this->rawFileRoot . '/child');
+        // A prior preflight may already have initialized this state directory.
+        $preflight = $this->runCli([
+            'preflight', $this->targetUrl,
+            '--state-dir=' . $this->rawFileRoot . '/state-inside',
+            '--fs-root=' . $this->rawFileRoot, '--secret=test-secret',
+        ]);
+        $this->assertSame(0, $preflight['exit'], $preflight['output']);
+        symlink($this->rawFileRoot . '/child', $this->root . '/alias');
+        $result = $this->runCli([
+            'pull-files', $this->targetUrl,
+            '--state-dir=' . $this->root . '/alias/../state-inside',
+            '--fs-root=' . $this->rawFileRoot,
+            '--secret=test-secret', '--on-fs-root-nonempty=preserve-local',
+        ]);
+        $this->assertSame(1, $result['exit'], $result['output']);
+        $this->assertStringContainsString('File pulls require --state-dir to be outside --fs-root.', $result['output']);
+    }
+
     public function testMirrorAppliesIncludedPathsAfterLocalRemapping(): void
     {
         $arguments = [

@@ -1311,11 +1311,13 @@ class ImportClient
             $this->files_pull_mode =
                 $requested_files_pull_mode ?? $saved_files_pull_mode;
 
-            $absolute_state_directory = Utils::realpath_with_missing_tail(
-                $this->state_dir[0] === "/"
-                    ? $this->state_dir
-                    : wp_join_unix_paths(getcwd() ?: "/", $this->state_dir)
-            );
+            // The constructor has created the state directory. Resolve that
+            // existing path before interpreting parent segments around aliases.
+            $absolute_state_directory = realpath($this->state_dir);
+            if ($absolute_state_directory === false) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem path shown as CLI text, not HTML.
+                throw new RuntimeException("Failed to resolve state directory: {$this->state_dir}");
+            }
             if (
                 !$abort
                 && Utils::relative_path_under(
