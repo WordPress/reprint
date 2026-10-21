@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: update-build-inputs-${{ github.event_name }}-${{ github.ref }}
+  group: update-build-inputs
   cancel-in-progress: false
 
 jobs:
