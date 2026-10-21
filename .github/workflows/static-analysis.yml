@@ -10,11 +10,11 @@ jobs:
     name: PHPStan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: "8.2"
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
@@ -27,11 +27,11 @@ jobs:
     name: PHP Compatibility
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: "8.2"
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
@@ -49,11 +49,11 @@ jobs:
     name: PHP 7.2 syntax (Reprint Server)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: "7.2"
           coverage: none
@@ -68,11 +68,11 @@ jobs:
     name: PDO-less wpdb fallback
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.2'
           coverage: none
@@ -89,14 +89,14 @@ jobs:
     name: PHP 5.6 Reprint Server artifact
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
       # Match the release job's artifact build before switching to the old
       # runtime which must parse and run the result.
       - name: Set up release build PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: "8.2"
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
@@ -116,7 +116,7 @@ jobs:
         run: git diff --exit-code -- packages/reprint-server reprint-server-wp
 
       - name: Set up PHP 5.6 parser
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: "5.6"
           coverage: none
@@ -134,3 +134,19 @@ jobs:
             php -l "$php_file"
           done < <(find "$artifact_dir" -type f -name '*.php' -print0)
           php tests/php56-server-smoke.php "$artifact_dir"
+
+  workflow-inputs:
+    name: Workflow inputs and publishing
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - run: node --test tests/e2e/ci/workflow-inputs.test.mjs tests/e2e/ci/publish-performance-history.test.mjs

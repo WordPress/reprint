@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: perf-history
@@ -23,11 +23,12 @@ jobs:
     name: Build reprint.phar (trunk)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.5'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
@@ -35,13 +36,13 @@ jobs:
       - run: composer install --no-dev --no-interaction --prefer-dist
       - run: ./bin/build-reprint-phar.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: client-phar-trunk
           path: reprint.phar
 
   bench-and-publish:
-    name: Bench trunk and publish to gh-pages
+    name: Bench trunk
     needs: build-phar
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -49,24 +50,25 @@ jobs:
       PHP_VERSION: '8.5'
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Download trunk phar
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: client-phar-trunk
           path: phars/trunk
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
 
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
       # because every Launchpad endpoint flakes regularly.
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: ${{ env.PHP_VERSION }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
@@ -145,14 +147,30 @@ jobs:
           touch pages/.nojekyll
           node tests/e2e/benchmark/append-history.mjs
 
-      - name: Commit and push
-        working-directory: pages
-        run: |
-          set -euo pipefail
-          git add -A
-          if git diff --cached --quiet; then
-            echo "Nothing to publish."
-            exit 0
-          fi
-          git commit -m "perf: data point for ${{ steps.commit.outputs.sha }}"
-          git push origin gh-pages
+      - name: Upload completed performance history
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: perf-history-data
+          path: pages/data/history.json
+
+  publish:
+    name: Publish performance history
+    needs: bench-and-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: perf-history-data
+          path: ${{ runner.temp }}/perf-history-data
+
+      - name: Publish completed performance history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bin/publish-performance-history.sh "$RUNNER_TEMP/perf-history-data/history.json"
