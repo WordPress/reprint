@@ -46,6 +46,6 @@ RUN composer install --no-dev --no-interaction --prefer-dist
 RUN composer install --no-dev --no-interaction --prefer-dist --working-dir=reprint-server-wp
 
 # Install npm deps for E2E
-RUN cd tests/e2e && npm install --silent
+RUN cd tests/e2e && npm ci --silent
 
 ENTRYPOINT ["/app/tests/e2e/docker-entrypoint.sh"]

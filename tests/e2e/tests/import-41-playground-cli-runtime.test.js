@@ -21,7 +21,7 @@ import { ensureSite } from '../lib/site-setup.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
-const itWhenRustExtensionConfigured = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST ? it : it.skip;
+const itWhenRustExtensionConfigured = process.env.WP_MYSQL_PARSER_EXTENSION === '1' ? it : it.skip;
 
 describe('Import: Playground CLI runtime', () => {
     const site = 'basic';
@@ -149,7 +149,7 @@ describe('Import: Playground CLI runtime', () => {
             'start.sh should have mount-before-install flags');
         assert.ok(startSh.includes(`--port=${port}`),
             'start.sh should use the configured port');
-        assert.ok(startSh.includes('npx @wp-playground/cli'),
+        assert.ok(startSh.includes('npx --yes @wp-playground/cli@'),
             'start.sh should invoke Playground CLI');
     });
 

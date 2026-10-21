@@ -1,0 +1,30 @@
+{
+  "sourceCommit": "16f40d8571128b33c7a387c5d529a084da657ed8",
+  "version": "69340feba0b03c087334943c381f9b7864498e51",
+  "artifacts": {
+    "8.0": {
+      "url": "https://raw.githubusercontent.com/WordPress/sqlite-database-integration/16f40d8571128b33c7a387c5d529a084da657ed8/wp_mysql_parser-wasm-extension/latest/wp_mysql_parser-php8.0-jspi.so",
+      "sha256": "09b93d11f2c0e3603516cf6fac542c660e2f998e49e0ae254141d3a0edcd78f1"
+    },
+    "8.1": {
+      "url": "https://raw.githubusercontent.com/WordPress/sqlite-database-integration/16f40d8571128b33c7a387c5d529a084da657ed8/wp_mysql_parser-wasm-extension/latest/wp_mysql_parser-php8.1-jspi.so",
+      "sha256": "41dbb80d99c35fd4e3a6304cba3284197815ba4e2c152b3f2d07115ea6bdd99c"
+    },
+    "8.2": {
+      "url": "https://raw.githubusercontent.com/WordPress/sqlite-database-integration/16f40d8571128b33c7a387c5d529a084da657ed8/wp_mysql_parser-wasm-extension/latest/wp_mysql_parser-php8.2-jspi.so",
+      "sha256": "740825a84d30f7ad4e108b7ed980db5529c7a49e059ec7f3a70560b9b6c6ca06"
+    },
+    "8.3": {
+      "url": "https://raw.githubusercontent.com/WordPress/sqlite-database-integration/16f40d8571128b33c7a387c5d529a084da657ed8/wp_mysql_parser-wasm-extension/latest/wp_mysql_parser-php8.3-jspi.so",
+      "sha256": "205e37d691ad1858ebbf472e9bb51ebd62026190200c8380deabb95d3b45b678"
+    },
+    "8.4": {
+      "url": "https://raw.githubusercontent.com/WordPress/sqlite-database-integration/16f40d8571128b33c7a387c5d529a084da657ed8/wp_mysql_parser-wasm-extension/latest/wp_mysql_parser-php8.4-jspi.so",
+      "sha256": "ee6e2a85a951943ef18a9d28f617a4809b1e15afc9ce85a415207191bf0bf65c"
+    },
+    "8.5": {
+      "url": "https://raw.githubusercontent.com/WordPress/sqlite-database-integration/16f40d8571128b33c7a387c5d529a084da657ed8/wp_mysql_parser-wasm-extension/latest/wp_mysql_parser-php8.5-jspi.so",
+      "sha256": "146361f0a9fd87bbb757259035fac6b7b89d4b03ea343b9357e8c70ffa6f8102"
+    }
+  }
+}

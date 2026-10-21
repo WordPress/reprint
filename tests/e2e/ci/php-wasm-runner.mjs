@@ -2,11 +2,13 @@
 import { createNodeFsMountHandler, loadNodeRuntime } from '@php-wasm/node';
 import { PHP } from '@php-wasm/universal';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { existsSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 const DEFAULT_PHP_VERSION = '8.3';
-const MYSQL_PARSER_MANIFEST_ENV = 'WP_MYSQL_PARSER_EXTENSION_MANIFEST';
+const MYSQL_PARSER_EXTENSION = createRequire(import.meta.url)('./wp-mysql-parser-extension.json');
 
 function envRecord() {
     return Object.fromEntries(
@@ -109,14 +111,21 @@ async function main() {
     const argv = process.argv.slice(2);
     const phpVersion = process.env.PLAYGROUND_PHP_VERSION || DEFAULT_PHP_VERSION;
     const extensions = ['intl'];
-    const manifestUrl = process.env[MYSQL_PARSER_MANIFEST_ENV];
-    if (manifestUrl) {
-        extensions.push({
-            source: {
-                format: 'manifest',
-                manifestUrl,
-            },
-        });
+    if (process.env.WP_MYSQL_PARSER_EXTENSION === '1') {
+        const artifact = MYSQL_PARSER_EXTENSION.artifacts[phpVersion];
+        if (!artifact) {
+            throw new Error(`No recorded wp_mysql_parser extension for PHP ${phpVersion}.`);
+        }
+        const response = await fetch(artifact.url);
+        if (!response.ok) {
+            throw new Error(`wp_mysql_parser download returned HTTP ${response.status}: ${artifact.url}`);
+        }
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        const checksum = createHash('sha256').update(bytes).digest('hex');
+        if (checksum !== artifact.sha256) {
+            throw new Error(`SHA-256 mismatch for wp_mysql_parser PHP ${phpVersion}: expected ${artifact.sha256}, received ${checksum}.`);
+        }
+        extensions.push({ source: { format: 'so', name: 'wp_mysql_parser', bytes } });
     }
 
     const php = new PHP(await loadNodeRuntime(phpVersion, {

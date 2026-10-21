@@ -61,7 +61,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
@@ -80,7 +80,7 @@ jobs:
 
       - name: Install e2e dependencies
         working-directory: tests/e2e
-        run: npm install
+        run: npm ci
 
       - name: Download wp-cli
         run: |
@@ -99,7 +99,7 @@ jobs:
           BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
           PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
           PLAYGROUND_PHP_VERSION: '8.3'
-          WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
+          WP_MYSQL_PARSER_EXTENSION: '1'
         run: node benchmark/bench-pull.mjs
 
       - name: Capture commit metadata
