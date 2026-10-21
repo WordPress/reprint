@@ -280,6 +280,49 @@ final class PullSymlinkScopeTest extends TestCase
         return ['file' => ['file'], 'directory' => ['directory'], 'symlink' => ['symlink']];
     }
 
+    public function testFileFetchRejectsUnrequestedChangesBeforeTouchingLocalFiles(): void
+    {
+        foreach (['file', 'directory', 'symlink', 'error'] as $type) {
+            file_put_contents($this->root . '/files/keep.txt', 'keep');
+            $headers = ['X-Chunk-Type' => $type];
+            $body = '';
+            if ($type === 'error') {
+                $body = json_encode(['error_type' => 'file_missing', 'path' => base64_encode('/keep.txt')]);
+            } else {
+                $headers['X-' . ucfirst($type) . '-Path'] = base64_encode('/keep.txt');
+                if ($type === 'file') {
+                    $headers += ['X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '3'];
+                    $body = 'new';
+                } elseif ($type === 'symlink') {
+                    $headers['X-Symlink-Target'] = base64_encode('requested.txt');
+                }
+            }
+            try {
+                $this->receive([['headers' => $headers, 'body' => $body]], ['/requested.txt']);
+            } catch (\RuntimeException $error) {
+                $this->assertStringContainsString('not requested in this file batch', $error->getMessage());
+            }
+            $this->assertFileExists($this->root . '/files/keep.txt');
+            $this->assertFalse(is_link($this->root . '/files/keep.txt'));
+            $this->assertSame('keep', file_get_contents($this->root . '/files/keep.txt'));
+        }
+    }
+
+    public function testRequestedUpdatesAndContinuedChunksStillArrive(): void
+    {
+        file_put_contents($this->root . '/files/existing.txt', 'old');
+        $this->receive([
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/existing.txt'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '0', 'X-File-Size' => '6'], 'body' => 'new'],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/existing.txt'),
+                'X-First-Chunk' => '0', 'X-Last-Chunk' => '1', 'X-File-Size' => '6'], 'body' => 'est'],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/next.txt'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'next'],
+        ], ['/existing.txt', '/next.txt']);
+        $this->assertSame('newest', file_get_contents($this->root . '/files/existing.txt'));
+        $this->assertSame('next', file_get_contents($this->root . '/files/next.txt'));
+    }
+
     /**
      * Run the production file-fetch dispatcher over a real HTTP response.
      *
@@ -288,16 +331,39 @@ final class PullSymlinkScopeTest extends TestCase
      *     @type array $headers Protocol header strings for each part.
      *     @type string $body Optional part bytes.
      * }
+     * @param string[]|null $requested_paths Paths selected by the local fetch list.
      * @return \ImportClient Client retaining the saved file-fetch state.
      * @phpstan-param list<array{headers:array<string,string>,body?:string}> $parts
      */
-    private function receive(array $parts): \ImportClient
+    private function receive(array $parts, ?array $requested_paths = null): \ImportClient
     {
         $parts[] = ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']];
         file_put_contents($this->root . '/parts.json', json_encode($parts));
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         ( new \ReflectionMethod($client, 'initialize_credential') )->invoke($client, true, ['secret' => 'test-secret']);
-        ( new \ReflectionMethod($client, 'fetch_file_batch') )->invoke($client, [], null);
+        $post_data = [];
+        $batch_file = null;
+        if ($requested_paths !== null) {
+            $list_file = $client->pull_state_directory . '/fetch-list.jsonl';
+            $lines = '';
+            foreach ($requested_paths as $path) {
+                $lines .= json_encode(['path' => base64_encode($path)]) . "\n";
+            }
+            file_put_contents($list_file, $lines);
+            $batch = ( new \ReflectionMethod($client, 'prepare_fetch_batch') )->invoke($client, $list_file, 0);
+            $batch_file = $batch['file'];
+            $client->get_state()->fetch->offset = 0;
+            $client->get_state()->fetch->next_offset = $batch['next_offset'];
+            $post_data['file_list'] = new \CURLFile($batch_file, 'application/json', 'file-list.json');
+            ( new \ReflectionProperty($client, 'fs_root_nonempty_behavior') )->setValue($client, 'preserve-local');
+        }
+        try {
+            ( new \ReflectionMethod($client, 'fetch_file_batch') )->invoke($client, $post_data, null);
+        } finally {
+            if ($batch_file !== null) {
+                unlink($batch_file);
+            }
+        }
         return $client;
     }
 

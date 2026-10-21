@@ -8908,10 +8908,40 @@ class ImportClient
             }
         }
 
+        // The diff already chose which existing paths may be updated. Check
+        // responses against that list, not against whether a file exists now.
+        // Walk only this batch's JSONL range once; retain the current path for
+        // repeated body callbacks and continuation parts of the same file.
+        $requested_paths = null;
+        if (( $post_data['file_list'] ?? null ) instanceof CURLFile) {
+            $requested_paths = ( function () use ($fetch_state): Generator {
+                $handle = fopen($this->fetch_list_file, 'rb');
+                if ($handle === false) {
+                    throw new RuntimeException('Could not open the file-fetch list for response matching.');
+                }
+                try {
+                    fseek($handle, $fetch_state->offset);
+                    while (ftell($handle) < $fetch_state->next_offset) {
+                        $line = fgets($handle);
+                        if ($line === false) {
+                            break;
+                        }
+                        $entry = json_decode($line, true);
+                        if (is_array($entry) && is_string($entry['path'] ?? null)) {
+                            yield base64_decode($entry['path'], true);
+                        }
+                    }
+                } finally {
+                    fclose($handle);
+                }
+            } )();
+        }
+
         $context->on_chunk = function ($chunk) use (
             &$cursor,
             &$complete,
             &$chunks_since_save,
+            &$requested_paths,
             $context
         ) {
             if ($this->shutdown_requested) {
@@ -8946,6 +8976,27 @@ class ImportClient
             }
 
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
+
+            if ($requested_paths !== null) {
+                $encoded_path = null;
+                if (in_array($chunk_type, ['file', 'directory', 'symlink'], true)) {
+                    $encoded_path = $chunk['headers']['x-' . $chunk_type . '-path'] ?? null;
+                } elseif ($chunk_type === 'error') {
+                    $error = json_decode($chunk['body'] ?? '', true);
+                    $encoded_path = is_array($error) ? ( $error['path'] ?? null ) : null;
+                }
+                if (is_string($encoded_path)) {
+                    // Error parts use the same non-strict decoding as handle_error_chunk().
+                    $remote_absolute_path = base64_decode($encoded_path);
+                    while ($requested_paths->valid() && $requested_paths->current() !== $remote_absolute_path) {
+                        $requested_paths->next();
+                    }
+                    if (!$requested_paths->valid()) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Base64 protocol path, not HTML.
+                        throw new RuntimeException('Received path ' . $encoded_path . ' was not requested in this file batch.');
+                    }
+                }
+            }
 
             if ($chunk_type === "metadata") {
                 $this->handle_metadata_chunk($chunk);
@@ -9085,6 +9136,9 @@ class ImportClient
                 $e,
             );
             return false;
+        } finally {
+            // Release the generator and its list handle even after a callback throws.
+            $requested_paths = null;
         }
         $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
