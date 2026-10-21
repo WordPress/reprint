@@ -7595,7 +7595,7 @@ class ImportClient
                 $this->audit_log(
                     "DB-APPLY | defaulting SQLite path to: {$target_path}"
                 );
-                $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
+                $this->progress->show_lifecycle_line("SQLite path: " . TerminalProgress::escape_text($target_path) . "\n");
             }
 
             if ($save_runtime_target) {
