@@ -53,8 +53,10 @@ test('dependency updates enable auto-merge for the generated PR and commit', asy
         assert.match(step, /gh pr merge --squash --auto --match-head-commit "\$EXPECTED_COMMIT" "\$PR_NUMBER"/, filename);
         assert.match(step, /PR_NUMBER: \$\{\{ steps\.update_pr\.outputs\.pull-request-number \}\}/, filename);
         assert.match(step, /EXPECTED_COMMIT: \$\{\{ steps\.update_pr\.outputs\.pull-request-head-sha \}\}/, filename);
-        assert.match(step, /GH_TOKEN: \$\{\{ secrets\.GH_TOKEN \}\}/, filename);
+        assert.match(step, /GH_TOKEN: \$\{\{ secrets\.DEPENDENCY_UPDATES_TOKEN \}\}/, filename);
         assert.doesNotMatch(step, /--admin/, filename);
+        assert.match(source, /token: \$\{\{ secrets\.DEPENDENCY_UPDATES_TOKEN \}\}/, filename);
+        assert.doesNotMatch(source, /secrets\.GH_TOKEN/, filename);
     }
 });
 

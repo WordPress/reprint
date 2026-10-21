@@ -30,6 +30,14 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
+      - name: Check updater credential
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDENCY_UPDATES_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::DEPENDENCY_UPDATES_TOKEN is missing. Add an Actions secret with Contents: write and Pull requests: write for $GITHUB_REPOSITORY."
+            exit 1
+          fi
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: trunk
@@ -45,8 +53,8 @@ jobs:
         id: update_pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          # Use the existing repository token so the update starts normal CI.
-          token: ${{ secrets.GH_TOKEN }}
+          # Use the repository-scoped updater token so the update starts normal CI.
+          token: ${{ secrets.DEPENDENCY_UPDATES_TOKEN }}
           branch: codex/update-playground-inputs
           commit-message: '[CI] Update Playground packages and parser binaries'
           title: '[CI] Update Playground packages and parser binaries'
@@ -63,7 +71,7 @@ jobs:
         if: steps.update_pr.outputs.pull-request-number != ''
         run: gh pr merge --squash --auto --match-head-commit "$EXPECTED_COMMIT" "$PR_NUMBER"
         env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GH_TOKEN: ${{ secrets.DEPENDENCY_UPDATES_TOKEN }}
           PR_NUMBER: ${{ steps.update_pr.outputs.pull-request-number }}
           EXPECTED_COMMIT: ${{ steps.update_pr.outputs.pull-request-head-sha }}
 
