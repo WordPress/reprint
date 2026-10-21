@@ -34,6 +34,48 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
+    public function testPreflightOnlyBootstrapsTheConfiguredWordPressRoot(): void
+    {
+        foreach ([false, true] as $configured) {
+            $directory = sys_get_temp_dir() . '/preflight-bootstrap-' . bin2hex(random_bytes(6));
+            mkdir($directory . '/chosen', 0700, true);
+            mkdir($directory . '/configured', 0700, true);
+            file_put_contents($directory . '/chosen/wp-load.php', '<?php file_put_contents(__DIR__ . "/loaded", "chosen");');
+            file_put_contents($directory . '/configured/wp-load.php', '<?php file_put_contents(__DIR__ . "/loaded", "configured");');
+            // phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Generates PHP literals for the subprocess.
+            $script = "<?php\nrequire " . var_export(realpath(self::AUTOLOAD_PATH), true) . ";\n"
+                . 'require ' . var_export(realpath(__DIR__ . '/../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php'), true) . ";\n"
+                . 'require ' . var_export(realpath(self::EXPORT_PATH), true) . ";\n"
+                . '$directory = ' . var_export($directory, true) . ";\n"
+                . ( $configured ? '$configured_root = true;' : '$configured_root = false;' )
+                . <<<'PHP'
+            define('SQLITE_DB_DROPIN_VERSION', 'test');
+            $database = new WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=:memory:;dbname=wordpress');
+            $database->exec('CREATE TABLE wp_options (option_id bigint PRIMARY KEY, option_name varchar(191), option_value longtext)');
+            $GLOBALS['@pdo'] = $database->get_connection()->get_pdo();
+            $GLOBALS['wpdb'] = (object) ['dbh' => $database, 'prefix' => 'wp_'];
+            if ($configured_root) { define('ABSPATH', $directory . '/configured/'); }
+            ob_start();
+            $result = endpoint_preflight(['directory' => $directory . '/chosen']);
+            ob_end_clean();
+            $result = $result['stats'];
+            echo json_encode(['connected' => $result['database']['connected'], 'wp' => $result['database']['wp']]);
+            PHP;
+            // phpcs:enable WordPress.PHP.DevelopmentFunctions.error_log_var_export
+            try {
+                $result = $this->runPhpCode($script);
+                $this->assertSame(0, $result['status'], $result['output']);
+                $preflight = json_decode($result['output'], true, 512, JSON_THROW_ON_ERROR);
+                $this->assertTrue($preflight['connected'], $result['output']);
+                $this->assertFileDoesNotExist($directory . '/chosen/loaded');
+                $this->assertSame($configured, $preflight['wp']['wp_load_attempted']);
+                $this->assertSame($configured, file_exists($directory . '/configured/loaded'));
+            } finally {
+                $this->removePath($directory);
+            }
+        }
+    }
+
     public function testNormalizePathListKeepsTheFilesystemRoot(): void
     {
         $export_path = realpath(self::EXPORT_PATH);
