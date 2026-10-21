@@ -3063,6 +3063,46 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($this->loadActiveState($push_state_directory));
     }
 
+    public function testFilesDiffAndPushLeaveTheActiveLocalSqliteDatabaseBehind(): void
+    {
+        $filesystem_root = $this->root . '/sqlite-local';
+        $state_directory = $this->root . '/sqlite-state';
+        mkdir($filesystem_root . '/wp-content/database', 0700, true);
+        $database_path = $filesystem_root . '/wp-content/database/custom.sqlite';
+        $database = new PDO('sqlite:' . $database_path);
+        $database->exec('CREATE TABLE local_data (value TEXT)');
+        unset($database);
+        foreach (['-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+            file_put_contents($database_path . $suffix, 'local database companion');
+        }
+        file_put_contents($filesystem_root . '/theme.css', 'body {}');
+        file_put_contents($filesystem_root . '/ordinary.sqlite', 'site content');
+        $this->writeFilesPushPreflight($state_directory, '/');
+        $client = new ImportClient($this->remote_reprint_api_url, $state_directory, $filesystem_root, ['allow_http' => true]);
+        $client->get_state()->set_preflight_record([
+            'http_code' => 200,
+            'data' => ['runtime' => ['document_root' => '/']],
+        ]);
+        $client->get_state()->apply->target_engine = 'sqlite';
+        $client->get_state()->apply->target_sqlite_path = $database_path;
+        $client->save_state();
+        file_put_contents(dirname($this->filesPushStateDirectory($state_directory)) . '/local_index.jsonl', '');
+
+        $diff = $this->runFilesDiffCli($filesystem_root, $state_directory);
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $paths = array_column($this->cliJsonLines($diff['stdout']), 'path_b64');
+        $this->assertNotContains(base64_encode('wp-content/database/custom.sqlite'), $paths);
+        $this->assertContains(base64_encode('ordinary.sqlite'), $paths);
+        $push = $this->runFilesPushCli($filesystem_root, $state_directory);
+        $this->assertSame(0, $push['exit'], $push['output']);
+        $this->assertSame('body {}', file_get_contents($this->docroot . '/theme.css'));
+        $this->assertSame('site content', file_get_contents($this->docroot . '/ordinary.sqlite'));
+        foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+            $this->assertFileDoesNotExist($this->docroot . '/wp-content/database/custom.sqlite' . $suffix);
+            $this->assertFileExists($database_path . $suffix);
+        }
+    }
+
     public function testCompletedFilesPushWritesTheLocalIndexUsedByFilesDiff(): void
     {
         $local_docroot = $this->root . '/push-diff-local-docroot';
