@@ -1252,7 +1252,7 @@ class MySQLDumpProducer
     /**
      * Formats a single column value as a SQL literal.
      *
-     * Numeric types are emitted as bare literals. Everything else — strings,
+     * Numeric types are checked and emitted as bare literals. Everything else — strings,
      * binary, dates, enums — goes through FROM_BASE64(). JSON is special:
      * MySQL rejects binary-charset input for JSON columns, so we wrap with
      * CONVERT(... USING utf8mb4) to decode the base64 into a utf8mb4 string.
@@ -1268,7 +1268,18 @@ class MySQLDumpProducer
         }
 
         if ($this->row_reader->is_numeric_type($data_type)) {
-            return (string) $value;
+            // Legacy SQLite tables may retain text in numeric columns.
+            // Column metadata alone does not make these bytes a SQL literal.
+            $numeric_value = (string) $value;
+            if (!is_numeric($numeric_value)) {
+                // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Base64 value and column type are CLI text, not HTML.
+                throw new \RuntimeException(
+                    "Cannot export nonnumeric value (base64: " . base64_encode($numeric_value)
+                    . ") from a " . $data_type . " column."
+                );
+                // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+            }
+            return $numeric_value;
         }
 
         if ($value === "" && $this->row_reader->is_spatial_type($data_type)) {
