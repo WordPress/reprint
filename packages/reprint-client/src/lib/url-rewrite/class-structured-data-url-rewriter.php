@@ -260,6 +260,11 @@ class StructuredDataUrlRewriter
             // cannot expose serialized string values for rewriting.
             if ($this->could_be_php_serialization_with_strings($value)) {
                 $p = new PhpSerializationProcessor($value);
+                // A value beyond the parser's nesting limit must stay intact.
+                // Falling back to plain-text rewriting could change serialized byte lengths.
+                if ($p->exceeded_nesting_limit()) {
+                    return $value;
+                }
                 if (!$p->is_malformed()) {
                     while ($p->next_value()) {
                         $original = $p->get_value();

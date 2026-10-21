@@ -5,12 +5,6 @@ on:
     - cron: '23 7 * * 1'
   workflow_dispatch:
   pull_request:
-    paths:
-      - '.github/workflows/update-build-inputs.yml'
-      - 'bin/update-build-inputs.mjs'
-      - 'bin/build-reprint-phar.sh'
-      - 'tests/e2e/ci/download-wp-cli.sh'
-      - 'tests/e2e/ci/update-build-inputs.test.mjs'
 
 permissions:
   contents: read
@@ -48,6 +42,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Open or update the dependency PR
+        id: update_pr
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
           # The existing repository token lets pull_request CI run without
@@ -59,7 +54,27 @@ jobs:
           body: |
             Updates Box and WP-CLI to their latest stable releases and records the SHA-256 of each downloaded PHAR.
 
-            The normal PR checks run before review. This workflow does not merge the update.
+            GitHub merges this update automatically after the required CI checks pass. Failed checks leave the PR open.
           add-paths: |
             bin/build-reprint-phar.sh
             tests/e2e/ci/download-wp-cli.sh
+      - name: Enable auto-merge
+        if: steps.update_pr.outputs.pull-request-number != ''
+        run: gh pr merge --squash --auto --match-head-commit "$EXPECTED_COMMIT" "$PR_NUMBER"
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PR_NUMBER: ${{ steps.update_pr.outputs.pull-request-number }}
+          EXPECTED_COMMIT: ${{ steps.update_pr.outputs.pull-request-head-sha }}
+
+  ci-result:
+    name: Build input updater result
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

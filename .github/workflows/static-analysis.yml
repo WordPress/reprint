@@ -150,3 +150,16 @@ jobs:
           node-version: '24'
 
       - run: node --test tests/e2e/ci/workflow-inputs.test.mjs tests/e2e/ci/publish-performance-history.test.mjs
+
+  ci-result:
+    name: Static analysis result
+    needs: [phpstan, compat, syntax-72, no-pdo-wpdb-fallback, server-56, workflow-inputs]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"
