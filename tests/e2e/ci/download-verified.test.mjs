@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +38,25 @@ test('downloads are verified before replacing the cache', async () => {
         await assert.rejects(run('bash', [downloader, url, checksum, destination]), /SHA-256 mismatch/);
         assert.equal(await readFile(destination, 'utf8'), 'keep until a verified replacement arrives');
         assert.deepEqual(await readdir(directory), ['artifact with spaces']);
+        // The E2E harness also runs WP-CLI as nginx. Its shared PHAR must be
+        // readable by that user, including after a private mktemp download.
+        const harness = join(directory, 'harness');
+        const wrapper = join(harness, 'tests/e2e/ci/download-wp-cli.sh');
+        await mkdir(join(harness, 'tests/e2e/ci'), { recursive: true });
+        await mkdir(join(harness, 'bin'));
+        await copyFile(downloader, join(harness, 'bin/download-verified.sh'));
+        const source = await readFile(new URL('./download-wp-cli.sh', import.meta.url), 'utf8');
+        await writeFile(wrapper, source
+            .replace(/'https:[^']+'/g, JSON.stringify(url))
+            .replace(/'[a-f0-9]{64}'/g, JSON.stringify(checksum))
+            .replaceAll('/tmp/wp-cli.phar', JSON.stringify(destination)));
+        body = expected;
+        await run('bash', [wrapper]);
+        assert.equal((await stat(destination)).mode & 0o777, 0o755);
+        await chmod(destination, 0o600);
+        await run('bash', [wrapper]);
+        assert.equal((await stat(destination)).mode & 0o777, 0o755);
+
     } finally {
         server.closeAllConnections();
         await new Promise((resolve) => server.close(resolve));
