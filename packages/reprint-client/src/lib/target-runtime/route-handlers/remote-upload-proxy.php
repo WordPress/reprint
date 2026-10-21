@@ -51,6 +51,14 @@ function remote_upload_proxy_code(): string
 	$path = parse_url($uri, PHP_URL_PATH);
 	if (!is_string($path) || $path === '') return;
 
+	// uploads/../../../private/file must not probe local files or reach the
+	// source site. Validate decoded segments before any filesystem checks.
+	$decoded_path = rawurldecode($path);
+	if (strpos($decoded_path, "\0") !== false || strpos($decoded_path, '\\') !== false) return;
+	foreach (explode('/', $decoded_path) as $segment) {
+		if ($segment === '.' || $segment === '..') return;
+	}
+
 	if (!preg_match('#/wp-content/uploads/(.+)$#', $path, $matches)) return;
 
 	$content_dir = defined('WP_CONTENT_DIR')
