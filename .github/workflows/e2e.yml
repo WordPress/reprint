@@ -156,6 +156,9 @@ jobs:
         working-directory: tests/e2e
         run: npm install
 
+      - name: Test recorded downloads
+        run: node --test tests/e2e/ci/download-verified.test.mjs
+
       - name: Provision basic site and smoke-test API
         env:
           E2E_WORDPRESS_VERSION: ${{ matrix.wordpress_version }}
@@ -164,10 +167,7 @@ jobs:
         working-directory: tests/e2e
         run: |
           # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
-          if [ ! -f /tmp/wp-cli.phar ]; then
-            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
-            chmod +x /tmp/wp-cli.phar
-          fi
+          ci/download-wp-cli.sh
 
           # Provision the "basic" site
           node --input-type=module <<'NODESCRIPT'

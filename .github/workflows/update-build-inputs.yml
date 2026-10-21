@@ -1,0 +1,65 @@
+name: Update build inputs
+
+on:
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/update-build-inputs.yml'
+      - 'bin/update-build-inputs.mjs'
+      - 'bin/build-reprint-phar.sh'
+      - 'tests/e2e/ci/download-wp-cli.sh'
+      - 'tests/e2e/ci/update-build-inputs.test.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-build-inputs
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: node --test tests/e2e/ci/update-build-inputs.test.mjs
+
+  update:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: trunk
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Check upstream releases
+        run: node bin/update-build-inputs.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Open or update the dependency PR
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          # The existing repository token lets pull_request CI run without
+          # the approval prompt required for PRs opened by GITHUB_TOKEN.
+          token: ${{ secrets.GH_TOKEN }}
+          branch: codex/update-build-inputs
+          commit-message: '[CI] Update Box and WP-CLI releases and checksums'
+          title: '[CI] Update Box and WP-CLI releases and checksums'
+          body: |
+            Updates Box and WP-CLI to their latest stable releases and records the SHA-256 of each downloaded PHAR.
+
+            The normal PR checks run before review. This workflow does not merge the update.
+          add-paths: |
+            bin/build-reprint-phar.sh
+            tests/e2e/ci/download-wp-cli.sh
