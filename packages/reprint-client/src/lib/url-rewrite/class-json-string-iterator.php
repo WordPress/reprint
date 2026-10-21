@@ -36,14 +36,21 @@ class JsonStringIterator
     private bool $changed = false;
 
     /**
-     * Paths to all string leaf values in the decoded structure.
-     * Each path is an array of keys/indices leading to a string value.
-     * @var array<int, array<int, string|int>>
+     * References to the arrays enclosing the current position, outermost first.
+     *
+     * Each array's internal pointer marks the element being visited. Only the
+     * current path is held, so memory stays bounded by the nesting depth.
+     * Storing a key path per leaf would grow with leaves x nesting depth, so a
+     * deeply nested array of many short strings could exhaust memory_limit.
+     * @var array<int, array<int|string, mixed>>
      */
-    private array $paths = [];
+    private array $stack = [];
 
-    /** @var int Current cursor position. -1 means before the first value. */
-    private int $cursor = -1;
+    /** @var bool Whether next_value() has been called at least once. */
+    private bool $started = false;
+
+    /** @var bool Whether the cursor is on a string value. */
+    private bool $on_value = false;
 
     public function __construct(string $json)
     {
@@ -56,7 +63,6 @@ class JsonStringIterator
         }
 
         $this->valid = true;
-        $this->enumerate($this->decoded, []);
     }
 
     /**
@@ -80,8 +86,46 @@ class JsonStringIterator
         if (!$this->valid) {
             return false;
         }
-        $this->cursor++;
-        return $this->cursor < count($this->paths);
+
+        if (!$this->started) {
+            $this->started = true;
+            if (is_string($this->decoded)) {
+                $this->on_value = true;
+                return true;
+            }
+            $this->stack[] = &$this->decoded;
+            reset($this->decoded);
+        } elseif ($this->on_value && $this->stack !== []) {
+            next($this->stack[count($this->stack) - 1]);
+        }
+        $this->on_value = false;
+
+        while ($this->stack !== []) {
+            $node = &$this->stack[count($this->stack) - 1];
+            $key = key($node);
+            if ($key === null) {
+                unset($node);
+                array_pop($this->stack);
+                if ($this->stack !== []) {
+                    next($this->stack[count($this->stack) - 1]);
+                }
+                continue;
+            }
+            if (is_string($node[$key])) {
+                $this->on_value = true;
+                return true;
+            }
+            if (is_array($node[$key]) && $node[$key] !== []) {
+                $this->stack[] = &$node[$key];
+                reset($node[$key]);
+                unset($node);
+                continue;
+            }
+            next($node);
+            unset($node);
+        }
+
+        return false;
     }
 
     /**
@@ -91,7 +135,11 @@ class JsonStringIterator
      */
     public function get_value(): string
     {
-        return $this->navigate($this->paths[$this->cursor]);
+        if ($this->stack === []) {
+            return $this->decoded;
+        }
+        $node = &$this->stack[count($this->stack) - 1];
+        return $node[key($node)];
     }
 
     /**
@@ -101,8 +149,12 @@ class JsonStringIterator
      */
     public function set_value(string $new_value): void
     {
-        $path = $this->paths[$this->cursor];
-        $this->setAtPath($path, $new_value);
+        if ($this->stack === []) {
+            $this->decoded = $new_value;
+        } else {
+            $node = &$this->stack[count($this->stack) - 1];
+            $node[key($node)] = $new_value;
+        }
         $this->changed = true;
     }
 
@@ -119,55 +171,5 @@ class JsonStringIterator
         }
 
         return json_encode($this->decoded, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    }
-
-    /**
-     * Recursively enumerate all string leaf values and record their paths.
-     *
-     * @param mixed $data The current node in the decoded structure.
-     * @param array<int, string|int> $path The path of keys leading to this node.
-     */
-    private function enumerate($data, array $path): void
-    {
-        if (is_string($data)) {
-            $this->paths[] = $path;
-            return;
-        }
-
-        if (is_array($data)) {
-            foreach ($data as $key => $value) {
-                $this->enumerate($value, array_merge($path, [$key]));
-            }
-        }
-    }
-
-    /**
-     * Navigate the decoded structure to the value at $path.
-     *
-     * @param array<int, string|int> $path
-     * @return string
-     */
-    private function navigate(array $path): string
-    {
-        $node = $this->decoded;
-        foreach ($path as $key) {
-            $node = $node[$key];
-        }
-        return $node;
-    }
-
-    /**
-     * Set the value at $path in the decoded structure.
-     *
-     * @param array<int, string|int> $path
-     * @param string $value
-     */
-    private function setAtPath(array $path, string $value): void
-    {
-        $ref = &$this->decoded;
-        foreach ($path as $key) {
-            $ref = &$ref[$key];
-        }
-        $ref = $value;
     }
 }
