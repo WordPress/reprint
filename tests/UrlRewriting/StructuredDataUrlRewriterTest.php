@@ -92,6 +92,34 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('[vc_btn link=\'url:https%3A%2F%2Fold-site.com%2F%27|title:x data-extra=changed y\']', $html->get_attribute('title'));
     }
 
+    /** Each opener should be visited once, even when closers do not match. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    #[DataProvider('repeatedCloserTags')]
+    public function testRepeatedClosersDoNotRescanOrCopyTheOpenShortcodeStack(string $closer_tag): void
+    {
+        set_time_limit(5);
+        $input = '[vc_table]' . str_repeat('[a]', 50000) . str_repeat('[/' . $closer_tag . ']', 50000);
+        $this->assertSame($input, $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+    }
+
+    /** @return array<string,array{string}> Matching and unmatched closer runs. */
+    public static function repeatedCloserTags(): array
+    {
+        return ['unmatched' => ['b'], 'matching' => ['a']];
+    }
+
+    public function testClosingAnOuterShortcodeDiscardsItsNestedOpeners(): void
+    {
+        $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
+        $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
+        foreach (['[a][b][/a][/b]', '[a][a][/a][/a]', '[vc_raw_html][a][/vc_raw_html][/a]'] as $prefix) {
+            $input = $prefix . '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]';
+            $expected = $prefix . '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]';
+            $this->assertSame($expected, $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+        }
+    }
+
     /** An empty child-path list still selects the multisite parser path. */
     public function testOrdinaryImportsKeepTheRawStyleAndBlockPaths(): void
     {

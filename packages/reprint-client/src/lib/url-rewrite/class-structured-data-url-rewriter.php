@@ -459,6 +459,8 @@ class StructuredDataUrlRewriter
     {
         $shortcodes = new ShortcodeProcessor($value);
         $open_shortcodes = array();
+        // Retain positions by tag so unmatched closers do not rescan every opener.
+        $open_shortcode_indices = array();
         $known_body_tokens = array();
 
         while ($shortcodes->next_token()) {
@@ -494,13 +496,8 @@ class StructuredDataUrlRewriter
 
             if ($shortcodes->is_tag_closer()) {
                 $matching_index = null;
-                for ($index = count($open_shortcodes) - 1; $index >= 0; $index--) {
-                    if ($open_shortcodes[$index]['tag'] !== $shortcode_tag) {
-                        continue;
-                    }
-
-                    $matching_index = $index;
-                    break;
+                if (isset($open_shortcode_indices[$shortcode_tag])) {
+                    $matching_index = $open_shortcode_indices[$shortcode_tag][count($open_shortcode_indices[$shortcode_tag]) - 1];
                 }
                 if ($matching_index === null) {
                     if ($open_shortcodes !== array()) {
@@ -510,7 +507,16 @@ class StructuredDataUrlRewriter
                 }
 
                 $closed_shortcode = $open_shortcodes[$matching_index];
-                array_splice($open_shortcodes, $matching_index);
+                // An outer closer also discards nested openers. Pop each one once
+                // without copying or reindexing the retained prefix of the stack.
+                for ($index = count($open_shortcodes) - 1; $index >= $matching_index; --$index) {
+                    $discarded_tag = $open_shortcodes[$index]['tag'];
+                    array_pop($open_shortcodes);
+                    array_pop($open_shortcode_indices[$discarded_tag]);
+                    if ($open_shortcode_indices[$discarded_tag] === array()) {
+                        unset($open_shortcode_indices[$discarded_tag]);
+                    }
+                }
                 if (
                     $closed_shortcode['has_known_body_codec']
                     && $closed_shortcode['body_is_complete']
@@ -528,6 +534,7 @@ class StructuredDataUrlRewriter
                 continue;
             }
 
+            $open_shortcode_indices[$shortcode_tag][] = count($open_shortcodes);
             $open_shortcodes[] = array(
                 'tag'                  => $shortcode_tag,
                 'has_known_body_codec' => $this->has_known_shortcode_body_codec($shortcode_tag),
