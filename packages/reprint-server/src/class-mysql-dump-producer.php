@@ -1252,8 +1252,8 @@ class MySQLDumpProducer
     /**
      * Formats a single column value as a SQL literal.
      *
-     * Numeric types are checked and emitted as bare literals. Everything else — strings,
-     * binary, dates, enums — goes through FROM_BASE64(). JSON is special:
+     * Numeric-typed values which are plain decimal literals are emitted bare.
+     * Everything else — strings, binary, dates, enums — goes through FROM_BASE64(). JSON is special:
      * MySQL rejects binary-charset input for JSON columns, so we wrap with
      * CONVERT(... USING utf8mb4) to decode the base64 into a utf8mb4 string.
      * JSON can only be encoded as UTF-8 or UTF-16, and it's typically UTF-8.
@@ -1295,9 +1295,10 @@ class MySQLDumpProducer
      * Checks whether a numeric column value can be written into the dump unquoted.
      *
      * The declared column type does not prove the stored value is a number:
-     * SQLite keeps any text in an INTEGER- or REAL-declared column. A value
-     * which is not a plain decimal literal goes through the base64 string path
-     * instead, so its bytes can never become SQL syntax.
+     * a SQLite table without STRICT keeps text which does not look like a
+     * number in an INTEGER-declared column. A value which is not a plain
+     * decimal literal goes through the base64 string path instead, so its
+     * bytes can never become SQL syntax.
      */
     private function is_bare_numeric_literal($value, $data_type)
     {
