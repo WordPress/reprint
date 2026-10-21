@@ -1948,7 +1948,12 @@ function endpoint_preflight(array $config): array
     }
     $credential_roots = normalize_path_list($credential_roots);
 
-    $db["wp"]["wp_load_path"] = $wp_load_path;
+    // Scanned directories describe files to export, not PHP to bootstrap.
+    // Only the host-configured WordPress root may supply executable setup.
+    $wp_bootstrap_path = defined("ABSPATH")
+        ? Utils::wp_join_unix_paths(ABSPATH, "wp-load.php")
+        : null;
+    $db["wp"]["wp_load_path"] = $wp_bootstrap_path;
     $db["wp"]["wp_load_loaded"] = function_exists("get_option");
 
     $creds = null;
@@ -2038,7 +2043,7 @@ function endpoint_preflight(array $config): array
                 $wp_load_attempted = false;
                 $wp_load_error = null;
                 $wp_loaded = $db["wp"]["wp_load_loaded"];
-                if (!$wp_loaded && $wp_load_path !== null) {
+                if (!$wp_loaded && $wp_bootstrap_path !== null) {
                     $wp_load_attempted = true;
                     $errors = [];
                     $handler = function ($errno, $errstr) use (&$errors) {
@@ -2046,7 +2051,7 @@ function endpoint_preflight(array $config): array
                         return true;
                     };
                     set_error_handler($handler);
-                    $include_result = @include_once $wp_load_path;
+                    $include_result = @include_once $wp_bootstrap_path;
                     restore_error_handler();
                     if ($include_result === false) {
                         $wp_load_error = !empty($errors)
