@@ -1,0 +1,36 @@
+name: Retry failed CI
+
+on:
+  workflow_run:
+    workflows:
+      - 'Static Analysis'
+      - 'PHPUnit'
+      - 'E2E Tests'
+      - 'E2E (Playground CLI PHP)'
+      - 'Performance Report'
+      - 'Windows migration'
+      - 'Update build inputs'
+      - 'Update Playground inputs'
+    types: [completed]
+
+permissions:
+  actions: write
+
+jobs:
+  retry:
+    # Retry jobs rather than accepting a red result. Repeated failures stay
+    # red after the initial attempt and two automatic reruns.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.conclusion == 'failure' || github.event.workflow_run.conclusion == 'timed_out') &&
+      github.event.workflow_run.run_attempt < 3
+    runs-on: ubuntu-latest
+    steps:
+      # The workflow uses only GitHub's run ID. It never checks out or runs
+      # code from the PR, and reruns retain the original run's permissions.
+      - name: Rerun failed jobs and their dependent jobs
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/rerun-failed-jobs"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
