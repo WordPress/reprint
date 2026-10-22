@@ -6,11 +6,12 @@ import { once } from 'node:events';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 
 const run = promisify(execFile);
-const project = new URL('../', import.meta.url).pathname;
+const project = fileURLToPath(new URL('../', import.meta.url));
 
 test('WordPress.org excludes push while the GitHub package retains it', async () => {
     const root = await mkdtemp(join(tmpdir(), 'reprint-plugin-build-test-'));
