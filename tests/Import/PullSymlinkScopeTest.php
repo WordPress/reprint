@@ -305,6 +305,73 @@ final class PullSymlinkScopeTest extends TestCase
         $this->assertSame('selected target', file_get_contents($this->root . '/files/files/value'));
     }
 
+    /**
+     * Existing links may come from the operator or an earlier pull. Only the
+     * overwrite mode may replace them or create links through a local alias.
+     *
+     * @dataProvider intermediate_local_paths
+     */
+    public function testIntermediateLinksUseTheSelectedLocalPathMode(string $type, bool $preserve): void
+    {
+        $files = $this->root . '/files';
+        file_put_contents($files . '/target', 'selected target');
+        file_put_contents($files . '/old-target', 'local target');
+        $remote_path = '/link';
+        $local_path = $files . '/link';
+        if ($type === 'parent alias') {
+            mkdir($files . '/shared');
+            symlink('shared', $files . '/alias');
+            $remote_path = '/alias/link';
+            $local_path = $files . '/shared/link';
+        } else {
+            symlink($type === 'dangling link' ? 'missing-target' : 'old-target', $local_path);
+        }
+        $client = $this->receive([]);
+        if ($preserve) {
+            ( new \ReflectionProperty($client, 'fs_root_nonempty_behavior') )->setValue($client, 'preserve-local');
+        }
+        $client->get_state()->set_preflight_record([
+            'data' => ['wp_detect' => ['roots' => [['path' => '/']]]]],
+        );
+        file_put_contents($this->root . '/parts.json', json_encode([
+            ['headers' => ['X-Chunk-Type' => 'index_batch'], 'body' => json_encode([
+                ['path' => base64_encode($remote_path), 'type' => 'link',
+                    'target' => base64_encode('/target'), 'intermediate' => true],
+                ['path' => base64_encode('/new-link'), 'type' => 'link',
+                    'target' => base64_encode('/target'), 'intermediate' => true],
+                ['path' => base64_encode('/target'), 'type' => 'file'],
+            ])],
+            ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']],
+        ]));
+        ( new \ReflectionMethod($client, 'fetch_next_remote_index') )->invoke($client);
+        ( new \ReflectionMethod($client, 'recreate_intermediate_symlinks') )->invoke($client);
+
+        $this->assertTrue(is_link($files . '/new-link'), 'A missing ordinary link must still be created.');
+        $this->assertSame('selected target', file_get_contents($files . '/new-link'));
+        $this->assertSame('local target', file_get_contents($files . '/old-target'));
+        if ($preserve && $type === 'parent alias') {
+            $this->assertFalse(is_link($local_path), 'Preserve-local must not create links through a local alias.');
+        } elseif ($preserve) {
+            $this->assertSame($type === 'dangling link' ? 'missing-target' : 'old-target', readlink($local_path));
+        } else {
+            $this->assertSame('selected target', file_get_contents($local_path));
+        }
+        if ($preserve) {
+            $this->assertStringContainsString('PRESERVE-LOCAL', file_get_contents($this->root . '/state/audit.log'));
+        }
+    }
+
+    /** @return array<string, array{string, bool}> Local path type and preserve-local setting. */
+    public static function intermediate_local_paths(): array
+    {
+        $cases = [];
+        foreach (['existing link', 'dangling link', 'parent alias'] as $type) {
+            $cases[$type . ' preserve'] = [$type, true];
+            $cases[$type . ' overwrite'] = [$type, false];
+        }
+        return $cases;
+    }
+
     public function testRemoteDeletionDoesNotFollowARepointedLocalParent(): void
     {
         $client = $this->receive([['headers' => ['X-Chunk-Type' => 'file',
