@@ -582,6 +582,10 @@ Downloaded files must not replace the state used to resume a pull. The selected 
 saved when `files-pull` starts. To switch modes, first run the same command with
 `--abort`, then start it again with the other `--mode` value.
 
+File-list downloads write entries to disk as they arrive, without holding a
+whole JSON batch in RAM. The saved source cursor and local index byte offset
+move together. Resuming discards later bytes and downloads those entries again.
+
 **Non-empty local fs-root**
 
 By default, `files-pull` refuses to start if `--fs-root` is non-empty. If you need to use a non-empty local fs-root,
@@ -1376,7 +1380,8 @@ fresh.
     "pull_index_wal_byte_offset": 128
   },
   "index": {
-    "cursor": "..."               // file_index cursor
+    "cursor": "...",              // file_index cursor after complete parts
+    "bytes_written": 12345        // matching byte offset in remote-index.next.jsonl
   },
   "filter": "none",               // "none" | "essential-files" | "skipped-earlier"
   "fetch": {
