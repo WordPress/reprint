@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
-import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
@@ -146,8 +146,9 @@ async function checkRequests(plugin, target, root) {
             const text = await response.text();
             assert.equal(response.status, 200, text + log);
             const page = JSON.parse(text);
-            assert.equal(page.plugin_file, join(plugin, entry));
-            assert.equal(page.activation_file, join(plugin, entry));
+            const pluginFile = await realpath(join(plugin, entry));
+            assert.equal(page.plugin_file, pluginFile);
+            assert.equal(page.activation_file, pluginFile);
             assert.equal(page.push_supported, target === 'github');
             assert.equal(page.push_enabled, target === 'github');
             assert.equal(page.push_actions.length, target === 'github' ? 2 : 0);
