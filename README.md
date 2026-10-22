@@ -940,14 +940,18 @@ php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
 The nginx runtime keeps document roots and host names as literal configuration
 values, including spaces and punctuation. Dollar signs and control characters
 in the document root, output path, or host are rejected before files are written.
+Its generated listener binds to `127.0.0.1`, and requests for dotfiles or paths
+inside dot-directories return 404. To accept remote clients, change the `listen`
+address in the generated `nginx.conf`. The configured SQLite database and its
+companion files also return 404, even when their names do not start with a dot.
 
 The command accepts either `--fs-root` (the raw download directory — the remote
 `document_root` path is appended automatically) or `--flat-document-root` (a
 directory created by `flat-docroot`, used as-is). These are mutually exclusive.
 
-Host and port default to the URL rewrite target from `db-apply` (so the server
-listens on the same address the database was rewritten to). Override with
-`--host` and `--port`.
+Host and port default to the URL rewrite target from `db-apply`. Override with
+`--host` and `--port`. For nginx, the host sets `server_name`; the listener
+remains on `127.0.0.1` unless you edit the generated configuration.
 
 The database written into `runtime.php` is the one `db-apply` connected to. To
 point the runtime at a database `db-apply` did not create — a local database you
