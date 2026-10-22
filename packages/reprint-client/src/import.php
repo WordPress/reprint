@@ -1526,7 +1526,7 @@ class ImportClient
             if ($command === 'pull' && $this->credential['scheme'] === 'key' && ( $this->credential['source'] ?? '' ) === 'state') {
                 $key_message =
                     "Key for this site: {$this->credential['path']}\n"
-                    . "Deleting the state directory destroys it, so the enrolled public key stops working; Tools > Reprint Server can also remove that key.";
+                    . "Deleting the state directory destroys it, so the enrolled Migration Token stops working; Tools > Reprint Server can also remove that Migration Token.";
                 // The plain terminal presentation drops JSONL records, so it
                 // gets the same text once, below the pull summary.
                 $this->progress->print_line("\033[2m{$key_message}\033[0m\n");
@@ -2722,10 +2722,10 @@ class ImportClient
             $lines[] = 'Generated a key for this site:';
         }
         $lines[] = '';
-        $lines[] = '  Key id:      ' . $generated['key_id'];
-        $lines[] = '  Stored at:   ' . $generated['path'];
+        $lines[] = '  Migration Token ID: ' . $generated['key_id'];
+        $lines[] = '  Stored at:          ' . $generated['path'];
         $lines[] = '';
-        $lines[] = 'Enroll this public key on the site under Tools → Reprint Server,';
+        $lines[] = 'Enroll this Migration Token on the site under Tools → Reprint Server,';
         if ($generated_by_pull) {
             $lines[] = 'then run the same command again:';
         } elseif ($stored_in_state) {
@@ -2826,7 +2826,7 @@ class ImportClient
     private static function no_credential_message(string $remote_reprint_api_url, string $state_dir): string
     {
         return 'No credential for this site. Run `' . self::keygen_command($remote_reprint_api_url, $state_dir) . '` '
-            . 'and enroll the printed key, or pass --secret=TOKEN.';
+            . 'and enroll the printed Migration Token, or pass --secret=TOKEN.';
     }
 
     /**
@@ -13586,7 +13586,7 @@ class ImportClient
             $using_key = $this->public_key_client !== null;
             $key_hint = '';
             if ($using_key) {
-                $key_hint = "\n\nYour public key (key id " . $this->public_key_client->get_key_id() . "):\n\n  "
+                $key_hint = "\n\nYour Migration Token (ID " . $this->public_key_client->get_key_id() . "):\n\n  "
                     . $this->public_key_client->get_public_key();
             }
 
@@ -13644,7 +13644,7 @@ class ImportClient
                         "This site's host has OpenSSL, so it accepts key authentication only; " .
                         "connection tokens are not accepted there.\n\n" .
                         "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
-                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server, " .
+                        "(or `reprint pull` with no --secret) and enroll the printed Migration Token under Tools > Reprint Server, " .
                         "then run the command again without --secret.",
                 ];
             }
@@ -13659,7 +13659,7 @@ class ImportClient
                 return [
                     'code' => 'AUTH_REQUIRES_TOKEN',
                     'message' =>
-                        "This site's PHP cannot verify public-key signatures because OpenSSL is unavailable. " .
+                        "This site's PHP cannot verify Migration Tokens because OpenSSL is unavailable. " .
                         "Reprint therefore requires the site's connection token.\n\n" .
                         $token_advice,
                 ];
@@ -13668,7 +13668,7 @@ class ImportClient
                 if ($using_key) {
                     $not_configured_message =
                         "This site requires key authentication but has no keys enrolled. " .
-                        "Enroll this public key under Tools > Reprint Server." . $key_hint;
+                        "Enroll this Migration Token under Tools > Reprint Server." . $key_hint;
                 } else {
                     // A key host keeps a stored token but never accepts it, so
                     // setting a token there would change nothing.
@@ -13676,7 +13676,7 @@ class ImportClient
                         "This site's host requires key authentication and has no keys enrolled. " .
                         "The connection token you passed is not accepted there.\n\n" .
                         "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
-                        "(or `reprint pull` with no --secret) and enroll the printed key under Tools > Reprint Server, " .
+                        "(or `reprint pull` with no --secret) and enroll the printed Migration Token under Tools > Reprint Server, " .
                         "then run the command again without --secret.";
                 }
                 return ['code' => 'AUTH_NOT_CONFIGURED', 'message' => $not_configured_message];
@@ -13690,7 +13690,7 @@ class ImportClient
                         "Check the connection settings under Tools > Reprint Server and the site's PHP error log.";
                 // Older plugins also answer not_configured when no keys are enrolled.
                 if ($using_key && is_older_plugin_authentication_refusal($http_code, $decoded)) {
-                    $not_configured_message .= "\n\nIf the site has no keys enrolled, enroll this public key under Tools > Reprint Server." . $key_hint;
+                    $not_configured_message .= "\n\nIf the site has no keys enrolled, enroll this Migration Token under Tools > Reprint Server." . $key_hint;
                 }
                 return ['code' => 'AUTH_NOT_CONFIGURED', 'message' => $not_configured_message];
             }
@@ -13698,8 +13698,8 @@ class ImportClient
                 return [
                     'code' => 'AUTH_UNKNOWN_KEY',
                     'message' =>
-                        "This key is not enrolled on the site. Enroll it under Tools > Reprint Server, " .
-                        "or check that the key id matches an enrolled key." . $key_hint,
+                        "This Migration Token is not enrolled on the site. Enroll it under Tools > Reprint Server, " .
+                        "or check that the Migration Token ID matches an enrolled Migration Token." . $key_hint,
                 ];
             }
 
@@ -16106,7 +16106,7 @@ if (
         echo "\n";
         echo "     (reprint keygen https://your-site.com --state-dir=./state does the same\n";
         echo "     without starting a pull)\n";
-        echo "  2. In wp-admin, go to Tools → Reprint Server and enroll the printed key\n";
+        echo "  2. In wp-admin, go to Tools → Reprint Server and enroll the printed Migration Token\n";
         echo "  3. Run the same command again; the key is found in --state-dir\n";
         echo "\n";
         echo "  Only a host without OpenSSL uses a connection token instead: enter one\n";
@@ -16338,9 +16338,9 @@ if (
                 "beside everything else about that site. Every later command\n" .
                 "finds it there; no --private-key-path flag is needed.\n" .
                 "\n" .
-                "Prints the public key as one line. Paste it into the site under\n" .
+                "Prints the Migration Token as one line. Paste it into the site under\n" .
                 "Tools > Reprint Server. Deleting the state directory destroys the\n" .
-                "private half, so the enrolled key stops working; the settings page\n" .
+                "private half, so the enrolled Migration Token stops working; the settings page\n" .
                 "can also remove it.\n" .
                 "\n" .
                 "`reprint pull` generates a key itself when none exists, so this\n" .

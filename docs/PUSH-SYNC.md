@@ -101,8 +101,8 @@ If no key exists yet, generate one:
 reprint keygen 'https://example.com/?reprint-api' --state-dir=./state
 ```
 
-Enroll the printed public key under **Tools → Reprint Server**, then enable
-**Allow push** for that key. With saved preflight data from the pull, run:
+Enroll the printed Migration Token under **Tools → Reprint Server**, then enable
+**Allow push** for that Migration Token. With saved preflight data from the pull, run:
 
 ```sh
 reprint files-push 'https://example.com/?reprint-api' --state-dir=./state --fs-root=./files
