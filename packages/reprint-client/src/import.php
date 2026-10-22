@@ -5165,6 +5165,15 @@ class ImportClient
                 continue;
             }
 
+            // These links are recreated after file fetching, outside its
+            // preserve-local checks. Apply the same rule before changing paths.
+            $skip_reason = $this->should_skip_for_preserve_local($remote_absolute_path);
+            if ($skip_reason !== null) {
+                $this->audit_log($skip_reason, true);
+                $this->emit_skip_progress($remote_absolute_path);
+                continue;
+            }
+
             // Create parent directory
             $parent = dirname($local_absolute_path);
             if (!is_dir($parent)) {
