@@ -51,7 +51,7 @@ test('WordPress.org excludes push while the GitHub package retains it', async ()
                 assert.ok(source.includes(symbol), `${target}: shared source ${symbol}`);
             }
             await run('php', ['tests/server-plugin-package.php', plugin, '', target], { cwd: project });
-            await checkRequests(plugin, entry, target, root);
+            await checkRequests(plugin, target, root);
         }
     } finally {
         await rm(root, { recursive: true, force: true });
@@ -91,7 +91,8 @@ test('unknown build targets stop packaging', async () => {
 });
 
 /** Exercise the packaged entry point even when trusted host configuration grants push. */
-async function checkRequests(plugin, entry, target, root) {
+async function checkRequests(plugin, target, root) {
+    const entry = (await readdir(plugin)).includes('reprint.php') ? 'reprint.php' : 'index.php';
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 3072 });
     const publicKeyBytes = publicKey.export({ type: 'spki', format: 'der' });
     const keyId = createHash('sha256').update(publicKeyBytes).digest('hex').slice(0, 16);
