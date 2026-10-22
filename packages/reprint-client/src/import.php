@@ -13245,13 +13245,10 @@ class ImportClient
                 if (!$current_chunk) {
                     $current_chunk = [
                         "headers" => $headers,
-                        "body" => $event["data"],
+                        "body" => "",
                     ];
-                } else {
-                    $current_chunk["body"] =
-                        ($current_chunk["body"] ?? "") .
-                        $event["data"];
                 }
+                $current_chunk["body"] .= $event["data"];
             } elseif ($event["type"] === "complete") {
                 $chunk_type = $headers["x-chunk-type"] ?? "";
                 if ($chunk_type === "error") {
