@@ -150,6 +150,10 @@ export async function apiRequest(siteName, endpoint, params = {}, options = {}) 
     // Sign the final URL: it carries the endpoint, and for GET the parameters too.
     const headers = client.getAuthHeaders({ method, url: url.toString() });
     headers['Accept-Encoding'] = 'gzip';
+    // Synchronous importer commands can outlast nginx's idle timeout while
+    // preventing Node from handling the close. Do not retain an idle socket
+    // which the next API request could reuse before seeing that close.
+    headers['Connection'] = 'close';
 
     const fetchOptions = {
         method,
