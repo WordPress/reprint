@@ -232,6 +232,9 @@ class ImportClient
     /** Maximum response header bytes retained for failed request audit logging. */
     private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
 
+    /** Maximum buffered part body, matching the exporter's 16 MiB SQL part limit. */
+    private const MAX_BUFFERED_PART_BODY_BYTES = 16 * 1024 * 1024;
+
     /**
      * cURL error numbers that can be temporary, often meaning the peer cut the transfer short.
      * We can attempt some retries from these errors before giving up.
@@ -13179,8 +13182,8 @@ class ImportClient
      * creation sites inside fetch_streaming.
      *
      * File parts are forwarded as body data arrives so large files are written
-     * to disk incrementally. Non-file parts are still accumulated until
-     * complete because they are small metadata/progress JSON payloads.
+     * to disk incrementally. Non-file parts hold SQL or JSON until complete,
+     * with a byte limit checked before each append, including decoded gzip data.
      */
     private function make_chunk_handler(
         StreamingContext $context,
@@ -13231,6 +13234,12 @@ class ImportClient
                     }
                     $current_chunk["started"] = true;
                     return;
+                }
+
+                $body_bytes = strlen($current_chunk["body"] ?? "") + strlen($event["data"]);
+                if ($body_bytes > self::MAX_BUFFERED_PART_BODY_BYTES) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error rendered as CLI text.
+                    throw new RuntimeException("Buffered multipart part " . json_encode($chunk_type) . " reached {$body_bytes} bytes; the " . self::MAX_BUFFERED_PART_BODY_BYTES . "-byte limit was exceeded.");
                 }
 
                 if (!$current_chunk) {
