@@ -268,8 +268,8 @@ class SettingsPage {
                         <p class="description">
                         <?php
                         echo esc_html($configuration['push_supported'] && get_push_authorization_error($authorized_key_id) === null
-                            ? __('This key also allows push to upload, replace, and delete files in this site’s document root, except excluded paths.', 'reprint')
-                            : __('This key allows downloads. It cannot change files on this site.', 'reprint')
+                            ? __('This Migration Token also allows push to upload, replace, and delete files in this site’s document root, except excluded paths.', 'reprint')
+                            : __('This Migration Token allows downloads. It cannot change files on this site.', 'reprint')
                         );
                         ?>
                         </p>
@@ -278,32 +278,32 @@ class SettingsPage {
                 <?php else: ?>
                     <h2 id="reprint-server-access-heading"><?php echo esc_html__('Authorize a tool to copy this site', 'reprint'); ?></h2>
                     <?php if ($key_host && $configuration['has_public_keys_file']): ?>
-                        <p><strong><code>public-keys.php</code> <?php echo esc_html__('override is active.', 'reprint'); ?></strong> <?php echo esc_html__('Edit that file to authorize a tool or remove a key. This page cannot change its keys.', 'reprint'); ?></p>
+                        <p><strong><code>public-keys.php</code> <?php echo esc_html__('override is active.', 'reprint'); ?></strong> <?php echo esc_html__('Edit that file to authorize a tool or remove a Migration Token. This page cannot change its Migration Tokens.', 'reprint'); ?></p>
                     <?php elseif ($key_host): ?>
                         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                             <input type="hidden" name="action" value="reprint_server_enroll_public_key" />
                             <?php wp_nonce_field('reprint_server_enroll_public_key'); ?>
-                            <p id="reprint-server-public-key-help"><?php echo esc_html__('Paste the public key shown by the tool you want to use.', 'reprint'); ?></p>
+                            <p id="reprint-server-public-key-help"><?php echo esc_html__('Paste the Migration Token shown by the tool you want to use.', 'reprint'); ?></p>
                             <p>
-                                <label for="reprint_server_public_key"><?php echo esc_html__('Public key', 'reprint'); ?></label>
+                                <label for="reprint_server_public_key"><?php echo esc_html__('Migration Token', 'reprint'); ?></label>
                                 <textarea id="reprint_server_public_key" name="reprint_server_public_key" rows="3" class="large-text code" aria-describedby="reprint-server-public-key-help reprint-server-public-key-permission" spellcheck="false" required></textarea>
                             </p>
                             <p id="reprint-server-public-key-permission" class="description"><?php echo esc_html__('Allows downloads of your database and files. Only authorize a tool you trust. Never paste a private key.', 'reprint'); ?></p>
                             <?php submit_button(__('Authorize tool', 'reprint')); ?>
                             <details class="reprint-server-help">
-                                <summary><?php echo esc_html__('I don’t have a public key yet', 'reprint'); ?></summary>
+                                <summary><?php echo esc_html__('I don’t have a Migration Token yet', 'reprint'); ?></summary>
                                 <ol>
                                     <li><?php echo esc_html(is_multisite() ? __('Choose a site below and use its Reprint API URL in your tool.', 'reprint') : __('Copy the Reprint API URL below into your tool.', 'reprint')); ?></li>
-                                    <li><?php echo esc_html__('Copy the public key it gives you.', 'reprint'); ?></li>
+                                    <li><?php echo esc_html__('Copy the Migration Token it gives you.', 'reprint'); ?></li>
                                     <li><?php echo esc_html__('Paste it here and choose Authorize tool.', 'reprint'); ?></li>
                                 </ol>
                                 <p><?php echo esc_html__('A PEM block or a single line is accepted.', 'reprint'); ?></p>
                                 <?php if (!is_multisite()): ?>
                                     <details class="reprint-server-help">
                                         <summary><?php echo esc_html__('Using the Reprint CLI?', 'reprint'); ?></summary>
-                                        <p><?php echo esc_html__('Generate a key in your terminal:', 'reprint'); ?></p>
+                                        <p><?php echo esc_html__('Generate a Migration Token in your terminal:', 'reprint'); ?></p>
                                         <pre><code><?php echo esc_html('reprint keygen ' . escapeshellarg($remote_reprint_api_url) . ' --state-dir=./reprint-state' . ( $uses_http ? ' --insecure' : '' )); ?></code></pre>
-                                        <p><?php echo esc_html__('Use the same --state-dir when you run reprint pull. Keep the private key in your tool; paste only the public key here.', 'reprint'); ?></p>
+                                        <p><?php echo esc_html__('Use the same --state-dir when you run reprint pull. Keep the private key in your tool; paste only the Migration Token here.', 'reprint'); ?></p>
                                         <?php if ($uses_http): ?>
                                             <p><?php echo esc_html__('This site uses HTTP. Prefer an HTTPS URL for transfers. If you use HTTP, pass --insecure to reprint pull too; site data, including passwords, travels unencrypted.', 'reprint'); ?></p>
                                         <?php endif; ?>
@@ -337,7 +337,7 @@ class SettingsPage {
                     <p>
                     <?php
                     echo esc_html($key_host
-                        ? __('Enrolled public keys can pull any site in this network.', 'reprint')
+                        ? __('Enrolled Migration Tokens can pull any site in this network.', 'reprint')
                         : __('This network token can pull any site in this network.', 'reprint')
                     );
                     ?>
@@ -384,8 +384,8 @@ class SettingsPage {
                             <?php $this->render_push_access_form($configuration); ?>
                         <?php endif; ?>
                         <?php if ($configuration['enrolled_keys'] !== [] || $configuration['has_public_keys_file']): ?>
-                            <h3><?php echo esc_html__('Stored public keys', 'reprint'); ?></h3>
-                            <p><?php echo esc_html__('These keys are not used on this host. Removing them does not change connection-token access.', 'reprint'); ?></p>
+                            <h3><?php echo esc_html__('Stored Migration Tokens', 'reprint'); ?></h3>
+                            <p><?php echo esc_html__('These Migration Tokens are not used on this host. Removing them does not change connection-token access.', 'reprint'); ?></p>
                             <?php $this->render_public_keys_section($configuration); ?>
                         <?php endif; ?>
                     <?php endif; ?>
@@ -487,7 +487,7 @@ class SettingsPage {
         if ($file_override) {
             echo '<p><strong><code>public-keys.php</code> '
                 . esc_html__('override is active.', 'reprint') . '</strong> '
-                . esc_html__('Edit that file to authorize a tool or remove a key. This page cannot change its keys.', 'reprint') . '</p>';
+                . esc_html__('Edit that file to authorize a tool or remove a Migration Token. This page cannot change its Migration Tokens.', 'reprint') . '</p>';
         }
         ?>
         <?php if ($configuration['enrolled_keys'] !== []): ?>
@@ -499,12 +499,12 @@ class SettingsPage {
                 <p><?php echo esc_html__('Push access is managed by your hosting provider.', 'reprint'); ?></p>
             <?php endif; ?>
         <?php endif; ?>
-        <p><?php echo esc_html__('Match the key id shown by your tool. A removed key can no longer connect. Removing the last key stops all public-key access.', 'reprint'); ?></p>
+        <p><?php echo esc_html__('Match the Migration Token ID shown by your tool. A tool with a removed Migration Token can no longer connect. Removing the last Migration Token stops all Migration Token access.', 'reprint'); ?></p>
         <div class="reprint-server-key-table-wrapper">
         <table class="widefat striped reprint-server-key-table" role="table">
             <thead>
                 <tr>
-                    <th scope="col"><?php echo esc_html__('Key id', 'reprint'); ?></th>
+                    <th scope="col"><?php echo esc_html__('Migration Token ID', 'reprint'); ?></th>
                     <th scope="col"><?php echo esc_html__('Added', 'reprint'); ?></th>
                     <?php if ($show_push_access): ?>
                         <th scope="col"><?php echo esc_html__('Push access', 'reprint'); ?></th>
@@ -520,7 +520,7 @@ class SettingsPage {
                 $key_may_push = $configuration['push_supported'] && get_push_authorization_error($entry['key_id']) === null;
                 ?>
                 <tr>
-                    <td data-label="<?php echo esc_attr__('Key id', 'reprint'); ?>"><code><?php echo esc_html($entry['key_id']); ?></code></td>
+                    <td data-label="<?php echo esc_attr__('Migration Token ID', 'reprint'); ?>"><code><?php echo esc_html($entry['key_id']); ?></code></td>
                     <td data-label="<?php echo esc_attr__('Added', 'reprint'); ?>"><?php echo esc_html($entry['added_at'] > 0 ? gmdate('Y-m-d', $entry['added_at']) : '—'); ?></td>
                     <?php if ($show_push_access): ?>
                     <td data-label="<?php echo esc_attr__('Push access', 'reprint'); ?>">
@@ -536,8 +536,8 @@ class SettingsPage {
                                        aria-label="
                                        <?php
                                        echo esc_attr(sprintf(
-                                           /* translators: %s: Enrolled key id. */
-                                           __('Allow push for key %s', 'reprint'), $entry['key_id']
+                                           /* translators: %s: Enrolled Migration Token ID. */
+                                           __('Allow push for Migration Token %s', 'reprint'), $entry['key_id']
                                        ));
                                        ?>
                                        " <?php checked($key_may_push); ?> />
@@ -546,8 +546,8 @@ class SettingsPage {
                             <?php
                             submit_button(__('Save push access', 'reprint'), 'secondary', 'submit', false, [
                                 'aria-label' => sprintf(
-                                    /* translators: %s: Enrolled key id. */
-                                    __('Save push access for key %s', 'reprint'), $entry['key_id']
+                                    /* translators: %s: Enrolled Migration Token ID. */
+                                    __('Save push access for Migration Token %s', 'reprint'), $entry['key_id']
                                 ),
                             ]);
                             ?>
@@ -564,10 +564,10 @@ class SettingsPage {
                             <input type="hidden" name="reprint_server_key_id" value="<?php echo esc_attr($entry['key_id']); ?>" />
                             <?php wp_nonce_field('reprint_server_remove_public_key'); ?>
                             <?php
-                            submit_button(__('Remove key', 'reprint'), 'link-delete', 'submit', false, [
+                            submit_button(__('Remove Migration Token', 'reprint'), 'link-delete', 'submit', false, [
                                 'aria-label' => sprintf(
-                                    /* translators: %s: Enrolled key id. */
-                                    __('Remove key %s', 'reprint'), $entry['key_id']
+                                    /* translators: %s: Enrolled Migration Token ID. */
+                                    __('Remove Migration Token %s', 'reprint'), $entry['key_id']
                                 ),
                             ]);
                             ?>
@@ -668,16 +668,16 @@ class SettingsPage {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value selects a read-only notice.
         $result = sanitize_key(wp_unslash($_GET['reprint_server_notice']));
         $notices = [
-            'enroll_invalid' => ['error', __('That is not a usable public key. Paste an RSA public key of at least 3072 bits, as a PEM block or one line.', 'reprint')],
-            'enroll_no_openssl' => ['error', __('This host cannot read public keys because the OpenSSL extension is missing. Clients authenticate with the connection token here.', 'reprint')],
-            'enroll_duplicate' => ['info', __('That public key is already enrolled.', 'reprint')],
-            'enroll_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
-            'enroll_storage_failure' => ['error', __('Failed to save the public key.', 'reprint')],
+            'enroll_invalid' => ['error', __('That is not a usable Migration Token. Copy the Migration Token from your tool and paste it here.', 'reprint')],
+            'enroll_no_openssl' => ['error', __('This host cannot read Migration Tokens because the OpenSSL extension is missing. Clients authenticate with the connection token here.', 'reprint')],
+            'enroll_duplicate' => ['info', __('That Migration Token is already enrolled.', 'reprint')],
+            'enroll_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled Migration Tokens.', 'reprint')],
+            'enroll_storage_failure' => ['error', __('Failed to save the Migration Token.', 'reprint')],
             'enroll_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
-            'key_removed' => ['success', __('Public key removed.', 'reprint')],
-            'remove_unknown' => ['error', __('That key is not enrolled.', 'reprint')],
-            'remove_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
-            'remove_storage_failure' => ['error', __('Failed to remove the public key.', 'reprint')],
+            'key_removed' => ['success', __('Migration Token removed.', 'reprint')],
+            'remove_unknown' => ['error', __('That Migration Token is not enrolled.', 'reprint')],
+            'remove_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled Migration Tokens.', 'reprint')],
+            'remove_storage_failure' => ['error', __('Failed to remove the Migration Token.', 'reprint')],
             'remove_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
             'network_token_saved' => ['success', __('Connection token saved.', 'reprint')],
             'network_token_unchanged' => ['success', __('Connection token was already up to date.', 'reprint')],
@@ -693,14 +693,14 @@ class SettingsPage {
                 'managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
                 'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
                 'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
-                'key_push_saved' => ['success', __('Push access for the key updated.', 'reprint')],
-                'key_push_unchanged' => ['success', __('Push access for the key was already up to date.', 'reprint')],
-                'key_push_unknown' => ['error', __('That key is not enrolled.', 'reprint')],
+                'key_push_saved' => ['success', __('Push access for the Migration Token updated.', 'reprint')],
+                'key_push_unchanged' => ['success', __('Push access for the Migration Token was already up to date.', 'reprint')],
+                'key_push_unknown' => ['error', __('That Migration Token is not enrolled.', 'reprint')],
                 'key_push_multisite' => ['info', __('Push is not supported on multisite networks.', 'reprint')],
                 'key_push_unsupported' => ['error', __('Push access requires PHP 7.2 or newer.', 'reprint')],
                 'key_push_managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
-                'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided keys.', 'reprint')],
-                'key_push_storage_failure' => ['error', __('Failed to save push access for the key.', 'reprint')],
+                'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided Migration Tokens.', 'reprint')],
+                'key_push_storage_failure' => ['error', __('Failed to save push access for the Migration Token.', 'reprint')],
                 'key_push_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
             ];
         }
