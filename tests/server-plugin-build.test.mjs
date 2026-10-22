@@ -148,6 +148,21 @@ async function checkRequests(plugin, target, root) {
                 assert.match(page.html, /Allow push|Push access/);
             }
         }
+        for (const [notice, message] of [
+            ['saved', 'Push access updated.'],
+            ['key_push_saved', 'Push access for the key updated.'],
+            ['key_removed', 'Public key removed.'],
+        ]) {
+            const response = await fetch(`http://127.0.0.1:${port}/?admin_probe=key&reprint_server_notice=${notice}`);
+            const text = await response.text();
+            assert.equal(response.status, 200, text + log);
+            const page = JSON.parse(text);
+            if (target === 'wordpress-org' && notice !== 'key_removed') {
+                assert.doesNotMatch(page.html, /push/i);
+            } else {
+                assert.ok(page.html.includes(message), `${target}: missing ${notice} notice`);
+            }
+        }
         const session = 'a'.repeat(32);
         const endpoints = target === 'github' ? ['push_create', 'push_remove'] : [
             'push_create', 'push_upload', 'push_status', 'push_commit', 'push_remove',

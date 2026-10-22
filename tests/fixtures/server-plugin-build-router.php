@@ -121,3 +121,10 @@ function checked($value) { if ($value) { echo ' checked'; } }
 function disabled($value) { if ($value) { echo ' disabled'; } }
 /** Supply the option write API without changing fixture credentials. */
 function update_option() { return true; }
+
+/** Match the notice's WordPress key sanitizer. */
+function sanitize_key($value) { return preg_replace('/[^a-z0-9_-]/', '', strtolower($value)); }
+/** Test query values contain no WordPress-added slashes. */
+function wp_unslash($value) { return $value; }
+/** Notices have already been escaped by the packaged page. */
+function wp_kses_post($value) { return $value; }

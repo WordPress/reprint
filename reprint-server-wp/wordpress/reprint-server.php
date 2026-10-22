@@ -668,12 +668,6 @@ class SettingsPage {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value selects a read-only notice.
         $result = sanitize_key(wp_unslash($_GET['reprint_server_notice']));
         $notices = [
-            'saved' => ['success', __('Push access updated.', 'reprint')],
-            'unchanged' => ['success', __('Push access was already up to date.', 'reprint')],
-            'unsupported' => ['error', __('Push access requires PHP 7.2 or newer. Downloads remain available.', 'reprint')],
-            'managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
-            'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
-            'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
             'enroll_invalid' => ['error', __('That is not a usable public key. Paste an RSA public key of at least 3072 bits, as a PEM block or one line.', 'reprint')],
             'enroll_no_openssl' => ['error', __('This host cannot read public keys because the OpenSSL extension is missing. Clients authenticate with the connection token here.', 'reprint')],
             'enroll_duplicate' => ['info', __('That public key is already enrolled.', 'reprint')],
@@ -685,20 +679,31 @@ class SettingsPage {
             'remove_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled keys.', 'reprint')],
             'remove_storage_failure' => ['error', __('Failed to remove the public key.', 'reprint')],
             'remove_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
-            'key_push_saved' => ['success', __('Push access for the key updated.', 'reprint')],
-            'key_push_unchanged' => ['success', __('Push access for the key was already up to date.', 'reprint')],
-            'key_push_unknown' => ['error', __('That key is not enrolled.', 'reprint')],
-            'key_push_multisite' => ['info', __('Push is not supported on multisite networks.', 'reprint')],
-            'key_push_unsupported' => ['error', __('Push access requires PHP 7.2 or newer.', 'reprint')],
-            'key_push_managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
-            'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided keys.', 'reprint')],
-            'key_push_storage_failure' => ['error', __('Failed to save push access for the key.', 'reprint')],
-            'key_push_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
             'network_token_saved' => ['success', __('Connection token saved.', 'reprint')],
             'network_token_unchanged' => ['success', __('Connection token was already up to date.', 'reprint')],
             'token_removed' => ['success', __('Connection token removed.', 'reprint')],
             'token_remove_storage_failure' => ['error', __('Failed to remove the connection token.', 'reprint')],
         ];
+        // A saved push-result URL can be reloaded after changing distributions.
+        if (!defined('REPRINT_PUSH_AVAILABLE') || REPRINT_PUSH_AVAILABLE) {
+            $notices += [
+                'saved' => ['success', __('Push access updated.', 'reprint')],
+                'unchanged' => ['success', __('Push access was already up to date.', 'reprint')],
+                'unsupported' => ['error', __('Push access requires PHP 7.2 or newer. Downloads remain available.', 'reprint')],
+                'managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
+                'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
+                'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
+                'key_push_saved' => ['success', __('Push access for the key updated.', 'reprint')],
+                'key_push_unchanged' => ['success', __('Push access for the key was already up to date.', 'reprint')],
+                'key_push_unknown' => ['error', __('That key is not enrolled.', 'reprint')],
+                'key_push_multisite' => ['info', __('Push is not supported on multisite networks.', 'reprint')],
+                'key_push_unsupported' => ['error', __('Push access requires PHP 7.2 or newer.', 'reprint')],
+                'key_push_managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
+                'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided keys.', 'reprint')],
+                'key_push_storage_failure' => ['error', __('Failed to save push access for the key.', 'reprint')],
+                'key_push_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
+            ];
+        }
         if (!isset($notices[$result])) {
             return;
         }
