@@ -38,7 +38,7 @@ On multisite, network administrators manage access. Enrolled keys or the network
 
 = Source and build instructions =
 
-The maintained PHP source, license, and build tools are available in the [Reprint repository](https://github.com/WordPress/reprint). Release builds downgrade a copy of the server's PHP syntax for older hosting environments and bundle the server package with Composer. No build tools are required on the installed site.
+The maintained PHP source, license, and build tools are available in the [Reprint repository](https://github.com/WordPress/reprint). GitHub release builds downgrade a copy of the server's PHP syntax for older hosting environments. The WordPress.org build keeps the maintained PHP 7.2 source. Both bundle the server package with Composer. No build tools are required on the installed site.
 
 Build the GitHub package with bin/build-server-plugin.sh after installing the Composer dependencies in tools/php56-build. For the downloads-only directory package, run bin/build-server-plugin.sh reprint-wordpress-org.zip wordpress-org; that target uses the maintained PHP 7.2 source and does not need the downgrade tool. See reprint-server-wp/README.md in the repository for integration and hosting configuration.
 
