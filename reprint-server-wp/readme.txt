@@ -1,5 +1,5 @@
 === Reprint ===
-Contributors: adamziel
+Contributors: zieladam
 Tags: migration, backup, development, synchronization
 Requires at least: 4.7
 Tested up to: 7.1
