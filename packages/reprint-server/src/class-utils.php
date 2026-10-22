@@ -105,6 +105,7 @@ final class Utils
         return $settings;
     }
 
+    // @reprint-push-start
     /**
      * Opens a dedicated connection without booting WordPress or sharing $wpdb.
      *
@@ -120,6 +121,7 @@ final class Utils
         }
         return new MysqliDriverPDO($dsn, $user, $password);
     }
+    // @reprint-push-end
 
     /**
      * Builds a PDO DSN string from a WordPress DB_HOST value.
@@ -345,6 +347,7 @@ final class Utils
         return $trimmed ?: '/';
     }
 
+    // @reprint-push-start
     /**
      * Canonicalizes an absolute path through the nearest ancestor realpath() can resolve.
      *
@@ -403,7 +406,9 @@ final class Utils
             'unix'
         );
     }
+    // @reprint-push-end
 
+    // @reprint-push-start
     /**
      * Normalizes document-root-relative excluded paths.
      *
@@ -439,7 +444,9 @@ final class Utils
         }
         return $normalized_excluded_paths;
     }
+    // @reprint-push-end
 
+    // @reprint-push-start
     /**
      * Validates a document-root-relative path carried as raw bytes.
      *
@@ -484,6 +491,7 @@ final class Utils
             }
         }
     }
+    // @reprint-push-end
 
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -814,6 +822,7 @@ final class Utils
         return '\\\\' . strtoupper($parts[1]) . '\\' . strtoupper($parts[2]);
     }
 
+    // @reprint-push-start
     /**
      * Remove selected local files and directories after the caller saves their push exclusions.
      *
@@ -843,7 +852,9 @@ final class Utils
         }
         return $removed_paths;
     }
+    // @reprint-push-end
 
+    // @reprint-push-start
     /**
      * Recursively remove a directory and all its contents.
      *
@@ -874,6 +885,7 @@ final class Utils
         }
         @rmdir($directory);
     }
+    // @reprint-push-end
 
     // ---------------------------------------------------------------------------
     // Vendored from wp-php-toolkit/filesystem.

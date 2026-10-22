@@ -135,6 +135,20 @@ jobs:
           done < <(find "$artifact_dir" -type f -name '*.php' -print0)
           php tests/php56-server-smoke.php "$artifact_dir"
 
+  plugin-distributions:
+    name: GitHub and WordPress.org plugin packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.2'
+          tools: composer:2.9.7
+      - run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
+      - run: node --test tests/server-plugin-build.test.mjs
+
   workflow-inputs:
     name: Workflow inputs and publishing
     runs-on: ubuntu-latest
@@ -153,7 +167,7 @@ jobs:
 
   ci-result:
     name: Static analysis result
-    needs: [phpstan, compat, syntax-72, no-pdo-wpdb-fallback, server-56, workflow-inputs]
+    needs: [phpstan, compat, syntax-72, no-pdo-wpdb-fallback, server-56, plugin-distributions, workflow-inputs]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:

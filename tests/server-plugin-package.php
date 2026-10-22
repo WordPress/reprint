@@ -1,18 +1,21 @@
 <?php
 /** Check the generated plugin directory before publishing its ZIP. */
 
-if ($argc < 2 || $argc > 3 || !is_dir($argv[1])) {
-    fwrite(STDERR, "Usage: php server-plugin-package.php <plugin-directory> [release-version]\n");
+if ($argc < 2 || $argc > 4 || !is_dir($argv[1])) {
+    fwrite(STDERR, "Usage: php server-plugin-package.php <plugin-directory> [release-version] [github|wordpress-org]\n");
     exit(1);
 }
 
 $reprint_plugin_directory = rtrim($argv[1], '/');
 $reprint_project_directory = dirname(__DIR__);
+$reprint_package_target = isset($argv[3]) ? $argv[3] : 'github';
+reprint_require_plugin_package(in_array($reprint_package_target, ['github', 'wordpress-org'], true), 'Unknown plugin package target: ' . $reprint_package_target . '.');
 foreach (['index.php', 'lib.php', 'compat.php', 'uninstall.php', 'readme.txt', 'LICENSE', 'vendor/autoload.php'] as $reprint_relative_file) {
     reprint_require_plugin_package(is_file($reprint_plugin_directory . '/' . $reprint_relative_file), 'The plugin package is missing ' . $reprint_relative_file . '.');
 }
 
-// Every maintained PHP file and admin asset must survive staging and ZIP extraction.
+// Every maintained PHP file and admin asset selected for this target must
+// survive staging and ZIP extraction.
 foreach (['reprint-server-wp' => '', 'packages/reprint-server/src' => 'vendor/wp-php-toolkit/reprint-server/src/'] as $reprint_source_directory => $reprint_destination_prefix) {
     $reprint_source_directory = $reprint_project_directory . '/' . $reprint_source_directory;
     $reprint_source_files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($reprint_source_directory, FilesystemIterator::SKIP_DOTS));
@@ -22,6 +25,10 @@ foreach (['reprint-server-wp' => '', 'packages/reprint-server/src' => 'vendor/wp
             continue;
         }
         if (!$reprint_source_file->isFile() || !in_array($reprint_source_file->getExtension(), ['php', 'css', 'js'], true)) {
+            continue;
+        }
+        if ($reprint_package_target === 'wordpress-org' && $reprint_destination_prefix !== '' && preg_match('/^class-(?:push-|database-push|multipart-processor\.|mysqli-driver-pdo)/', $reprint_relative_file)) {
+            reprint_require_plugin_package(!file_exists($reprint_plugin_directory . '/' . $reprint_destination_prefix . $reprint_relative_file), 'The WordPress.org package must not contain ' . $reprint_relative_file . '.');
             continue;
         }
         $reprint_packaged_file = $reprint_destination_prefix . $reprint_relative_file;
@@ -52,7 +59,7 @@ foreach (['Requires at least', 'Requires PHP', 'License', 'License URI'] as $rep
 }
 reprint_require_plugin_package(reprint_plugin_package_header($reprint_plugin_readme, 'Stable tag') === $reprint_plugin_version, 'The readme Stable tag must match the plugin Version.');
 reprint_require_plugin_package(reprint_plugin_package_header($reprint_plugin_header, 'Requires PHP') === '5.6.20', 'The generated plugin must declare PHP 5.6.20.');
-if (isset($argv[2])) {
+if (isset($argv[2]) && $argv[2] !== '') {
     reprint_require_plugin_package(preg_match('/^[0-9]+(?:\.[0-9]+)+$/', $reprint_plugin_version) === 1, 'A published plugin must have a numeric stable version; observed ' . $reprint_plugin_version . '.');
     reprint_require_plugin_package($reprint_plugin_version === $argv[2], 'The plugin Version must match release ' . $argv[2] . '; observed ' . $reprint_plugin_version . '.');
 }

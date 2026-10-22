@@ -15,8 +15,10 @@ function reprint_server_compat_constants(): array {
         'SITE_EXPORT_PLUGIN_DIR' => 'WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR',
         'SITE_EXPORT_SECRET_FILE' => 'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_FILE',
         'SITE_EXPORT_SECRET_OPTION' => 'WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION',
+        // @reprint-push-start
         'SITE_EXPORT_PUSH_AUTHORIZATION_OPTION' =>
             'WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION',
+        // @reprint-push-end
         'SITE_EXPORT_TIMESTAMP_TOLERANCE' => 'WordPress\\Reprint\\Server\\Plugin\\TIMESTAMP_TOLERANCE',
     ];
 }
@@ -73,6 +75,7 @@ function reprint_server_compat_expose_legacy_names(): void {
         -PHP_INT_MAX
     );
 
+    // @reprint-push-start
     // TODO: This filter should be deleted after September 2026, as it should no longer be relevant by then.
     add_filter(
         'reprint_server_managed_push_enabled',
@@ -91,6 +94,7 @@ function reprint_server_compat_expose_legacy_names(): void {
         },
         -PHP_INT_MAX
     );
+    // @reprint-push-end
 }
 
 /**
@@ -124,15 +128,19 @@ function reprint_server_compat_migrate_legacy_options(): void {
         || !function_exists('update_option')
         || !function_exists('delete_option')
         || !defined('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION')
+        // @reprint-push-start
         || !defined('WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION')
+        // @reprint-push-end
     ) {
         return;
     }
 
     $legacy_option_names = [
         'site_export_secret' => constant('WordPress\\Reprint\\Server\\Plugin\\CONNECTION_TOKEN_OPTION'),
+        // @reprint-push-start
         'site_export_push_authorized_token_fingerprint' =>
             constant('WordPress\\Reprint\\Server\\Plugin\\PUSH_AUTHORIZATION_OPTION'),
+        // @reprint-push-end
     ];
     foreach ($legacy_option_names as $legacy_name => $canonical_name) {
         if ($canonical_name === $legacy_name) {
@@ -145,12 +153,14 @@ function reprint_server_compat_migrate_legacy_options(): void {
             continue;
         }
 
+        // @reprint-push-start
         // An empty canonical value counts as missing. The plugin migrates
         // while lib.php loads, before the settings page registers the
         // listener which revokes push authorization when the connection token
         // option appears. A project which embeds lib.php after that listener
         // exists writes an empty fingerprint here, and the entry below then
         // restores the granted one.
+        // @reprint-push-end
         $canonical_value = get_option($canonical_name, null);
         if ($canonical_value === null || $canonical_value === '') {
             update_option($canonical_name, $legacy_value, false);
@@ -172,9 +182,11 @@ function _site_export_is_push_endpoint(string $endpoint): bool {
     return \WordPress\Reprint\Server\Plugin\is_push_endpoint($endpoint);
 }
 
+// @reprint-push-start
 function _site_export_push_is_supported(): bool {
     return \WordPress\Reprint\Server\Plugin\push_is_supported();
 }
+// @reprint-push-end
 
 function _site_export_load_exporter_runtime(): ?string {
     return \WordPress\Reprint\Server\Plugin\load_server_runtime();
@@ -200,21 +212,29 @@ function _site_export_update_shared_secret(string $secret): bool {
     return \WordPress\Reprint\Server\Plugin\update_connection_token($secret);
 }
 
+// @reprint-push-start
 function _site_export_get_managed_push_enabled(): ?bool {
     return \WordPress\Reprint\Server\Plugin\get_managed_push_enabled();
 }
+// @reprint-push-end
 
+// @reprint-push-start
 function _site_export_is_push_authorized(): bool {
     return \WordPress\Reprint\Server\Plugin\is_push_authorized();
 }
+// @reprint-push-end
 
+// @reprint-push-start
 function _site_export_get_push_authorization_error(): ?string {
     return \WordPress\Reprint\Server\Plugin\get_push_authorization_error();
 }
+// @reprint-push-end
 
+// @reprint-push-start
 function _site_export_update_push_authorization(bool $enabled): bool {
     return \WordPress\Reprint\Server\Plugin\update_push_authorization($enabled);
 }
+// @reprint-push-end
 
 function _site_export_handle_api_request(array $options = []): void {
     \WordPress\Reprint\Server\Plugin\handle_api_request($options);
