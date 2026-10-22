@@ -23,7 +23,7 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
     try {
         const page = await login(context);
         const adminUrl = `${siteUrl}/wp-admin/tools.php?page=reprint-server`;
-        const publicKeyField = page.getByRole('textbox', { name: 'Public key', exact: true });
+        const publicKeyField = page.getByRole('textbox', { name: 'Migration Token', exact: true });
         const authorizeButton = page.getByRole('button', { name: 'Authorize tool', exact: true });
         const management = page.locator('.reprint-server-manage-access');
         assert.equal(await page.getByRole('heading', { name: 'Authorize a tool to copy this site', exact: true }).isVisible(), true);
@@ -34,7 +34,7 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
 
         await publicKeyField.fill('not a public key');
         await submit(page, authorizeButton);
-        assert.match(await page.locator('.notice-error').innerText(), /not a usable public key/);
+        assert.match(await page.locator('.notice-error').innerText(), /not a usable Migration Token/);
         assert.equal(await publicKeyField.isVisible(), true);
 
         const publicKey = generatePublicKey();
@@ -42,7 +42,7 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         await submit(page, authorizeButton);
         assert.equal(await page.getByRole('heading', { name: 'Tool authorized', exact: true }).isVisible(), true);
         assert.equal(await page.getByText('Return to your tool to start or resume the copy.', { exact: true }).isVisible(), true);
-        assert.equal(await page.getByText('This key allows downloads. It cannot change files on this site.', { exact: true }).isVisible(), true);
+        assert.equal(await page.getByText('This Migration Token allows downloads. It cannot change files on this site.', { exact: true }).isVisible(), true);
         assert.equal(await publicKeyField.count(), 0);
         assert.equal(await page.locator('.reprint-server-page .notice').count(), 0);
         const firstKeyId = await page.locator('.reprint-server-key-table tbody tr code').textContent();
@@ -58,7 +58,7 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         assert.equal(await page.getByText('Server details', { exact: true }).count(), 0);
         assert.equal(await page.getByText('Host details', { exact: true }).count(), 0);
 
-        const keyHelp = page.getByText('I don’t have a public key yet', { exact: true });
+        const keyHelp = page.getByText('I don’t have a Migration Token yet', { exact: true });
         await keyHelp.focus();
         await page.keyboard.press('Enter');
         await page.getByText('Using the Reprint CLI?', { exact: true }).click();
@@ -66,7 +66,7 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         await keyHelp.click();
         await publicKeyField.fill('not a public key');
         await submit(page, authorizeButton);
-        assert.match(await page.locator('.notice-error').innerText(), /not a usable public key/);
+        assert.match(await page.locator('.notice-error').innerText(), /not a usable Migration Token/);
         assert.equal(await publicKeyField.isVisible(), true);
         assert.equal(await management.getAttribute('open'), null);
         assert.equal(await page.locator('.reprint-server-key-table tbody tr').count(), 1);
@@ -86,15 +86,15 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         await page.goto(adminUrl);
         assert.equal(await publicKeyField.isVisible(), true, 'A normal visit offers authorization even when keys are already saved.');
         await management.locator('summary').first().click();
-        await page.getByRole('checkbox', { name: `Allow push for key ${firstKeyId}`, exact: true }).check();
+        await page.getByRole('checkbox', { name: `Allow push for Migration Token ${firstKeyId}`, exact: true }).check();
         await page.reload();
         await management.locator('summary').first().click();
-        assert.equal(await page.getByRole('checkbox', { name: `Allow push for key ${firstKeyId}`, exact: true }).isChecked(), false, 'Checking alone must not save consent.');
-        await page.getByRole('checkbox', { name: `Allow push for key ${firstKeyId}`, exact: true }).check();
-        await submit(page, page.getByRole('button', { name: `Save push access for key ${firstKeyId}`, exact: true }));
+        assert.equal(await page.getByRole('checkbox', { name: `Allow push for Migration Token ${firstKeyId}`, exact: true }).isChecked(), false, 'Checking alone must not save consent.');
+        await page.getByRole('checkbox', { name: `Allow push for Migration Token ${firstKeyId}`, exact: true }).check();
+        await submit(page, page.getByRole('button', { name: `Save push access for Migration Token ${firstKeyId}`, exact: true }));
         assert.equal(await management.getAttribute('open'), '', 'The result keeps the controls visible.');
-        assert.equal(await page.getByRole('checkbox', { name: `Allow push for key ${firstKeyId}`, exact: true }).isChecked(), true);
-        assert.equal(await page.getByRole('checkbox', { name: `Allow push for key ${secondKeyId}`, exact: true }).isChecked(), false);
+        assert.equal(await page.getByRole('checkbox', { name: `Allow push for Migration Token ${firstKeyId}`, exact: true }).isChecked(), true);
+        assert.equal(await page.getByRole('checkbox', { name: `Allow push for Migration Token ${secondKeyId}`, exact: true }).isChecked(), false);
 
         await page.setViewportSize({ width: 390, height: 844 });
         await page.goto(adminUrl);
@@ -109,12 +109,12 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'CLI help must fit on mobile.');
         await keyHelp.click();
         await management.locator('summary').first().click();
-        const removeButton = await page.getByRole('button', { name: `Remove key ${firstKeyId}`, exact: true }).boundingBox();
+        const removeButton = await page.getByRole('button', { name: `Remove Migration Token ${firstKeyId}`, exact: true }).boundingBox();
         assert.ok(removeButton.x >= 0 && removeButton.x + removeButton.width <= 390, 'Mobile key actions must not require sideways scrolling.');
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-        await submit(page, page.getByRole('button', { name: `Remove key ${firstKeyId}`, exact: true }));
+        await submit(page, page.getByRole('button', { name: `Remove Migration Token ${firstKeyId}`, exact: true }));
         assert.equal(await page.locator('.reprint-server-key-table tbody tr').count(), 1);
-        await submit(page, page.getByRole('button', { name: `Remove key ${secondKeyId}`, exact: true }));
+        await submit(page, page.getByRole('button', { name: `Remove Migration Token ${secondKeyId}`, exact: true }));
         assert.equal(await page.locator('.reprint-server-key-table').count(), 0);
         assert.equal(await management.count(), 0);
         assert.equal(await publicKeyField.isVisible(), true);
@@ -127,7 +127,7 @@ test('configured URL copying reports success and falls back to manual selection 
     const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] });
     try {
         const page = await login(context);
-        await page.getByRole('textbox', { name: 'Public key', exact: true }).fill(generatePublicKey());
+        await page.getByRole('textbox', { name: 'Migration Token', exact: true }).fill(generatePublicKey());
         await submit(page, page.getByRole('button', { name: 'Authorize tool', exact: true }));
         const keyId = await page.locator('.reprint-server-key-table tbody tr code').textContent();
         assert.equal(await page.locator('#reprint-server-connection-heading').count(), 0);
@@ -163,8 +163,8 @@ test('configured URL copying reports success and falls back to manual selection 
         await page.setViewportSize({ width: 390, height: 844 });
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
         await page.locator('.reprint-server-manage-access > summary').click();
-        await submit(page, page.getByRole('button', { name: `Remove key ${keyId}`, exact: true }));
-        assert.equal(await page.getByRole('textbox', { name: 'Public key', exact: true }).isVisible(), true);
+        await submit(page, page.getByRole('button', { name: `Remove Migration Token ${keyId}`, exact: true }));
+        assert.equal(await page.getByRole('textbox', { name: 'Migration Token', exact: true }).isVisible(), true);
     } finally {
         await context.close();
     }

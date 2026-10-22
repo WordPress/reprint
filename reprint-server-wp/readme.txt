@@ -20,7 +20,7 @@ The plugin provides the server API and its settings page. You need the separate 
 
 = Authentication and push access =
 
-On hosts with OpenSSL, enroll the client's public key under Tools > Reprint Server. The client keeps the private key and signs its requests. Hosts without OpenSSL use a connection token instead.
+On hosts with OpenSSL, enroll the client's Migration Token under Tools > Reprint Server. The client keeps the private key and signs its requests. Hosts without OpenSSL use a connection token instead.
 
 New keys and connection tokens authorize downloads only. File push requires a separate administrator grant. While enabled, an authorized client can upload, replace, and delete files in the site's document root, except excluded paths. Hosting providers can manage this permission centrally.
 
@@ -43,7 +43,7 @@ To build from source, install the Composer dependencies in tools/php56-build and
 1. Download reprint-exporter-wp.zip from the [GitHub releases](https://github.com/WordPress/reprint/releases/latest).
 2. In WordPress, open Plugins > Add New > Upload Plugin, upload the ZIP, and activate Reprint Server. On multisite, network-activate the plugin.
 3. Download reprint.phar from the same release. The client requires PHP 7.4 or newer; file push from the client requires PHP 8.1 or newer.
-4. Run the pull command below. On a host with OpenSSL, the client prints the public key to enroll and stops. Enroll it under Tools > Reprint Server, then run the same command again. On multisite, use the network settings page.
+4. Run the pull command below. On a host with OpenSSL, the client prints the Migration Token to enroll and stops. Enroll it under Tools > Reprint Server, then run the same command again. On multisite, use the network settings page.
 
     php reprint.phar pull https://example.com --state-dir=./state --fs-root=./files
 
@@ -61,7 +61,7 @@ Yes. Downloads are enough to copy this site to another host or a local developme
 
 = How do I revoke access? =
 
-Remove an enrolled public key in Tools > Reprint Server. On a host using connection tokens, clear or replace the token; replacing it also revokes its local push grant. Credentials supplied by your host through public-keys.php, secret.php, or managed configuration must be changed by the host.
+Remove an enrolled Migration Token in Tools > Reprint Server. On a host using connection tokens, clear or replace the token; replacing it also revokes its local push grant. Credentials supplied by your host through public-keys.php, secret.php, or managed configuration must be changed by the host.
 
 = What happens when I deactivate or delete the plugin? =
 

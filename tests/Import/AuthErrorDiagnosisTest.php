@@ -63,7 +63,7 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose($this->clientWith([]), 403, ['error' => 'msg', 'reason' => 'requires_token_auth', 'auth_version' => 2]);
         $this->assertSame('AUTH_REQUIRES_TOKEN', $result['code']);
         $this->assertStringContainsString('--secret=TOKEN', $result['message']);
-        $this->assertStringContainsString('cannot verify public-key signatures because OpenSSL is unavailable', $result['message']);
+        $this->assertStringContainsString('cannot verify Migration Tokens because OpenSSL is unavailable', $result['message']);
         $this->assertStringNotContainsString('Ask the site owner', $result['message']);
     }
 
@@ -76,6 +76,8 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose($this->clientWith(['private_key_path' => $path]), 503, ['error' => 'msg', 'reason' => 'no_keys_enrolled', 'auth_version' => 2]);
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString($public_key, $result['message']);
+        $this->assertStringContainsString('Your Migration Token (ID ', $result['message']);
+        $this->assertStringNotContainsString('public key', $result['message']);
     }
 
     public function testNoKeysEnrolledWithATokenNamesKeygenNotTheTokenForm(): void
@@ -148,6 +150,8 @@ final class AuthErrorDiagnosisTest extends TestCase
         $result = $this->diagnose($client, 403, ['error' => 'msg', 'reason' => 'unknown_key', 'auth_version' => 2]);
         $this->assertSame('AUTH_UNKNOWN_KEY', $result['code']);
         $this->assertStringContainsString($public_key, $result['message']);
+        $this->assertStringContainsString('Your Migration Token (ID ', $result['message']);
+        $this->assertStringNotContainsString('public key', $result['message']);
         $this->assertStringContainsString(\WordPress\Reprint\Server\Utils::public_key_fingerprint($public_key), $result['message']);
     }
 

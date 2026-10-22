@@ -219,8 +219,8 @@ class DiagnoseHttpErrorTest extends TestCase
 
         $this->assertSame('AUTH_NOT_CONFIGURED', $result['code']);
         $this->assertStringContainsString('no keys are enrolled', $result['message']);
-        $this->assertStringContainsString('enroll this public key', $result['message']);
-        $this->assertStringContainsString('Your public key (key id ', $result['message']);
+        $this->assertStringContainsString('enroll this Migration Token', $result['message']);
+        $this->assertStringContainsString('Your Migration Token (ID ', $result['message']);
     }
 
     /** @dataProvider notAnOlderPluginProvider */
