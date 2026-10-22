@@ -22,16 +22,15 @@ Build the downloads-only WordPress.org ZIP with:
 ./bin/build-server-plugin.sh reprint-wordpress-org.zip wordpress-org
 ```
 
-This ZIP contains a `reprint/` directory. The build removes the file-push and
-database-push classes, dispatcher setup, authorization changes, and administrator
-controls before Composer generates its classmap. Host constants, environment
-variables, and API options cannot enable push in this build. The GitHub ZIP
-keeps push and its existing filename and layout.
+This ZIP contains a `reprint/` directory. The build sets
+`define('REPRINT_PUSH_AVAILABLE', false)` in the server package's
+`src/build-features.php` and omits the file-push and database-push implementation
+files before Composer generates its classmap. Shared PHP files stay intact.
+The flag blocks push dispatch, hides push controls, and prevents push grants.
+Host constants, environment variables, and API options cannot enable push in
+this build. The GitHub ZIP sets the flag to `true` and keeps push and its
+existing filename and layout. This is a build choice, not a site setting.
 
-Push-only regions in shared source use `@reprint-push-start` and
-`@reprint-push-end` comments. `@reprint-pull-only` lines supply the directory
-build’s rejection response and download-only text. Keep each region balanced;
-the build rejects unmatched markers. Dedicated push classes are excluded entirely.
 Both targets are built and checked in CI, including requests through the
 packaged entry point with a host configuration that grants push.
 

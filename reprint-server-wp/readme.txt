@@ -22,12 +22,11 @@ The plugin provides the server API and its settings page. You need the separate 
 
 On hosts with OpenSSL, enroll the client's public key under Tools > Reprint Server. The client keeps the private key and signs its requests. Hosts without OpenSSL use a connection token instead.
 
-<!-- @reprint-push-start -->
-New keys and connection tokens authorize downloads only. File push requires a separate administrator grant. While enabled, an authorized client can upload, replace, and delete files in the site's document root, except excluded paths. Hosting providers can manage this permission centrally.
+The WordPress.org build provides downloads only and does not include file-push or database-push implementations. The GitHub build also supports push.
+
+New keys and connection tokens authorize downloads only. In the GitHub build, file push requires a separate administrator grant. While enabled, an authorized client can upload, replace, and delete files in the site's document root, except excluded paths. Hosting providers can manage this permission centrally.
 
 Push requires PHP 7.2 or newer and is not supported on multisite networks.
-<!-- @reprint-push-end -->
-<!-- @reprint-pull-only The WordPress.org build provides downloads only. It does not include file-push or database-push implementations. -->
 
 The generated release ZIP supports downloads on PHP 5.6.20 or newer; use a maintained PHP version when your host allows it.
 
@@ -45,12 +44,8 @@ To build from source, install the Composer dependencies in tools/php56-build and
 
 == Installation ==
 
-<!-- @reprint-push-start -->
-1. Download reprint-exporter-wp.zip from the [GitHub releases](https://github.com/WordPress/reprint/releases/latest).
+1. Install Reprint from the WordPress.org plugin directory, or download a plugin ZIP from the [GitHub releases](https://github.com/WordPress/reprint/releases/latest).
 2. In WordPress, open Plugins > Add New > Upload Plugin, upload the ZIP, and activate Reprint Server. On multisite, network-activate the plugin.
-<!-- @reprint-push-end -->
-<!-- @reprint-pull-only 1. Install Reprint from the WordPress.org plugin directory, or upload reprint-wordpress-org.zip under Plugins > Add New > Upload Plugin. -->
-<!-- @reprint-pull-only 2. Activate Reprint. On multisite, network-activate the plugin. -->
 3. Download reprint.phar from the same release. The client requires PHP 7.4 or newer; file push from the client requires PHP 8.1 or newer.
 4. Run the pull command below. On a host with OpenSSL, the client prints the public key to enroll and stops. Enroll it under Tools > Reprint Server, then run the same command again. On multisite, use the network settings page.
 

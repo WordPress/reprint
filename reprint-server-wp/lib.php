@@ -12,9 +12,7 @@ namespace WordPress\Reprint\Server\Plugin;
 use Exception;
 use InvalidArgumentException;
 use WordPress\Reprint\Server\HTTPServer;
-// @reprint-push-start
 use WordPress\Reprint\Server\PushConfigurationException;
-// @reprint-push-end
 use WordPress\Reprint\Server\RequestAuthenticator;
 use WordPress\Reprint\Server\Utils;
 
@@ -37,11 +35,9 @@ if (!defined(__NAMESPACE__ . '\\CONNECTION_TOKEN_FILE')) {
 if (!defined(__NAMESPACE__ . '\\CONNECTION_TOKEN_OPTION')) {
     define(__NAMESPACE__ . '\\CONNECTION_TOKEN_OPTION', 'reprint_server_connection_token');
 }
-// @reprint-push-start
 if (!defined(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION')) {
     define(__NAMESPACE__ . '\\PUSH_AUTHORIZATION_OPTION', 'reprint_server_push_authorized_token_fingerprint');
 }
-// @reprint-push-end
 if (!defined(__NAMESPACE__ . '\\PUBLIC_KEYS_OPTION')) {
     define(__NAMESPACE__ . '\\PUBLIC_KEYS_OPTION', 'reprint_server_public_keys');
 }
@@ -127,14 +123,14 @@ function is_push_endpoint(string $endpoint): bool {
     return strpos($endpoint, 'push_') === 0;
 }
 
-// @reprint-push-start
-/** Returns whether this PHP runtime can serve push endpoints. */
+/** Returns whether this build and PHP runtime can serve push endpoints. */
 function push_is_supported(): bool {
-    return PHP_VERSION_ID >= 70200;
+    if (!defined('REPRINT_PUSH_AVAILABLE') && load_server_runtime() === null) {
+        return false;
+    }
+    return REPRINT_PUSH_AVAILABLE && PHP_VERSION_ID >= 70200;
 }
-// @reprint-push-end
 
-// @reprint-push-start
 /** Resolves dot segments in a slash-delimited path without touching the filesystem. */
 function normalize_path(string $path): string {
     $parts = explode('/', $path);
@@ -151,7 +147,6 @@ function normalize_path(string $path): string {
     }
     return '/' . implode('/', $resolved);
 }
-// @reprint-push-end
 
 /**
  * Resolve and load the server package runtime.
@@ -199,6 +194,7 @@ function load_server_runtime(): ?string {
         }
 
         require_once $autoload_path;
+        require_once dirname($export_path) . '/build-features.php';
         require_once $compat_path;
         $loaded_export_path = $export_path;
         return $export_path;
@@ -297,9 +293,7 @@ function has_public_keys_file(): bool {
  *     @type string $key_id     Key id computed from the public key.
  *     @type string $public_key One-line public key.
  *     @type int    $added_at   Unix timestamp of enrollment, 0 when absent.
- * @reprint-push-start
  *     @type bool   $push       Whether this key may push.
- * @reprint-push-end
  * }
  */
 function normalize_public_key_entry($entry): ?array {
@@ -319,9 +313,7 @@ function normalize_public_key_entry($entry): ?array {
         'key_id' => Utils::public_key_fingerprint($public_key),
         'public_key' => $public_key,
         'added_at' => isset($entry['added_at']) ? (int) $entry['added_at'] : 0,
-        // @reprint-push-start
         'push' => !empty($entry['push']),
-        // @reprint-push-end
     ];
 }
 
@@ -409,7 +401,6 @@ function update_option_public_keys(array $entries): bool {
     return (bool) update_option(PUBLIC_KEYS_OPTION, array_values($entries), false);
 }
 
-// @reprint-push-start
 /**
  * Returns the hosting provider's push policy, or null when the site controls it.
  *
@@ -440,16 +431,12 @@ function get_managed_push_enabled(): ?bool {
     }
     return null;
 }
-// @reprint-push-end
 
-// @reprint-push-start
 /** Returns whether the current connection token is authorized for push. */
 function is_push_authorized(): bool {
     return get_push_authorization_error() === null;
 }
-// @reprint-push-end
 
-// @reprint-push-start
 /**
  * Returns the exact push authorization failure, or null when push may start new work.
  *
@@ -458,6 +445,14 @@ function is_push_authorized(): bool {
  *                                          push flag decides instead of the token fingerprint.
  */
 function get_push_authorization_error(?string $authenticated_key_id = null): ?string {
+    if (!push_is_supported()) {
+        if (!defined('REPRINT_PUSH_AVAILABLE')) {
+            return 'The Reprint Server runtime is missing. Reinstall the plugin release package.';
+        }
+        return REPRINT_PUSH_AVAILABLE
+            ? 'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
+            : 'Push is not included in this build.';
+    }
     if (function_exists('is_multisite') && is_multisite()) {
         return 'Push into a multisite network is not supported. Pull the selected site into a fresh target instead.';
     }
@@ -488,9 +483,7 @@ function get_push_authorization_error(?string $authenticated_key_id = null): ?st
         && hash_equals(hash('sha256', $connection_token), $authorized_fingerprint);
     return $authorized ? null : 'Push access is disabled for the current connection token.';
 }
-// @reprint-push-end
 
-// @reprint-push-start
 /**
  * Grants or revokes personal push authorization for the current token.
  *
@@ -498,7 +491,7 @@ function get_push_authorization_error(?string $authenticated_key_id = null): ?st
  * current token therefore cannot inherit the prior token's write authority.
  */
 function update_push_authorization(bool $enabled): bool {
-    if (!function_exists('update_option')) {
+    if (( $enabled && !push_is_supported() ) || !function_exists('update_option')) {
         return false;
     }
 
@@ -517,7 +510,6 @@ function update_push_authorization(bool $enabled): bool {
 
     return (bool) update_option(PUSH_AUTHORIZATION_OPTION, $fingerprint, false);
 }
-// @reprint-push-end
 
 /**
  * Handle an export API request.
@@ -532,16 +524,13 @@ function update_push_authorization(bool $enabled): bool {
  * @param array $options {
  *     Optional endpoint configuration overrides.
  *
- * @reprint-push-start
  *     @type bool $database_push Optional. Enable full database overwrite only
  *                              on a host-configured standalone route whose
  *                              authentication survives replacement of wp_options.
- * @reprint-push-end
  *     @type callable $authenticate Optional. Authenticates the request and
  *                                  owns the whole decision. Defaults to
  *                                  RequestAuthenticator with the stored
  *                                  connection token and enrolled keys.
- * @reprint-push-start
  *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
@@ -556,9 +545,7 @@ function update_push_authorization(bool $enabled): bool {
  *     @type int $maximum_commit_entries Optional. Maximum bounded entries one
  *                                       push_commit request processes. Defaults
  *                                       to 256.
- * @reprint-push-end
  * }
- * @reprint-push-start
  * @phpstan-param array{
  *     database_push?:bool,
  *     authenticate?:callable,
@@ -568,7 +555,6 @@ function update_push_authorization(bool $enabled): bool {
  *     maximum_part_bytes?:int,
  *     maximum_commit_entries?:int
  * } $options
- * @reprint-push-end
  */
 function handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
@@ -709,13 +695,17 @@ function handle_api_request(array $options = []): void {
         $authenticated_key_id = $authenticator->authenticated_key_id();
     }
 
-    // @reprint-push-start
-    if (!push_is_supported() && is_push_endpoint($endpoint)) {
-        push_error(
-            503,
-            'push_disabled',
-            'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
-        );
+    if (is_push_endpoint($endpoint) && !push_is_supported()) {
+        if (defined('REPRINT_PUSH_AVAILABLE') && !REPRINT_PUSH_AVAILABLE) {
+            push_error(403, 'push_disabled', 'Push is not included in this build.');
+        }
+        if (PHP_VERSION_ID < 70200) {
+            push_error(
+                503,
+                'push_disabled',
+                'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
+            );
+        }
     }
 
     // Authentication completes first. Every push operation requires current
@@ -737,11 +727,6 @@ function handle_api_request(array $options = []): void {
             $push_authorization_error
         );
     }
-    // @reprint-push-end
-
-    // @reprint-pull-only if (is_push_endpoint($endpoint)) {
-    // @reprint-pull-only     push_error(403, 'push_disabled', 'Push is not included in the WordPress.org build.');
-    // @reprint-pull-only }
 
     // Ensure the Composer autoloader is loaded so HTTPServer
     // is resolvable. The class itself will require export.php on demand
@@ -760,7 +745,6 @@ function handle_api_request(array $options = []): void {
             require_once __DIR__ . '/wordpress/multisite.php';
             $server_options['multisite'] = get_multisite_export_context();
         }
-        // @reprint-push-start
         if (HTTPServer::is_push_endpoint($endpoint)) {
             // Hosts must provide a route and authentication which survive
             // replacement of wp_options and deactivation of this plugin.
@@ -899,10 +883,8 @@ function handle_api_request(array $options = []): void {
                 $server_options['database_push'] = $push_options;
             }
         }
-        // @reprint-push-end
         HTTPServer::serve($server_options);
     } catch (Exception $e) {
-        // @reprint-push-start
         if (is_push_endpoint($endpoint)) {
             if ($e instanceof PushConfigurationException) {
                 push_error(503, 'not_configured', $e->getMessage());
@@ -916,7 +898,6 @@ function handle_api_request(array $options = []): void {
                 'The push endpoint failed while processing the request.'
             );
         }
-        // @reprint-push-end
         if (!headers_sent()) {
             http_response_code(400);
             // Hosts such as Hostinger rewrite domains so links and assets stay on a

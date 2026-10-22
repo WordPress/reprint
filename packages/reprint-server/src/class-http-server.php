@@ -4,21 +4,20 @@ namespace WordPress\Reprint\Server;
 
 use InvalidArgumentException;
 
+require_once __DIR__ . '/build-features.php';
+
 if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
     require_once __DIR__ . '/class-resource-budget.php';
 }
-// @reprint-push-start
-if (!class_exists(PushConfigurationException::class, false)) {
+if (REPRINT_PUSH_AVAILABLE && !class_exists(PushConfigurationException::class, false)) {
     require_once __DIR__ . '/class-push-configuration-exception.php';
 }
-// @reprint-push-end
 
 /**
  * HTTP dispatcher for the Reprint Server API.
  */
 final class HTTPServer {
 
-    // @reprint-push-start
     private const PUSH_ENDPOINT_METHODS = [
         'push_create' => 'create',
         'push_upload' => 'upload',
@@ -31,7 +30,6 @@ final class HTTPServer {
 
     /** @var DatabasePushEndpoints|null */
     private $database_push_endpoints;
-    // @reprint-push-end
 
     /** @var array<string, callable> */
     private $handlers;
@@ -48,10 +46,8 @@ final class HTTPServer {
     /** @var string|null */
     private $default_directory;
 
-    // @reprint-push-start
     /** @var PushEndpoints|null */
     private $push_endpoints;
-    // @reprint-push-end
 
     /** @var array|null Trusted WordPress source metadata, never read from the request. */
     private $multisite;
@@ -65,9 +61,8 @@ final class HTTPServer {
         };
         $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
         $this->default_directory = $options['default_directory'] ?? null;
-        // @reprint-push-start
         $this->push_endpoints = null;
-        if (array_key_exists('push', $options)) {
+        if (REPRINT_PUSH_AVAILABLE && array_key_exists('push', $options)) {
             try {
                 if (!is_array($options['push'])) {
                     throw new InvalidArgumentException('The push HTTP server option must be an array.');
@@ -86,11 +81,10 @@ final class HTTPServer {
                 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
             }
         }
-        if (isset($options['database_push'])) {
+        if (REPRINT_PUSH_AVAILABLE && isset($options['database_push'])) {
             require_once __DIR__ . '/class-database-push-endpoints.php';
             $this->database_push_endpoints = new DatabasePushEndpoints($options['database_push']);
         }
-        // @reprint-push-end
         $this->handlers = $options['handlers'] ?? $this->default_handlers();
     }
 
@@ -396,6 +390,26 @@ final class HTTPServer {
             );
         }
 
+        if (strpos($endpoint, 'push_') === 0 && ( !REPRINT_PUSH_AVAILABLE || PHP_VERSION_ID < 70200 )) {
+            http_response_code(REPRINT_PUSH_AVAILABLE ? 503 : 403);
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+            header('Expires: 0');
+            // Hosts such as Hostinger rewrite domains so links and assets stay on a
+            // preview domain while the stored site URL still uses the real domain.
+            // This lets users preview a site before changing DNS, but also rewrites
+            // application/json bodies. Octet-stream bypasses Hostinger's filter.
+            header('Content-Type: application/octet-stream');
+            echo json_encode([
+                'status' => 'rejected',
+                'reason' => 'push_disabled',
+                'detail' => REPRINT_PUSH_AVAILABLE
+                    ? 'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
+                    : 'Push is not included in this build.',
+            ]);
+            return;
+        }
+
         if (!isset($this->handlers[$endpoint])) {
             throw new InvalidArgumentException(
                 "Invalid endpoint: '{$endpoint}'. Valid endpoints: " . $this->get_valid_endpoints_message()
@@ -403,29 +417,10 @@ final class HTTPServer {
         }
 
         $handler = $this->handlers[$endpoint];
-        // @reprint-push-start
         if (self::is_push_endpoint($endpoint)) {
-            if (PHP_VERSION_ID < 70200) {
-                http_response_code(503);
-                header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-                header('Pragma: no-cache');
-                header('Expires: 0');
-                // Hosts such as Hostinger rewrite domains so links and assets stay on a
-                // preview domain while the stored site URL still uses the real domain.
-                // This lets users preview a site before changing DNS, but also rewrites
-                // application/json bodies. Octet-stream bypasses Hostinger's filter.
-                header('Content-Type: application/octet-stream');
-                echo json_encode([
-                    'status' => 'rejected',
-                    'reason' => 'push_disabled',
-                    'detail' => 'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.',
-                ]);
-                return;
-            }
             call_user_func($handler, $config);
             return;
         }
-        // @reprint-push-end
         if ($endpoint === 'preflight') {
             call_user_func($handler, $config);
             return;
@@ -438,12 +433,10 @@ final class HTTPServer {
         call_user_func($handler, $config, $budget);
     }
 
-    // @reprint-push-start
     public static function is_push_endpoint(string $endpoint): bool {
         $push_endpoint_methods = self::PUSH_ENDPOINT_METHODS;
         return isset($push_endpoint_methods[$endpoint]) || in_array($endpoint, self::DATABASE_PUSH_ENDPOINTS, true);
     }
-    // @reprint-push-end
 
     /**
      * @return array<string, callable>
@@ -456,7 +449,6 @@ final class HTTPServer {
             'db_index' => 'endpoint_db_index',
             'preflight' => 'endpoint_preflight',
         ];
-        // @reprint-push-start
         if ($this->push_endpoints !== null) {
             foreach (self::PUSH_ENDPOINT_METHODS as $endpoint => $method) {
                 $handlers[$endpoint] = [$this->push_endpoints, $method];
@@ -467,7 +459,6 @@ final class HTTPServer {
                 $handlers[$endpoint] = [$this->database_push_endpoints, 'handle'];
             }
         }
-        // @reprint-push-end
         return $handlers;
     }
 

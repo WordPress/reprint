@@ -19,43 +19,28 @@ foreach (['reprint-server-wp', 'packages/reprint-server/src'] as $relative_direc
     if (!is_dir($directory) || realpath($directory) === realpath($project_directory . '/' . $relative_directory)) {
         throw new RuntimeException('The staged directory is missing or points at maintained source: ' . $directory . '.');
     }
-    $files = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($directory, FilesystemIterator::SKIP_DOTS));
-    foreach ($files as $file) {
-        if (!$file->isFile() || !in_array($file->getExtension(), ['php', 'txt'], true)) {
-            continue;
-        }
-        if ($relative_directory === 'packages/reprint-server/src' && preg_match('/^class-(?:push-|database-push|multipart-processor\.|mysqli-driver-pdo)/', $file->getFilename())) {
-            unlink($file->getPathname());
-            continue;
-        }
+}
 
-        // Markers keep shared source in one place. Strip complete regions before
-        // Composer builds its classmap, so removed classes cannot be autoloaded.
-        $output = '';
-        $inside_push_region = false;
-        foreach (file($file->getPathname()) as $line_number => $line) {
-            if (strpos($line, '@reprint-push-start') !== false) {
-                if ($inside_push_region) {
-                    throw new RuntimeException('Nested push region in ' . $file->getPathname() . ' on line ' . ($line_number + 1) . '.');
-                }
-                $inside_push_region = true;
-            } elseif (strpos($line, '@reprint-push-end') !== false) {
-                if (!$inside_push_region) {
-                    throw new RuntimeException('Unmatched push end marker in ' . $file->getPathname() . ' on line ' . ($line_number + 1) . '.');
-                }
-                $inside_push_region = false;
-            } elseif (!$inside_push_region) {
-                $output .= preg_replace('/(?:\/\/|<!--) @reprint-pull-only (.*?)(?: -->)?\r?\n?$/', "$1\n", $line);
-            }
-        }
-        if ($inside_push_region) {
-            throw new RuntimeException('Unclosed push region in ' . $file->getPathname() . '.');
-        }
-        file_put_contents($file->getPathname(), $output);
+$files = new DirectoryIterator($staging_directory . '/packages/reprint-server/src');
+foreach ($files as $file) {
+    if ($file->isFile() && preg_match('/^class-(?:push-|database-push|multipart-processor\.|mysqli-driver-pdo)/', $file->getFilename())) {
+        unlink($file->getPathname());
     }
 }
 
+$features_file = $staging_directory . '/packages/reprint-server/src/build-features.php';
+$features = str_replace(
+    "define('REPRINT_PUSH_AVAILABLE', true);",
+    "define('REPRINT_PUSH_AVAILABLE', false);",
+    file_get_contents($features_file),
+    $replacements
+);
+if ($replacements !== 1) {
+    throw new RuntimeException('Expected one enabled REPRINT_PUSH_AVAILABLE definition in ' . $features_file . '; observed ' . $replacements . '.');
+}
+file_put_contents($features_file, $features);
+
 // These integration manuals describe the push-capable GitHub distribution.
-// The directory package ships its target-specific readme.txt instead.
+// The directory package ships readme.txt, which describes both distributions.
 unlink($staging_directory . '/reprint-server-wp/README.md');
 unlink($staging_directory . '/packages/reprint-server/README.md');

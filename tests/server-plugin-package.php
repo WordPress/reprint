@@ -69,6 +69,7 @@ require $reprint_plugin_directory . '/vendor/autoload.php';
 foreach (['Utils', 'HTTPServer', 'RequestAuthenticator'] as $reprint_class_name) {
     reprint_require_plugin_package(class_exists('WordPress\\Reprint\\Server\\' . $reprint_class_name), 'The packaged autoloader cannot load ' . $reprint_class_name . '.');
 }
+reprint_require_plugin_package(REPRINT_PUSH_AVAILABLE === ($reprint_package_target === 'github'), 'REPRINT_PUSH_AVAILABLE must match the package target: ' . $reprint_package_target . '.');
 // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedConstantFound -- Standalone package test supplies WordPress's bootstrap constant.
 define('ABSPATH', $reprint_plugin_directory . '/');
 define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', $reprint_plugin_directory . '/');

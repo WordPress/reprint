@@ -1,9 +1,10 @@
 # Push Sync
 
 The GitHub plugin distribution includes push. The WordPress.org distribution
-is downloads-only: its build removes the file-push and database-push
-implementations, authorization changes, and administrator controls before
-packaging. Hosting configuration cannot enable push in that distribution.
+sets `REPRINT_PUSH_AVAILABLE` to `false` and omits the file-push and
+database-push implementation files before Composer generates its classmap.
+Shared PHP files remain intact; the flag blocks push requests and grants and
+hides push controls. Host configuration cannot turn it on.
 
 Push local changes to a remote WordPress site: files and database, driven
 entirely from the local machine, resumable at every step, never leaving the

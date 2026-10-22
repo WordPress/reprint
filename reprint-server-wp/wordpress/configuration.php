@@ -10,11 +10,8 @@ if (!defined('ABSPATH')) {
  * UI-independent WordPress configuration integration for Reprint Server.
  *
  * A project embedding lib.php can require this file to get the option-backed
- * connection token,
- * @reprint-push-start
- * its push-authorization revocation hooks,
- * @reprint-push-end
- * the option-backed public-key enrollment, and the read and write operations behind them,
+ * connection token, its push-authorization revocation hooks, the option-backed
+ * public-key enrollment, and the read and write operations behind them,
  * without loading the bundled administrator.
  */
 
@@ -30,7 +27,6 @@ function register_wordpress_configuration(): void {
     add_action('admin_init', __NAMESPACE__ . '\\register_connection_token_setting');
     add_action('rest_api_init', __NAMESPACE__ . '\\register_connection_token_setting');
     add_action('admin_init', __NAMESPACE__ . '\\register_public_keys_setting');
-    // @reprint-push-start
     add_action(
         'update_option_' . CONNECTION_TOKEN_OPTION,
         __NAMESPACE__ . '\\revoke_push_authorization_after_connection_token_change',
@@ -43,7 +39,6 @@ function register_wordpress_configuration(): void {
         10,
         0
     );
-    // @reprint-push-end
 }
 
 /** Register the connection token for the Settings and REST APIs. */
@@ -101,15 +96,11 @@ function sanitize_public_keys_option($value): array {
         if ($entry === null) {
             continue;
         }
-        // @reprint-push-start
         // assert_valid_public_key() throws for every key on a host without
         // OpenSSL. Keys are inert there but the settings page still lets the
         // administrator remove one or change its push grant, and dropping the
         // rest on that write would leave the site not_configured once it moves
         // back to an OpenSSL host. The normalized entry is already strict base64.
-        // @reprint-push-end
-        // @reprint-pull-only // Keep normalized keys on hosts without OpenSSL so administrators can
-        // @reprint-pull-only // remove keys without discarding access for a later OpenSSL host.
         if (function_exists('openssl_pkey_get_public')) {
             try {
                 $entry['public_key'] = \WordPress\Reprint\Server\PublicKeyServer::assert_valid_public_key($entry['public_key']);
@@ -164,9 +155,7 @@ function enroll_public_key(string $pasted_key): string {
         'key_id' => $key_id,
         'public_key' => $public_key,
         'added_at' => time(),
-        // @reprint-push-start
         'push' => false,
-        // @reprint-push-end
     ];
     if (!update_option_public_keys($entries)) {
         return 'storage_failure';
@@ -206,7 +195,6 @@ function remove_public_key(string $key_id): string {
     return update_option_public_keys($remaining) ? 'saved' : 'storage_failure';
 }
 
-// @reprint-push-start
 /**
  * Grants or revokes push for one key.
  *
@@ -247,9 +235,7 @@ function change_key_push_access(string $key_id, bool $enabled): string {
     }
     return update_option_public_keys($entries) ? 'saved' : 'storage_failure';
 }
-// @reprint-push-end
 
-// @reprint-push-start
 /**
  * Revoke local push authorization when the effective connection token changes.
  *
@@ -269,9 +255,7 @@ function revoke_push_authorization_after_connection_token_change($old_value, $ne
         update_push_authorization(false);
     }
 }
-// @reprint-push-end
 
-// @reprint-push-start
 /**
  * Revoke stale local push authorization when the connection-token option is added.
  *
@@ -284,7 +268,6 @@ function revoke_push_authorization_after_connection_token_added(): void {
         update_push_authorization(false);
     }
 }
-// @reprint-push-end
 
 /**
  * Returns the configuration state used by WordPress integrations.
@@ -296,17 +279,14 @@ function revoke_push_authorization_after_connection_token_added(): void {
  *     @type bool      $is_configured Whether a credential the host accepts exists: an enrolled key on a key host,
  *                                    an effective connection token on an HMAC host.
  *     @type bool      $has_connection_token_file Whether secret.php supplies the effective connection token.
- * @reprint-push-start
- *     @type bool      $push_supported Whether this PHP runtime can serve push endpoints.
+ *     @type bool      $push_supported Whether this build and PHP runtime can serve push endpoints.
  *     @type bool|null $managed_push_enabled Hosting-provider push policy, or null when the site controls it.
  *     @type bool      $push_enabled Whether push is authorized for any enrolled key on a key host, or for the
  *                                   current connection token on an HMAC host.
- * @reprint-push-end
  *     @type string    $required_scheme Scheme this host accepts: key when OpenSSL is available, otherwise hmac.
  *     @type array[]   $enrolled_keys Effective enrolled keys, in the shape normalize_public_key_entry() returns.
  *     @type bool      $has_public_keys_file Whether public-keys.php supplies the enrolled keys.
  * }
- * @reprint-push-start
  * @phpstan-return array{
  *     stored_connection_token:string,
  *     is_configured:bool,
@@ -318,7 +298,6 @@ function revoke_push_authorization_after_connection_token_added(): void {
  *     enrolled_keys:array<int,array{key_id:string,public_key:string,added_at:int,push:bool}>,
  *     has_public_keys_file:bool
  * }
- * @reprint-push-end
  */
 function get_configuration_state(): array {
     if (require_server_runtime()) {
@@ -333,13 +312,10 @@ function get_configuration_state(): array {
     }
     $enrolled_keys = get_enrolled_public_keys();
     $effective_connection_token = get_connection_token();
-    $is_configured = $key_auth_required
-        ? $enrolled_keys !== []
-        : $effective_connection_token !== null && $effective_connection_token !== '';
-    // @reprint-push-start
     $push_supported = push_is_supported();
 
     if ($key_auth_required) {
+        $is_configured = $enrolled_keys !== [];
         // get_push_authorization_error() applies the multisite refusal and the managed policy before the key's flag.
         $push_enabled = false;
         foreach ($enrolled_keys as $entry) {
@@ -349,19 +325,17 @@ function get_configuration_state(): array {
             }
         }
     } else {
+        $is_configured = $effective_connection_token !== null && $effective_connection_token !== '';
         $push_enabled = is_push_authorized();
     }
-    // @reprint-push-end
 
     return [
         'stored_connection_token' => get_option_connection_token(),
         'is_configured' => $is_configured,
         'has_connection_token_file' => has_connection_token_file(),
-        // @reprint-push-start
         'push_supported' => $push_supported,
         'managed_push_enabled' => get_managed_push_enabled(),
         'push_enabled' => $push_supported && $push_enabled,
-        // @reprint-push-end
         'required_scheme' => $key_auth_required ? 'key' : 'hmac',
         'enrolled_keys' => $enrolled_keys,
         'has_public_keys_file' => has_public_keys_file(),
@@ -381,7 +355,6 @@ function change_connection_token(string $connection_token): string {
     return update_connection_token($connection_token) ? 'saved' : 'storage_failure';
 }
 
-// @reprint-push-start
 /**
  * Applies a site-controlled push-access change.
  *
@@ -412,4 +385,3 @@ function change_push_access(bool $enabled): string {
 
     return update_push_authorization($enabled) ? 'saved' : 'storage_failure';
 }
-// @reprint-push-end
