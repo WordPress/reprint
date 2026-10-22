@@ -12,6 +12,8 @@ class RemoteUploadProxyRuntimeTest extends TestCase
     private $stateDir;
     private $fsRoot;
     private $outputDir;
+    /** @var resource[] */
+    private array $server_processes = [];
 
     protected function setUp(): void
     {
@@ -28,6 +30,10 @@ class RemoteUploadProxyRuntimeTest extends TestCase
 
     protected function tearDown(): void
     {
+        foreach ($this->server_processes as $process) {
+            proc_terminate($process);
+            proc_close($process);
+        }
         $this->recursiveDelete($this->tempDir);
         parent::tearDown();
     }
@@ -140,6 +146,98 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         }
 
         return file_get_contents($this->outputDir . '/runtime.php');
+    }
+
+    public function testProxyRejectsParentSegmentsBeforeCheckingOrForwardingPaths(): void
+    {
+        $url = $this->startProxyRuntime();
+        mkdir($this->tempDir . '/private');
+        file_put_contents($this->tempDir . '/private/existing.txt', 'private');
+        foreach ([
+            '../../../private/existing.txt', '../../../private/missing.txt',
+            '%2e%2e/%2e%2e/%2e%2e/private/existing.txt',
+            '%2e%2e/%2e%2e/%2e%2e/private/missing.txt',
+            '..%5c..%5c..%5cprivate/missing.txt', '%00/missing.txt', './missing.txt',
+        ] as $suffix) {
+            [$status] = $this->request($url . '/wp-content/uploads/' . $suffix);
+            $this->assertSame(404, $status, $suffix);
+        }
+        $this->assertFileDoesNotExist($this->tempDir . '/upstream-requests');
+    }
+
+    public function testProxyKeepsLocalFilesAndForwardsEncodedMissingUploads(): void
+    {
+        $url = $this->startProxyRuntime();
+        file_put_contents($this->fsRoot . '/wp-content/uploads/2026/photo.txt', 'local photo');
+        [$status, $body] = $this->request($url . '/wp-content/uploads/2026/photo.txt');
+        $this->assertSame(200, $status);
+        $this->assertSame('local photo', $body);
+        $this->assertFileDoesNotExist($this->tempDir . '/upstream-requests');
+        foreach (['GET', 'HEAD'] as $method) {
+            [$status, $body] = $this->request($url . '/wp-content/uploads/2026/missing%20photo.txt?v=1', $method);
+            $this->assertSame(206, $status);
+            $this->assertSame($method === 'HEAD' ? '' : 'remote photo', $body);
+        }
+        $this->assertSame(
+            "GET /2026/missing%20photo.txt?v=1\nHEAD /2026/missing%20photo.txt?v=1\n",
+            file_get_contents($this->tempDir . '/upstream-requests')
+        );
+    }
+
+    private function startProxyRuntime(): string
+    {
+        mkdir($this->tempDir . '/upstream');
+        file_put_contents($this->tempDir . '/upstream/index.php', '<?php '
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Encode the fixture path as a PHP literal.
+            . 'file_put_contents(' . var_export($this->tempDir . '/upstream-requests', true)
+            . ', $_SERVER["REQUEST_METHOD"] . " " . $_SERVER["REQUEST_URI"] . "\n", FILE_APPEND);'
+            . 'http_response_code(206); echo "remote photo";');
+        $upstream_url = $this->startServer($this->tempDir . '/upstream', $this->tempDir . '/upstream/index.php');
+        mkdir($this->fsRoot . '/wp-content/uploads/2026', 0755, true);
+        file_put_contents($this->fsRoot . '/index.php', '<?php http_response_code(404); echo "local missing";');
+        $this->writeState(['filter' => 'essential-files', 'preflight' => ['data' => ['database' => ['wp' => [
+            'paths_urls' => ['uploads' => ['baseurl' => $upstream_url]],
+        ]]]]]);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+        return $this->startServer($this->fsRoot, $this->outputDir . '/runtime.php');
+    }
+
+    private function startServer(string $document_root, string $router): string
+    {
+        $listener = stream_socket_server('tcp://127.0.0.1:0');
+        $this->assertIsResource($listener);
+        $address = stream_socket_get_name($listener, false);
+        fclose($listener);
+        $process = proc_open([PHP_BINARY, '-S', $address, '-t', $document_root, $router],
+            [0 => ['pipe', 'r'], 1 => ['file', $this->tempDir . '/server.log', 'a'],
+                2 => ['file', $this->tempDir . '/server.log', 'a']], $pipes);
+        $this->assertIsResource($process);
+        $this->server_processes[] = $process;
+        fclose($pipes[0]);
+        for ($attempt = 0; $attempt < 100; ++$attempt) {
+            $connection = @stream_socket_client('tcp://' . $address, $error_number, $error, 0.1);
+            if (is_resource($connection)) {
+                fclose($connection);
+                return 'http://' . $address;
+            }
+            usleep(20000);
+        }
+        $this->fail(file_get_contents($this->tempDir . '/server.log'));
+    }
+
+    /** @return array{int,string} HTTP status and response body from the real router. */
+    private function request(string $url, string $method = 'GET'): array
+    {
+        $handle = curl_init($url);
+        curl_setopt_array($handle, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5,
+            CURLOPT_PATH_AS_IS => true, CURLOPT_NOBODY => $method === 'HEAD']);
+        $body = curl_exec($handle);
+        $this->assertIsString($body, curl_error($handle));
+        $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+        curl_close($handle);
+        return [$status, $body];
     }
 
     public function testApplyRuntimeKeepsTheFilesystemRootAsTheFlatDocumentRoot(): void

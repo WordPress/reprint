@@ -403,6 +403,36 @@ final class PushSessionTest extends TestCase {
         }
     }
 
+    public function testDirectoryAndSymlinkPartsCheckParentsBeforeReplacingLeaves(): void {
+        foreach (['directory', 'symlink'] as $index => $type) {
+            file_put_contents($this->docroot . '/keep.txt', 'keep');
+            $push_session = $this->push_session(sprintf('%032x', 810 + $index));
+            $this->push_parts($push_session, [[
+                'headers' => [
+                    'X-Chunk-Type' => 'symlink',
+                    'X-Symlink-Path' => base64_encode('parent'),
+                    'X-Symlink-Target' => base64_encode($this->docroot),
+                ],
+                'body' => '',
+            ]]);
+            $headers = ['X-Chunk-Type' => $type];
+            if ($type === 'directory') {
+                $headers['X-Directory-Path'] = base64_encode('parent/keep.txt');
+            } else {
+                $headers['X-Symlink-Path'] = base64_encode('parent/keep.txt');
+                $headers['X-Symlink-Target'] = base64_encode('elsewhere');
+            }
+            try {
+                $this->push_parts($push_session, [['headers' => $headers, 'body' => '']]);
+                $this->fail('A work symlink was traversed as a private parent.');
+            } catch (InvalidArgumentException $exception) {
+                $this->assertStringContainsString('cannot be used as the parent', $exception->getMessage());
+            }
+            $this->assertFileExists($this->docroot . '/keep.txt');
+            $this->assertSame('keep', file_get_contents($this->docroot . '/keep.txt'));
+        }
+    }
+
     public function testCompletedEmptyDirectoryCanBecomeNonEmpty(): void {
         foreach (['file', 'directory', 'symlink'] as $index => $type) {
             $push_session = $this->push_session(sprintf('%032x', 700 + $index));

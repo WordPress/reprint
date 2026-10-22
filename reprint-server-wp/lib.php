@@ -24,7 +24,7 @@ require_once __DIR__ . '/compat.php';
 \reprint_server_compat_adopt_legacy_constants();
 
 if (!defined(__NAMESPACE__ . '\\VERSION')) {
-    define(__NAMESPACE__ . '\\VERSION', '0.11.1-dev');
+    define(__NAMESPACE__ . '\\VERSION', '0.11.3-dev');
 }
 if (!defined(__NAMESPACE__ . '\\PLUGIN_DIR')) {
     define(__NAMESPACE__ . '\\PLUGIN_DIR', plugin_dir_path(__FILE__));
@@ -522,9 +522,8 @@ function update_push_authorization(bool $enabled): bool {
  *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
- *     @type string $reprint_directory Optional. Private push storage path
- *                                     outside the document root.
- *                                     Defaults to a document-root-specific sibling.
+ *     @type string $reprint_directory Required for push. Private push directory
+ *                                     outside every web root. No default.
  *     @type string[] $excluded_paths Optional. Document-root-relative paths
  *                                    push must preserve. The Reprint Server
  *                                    plugin directory is always included when
@@ -549,7 +548,9 @@ function handle_api_request(array $options = []): void {
     // Revert WordPress error display settings (wp_debug_mode may
     // have enabled display_errors based on WP_DEBUG_DISPLAY).
     if (function_exists('ini_set')) {
+        // phpcs:ignore PluginCheck.CodeAnalysis.PHPErrorReporting.IniDirectiveDisplay_errors,Squiz.PHP.DiscouragedFunctions.Discouraged -- Displayed PHP errors would corrupt the API's file bytes or JSON response.
         @ini_set('display_errors', '0');
+        // phpcs:ignore Squiz.PHP.DiscouragedFunctions.Discouraged -- API error responses use JSON rather than PHP's HTML formatting.
         @ini_set('html_errors', '0');
     }
 
@@ -579,6 +580,7 @@ function handle_api_request(array $options = []): void {
     // old symlink target). This is cheap and prevents non-deterministic failures.
     clearstatcache(true);
 
+    // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_set_error_handler -- Convert PHP failures into the API's JSON error response.
     set_error_handler(function ($errno, $errstr, $errfile, $errline) {
         $error = [
             'error' => "PHP Error: $errstr",
@@ -586,6 +588,7 @@ function handle_api_request(array $options = []): void {
             'line' => $errline,
             'type' => $errno,
         ];
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Keep failed API requests in the host error log even when WP_DEBUG is off.
         error_log('Reprint Server API error: ' . json_encode($error));
         http_response_code(500);
         // Hosts such as Hostinger rewrite domains so links and assets stay on a
@@ -603,6 +606,7 @@ function handle_api_request(array $options = []): void {
             'file' => $e->getFile(),
             'line' => $e->getLine(),
         ];
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Keep failed API requests in the host error log even when WP_DEBUG is off.
         error_log('Reprint Server API exception: ' . json_encode($error));
         http_response_code(500);
         // Hosts such as Hostinger rewrite domains so links and assets stay on a
@@ -725,6 +729,14 @@ function handle_api_request(array $options = []): void {
             $server_options['multisite'] = get_multisite_export_context();
         }
         if (HTTPServer::is_push_endpoint($endpoint)) {
+            // Hosts must provide a route and authentication which survive
+            // replacement of wp_options and deactivation of this plugin.
+            if (
+                strpos($endpoint, 'push_db_') === 0
+                && ( ( $options['database_push'] ?? false ) !== true || isset($server_options['multisite']) )
+            ) {
+                push_error(403, 'push_disabled', 'Full database push requires a host-configured standalone API route; multisite is not supported.');
+            }
             // Push changes the web server's document root. ABSPATH remains the
             // pull default because it may point at a separate shared core tree.
             if (array_key_exists('docroot', $options)) {
@@ -748,16 +760,22 @@ function handle_api_request(array $options = []): void {
             }
             $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
             $lexical_docroot = normalize_path(str_replace('\\', '/', $configured_docroot));
-            $reprint_directory = $options['reprint_directory'] ?? (
-                dirname($docroot) . '/.reprint-' . substr(hash('sha256', $docroot), 0, 12)
-            );
+            $reprint_directory = $options['reprint_directory'] ?? null;
+            if (!is_string($reprint_directory) || $reprint_directory === '') {
+                // The document root's parent may be served by another virtual host.
+                // Only the host configuration can choose a directory outside all of them.
+                throw new PushConfigurationException(
+                    'Push endpoints require a configured reprint_directory outside all web roots; observed '
+                    . json_encode($reprint_directory)
+                    . '. Set reprint_directory in the reprint_server_api_options filter or handle_api_request() options.'
+                );
+            }
             $excluded_paths = $options['excluded_paths'] ?? [];
             if (!is_array($excluded_paths)) {
                 throw new PushConfigurationException('excluded_paths must be an array.');
             }
             $canonical_plugin_directory = realpath(PLUGIN_DIR);
             $plugin_directory = rtrim($canonical_plugin_directory === false ? PLUGIN_DIR : $canonical_plugin_directory, '/\\');
-            $logical_plugin_path_added = false;
             if (defined('WP_PLUGIN_DIR') && function_exists('plugin_basename')) {
                 // Keep the registered installation path lexical until its
                 // document-root-relative name is known. realpath() would turn a
@@ -815,16 +833,16 @@ function handle_api_request(array $options = []): void {
                         );
                     }
                     $excluded_paths[] = $logical_plugin_relative_path;
-                    $logical_plugin_path_added = true;
                 }
             }
             $plugin_relative_path = Utils::relative_path_under(
                 $plugin_directory,
                 $docroot
             );
+            // The installed alias and its target can both be inside the document
+            // root. Exclude both names rather than choosing one of them.
             if (
-                !$logical_plugin_path_added
-                && $plugin_relative_path !== null
+                $plugin_relative_path !== null
                 && $plugin_relative_path !== ''
             ) {
                 $excluded_paths[] = str_replace('\\', '/', $plugin_relative_path);
@@ -845,11 +863,6 @@ function handle_api_request(array $options = []): void {
             }
             $server_options['push'] = $push_options;
             if (strpos($endpoint, 'push_db_') === 0) {
-                // Hosts must provide a route and authentication which survive
-                // replacement of wp_options and deactivation of this plugin.
-                if (( $options['database_push'] ?? false ) !== true || isset($server_options['multisite'])) {
-                    push_error(403, 'push_disabled', 'Full database push requires a host-configured standalone API route; multisite is not supported.');
-                }
                 $server_options['database_push'] = $push_options;
             }
         }

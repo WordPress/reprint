@@ -3,19 +3,26 @@
 # Used by e2e tests when PHP_BINARY points here instead of the system `php`.
 #
 # By default this delegates to @wp-playground/cli php so the CI still covers
-# the public CLI path. When WP_MYSQL_PARSER_EXTENSION_MANIFEST is set, or when
+# the public CLI path. When WP_MYSQL_PARSER_EXTENSION=1 is set, or when
 # PLAYGROUND_PHP_USE_WASM_RUNNER=1 is set, it uses the npm-installed
 # @php-wasm/node runner because the CLI does not expose arbitrary external PHP
 # extensions.
 set -euo pipefail
 
-if [ -n "${WP_MYSQL_PARSER_EXTENSION_MANIFEST:-}" ] || [ "${PLAYGROUND_PHP_USE_WASM_RUNNER:-}" = "1" ]; then
-    SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-    NODE_CMD=(node)
-    if ! node --experimental-wasm-jspi --input-type=module -e "import { jspi } from 'wasm-feature-detect'; process.exit(await jspi() ? 0 : 1);" >/dev/null 2>&1; then
-        NODE_CMD=(npx --yes node@24)
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ "${WP_MYSQL_PARSER_EXTENSION:-}" = "1" ] || [ "${PLAYGROUND_PHP_USE_WASM_RUNNER:-}" = "1" ]; then
+    if ! node --experimental-wasm-jspi -e 'process.exit(typeof WebAssembly.Suspending === "function" && typeof WebAssembly.promising === "function" ? 0 : 1)' >/dev/null 2>&1; then
+        echo 'Playground PHP needs JSPI support. Use Node.js 24 or newer before running the harness.' >&2
+        exit 1
     fi
-    exec "${NODE_CMD[@]}" --experimental-wasm-jspi "${SCRIPT_DIR}/php-wasm-runner.mjs" "$@"
+    exec node --experimental-wasm-jspi "$SCRIPT_DIR/php-wasm-runner.mjs" "$@"
+fi
+
+PLAYGROUND_CLI="$SCRIPT_DIR/../node_modules/.bin/wp-playground-cli"
+if [ ! -x "$PLAYGROUND_CLI" ]; then
+    echo 'Playground CLI is not installed. Run npm ci in tests/e2e first.' >&2
+    exit 1
 fi
 
 MOUNT_ARGS=()
@@ -42,4 +49,4 @@ done
 # Deduplicate mount args
 UNIQUE_MOUNTS=($(printf '%s\n' "${MOUNT_ARGS[@]}" | sort -u))
 
-exec npx @wp-playground/cli php "${UNIQUE_MOUNTS[@]}" -- "$@"
+exec "$PLAYGROUND_CLI" php "${UNIQUE_MOUNTS[@]}" -- "$@"

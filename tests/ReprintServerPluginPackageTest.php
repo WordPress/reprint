@@ -25,6 +25,12 @@ class ReprintServerPluginPackageTest extends TestCase {
         rmdir($this->project_directory);
     }
 
+    public function testPluginHeaderAndReadmeUseTheReprintDisplayName(): void {
+        $plugin_directory = $this->project_directory . '/reprint-server-wp/';
+        $this->assertStringContainsString(" * Plugin Name: Reprint\n", file_get_contents($plugin_directory . 'index.php'));
+        $this->assertStringStartsWith("=== Reprint ===\n", file_get_contents($plugin_directory . 'readme.txt'));
+    }
+
     /** @dataProvider versionProvider */
     public function testStampKeepsTheHeaderRuntimeAndReadmeVersionsTogether(string $version): void {
         exec('bash ' . escapeshellarg($this->project_directory . '/bin/stamp-plugin-version.sh') . ' ' . escapeshellarg($version) . ' 2>&1', $output, $exit_code);

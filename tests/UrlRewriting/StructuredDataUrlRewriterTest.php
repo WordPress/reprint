@@ -82,6 +82,44 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
     }
 
+    public function testShortcodeRewriteRetainsTheEnclosingHtmlAttribute(): void
+    {
+        $input = '<a title="[vc_btn link=\'url:https%3A%2F%2Fold-site.com%2F%27|title:x data-extra=changed y\']">Read</a>';
+        $output = $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP);
+        $html = new WP_HTML_Tag_Processor($output);
+        $this->assertTrue($html->next_tag('a'));
+        $this->assertNull($html->get_attribute('data-extra'));
+        $this->assertSame('[vc_btn link=\'url:https%3A%2F%2Fold-site.com%2F%27|title:x data-extra=changed y\']', $html->get_attribute('title'));
+    }
+
+    /** Each opener should be visited once, even when closers do not match. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    #[DataProvider('repeatedCloserTags')]
+    public function testRepeatedClosersDoNotRescanOrCopyTheOpenShortcodeStack(string $closer_tag): void
+    {
+        set_time_limit(5);
+        $input = '[vc_table]' . str_repeat('[a]', 50000) . str_repeat('[/' . $closer_tag . ']', 50000);
+        $this->assertSame($input, $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+    }
+
+    /** @return array<string,array{string}> Matching and unmatched closer runs. */
+    public static function repeatedCloserTags(): array
+    {
+        return ['unmatched' => ['b'], 'matching' => ['a']];
+    }
+
+    public function testClosingAnOuterShortcodeDiscardsItsNestedOpeners(): void
+    {
+        $old_html = '<a href="https://old-site.com/manual.pdf">Manual</a>';
+        $new_html = '<a href="https://new-site.com/manual.pdf">Manual</a>';
+        foreach (['[a][b][/a][/b]', '[a][a][/a][/a]', '[vc_raw_html][a][/vc_raw_html][/a]'] as $prefix) {
+            $input = $prefix . '[vc_raw_html]' . base64_encode($old_html) . '[/vc_raw_html]';
+            $expected = $prefix . '[vc_raw_html]' . base64_encode($new_html) . '[/vc_raw_html]';
+            $this->assertSame($expected, $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP));
+        }
+    }
+
     /** An empty child-path list still selects the multisite parser path. */
     public function testOrdinaryImportsKeepTheRawStyleAndBlockPaths(): void
     {
@@ -604,6 +642,94 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite($input);
         // Should not contain escaped slashes like \/
         $this->assertStringNotContainsString('\\/', $result);
+    }
+
+    /** Deep string wrappers stay intact under a fixed CLI memory ceiling. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testDeepSerializedStringsStayWithinTheMemoryCeiling(): void
+    {
+        ini_set('memory_limit', '128M');
+        $rewriter = $this->createRewriter();
+        foreach ([65525, 1024 * 1024] as $input_bytes) {
+            $input = $this->wrapSerializedString('https://old-site.com/photo', $input_bytes);
+            $started_at = microtime(true);
+            $this->assertSame($input, $rewriter->rewrite($input));
+            $this->assertLessThan(2.0, microtime(true) - $started_at);
+            $this->assertLessThan(64 * 1024 * 1024, memory_get_peak_usage(true));
+        }
+        // Returning from the depth limit must not affect the next database value.
+        $this->assertSame('https://new-site.com/photo', $rewriter->rewrite('https://old-site.com/photo'));
+    }
+
+    /** Container depth is separate from nested serialized string wrappers. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testDeepSerializedContainersStayUnchangedWithinTheMemoryCeiling(): void
+    {
+        ini_set('memory_limit', '64M');
+        $rewriter = $this->createRewriter(['https://old-site.com' => 'https://longer-destination.example']);
+        foreach (['a:1:{i:0;', 'O:8:"stdClass":1:{s:3:"key";'] as $prefix) {
+            $input = str_repeat($prefix, 100000) . serialize('https://old-site.com/photo') . str_repeat('}', 100000);
+            $started_at = microtime(true);
+            $this->assertSame($input, $rewriter->rewrite($input));
+            $this->assertLessThan(2.0, microtime(true) - $started_at);
+            $this->assertLessThan(48 * 1024 * 1024, memory_get_peak_usage(true));
+        }
+        $this->assertSame('https://longer-destination.example/photo', $rewriter->rewrite('https://old-site.com/photo'));
+        $this->assertSame('a:broken https://longer-destination.example/photo', $rewriter->rewrite('a:broken https://old-site.com/photo'));
+    }
+
+    /** Many string leaves under deeply nested JSON arrays stay within the memory ceiling. */
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testDeepJsonArraysWithManyLeavesStayWithinTheMemoryCeiling(): void
+    {
+        ini_set('memory_limit', '128M');
+        $rewriter = $this->createRewriter();
+        foreach ([16000, 350000] as $empty_leaves) {
+            $input = str_repeat('[', 511) . '"https://old-site.com/"' . str_repeat(',""', $empty_leaves) . str_repeat(']', 511);
+            $started_at = microtime(true);
+            $this->assertSame(str_replace('old-site.com', 'new-site.com', $input), $rewriter->rewrite($input));
+            $this->assertLessThan(2.0, microtime(true) - $started_at);
+            $this->assertLessThan(64 * 1024 * 1024, memory_get_peak_usage(true));
+        }
+    }
+
+    /** A value visited near the depth limit can still be fully rewritten on its own. */
+    public function testNestedRewriteCacheRespectsTheRemainingDepth(): void
+    {
+        $rewriter = $this->createRewriter();
+        $inner = serialize(serialize(serialize('https://old-site.com/photo')));
+        $input = $inner;
+        for ($depth = 0; $depth < 15; ++$depth) {
+            $input = serialize($input);
+        }
+        $this->assertSame($input, $rewriter->rewrite($input));
+        $this->assertSame(serialize(serialize(serialize('https://new-site.com/photo'))), $rewriter->rewrite($inner));
+    }
+
+    /** Shallow siblings still rewrite while an overly nested string remains opaque. */
+    public function testDeepSerializedFieldDoesNotPreventSiblingRewriting(): void
+    {
+        $deep = $this->wrapSerializedString('https://old-site.com/deep', 65525);
+        $input = serialize(['deep' => $deep, 'url' => 'https://old-site.com/photo']);
+        $output = unserialize($this->createRewriter()->rewrite($input), ['allowed_classes' => false]);
+        $this->assertSame($deep, $output['deep']);
+        $this->assertSame('https://new-site.com/photo', $output['url']);
+    }
+
+    /** Build a long wrapper chain without repeatedly copying its complete suffix. */
+    private function wrapSerializedString(string $value, int $minimum_bytes): string
+    {
+        $prefixes = [];
+        $bytes = strlen($value);
+        while ($bytes < $minimum_bytes) {
+            $prefix = 's:' . $bytes . ':"';
+            $prefixes[] = $prefix;
+            $bytes += strlen($prefix) + 2;
+        }
+        return implode('', array_reverse($prefixes)) . $value . str_repeat('";', count($prefixes));
     }
 
     // --- Serialized PHP ---

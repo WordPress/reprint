@@ -326,7 +326,7 @@ class NewSiteUrlTest extends TestCase
     public function testThrowsOnUnparseableExportUrl(): void
     {
         $client = new \ImportClient(
-            '://not-a-url',
+            'https://',
             $this->tempDir,
             $this->tempDir . '/fs-root'
         );

@@ -40,14 +40,14 @@ jobs:
           --health-retries=5
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: pdo, pdo_mysql, pdo_sqlite, mysqli, json, hash, zlib, mbstring
+          extensions: pdo, pdo_mysql, pdo_sqlite, mysqli, json, hash, zlib, mbstring, gd
 
       - run: composer install --no-interaction --prefer-dist
 
@@ -95,10 +95,10 @@ jobs:
           --health-timeout=5s
           --health-retries=5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.4'
           extensions: pdo, pdo_mysql, pdo_sqlite, mysqli, json, hash, zlib, mbstring
@@ -137,10 +137,10 @@ jobs:
           --health-timeout=5s
           --health-retries=5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.2'
           extensions: pdo, pdo_mysql, pdo_sqlite, mysqli, curl, mbstring
@@ -168,3 +168,16 @@ jobs:
           "$REPRINT_DB_PUSH_SERVER_PHP" -r 'if (class_exists("PDO") || !extension_loaded("mysqli")) { exit(1); }'
           "$REPRINT_DB_PUSH_CLIENT_PHP" -r 'if (extension_loaded("pdo_mysql") || !extension_loaded("mysqli")) { exit(1); }'
           ../vendor/bin/phpunit MySQLDumpProducer/DatabasePushTest.php MySQLDumpProducer/DatabasePushHttpTest.php
+
+  ci-result:
+    name: PHPUnit result
+    needs: [phpunit, mariadb-auto-increment, database-push-compatibility]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

@@ -657,9 +657,19 @@ final class PushFilesSender
             'push_session_id' => $this->state['push_session_id'],
         ], ['created']);
         if ($request_result['reason'] === 'commit_required') {
-            /** @var array{blocking_push_session_id:string} $response */
+            /** @var array{blocking_push_session_id?:mixed}|null $response */
             $response = $request_result['response'];
-            $this->state['blocking_push_session_id'] = $response['blocking_push_session_id'];
+            $blocking_push_session_id = $response['blocking_push_session_id'] ?? null;
+            if (!is_string($blocking_push_session_id) || preg_match('/^[a-f0-9]{32}$/D', $blocking_push_session_id) !== 1) {
+                $this->fail(
+                    'unexpected_response',
+                    'push_create returned commit_required with blocking_push_session_id '
+                    . json_encode($blocking_push_session_id, JSON_INVALID_UTF8_SUBSTITUTE)
+                    . '; expected a 32-character lowercase hexadecimal value.'
+                );
+                return;
+            }
+            $this->state['blocking_push_session_id'] = $blocking_push_session_id;
             $this->state['phase'] = 'finishing_previous_commit';
             $this->store_state($this->state);
             return;
@@ -701,20 +711,31 @@ final class PushFilesSender
     /**
      * Advances the commit which prevents this sender from creating its push session.
      *
-     * One step sends one commit request. The target owns that commit checkpoint,
+     * A step sends at most one commit request. The target owns that commit checkpoint,
      * so a later process can continue it from the saved blocking push session ID.
+     * A push_not_found refusal ends the run and leaves creating for the next resume.
      */
     private function finish_previous_commit(): void
     {
         $blocking_push_session_id = $this->state['blocking_push_session_id'];
-        if ($blocking_push_session_id === null) {
-            throw new LogicException(
-                'The finishing_previous_commit phase requires a blocking_push_session_id.'
-            );
+        if (!is_string($blocking_push_session_id) || preg_match('/^[a-f0-9]{32}$/D', $blocking_push_session_id) !== 1) {
+            // Older senders saved this target field without validating it.
+            // Return to creating without sending a request for that value.
+            $this->state['blocking_push_session_id'] = null;
+            $this->state['phase'] = 'creating';
+            $this->store_state($this->state);
+            return;
         }
         $request_result = $this->push_stream_client->send_push_request('POST', 'push_commit', [
             'push_session_id' => $blocking_push_session_id,
         ], ['accepted']);
+        if ($request_result['reason'] === 'push_not_found') {
+            // End this run on the refusal. A later resume can ask to create
+            // again instead of committing a session the target no longer has.
+            $this->state['blocking_push_session_id'] = null;
+            $this->state['phase'] = 'creating';
+            $this->store_state($this->state);
+        }
         if ($this->handle_request_failure($request_result)) {
             return;
         }

@@ -300,6 +300,12 @@ it is the only key source; the settings page shows its keys read-only and refuse
 cannot be granted push access individually, so a platform that pushes to such sites sets
 `REPRINT_SERVER_PUSH_ENABLED` (see the plugin README).
 
+Every push deployment must also configure `reprint_directory` as a private
+directory outside all web-served trees, on the same filesystem as the document
+root. There is no default. Set it through the early `reprint_server_api_options`
+filter shown in the [plugin configuration guide](reprint-server-wp/README.md#platform-configuration).
+Pull endpoints do not require this setting.
+
 **Connection tokens.** On a host without OpenSSL both sides must share the same secret string. The plugin has a UI
 screen where the user can paste the secret, and then the importer must be fed the same string through
 `--secret=TOKEN` (more details below). Alternatively, the plugin can be pre-packaged with a
@@ -345,7 +351,7 @@ php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
 
-Reprint rejects HTTP remote Reprint API URLs before selecting remote state or making requests unless `--insecure` explicitly allows an unencrypted connection. This applies to every remote command, including local-only commands and local hosts. The supplied URL's scheme is never changed.
+Remote Reprint API URLs must start with `https://` or `http://`; URLs without a scheme and other schemes are rejected. Reprint rejects HTTP remote Reprint API URLs before selecting remote state or making requests unless `--insecure` explicitly allows an unencrypted connection. This applies to every remote command, including local-only commands and local hosts. The supplied URL's scheme is never changed.
 
 For a site with an expired, self-signed, or wrong-hostname HTTPS certificate, `--insecure` also skips certificate and hostname verification. HTTPS stays encrypted, but Reprint cannot verify the server's identity; an attacker on the connection can read or modify transferred content. This does not repair other TLS handshake failures. `REPRINT_INSECURE_TLS=1` is an alternative to the flag; unset it or set it to `0` to keep the default checks. The choice is not saved in migration state, so supply it again when resuming.
 
@@ -571,8 +577,8 @@ To fetch plugins skipped by a completed pull, start another `pull-files` with
 with that flag. This cannot restore plugin activation removed by an earlier
 import. Runtime setup itself does not connect to or edit the database.
 
-Mirror mode requires `--state-dir` to be outside `--fs-root`, because the state
-files must not appear in the local tree being compared. The selected mode is
+File pulls require `--state-dir` to be outside `--fs-root` in both modes.
+Downloaded files must not replace the state used to resume a pull. The selected mode is
 saved when `files-pull` starts. To switch modes, first run the same command with
 `--abort`, then start it again with the other `--mode` value.
 
@@ -636,6 +642,15 @@ symlink is copied as a link without indexing its target. A selected path reached
 through a symlinked parent is rejected; use the default or
 `--follow-symlinks` so Reprint can preserve the requested link path and index
 the physical target.
+
+Local symlink targets are resolved through existing links before parent segments
+are applied. Missing target paths may stay dangling inside `--fs-root`. File,
+directory, and symlink parts check the physical parent before replacing a path.
+A resumed file is checked before truncation or append. Retained file paths are
+checked again before source timestamps are applied because later parts may change
+the links in those paths. Preserve-local skips a blocked shared parent and keeps
+downloading other files. An empty source directory may be remapped directly onto
+an existing `--fs-root` directory.
 
 #### Pull only files.
 
@@ -859,6 +874,32 @@ decodes the base64-encoded column values, detects the data format (serialized PH
 JSON, block markup, plain text), and rewrites URLs through the appropriate parser
 so that surrounding structure stays intact. Serialized PHP `s:N:` length prefixes
 are recalculated, JSON is re-encoded, and block comment attributes are updated.
+Rewriting allows at most 16 active calls through nested encoded strings. Values
+below that depth stay unchanged; shallower sibling values are still rewritten.
+
+For MySQL and MariaDB targets, `db-apply` and `db-pull --sql-output=mysql`
+check named full-text parsers in exported `CREATE TABLE` statements against
+the target's active full-text parser plugins. If a parser is unavailable,
+Reprint omits that index's `WITH PARSER` clause and keeps the index and its
+columns. The target's default parser is used instead, so search matches and
+ranking may change. Supported parsers remain unchanged. The saved `db.sql`
+is never edited by this fallback.
+
+Each omitted parser produces a JSONL warning, an audit-log entry, and a
+message in terminal mode. Callers can detect the warning by its `type` and
+`reason` fields:
+
+```json
+{
+  "type": "warning",
+  "phase": "sql",
+  "reason": "unsupported_fulltext_parser",
+  "table": "wp_articles",
+  "index": "content_search",
+  "parser": "ngram",
+  "message": "The target has no active full-text parser 'ngram'. Omitting it from index 'content_search' on table 'wp_articles' and using the default parser; search matches and ranking may change."
+}
+```
 
 You can map multiple domains by repeating the flag:
 
@@ -895,6 +936,10 @@ php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
     --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=nginx-fpm
 # Include $RUNTIME_DIR/nginx.conf in your nginx configuration, then reload
 ```
+
+The nginx runtime keeps document roots and host names as literal configuration
+values, including spaces and punctuation. Dollar signs and control characters
+in the document root, output path, or host are rejected before files are written.
 
 The command accepts either `--fs-root` (the raw download directory — the remote
 `document_root` path is appended automatically) or `--flat-document-root` (a
@@ -1366,6 +1411,17 @@ The `sourceSite` object contains the source WordPress home URL, site URL, table
 prefix, WordPress database charset, and database server charset reported by
 preflight. Each field is `null` when preflight did not report it.
 
+The `key` object describes the private key stored for this remote at
+`<remote-state-directory>/key.pem`, the key remote commands sign with when given
+no `--secret` or `--private-key-path`. It holds the key `id`, the private key
+`path`, and the one-line `publicKey` to enroll on the site. It is `null` when no
+key is stored, so a host integration can tell whether to run `keygen` and can
+enroll the existing public key again after the site reports `AUTH_UNKNOWN_KEY`:
+
+```bash
+php reprint.phar pull-metadata "$URL" --state-dir="$STATE_DIR" | jq -r '.key.publicKey'
+```
+
 #### `<remote-state-directory>/pull/volatile-files.json` — files that changed during sync
 
 During `files-pull`, a file on the source may be modified while the importer is
@@ -1389,6 +1445,11 @@ the caller can decide what to do — re-run the sync, ignore them, or ask the us
 Files that are subsequently downloaded successfully are automatically removed
 from the tracker. The file is deleted entirely once all entries are cleared.
 
+File errors from a file-fetch response use the same path mapping and selection
+as file downloads. Their base64 paths are decoded before local cleanup and
+remote-index invalidation. Errors during database or index work do not remove
+local files. Existing parent links are checked before a file is removed.
+
 #### `audit.log` — append-only event log
 
 Every significant event during import is recorded in `audit.log` as a
@@ -1401,6 +1462,11 @@ truncated or rotated, so it provides a complete history of the migration.
 [2025-01-15 10:30:05] VOLATILE CLEARED | path=/srv/htdocs/wp-content/debug.log
 [2025-01-15 10:31:12] FILE TRUNCATE | /tmp/reprint-state/remotes/0123456789abcdef0123456789abcdef/pull/index.wal | pull index WAL batch applied
 ```
+
+New state directories use mode `0700`. The audit log uses mode `0600`, including
+older logs on the next append. Command and request log entries mask database
+password options, URL user-info, and `SECRET_KEY` query values. Request URLs are
+unchanged.
 
 Pass `--verbose` to also print audit log entries to the console as they happen.
 This is useful for debugging but noisy for production use.
@@ -1423,8 +1489,13 @@ php reprint.phar <command> <URL> --state-dir=DIR --fs-root=DIR [options]
 * `db-apply` — Applies `db.sql` to a target MySQL or SQLite database. Both engines continue from the file group named by the cursor stored in the target. Accepts `--rewrite-url FROM TO` (repeatable) to rewrite domains during import.
 * `db-rewrite-urls` — Rewrites URLs directly in an existing MySQL or SQLite database. You can stop it and continue later. See [Rewrite URLs in a live database](docs/DB-REWRITE-URLS.md).
 * `db-index` — Indexes database tables and their statistics (name, row count, size) to `db-tables.jsonl`.
-* `pull-metadata` — Prints pull lifecycle and source-site metadata as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
+* `pull-metadata` — Prints pull lifecycle, source-site metadata, and the stored key as JSON. The remote Reprint API URL selects the pull state; no network calls are made.
 * `flat-docroot` — Reassemble pulled files into a standard WordPress directory layout using symlinks. Useful when the source site has a non-standard layout (e.g. WP Cloud with ABSPATH separate from wp-content).
 * `apply-runtime` — Generates server configuration files (`runtime.php`, `start.sh` or `nginx.conf`) from the pull state selected by the remote Reprint API URL. No network calls are made. See [Step 6](#step-6--generate-runtime-configuration).
 
 All commands except `preflight-assert` support `--abort` to abort the current sync and exit. For `files-pull`, this clears sync progress but keeps the remote index and downloaded files — the next run performs a delta sync. For `db-pull` and `db-index`, it clears the output file so the next run starts from scratch. Interrupted commands automatically resume from the last saved cursor.
+
+For `files-push`, `--abort` clears the local sender checkpoint and plan without
+contacting the target. It needs no preflight or credential. The completed local
+index, pull state, local files, and target files stay unchanged. A target commit
+already in progress is not cancelled; the next push may still need to finish it.

@@ -659,7 +659,7 @@ class ImportClient
 
         // Create directories
         if (!is_dir($this->pull_state_directory)) {
-            if (!mkdir($this->pull_state_directory, 0755, true)) {
+            if (!mkdir($this->pull_state_directory, 0700, true)) {
                 throw new RuntimeException("Failed to create directory: {$this->pull_state_directory}");
             }
         }
@@ -691,6 +691,9 @@ class ImportClient
     /**
      * Refuses a remote Reprint API URL that no command can use.
      *
+     * A URL such as example.com/?reprint-api makes cURL guess HTTP. Require
+     * an explicit HTTP or HTTPS scheme before creating state or making requests.
+     *
      * For example, appending &endpoint=preflight to /?reprint-api#section
      * puts the endpoint after #, where cURL treats it as a URL fragment and
      * never sends it. The server would receive /?reprint-api with no endpoint.
@@ -698,10 +701,25 @@ class ImportClient
      *
      * @param string $remote_reprint_api_url Remote Reprint API URL as supplied.
      * @param bool   $allow_http             Whether an unencrypted http:// URL is accepted.
-     * @throws InvalidArgumentException When the URL uses HTTP without permission or contains a fragment.
+     * @throws InvalidArgumentException When the URL lacks an HTTP(S) prefix, uses HTTP without permission, or contains a fragment.
      */
     public static function validate_remote_reprint_api_url(string $remote_reprint_api_url, bool $allow_http): void
     {
+        // Local-only commands can select saved state without a remote URL.
+        if ($remote_reprint_api_url === '') {
+            return;
+        }
+        if (
+            strncasecmp($remote_reprint_api_url, 'https://', 8) !== 0
+            && strncasecmp($remote_reprint_api_url, 'http://', 7) !== 0
+        ) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The scheme describes rejected CLI input, never HTML output.
+                'The remote Reprint API URL must start with https:// or http://; observed scheme ' .
+                json_encode(parse_url($remote_reprint_api_url, PHP_URL_SCHEME)) . '. ' .
+                'Provide a full URL such as https://example.com/?reprint-api.'
+            );
+        }
         if (!$allow_http && strncasecmp($remote_reprint_api_url, 'http://', 7) === 0) {
             throw new InvalidArgumentException(
                 'The remote Reprint API URL you provided uses HTTP. '
@@ -751,12 +769,20 @@ class ImportClient
         $timestamp = date("Y-m-d H:i:s");
         $log_line = "[{$timestamp}] {$message}\n";
 
-        // Always write to audit log
-        file_put_contents($this->audit_log_file, $log_line, FILE_APPEND);
+        // New logs start private; tighten older logs before appending.
+        $previous_umask = umask(0077);
+        try {
+            if (is_file($this->audit_log_file) && !chmod($this->audit_log_file, 0600)) {
+                throw new RuntimeException("Failed to set audit log permissions: {$this->audit_log_file}");
+            }
+            file_put_contents($this->audit_log_file, $log_line, FILE_APPEND);
+        } finally {
+            umask($previous_umask);
+        }
 
         // Output to console if verbose mode or if explicitly requested
         if ($to_console && $this->verbose_mode) {
-            fwrite($this->progress_fd, $log_line);
+            fwrite($this->progress_fd, "[{$timestamp}] " . TerminalProgress::escape_text($message) . "\n");
         }
     }
 
@@ -860,10 +886,7 @@ class ImportClient
         // Mask the positional remote URL to avoid logging secrets embedded in query strings.
         $masked = $argv;
         if (isset($masked[2]) && strpos($masked[2], '-') !== 0) {
-            $masked[2] = preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked[2]);
-            if (in_array($command, ['files-push', 'db-push'], true)) {
-                $masked[2] = self::mask_url_credentials($masked[2]);
-            }
+            $masked[2] = self::mask_url_credentials($masked[2]);
         }
         foreach ($masked as $argument_index => $argument) {
             if (!is_string($argument)) {
@@ -877,6 +900,9 @@ class ImportClient
             }
             if (strpos($argument, '--target-pass=') === 0) {
                 $masked[$argument_index] = '--target-pass=***';
+            }
+            if (strpos($argument, '--mysql-password=') === 0) {
+                $masked[$argument_index] = '--mysql-password=***';
             }
         }
         $this->audit_log(
@@ -972,7 +998,7 @@ class ImportClient
                 ? " (changed {$changes} times — may be too volatile to sync)"
                 : " (changed {$changes} time" . ($changes > 1 ? "s" : "") . ")";
             $this->audit_log("  VOLATILE FILE | path={$path} | count={$changes}");
-            $this->progress->show_lifecycle_line("  {$path}{$suffix}\n");
+            $this->progress->show_lifecycle_line("  " . TerminalProgress::escape_text($path) . "{$suffix}\n");
         }
 
         $this->output_progress(
@@ -1114,6 +1140,30 @@ class ImportClient
             return;
         }
         if ($command === "files-push") {
+            if ($abort) {
+                $options['insecure'] = $this->insecure;
+                $context = $options['files_push_context'] ?? self::prepare_files_push_context(
+                    $this->remote_reprint_api_url,
+                    $this->state_dir,
+                    $this->filesystem_root,
+                    $options
+                );
+                $push_state_directory = $context['push_state_directory'];
+                // Local abort does not read sender JSON or contact the target.
+                // Keep the completed local index and all pull state unchanged.
+                $this->remove_local_plan_directory(wp_join_unix_paths($push_state_directory, 'plan'));
+                foreach (['excluded_paths.json', 'excluded_paths.json.tmp', 'sender.json.tmp', 'sender.json'] as $state_file) {
+                    $state_path = wp_join_unix_paths($push_state_directory, $state_file);
+                    if (is_file($state_path) && !unlink($state_path)) {
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Reports a local cleanup path to the CLI, not HTML.
+                        throw new RuntimeException('Failed to remove local files-push state: ' . $state_path . '.');
+                    }
+                }
+                $this->audit_log('ABORT files-push | Local sender state and plan cleared.');
+                $this->progress->show_lifecycle_line("Local files-push state cleared; target unchanged.\n");
+                $this->output_progress(['status' => 'aborted', 'message' => 'Local files-push state cleared; target unchanged.']);
+                return;
+            }
             if (is_file($this->pull_index_wal_path)) {
                 throw new RuntimeException(
                     "Finish or abort the interrupted files-pull before running files-push."
@@ -1261,21 +1311,22 @@ class ImportClient
             $this->files_pull_mode =
                 $requested_files_pull_mode ?? $saved_files_pull_mode;
 
-            $absolute_state_directory = Utils::realpath_with_missing_tail(
-                $this->state_dir[0] === "/"
-                    ? $this->state_dir
-                    : wp_join_unix_paths(getcwd() ?: "/", $this->state_dir)
-            );
+            // The constructor has created the state directory. Resolve that
+            // existing path before interpreting parent segments around aliases.
+            $absolute_state_directory = realpath($this->state_dir);
+            if ($absolute_state_directory === false) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem path shown as CLI text, not HTML.
+                throw new RuntimeException("Failed to resolve state directory: {$this->state_dir}");
+            }
             if (
                 !$abort
-                && $this->files_pull_mode === "mirror"
                 && Utils::relative_path_under(
-                    $absolute_state_directory,
-                    $this->filesystem_root
+                    Utils::normalize_path_separators($absolute_state_directory, Utils::native_path_format()),
+                    Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format())
                 ) !== null
             ) {
                 throw new InvalidArgumentException(
-                    "--mode=mirror requires --state-dir to be outside --fs-root."
+                    "File pulls require --state-dir to be outside --fs-root."
                 );
             }
             $this->get_state()->files_pull_mode = $this->files_pull_mode;
@@ -1676,6 +1727,12 @@ class ImportClient
             foreach ($this->get_state()->apply->remote_paths_removed_from_local_site as $document_root_relative_path) {
                 $excluded_paths[] = base64_encode(ltrim(wp_join_unix_paths($document_root, $document_root_relative_path), '/'));
             }
+            foreach ($this->local_sqlite_artifact_paths() as $local_absolute_path) {
+                $local_relative_path = Utils::relative_path_under($local_absolute_path, $this->filesystem_root);
+                if ($local_relative_path !== null) {
+                    $excluded_paths[] = base64_encode($local_relative_path);
+                }
+            }
             $excluded_paths_path = wp_join_unix_paths($plan_directory, 'local_exclusions.json');
             if (file_put_contents($excluded_paths_path, json_encode($excluded_paths, JSON_THROW_ON_ERROR)) === false) {
                 throw new RuntimeException('Failed to write local exclusions: ' . $excluded_paths_path . '.');
@@ -1954,6 +2011,14 @@ class ImportClient
         $memory_limit_bytes = $memory_limit_value === '' || $memory_limit_value === '-1'
             ? -1
             : Utils::parse_size($memory_limit_value);
+        $excluded_paths = $this->get_state()->apply->remote_paths_removed_from_local_site;
+        $local_document_root = $this->path_mapper()->remote_path_to_local_path($document_root);
+        foreach ($this->local_sqlite_artifact_paths() as $local_absolute_path) {
+            $document_root_relative_path = Utils::relative_path_under($local_absolute_path, $local_document_root);
+            if ($document_root_relative_path !== null) {
+                $excluded_paths[] = $document_root_relative_path;
+            }
+        }
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
             'document_root' => $document_root,
@@ -1969,7 +2034,7 @@ class ImportClient
             'allow_http' => $options['allow_http'] ?? false,
             'insecure' => $this->insecure,
             'chunk_bytes' => $chunk_bytes,
-            'excluded_paths' => $this->get_state()->apply->remote_paths_removed_from_local_site,
+            'excluded_paths' => $excluded_paths,
         ];
 
         $resuming = is_file(wp_join_unix_paths($context['push_state_directory'], 'sender.json'));
@@ -2144,7 +2209,7 @@ class ImportClient
         // Emit the final JSON line after any preceding progress records.
         if ($this->uses_terminal_progress() && !$this->verbose_mode) {
             $this->progress->clear_progress_line();
-            $this->progress->show_lifecycle_line($result['message'] . "\n");
+            $this->progress->show_lifecycle_line(TerminalProgress::escape_text($result['message']) . "\n");
             return;
         }
         $result_json = json_encode($result, JSON_INVALID_UTF8_SUBSTITUTE);
@@ -2160,6 +2225,25 @@ class ImportClient
     {
         return $this->progress_output_mode === 'tty'
             || ( $this->progress_output_mode === 'auto' && $this->is_tty );
+    }
+
+    /**
+     * Local database files belong to db-push, not the filesystem comparison.
+     *
+     * @return string[] Local absolute paths of the active SQLite database and its companions.
+     */
+    private function local_sqlite_artifact_paths(): array
+    {
+        $apply = $this->get_state()->apply;
+        if ($apply->target_engine !== 'sqlite' || $apply->target_sqlite_path === null) {
+            return [];
+        }
+        $database_path = Utils::realpath_with_missing_tail($apply->target_sqlite_path);
+        $paths = [];
+        foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+            $paths[] = $database_path . $suffix;
+        }
+        return $paths;
     }
 
     /**
@@ -2407,6 +2491,7 @@ class ImportClient
      * @param array $options {
      *     Parsed files-push options.
      *
+     *     @type bool   $abort      Clear local sender state without requiring a credential.
      *     @type string $secret     HMAC connection token.
      *     @type bool   $insecure   Allow HTTP and skip HTTPS certificate checks.
      *     @type bool   $allow_http Whether the operator allowed a plain-HTTP target.
@@ -2427,12 +2512,14 @@ class ImportClient
         string $filesystem_root,
         array $options
     ): array {
-        $credential = self::resolve_credential(
-            $options,
-            self::remote_state_directory_path($remote_reprint_api_url, $state_dir)
-        );
-        if ($credential['scheme'] === null) {
-            throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
+        if (empty($options['abort'])) {
+            $credential = self::resolve_credential(
+                $options,
+                self::remote_state_directory_path($remote_reprint_api_url, $state_dir)
+            );
+            if ($credential['scheme'] === null) {
+                throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
+            }
         }
         if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
             throw new InvalidArgumentException(
@@ -2712,6 +2799,29 @@ class ImportClient
         return $contents;
     }
 
+    /**
+     * Opens the key a resolved credential read, naming its file on failure.
+     *
+     * @param array $credential {
+     *     A resolve_credential() result whose scheme is 'key'.
+     *
+     *     @type string $private_key_pem Contents of the key file.
+     *     @type string $path            The key file.
+     * }
+     * @throws InvalidArgumentException When the file does not hold an RSA private key.
+     */
+    private static function public_key_client_for_credential(array $credential): \WordPress\Reprint\Server\PublicKeyClient
+    {
+        try {
+            return new \WordPress\Reprint\Server\PublicKeyClient($credential['private_key_pem']);
+        } catch (InvalidArgumentException $exception) {
+            throw new InvalidArgumentException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error naming a local file, never HTML.
+                "The private key at {$credential['path']} could not be used: " . $exception->getMessage()
+            );
+        }
+    }
+
     /** The sentence every remote command throws when it finds no credential. */
     private static function no_credential_message(string $remote_reprint_api_url, string $state_dir): string
     {
@@ -2748,13 +2858,7 @@ class ImportClient
             return new \Site_Export_HMAC_Client($credential['secret']);
         }
         if ($credential['scheme'] === 'key') {
-            try {
-                return new \WordPress\Reprint\Server\PublicKeyClient($credential['private_key_pem']);
-            } catch (InvalidArgumentException $exception) {
-                throw new InvalidArgumentException(
-                    "The private key at {$credential['path']} could not be used: " . $exception->getMessage()
-                );
-            }
+            return self::public_key_client_for_credential($credential);
         }
         throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
     }
@@ -2820,7 +2924,7 @@ class ImportClient
         }
     }
 
-    /** Masks URL authority credentials without changing the URL used to name the local push state directory. */
+    /** Masks URL credentials without changing the URL used for requests or local state paths. */
     private static function mask_url_credentials(string $url): string
     {
         $masked = preg_replace(
@@ -2828,7 +2932,8 @@ class ImportClient
             '$1***@',
             $url
         );
-        return is_string($masked) ? $masked : $url;
+        $masked = is_string($masked) ? $masked : $url;
+        return preg_replace('/SECRET_KEY=[^&\s]+/', 'SECRET_KEY=***', $masked) ?? $masked;
     }
 
     /**
@@ -3067,14 +3172,7 @@ class ImportClient
             if (!class_exists(\WordPress\Reprint\Server\PublicKeyClient::class)) {
                 throw new RuntimeException('Streaming exporter runtime not found. Run composer install before using --private-key-path.');
             }
-            try {
-                $this->public_key_client = new \WordPress\Reprint\Server\PublicKeyClient($this->credential['private_key_pem']);
-            } catch (InvalidArgumentException $exception) {
-                throw new InvalidArgumentException(
-                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error naming a local file, never HTML.
-                    "The private key at {$this->credential['path']} could not be used: " . $exception->getMessage()
-                );
-            }
+            $this->public_key_client = self::public_key_client_for_credential($this->credential);
         }
     }
 
@@ -3084,7 +3182,7 @@ class ImportClient
     public function run_preflight(): void
     {
         ["url" => $url, "params" => $post_data] = $this->build_request("preflight", null);
-        $this->audit_log("PREFLIGHT REQUEST | {$url}", false);
+        $this->audit_log("PREFLIGHT REQUEST | " . self::mask_url_credentials($url), false);
 
         // Try each User-Agent until one gets a JSON response or Reprint
         // itself refuses the request.
@@ -3661,7 +3759,7 @@ class ImportClient
         $failed_checks = [];
         foreach ($checks as $check) {
             $icon = $check["pass"] ? "PASS" : "FAIL";
-            $human_summary .= "[{$icon}] {$check["label"]}: {$check["detail"]}\n";
+            $human_summary .= "[{$icon}] " . TerminalProgress::escape_text($check["label"] . ": " . $check["detail"]) . "\n";
             if (!$check["pass"]) {
                 $failed_checks[] = "{$check["label"]}: {$check["detail"]}";
             }
@@ -3674,7 +3772,7 @@ class ImportClient
         $message = $all_pass
             ? "Migration looks feasible."
             : "Error: " . $error['message'];
-        $human_summary .= "\n{$message}\n";
+        $human_summary .= "\n" . TerminalProgress::escape_text($message) . "\n";
         $this->progress->show_lifecycle_line($human_summary);
         $this->output_progress([
             "type" => "preflight_assertion",
@@ -4777,7 +4875,7 @@ class ImportClient
                 "FOLLOW SYMLINK | indexing remote directory: {$dir}",
                 true,
             );
-            $this->progress->show_lifecycle_line("Following symlink target: {$dir}\n");
+            $this->progress->show_lifecycle_line("Following symlink target: " . TerminalProgress::escape_text($dir) . "\n");
             $this->output_progress([
                 "type" => "symlink_follow",
                 "directory" => $dir,
@@ -4813,7 +4911,7 @@ class ImportClient
                                 substr($msg, 0, 200),
                             true,
                         );
-                        $this->progress->show_lifecycle_line("  Skipped (server rejected): {$dir}\n");
+                        $this->progress->show_lifecycle_line("  Skipped (server rejected): " . TerminalProgress::escape_text($dir) . "\n");
                         $this->output_progress([
                             "type" => "symlink_follow_rejected",
                             "directory" => $dir,
@@ -5027,6 +5125,9 @@ class ImportClient
             // Validate that the symlink target doesn't escape the filesystem root.
             $root = $this->filesystem_root;
             try {
+                // An in-root target does not mean the link's parent is in-root.
+                // A local alias can point out to a shared directory and back in.
+                $this->assert_local_path_within_root(dirname($local_absolute_path));
                 $this->assert_symlink_target_within_root(
                     dirname($local_absolute_path),
                     $symlink_target,
@@ -5405,6 +5506,15 @@ class ImportClient
      *                                   remain. Current pulls do not defer
      *                                   files, so this is always false.
      *     @type mixed $pullStage        Last completed pull stage.
+     *     @type array|null $key {
+     *         The key.pem in the remote state directory, which remote
+     *         commands sign with when given no --secret or
+     *         --private-key-path. Null when no key is stored.
+     *
+     *         @type string $id        Fingerprint the site lists the key under.
+     *         @type string $path      Private key file.
+     *         @type string $publicKey One-line public key to enroll on the site.
+     *     }
      *     @type array $sourceSite {
      *         Source-site values reported by preflight.
      *
@@ -5431,6 +5541,7 @@ class ImportClient
      *     hasLocalIndex: bool,
      *     hasSkippedFiles: bool,
      *     pullStage: mixed,
+     *     key: array{id: string, path: string, publicKey: string}|null,
      *     sourceSite: array{
      *         homeUrl: string|null,
      *         siteUrl: string|null,
@@ -5454,6 +5565,17 @@ class ImportClient
         $wordpress = $database["wp"] ?? [];
         $paths_urls = $wordpress["paths_urls"] ?? [];
         $runtime_manifest = runtime_manifest_for($preflight_data);
+        // With no options, credential resolution finds only the stored key.
+        $stored_key = self::resolve_credential([], $this->remote_state_directory);
+        $key = null;
+        if ($stored_key['scheme'] === 'key') {
+            $public_key_client = self::public_key_client_for_credential($stored_key);
+            $key = [
+                "id" => $public_key_client->get_key_id(),
+                "path" => $stored_key['path'],
+                "publicKey" => $public_key_client->get_public_key(),
+            ];
+        }
 
         return [
             "hasCompletedOnce" => $pull->has_completed_once,
@@ -5462,6 +5584,7 @@ class ImportClient
                 filesize($this->local_index_file) > 0,
             "hasSkippedFiles" => false,
             "pullStage" => $pull->last_completed_stage,
+            "key" => $key,
             "sourceSite" => [
                 "homeUrl" => $wordpress["home"] ?? null,
                 "siteUrl" => $wordpress["siteurl"] ?? null,
@@ -5830,13 +5953,13 @@ class ImportClient
             "message" => "apply-runtime complete (runtime: {$runtime})",
         ]);
 
-        $human_summary = "\nRuntime: {$runtime}\nSource host: {$webhost}\n";
+        $human_summary = "\nRuntime: {$runtime}\nSource host: " . TerminalProgress::escape_text($webhost) . "\n";
         if ($target_engine !== null) {
             $human_summary .= "Target database: {$target_engine}\n";
         }
         $human_summary .= "\n";
         foreach ($summary as $line) {
-            $human_summary .= "{$line}\n";
+            $human_summary .= TerminalProgress::escape_text($line) . "\n";
         }
         $this->progress->show_lifecycle_line($human_summary);
     }
@@ -7174,7 +7297,7 @@ class ImportClient
                     'message' => $skip_message,
                 ], true);
                 $this->progress->clear_progress_line();
-                $this->progress->show_lifecycle_line($skip_message . "\n");
+                $this->progress->show_lifecycle_line(TerminalProgress::escape_text($skip_message) . "\n");
             }
 
             $message = sprintf(
@@ -7472,7 +7595,7 @@ class ImportClient
                 $this->audit_log(
                     "DB-APPLY | defaulting SQLite path to: {$target_path}"
                 );
-                $this->progress->show_lifecycle_line("SQLite path: {$target_path}\n");
+                $this->progress->show_lifecycle_line("SQLite path: " . TerminalProgress::escape_text($target_path) . "\n");
             }
 
             if ($save_runtime_target) {
@@ -8217,10 +8340,76 @@ class ImportClient
                         'message' => $rewritten['message'],
                     ], true);
                     $this->progress->clear_progress_line();
-                    $this->progress->print_line($rewritten['message'] . "\n");
+                    $this->progress->print_line(TerminalProgress::escape_text($rewritten['message']) . "\n");
                 }
                 if ($stmt_rewriter !== null) {
                     $query = $stmt_rewriter->rewrite($query);
+                }
+                // A source's full-text parser (for example, MySQL's ngram) may not
+                // exist on the target. Keep the index, omit unavailable parser
+                // clauses, and warn callers because default parsing can change searches.
+                if (stripos($query, 'PARSER') !== false) {
+                    $tokens = ( new \WP_MySQL_Lexer($query) )->remaining_tokens();
+                    if (
+                        ( $tokens[0]->id ?? null ) === \WP_MySQL_Lexer::CREATE_SYMBOL
+                        && ( $tokens[1]->id ?? null ) === \WP_MySQL_Lexer::TABLE_SYMBOL
+                    ) {
+                        $table_name = $tokens[2]->get_value();
+                        $index_name = null;
+                        $omitted_bytes = 0;
+                        foreach ($tokens as $token_index => $token) {
+                            if ($token->id === \WP_MySQL_Lexer::FULLTEXT_SYMBOL) {
+                                $index_name_position = $token_index + 1;
+                                if (in_array($tokens[$index_name_position]->id, [
+                                    \WP_MySQL_Lexer::KEY_SYMBOL,
+                                    \WP_MySQL_Lexer::INDEX_SYMBOL,
+                                ], true)) {
+                                    ++$index_name_position;
+                                }
+                                $index_name = $tokens[$index_name_position]->get_value();
+                            }
+                            if (
+                                $token->id !== \WP_MySQL_Lexer::WITH_SYMBOL
+                                || ( $tokens[$token_index + 1]->id ?? null ) !== \WP_MySQL_Lexer::PARSER_SYMBOL
+                                || !isset($tokens[$token_index + 2])
+                            ) {
+                                continue;
+                            }
+                            $parser_token = $tokens[$token_index + 2];
+                            $parser_name = $parser_token->get_value();
+                            $parser_result = $connection->query(
+                                "SELECT PLUGIN_NAME FROM INFORMATION_SCHEMA.PLUGINS " .
+                                "WHERE PLUGIN_NAME = ? AND PLUGIN_TYPE = 'FTPARSER' AND PLUGIN_STATUS = 'ACTIVE'",
+                                [$parser_name]
+                            );
+                            $parser_is_available = $parser_result->fetchColumn() !== false;
+                            $parser_result->closeCursor();
+                            if ($parser_is_available) {
+                                continue;
+                            }
+
+                            // Token offsets refer to the original query, including executable
+                            // comment wrappers. Leave those wrappers and the index intact.
+                            $clause_bytes = $parser_token->start + $parser_token->length - $token->start;
+                            $query = substr_replace($query, '', $token->start - $omitted_bytes, $clause_bytes);
+                            $omitted_bytes += $clause_bytes;
+                            $message = "The target has no active full-text parser '{$parser_name}'. " .
+                                "Omitting it from index '{$index_name}' on table '{$table_name}' and using the default parser; " .
+                                "search matches and ranking may change.";
+                            $this->audit_log($message, false);
+                            $this->output_progress([
+                                'type' => 'warning',
+                                'phase' => 'sql',
+                                'reason' => 'unsupported_fulltext_parser',
+                                'table' => $table_name,
+                                'index' => $index_name,
+                                'parser' => $parser_name,
+                                'message' => $message,
+                            ], true);
+                            $this->progress->clear_progress_line();
+                            $this->progress->print_line(TerminalProgress::escape_text($message) . "\n");
+                        }
+                    }
                 }
                 // The exporter applies its packet-size cap to each statement.
                 // Keep each MySQL command within that cap even when one
@@ -8670,6 +8859,8 @@ class ImportClient
         $tracked_file = $this->get_state()->current_file ?? null;
         $tracked_bytes = $this->get_state()->current_file_bytes ?? null;
         if ($tracked_file !== null && $tracked_bytes !== null && file_exists($tracked_file)) {
+            $this->assert_local_path_within_root(dirname($tracked_file));
+            $this->assert_local_path_within_root($tracked_file);
             $actual_size = filesize($tracked_file);
             if ($actual_size > $tracked_bytes) {
                 $this->audit_log(
@@ -8696,7 +8887,7 @@ class ImportClient
         }
         ["url" => $url, "params" => $request_params] = $this->build_request("file_fetch", $cursor, $params);
         $post_data = array_merge($request_params, $post_data ?? []);
-        $this->audit_log("Downloading file fetch from {$url}");
+        $this->audit_log("Downloading file fetch from " . self::mask_url_credentials($url));
         $this->audit_log("POST data: " . json_encode($post_data));
 
         $context = new StreamingContext();
@@ -9795,6 +9986,8 @@ class ImportClient
             $local_absolute_path = $this->path_mapper()->remote_path_to_local_path(
                 $remote_deletion_root
             );
+            // Unlinking a leaf symlink is fine; traversing an external parent is not.
+            $this->assert_local_path_within_root(dirname($local_absolute_path));
         } catch (RuntimeException $e) {
             $this->audit_log(
                 "Security: refusing to delete invalid path '{$remote_deletion_root}': " . $e->getMessage(),
@@ -11018,8 +11211,9 @@ class ImportClient
      *
      * For absolute targets, the target itself must be under $root.
      * For relative targets, the resolved path (parent dir + target) must be
-     * under $root. We normalize ".." segments without touching the filesystem,
-     * since the target may not exist yet.
+     * under $root. Resolve existing links before applying ".." segments,
+     * without creating missing components. Dangling links are resolved through
+     * their stored targets. Existing link loops are refused.
      *
      * @throws RuntimeException if the target escapes the root.
      */
@@ -11028,13 +11222,12 @@ class ImportClient
         string $target,
         string $root
     ): void {
-        if (Utils::str_starts_with($target, "/")) {
-            // Absolute target: must be under root
-            $resolved = Utils::normalize_path($target, Utils::native_path_format());
-        } else {
-            // Relative target: resolve against the symlink's parent directory
-            $resolved = Utils::normalize_path(wp_join_unix_paths($symlink_parent_dir, $target), Utils::native_path_format());
-        }
+        $path_format = Utils::native_path_format();
+        $absolute_target = Utils::is_absolute_path($target, $path_format)
+            ? $target
+            : wp_join_unix_paths($symlink_parent_dir, $target);
+        $resolved = $this->resolve_local_path_with_missing_tail($absolute_target);
+        $root = Utils::normalize_path_separators($root, $path_format);
 
         if (!Utils::path_is_same_as_or_descendant_of($resolved, $root)) {
             throw new RuntimeException(
@@ -11755,6 +11948,19 @@ class ImportClient
         }
 
         $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
+        // Skipped bodies do no local work. A new first chunk still needs its
+        // own parent check even when the previous file was skipped.
+        if ($is_first || !$context->skip_current_file) {
+            try {
+                $this->assert_local_path_within_root(dirname($local_absolute_path));
+            } catch (RuntimeException $error) {
+                if ($this->fs_root_nonempty_behavior !== 'preserve-local') {
+                    throw $error;
+                }
+                $this->skip_file_chunk($context, $path, $is_last, 'PRESERVE-LOCAL: ' . $error->getMessage());
+                return;
+            }
+        }
         if ($is_first || $context->remote_file_path === null) {
             $context->remote_file_path = $path;
             $context->remote_file_size = $file_size;
@@ -11816,6 +12022,8 @@ class ImportClient
             if ($context->file_handle) {
                 fclose($context->file_handle);
                 if ($context->file_ctime && $context->file_path) {
+                    // Later parts may have redirected the retained pathname.
+                    $this->assert_local_path_within_root($context->file_path);
                     touch($context->file_path, $context->file_ctime);
                 }
             }
@@ -11827,14 +12035,7 @@ class ImportClient
                 try {
                     $this->create_directory_if_missing($dir);
                 } catch (PreserveLocalSkipException $e) {
-                    $context->skip_current_file = true;
-                    $context->remote_file_path = null;
-                    $context->remote_file_size = null;
-                    if ($is_last) {
-                        $this->progress_reporter->complete_path(0);
-                    }
-                    $this->audit_log($e->getMessage(), true);
-                    $this->emit_skip_progress($path);
+                    $this->skip_file_chunk($context, $path, $is_last, $e->getMessage());
                     return;
                 }
             }
@@ -11919,6 +12120,7 @@ class ImportClient
 
             // Set file modification time
             if ($context->file_ctime && $context->file_path) {
+                $this->assert_local_path_within_root($context->file_path);
                 touch($context->file_path, $context->file_ctime);
             }
 
@@ -11984,6 +12186,26 @@ class ImportClient
     }
 
     /**
+     * Keeps a skipped file's bodies out of the local download and progress bytes.
+     *
+     * @param StreamingContext $context Current request's skip and remote-file fields.
+     * @param string $path Remote absolute path being skipped.
+     * @param bool $is_last Whether the source marked this as its last file chunk.
+     * @param string $reason Local condition reported by the parent or directory check.
+     */
+    private function skip_file_chunk(StreamingContext $context, string $path, bool $is_last, string $reason): void
+    {
+        $context->skip_current_file = true;
+        $context->remote_file_path = null;
+        $context->remote_file_size = null;
+        if ($is_last) {
+            $this->progress_reporter->complete_path(0);
+        }
+        $this->audit_log($reason, true);
+        $this->emit_skip_progress($path);
+    }
+
+    /**
      * Builds one file-download record with stable progress-screen counters.
      *
      * @return array<string,mixed> JSONL progress record.
@@ -12043,7 +12265,7 @@ class ImportClient
 
     /**
      * Build a short display path for progress messages: strip leading slash,
-     * truncate from the left when too long.
+     * truncate from the left when too long, and display control bytes as text.
      */
     private function display_path(string $path): string
     {
@@ -12052,7 +12274,7 @@ class ImportClient
         if (strlen($rel) > $max) {
             $rel = "..." . substr($rel, -($max - 3));
         }
-        return $rel;
+        return TerminalProgress::escape_text($rel);
     }
 
     /**
@@ -12286,6 +12508,16 @@ class ImportClient
             }
         }
 
+        // An existing root directory needs no parent creation or replacement.
+        // Check the root itself; its parent is deliberately outside the pull tree.
+        $path_format = Utils::native_path_format();
+        $is_existing_root_directory = Utils::normalize_path_separators($local_absolute_path, $path_format)
+            === Utils::normalize_path_separators($this->filesystem_root, $path_format)
+            && is_dir($local_absolute_path) && !is_link($local_absolute_path);
+        $this->assert_local_path_within_root(
+            $is_existing_root_directory ? $local_absolute_path : dirname($local_absolute_path)
+        );
+
         if (
             (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
             (!is_dir($local_absolute_path) || is_link($local_absolute_path))
@@ -12380,6 +12612,7 @@ class ImportClient
         // Validate that the symlink target doesn't escape the filesystem root.
         $root = $this->filesystem_root;
         try {
+            $this->assert_local_path_within_root(dirname($local_absolute_path));
             $this->assert_symlink_target_within_root(
                 dirname($local_absolute_path),
                 $target_for_local,
@@ -12485,8 +12718,81 @@ class ImportClient
         ]);
     }
 
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path errors are CLI text, not HTML.
     /**
-     * Handle an error chunk from the server.
+     * Refuses a local path which resolves outside the filesystem root.
+     *
+     * Check parents before replacements and the complete retained path before
+     * timestamp changes. Earlier source parts may have changed either path.
+     *
+     * @param string $local_absolute_path Local path or parent about to be used.
+     * @throws RuntimeException When resolution fails or the path is outside the root.
+     */
+    private function assert_local_path_within_root(string $local_absolute_path): void
+    {
+        $resolved_path = $this->resolve_local_path_with_missing_tail($local_absolute_path);
+        $root = Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format());
+        if (!Utils::path_is_same_as_or_descendant_of($resolved_path, $root)) {
+            throw new RuntimeException(
+                "Refusing to change path outside filesystem root: {$local_absolute_path} " .
+                "(resolves to {$resolved_path})"
+            );
+        }
+    }
+
+    /** Resolves links before parent segments, including links beyond a missing component. */
+    private function resolve_local_path_with_missing_tail(string $absolute_path): string
+    {
+        $path_format = Utils::native_path_format();
+        $links_followed = 0;
+        while (true) {
+            $absolute_path = Utils::normalize_path_separators($absolute_path, $path_format);
+            $share_root = $path_format === 'windows' ? Utils::windows_share_root($absolute_path) : null;
+            $path_root = '/';
+            if ($share_root !== null) {
+                $path_root = Utils::normalize_path_separators($share_root, $path_format);
+            } elseif ($path_format === 'windows' && preg_match('~^[A-Z]:/~', $absolute_path)) {
+                $path_root = substr($absolute_path, 0, 3);
+            }
+            $components = explode('/', substr($absolute_path, strlen($path_root)));
+            $resolved = $path_root;
+            foreach ($components as $index => $component) {
+                // Apply .. only after expanding the preceding link. Walk even
+                // a missing component: a later .. can return to existing paths.
+                $resolved = Utils::normalize_path(wp_join_unix_paths($resolved, $component), $path_format);
+                if (!is_link($resolved)) {
+                    continue;
+                }
+                $link_target = readlink($resolved);
+                if ($link_target === false) {
+                    throw new RuntimeException("Cannot read symlink while resolving local path: {$resolved}");
+                }
+                if (++$links_followed > 40) {
+                    throw new RuntimeException("Cannot resolve local path {$absolute_path}: more than 40 links were followed.");
+                }
+                $absolute_path = wp_join_unix_paths(
+                    Utils::is_absolute_path($link_target, $path_format)
+                        ? $link_target
+                        : wp_join_unix_paths(dirname($resolved), $link_target),
+                    implode('/', array_slice($components, $index + 1))
+                );
+                continue 2;
+            }
+            return $resolved;
+        }
+    }
+
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
+
+    /**
+     * Reports a source error and invalidates selected file-fetch work.
+     *
+     * @param array $chunk {
+     *     Source multipart error part.
+     *     @type string $body JSON with error_type, base64 path, and message.
+     * }
+     * @param string $phase Client phase consuming the error.
+     * @param StreamingContext $context Open request's current local file.
      */
     private function handle_error_chunk(
         array $chunk,
@@ -12505,7 +12811,14 @@ class ImportClient
         }
 
         $error_type = $data["error_type"] ?? "unknown";
-        $path = $data["path"] ?? "";
+        $encoded_path = $data["path"] ?? "";
+        $path = "";
+        if ($encoded_path !== "") {
+            $this->assert_valid_received_path($encoded_path, "remote error path");
+            /** @var string $path Validation above checked the base64 path and source format. */
+            $path = base64_decode($encoded_path, true);
+            $path = Utils::normalize_path_separators($path, $this->get_state()->remote_path_format());
+        }
         $message = $data["message"] ?? "Error";
 
         $this->audit_log(
@@ -12518,10 +12831,30 @@ class ImportClient
             ["file_changed", "file_missing", "file_open", "file_read"],
             true,
         );
-        if ($path !== "" && $is_file_error) {
+        if ($phase === "files" && $path !== "" && $is_file_error) {
+            $selected = $this->is_selected_for_pulling($path, false, "file");
+            if (!$selected && $this->follow_symlinks) {
+                // Followed targets can be selected outside an include prefix.
+                $selected = $this->next_remote_index_contains_remote_absolute_path_prefix($path);
+            }
+            if (!$selected) {
+                $this->audit_log("Skipped file error outside the pull selection: {$path}", true);
+                return;
+            }
+            $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
+            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+                $resolved_parent = realpath(dirname($local_absolute_path));
+                $path_format = Utils::native_path_format();
+                if ($resolved_parent === false || !Utils::path_is_same_as_or_descendant_of(
+                    Utils::normalize_path_separators($resolved_parent, $path_format),
+                    Utils::normalize_path_separators($this->filesystem_root, $path_format)
+                )) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path error rendered by the CLI, not HTML.
+                    throw new RuntimeException("Refusing file error removal outside filesystem root: {$local_absolute_path}");
+                }
+            }
             $context->remote_file_path = null;
             $context->remote_file_size = null;
-            $local_absolute_path = $this->filesystem_root . $path;
             if ($context->file_handle && $context->file_path === $local_absolute_path) {
                 fclose($context->file_handle);
                 $context->file_handle = null;
@@ -12530,7 +12863,7 @@ class ImportClient
                 $context->file_bytes_written = 0;
             }
 
-            if (file_exists($local_absolute_path)) {
+            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
                 @unlink($local_absolute_path);
             }
             $this->pull_index_journal->record_remote_invalidation($path);
@@ -12546,7 +12879,7 @@ class ImportClient
         }
 
         $error_progress_message = "Remote error: {$error_type} " . ($path !== "" ? $path : "");
-        $this->progress->show_progress_line($error_progress_message);
+        $this->progress->show_progress_line(TerminalProgress::escape_text($error_progress_message));
         $this->output_progress(
             [
                 "type" => "error",
@@ -12568,17 +12901,36 @@ class ImportClient
     }
 
     /**
-     * Handle progress chunk.
+     * Emit source progress separately from client stages and command results.
+     * Source counters describe its current file, not completed local work.
+     *
+     * @param array $chunk {
+     *     Multipart progress part.
+     *     @type string $body JSON supplied by the source server.
+     * }
+     * @param string $phase Client phase consuming this part.
      */
     private function handle_progress(array $chunk, string $phase): void
     {
-        $body = $chunk["body"] ?? "";
-        $data = json_decode($body, true);
-        if (!$data) {
+        $data = json_decode($chunk["body"] ?? "", true);
+        if (!is_array($data) || $data === []) {
             return;
         }
 
-        $this->output_progress(array_merge(["phase" => $phase], $data));
+        $record = ["type" => "remote_progress", "phase" => $phase];
+        if (isset($data["message"]) && is_string($data["message"])) {
+            $record["remote_message"] = $data["message"];
+        }
+        $current_file = $data["current_file"] ?? [];
+        if (is_array($current_file)) {
+            foreach (["size" => "file_bytes_total", "bytes_read" => "file_bytes_read"] as $source_key => $counter_key) {
+                $value = $current_file[$source_key] ?? null;
+                if (is_int($value) && $value >= 0) {
+                    $record["remote_counters"][$counter_key] = $value;
+                }
+            }
+        }
+        $this->output_progress($record);
     }
 
     /**
@@ -13559,7 +13911,7 @@ class ImportClient
     {
         $this->reset_request_error_state();
 
-        $this->audit_log("HTTP_REQUEST | POST | {$url}", false);
+        $this->audit_log("HTTP_REQUEST | POST | " . self::mask_url_credentials($url), false);
         $body = http_build_query($post_data);
 
         $ch = curl_init($url);
@@ -13675,7 +14027,7 @@ class ImportClient
         $this->reset_request_error_state();
 
         // Log HTTP request details
-        $log_parts = ["HTTP_REQUEST", "POST", $url];
+        $log_parts = ["HTTP_REQUEST", "POST", self::mask_url_credentials($url)];
 
         if ($post_data && isset($post_data["file_list"])) {
             $file_list_part = $post_data["file_list"];
@@ -13869,11 +14221,14 @@ class ImportClient
                 // If no parser yet, we might be receiving an error response
                 if (!$parser) {
                     $error_body .= $data;
+                    // A site's index.php may send whitespace before Reprint can
+                    // set Content-Type. Drop only that prefix, across reads.
+                    $error_body = ltrim($error_body, " \t\r\n");
                     if (strlen($error_body) > 65536) {
                         $error_body = substr($error_body, -65536);
                     }
 
-                    // Strict fallback: if body starts with a boundary line, parse it.
+                    // Strict fallback: after whitespace, require a boundary line.
                     if (strncmp($error_body, "--boundary-", 11) === 0) {
                         $line_end = strpos($error_body, "\n");
                         if ($line_end !== false) {
@@ -13905,9 +14260,9 @@ class ImportClient
                         );
                         $logged_no_parser = true;
                     }
-                }
-
-                if ($parser) {
+                } else {
+                    // A newly detected parser already received this read in
+                    // $error_body. Feed only subsequent reads here.
                     $parser->feed($data);
                 }
 
@@ -14961,9 +15316,9 @@ if (
             'name' => 'abort',
             'type' => 'flag',
             'target' => 'abort',
-            'help' => 'Abort current sync (preserves downloads). For db-push, discard staged tables without changing live tables',
+            'help' => 'Abort current sync (preserves downloads). For files-push, clear only local sender state and plan. For db-push, discard staged tables without changing live tables',
             'help_section' => 'global',
-            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
+            'commands' => ['pull', 'pull-files', 'pull-db', 'files-pull', 'files-push', 'files-index', 'db-push', 'db-pull', 'db-index', 'db-apply', 'db-rewrite-urls'],
         ],
         [
             'name' => 'verbose',
@@ -16100,7 +16455,7 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key-path=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key-path=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]\nreprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --abort",
             "description" =>
                 "Sends the remote document root's local tree beneath --fs-root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
@@ -16110,7 +16465,11 @@ if (
                 "Each process runs one sender until it completes, reaches a caller time or\n" .
                 "memory boundary, or receives a signal handled by this PHP runtime.\n" .
                 "Re-run the same command after exit 2.\n" .
-                "After a restart result, the next run starts a fresh plan.\n",
+                "After a restart result, the next run starts a fresh plan.\n" .
+                "--abort clears only local sender state and its plan. It keeps the\n" .
+                "completed local index, pull state, and target files unchanged.\n" .
+                "It needs no credential or preflight and sends no request. A target\n" .
+                "commit already in progress is not cancelled.\n",
             "extra" =>
                 "Progress output:\n" .
                 "  auto   Use tty on a terminal and jsonl otherwise (default)\n" .
@@ -16121,7 +16480,7 @@ if (
                 "Explicit tty, jsonl, and compact modes cannot be combined with --verbose.\n" .
                 "\n" .
                 "Exit outcomes:\n" .
-                "  0  File push complete\n" .
+                "  0  File push complete or local state aborted\n" .
                 "  2  Partial, interrupted, or restart; run the command again\n" .
                 "  1  Failed request or command error\n",
         ],
@@ -16192,9 +16551,13 @@ if (
             "short" => "Print local pull metadata for host integrations as JSON",
             "usage" => "reprint pull-metadata <remote-reprint-api-url> --state-dir=DIR",
             "description" =>
-                "Prints pull lifecycle, artifact availability, and source-site\n" .
-                "metadata for host integrations. The remote Reprint API URL selects\n" .
-                "the state; no network calls are made.\n",
+                "Prints pull lifecycle, artifact availability, source-site\n" .
+                "metadata, and the stored key for host integrations. The remote\n" .
+                "Reprint API URL selects the state; no network calls are made.\n" .
+                "\n" .
+                "`key` describes <state-dir>/remotes/<md5-of-url>/key.pem, the key\n" .
+                "remote commands find automatically: its id, path, and the public\n" .
+                "key to enroll on the site. It is null when no key is stored.\n",
             "extra" =>
                 "Example:\n" .
                 "  reprint pull-metadata https://example.com --state-dir=./state | jq '.hasCompletedOnce'\n",
@@ -16478,7 +16841,7 @@ if (
         foreach ($reprint_files_command_arguments as $reprint_files_push_command_argument) {
             $reprint_files_push_option_allowed = in_array(
                 $reprint_files_push_command_argument,
-                ['--insecure', '--allow-unsafe-http', '--force-http', '--verbose', '-v'],
+                ['--insecure', '--allow-unsafe-http', '--force-http', '--verbose', '-v', '--abort'],
                 true
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
@@ -16688,7 +17051,7 @@ if (
             || ( $reprint_progress_output_mode === 'auto' && $reprint_progress_stream_is_tty );
         $error_code = isset($client) ? $client->last_error_code : null;
         if ($reprint_uses_terminal_progress && empty($options['verbose'])) {
-            fwrite(STDERR, ( $command === 'files-diff' ? '' : "\n" ) . "Error: " . $e->getMessage() . "\n");
+            fwrite(STDERR, ( $command === 'files-diff' ? '' : "\n" ) . "Error: " . TerminalProgress::escape_text($e->getMessage()) . "\n");
         } else {
             $error = [
                 "error" => $e->getMessage(),
@@ -16697,10 +17060,7 @@ if (
                 "file" => $e->getFile(),
                 "line" => $e->getLine(),
             ] + ( isset($client) ? $client->get_error_details($e) : [] );
-            $json = json_encode($error);
-            if ($json === false) {
-                $json = '{"error":"' . addslashes($e->getMessage()) . '","exception":"' . get_class($e) . '"}';
-            }
+            $json = json_encode($error, JSON_INVALID_UTF8_SUBSTITUTE);
             fwrite(STDERR, $json . "\n");
         }
         $reprint_exit_code = $e instanceof RetryLaterException ? 3 : 1;

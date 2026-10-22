@@ -122,6 +122,7 @@ class PullMetadataTest extends TestCase
         $this->assertFalse($metadata['hasSkippedFiles']);
         $this->assertFileDoesNotExist($this->pullStateDirectory . '/state.json');
         $this->assertNull($metadata['pullStage']);
+        $this->assertNull($metadata['key']);
         $this->assertSame([
             'homeUrl' => null,
             'siteUrl' => null,
@@ -268,6 +269,49 @@ class PullMetadataTest extends TestCase
 
         $this->assertTrue($metadata['hasCompletedOnce']);
         $this->assertNull($metadata['pullStage']);
+    }
+
+    /**
+     * Verifies the key keygen stores for a remote is reported with the public
+     * key to enroll, and that another remote does not report it.
+     */
+    public function testPullMetadataReportsTheStoredKeyOfTheSelectedRemote(): void
+    {
+        $remoteReprintApiUrl = 'https://first.example/?reprint-api';
+        $generated = \ImportClient::generate_key_file(
+            \ImportClient::key_file_path($remoteReprintApiUrl, $this->stateDir),
+            false
+        );
+
+        $this->assertSame([
+            'id' => $generated['key_id'],
+            'path' => $generated['path'],
+            'publicKey' => $generated['public_key'],
+        ], $this->readMetadata('pull-metadata', $remoteReprintApiUrl)['key']);
+        $this->assertNull(
+            $this->readMetadata('pull-metadata', 'https://second.example/?reprint-api')['key']
+        );
+    }
+
+    /**
+     * Verifies a corrupt stored key fails with its path instead of reporting
+     * no key, which would send the caller to a keygen that refuses to run.
+     */
+    public function testPullMetadataNamesTheCorruptStoredKeyFile(): void
+    {
+        $keyPath = \ImportClient::key_file_path('https://example.invalid', $this->stateDir);
+        mkdir(dirname($keyPath), 0700, true);
+        file_put_contents($keyPath, "not a private key\n");
+
+        $client = new \ImportClient('https://example.invalid', $this->stateDir, $this->fsRoot);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage("The private key at {$keyPath} could not be used: ");
+        ob_start();
+        try {
+            $client->run(['command' => 'pull-metadata']);
+        } finally {
+            $this->assertSame('', ob_get_clean());
+        }
     }
 
     /**

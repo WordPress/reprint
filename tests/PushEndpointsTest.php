@@ -761,6 +761,139 @@ final class PushEndpointsTest extends TestCase {
         $this->assertDirectoryDoesNotExist($push_sessions_directory . '/' . $push_session_id);
     }
 
+    /** A target refusal must name a usable blocking push session before it is saved. */
+    public function testSenderRejectsMalformedBlockingPushSessionIds(): void
+    {
+        $responses = [[], ['blocking_push_session_id' => null], ['blocking_push_session_id' => 17],
+            ['blocking_push_session_id' => []], ['blocking_push_session_id' => 'short'],
+            ['blocking_push_session_id' => str_repeat('z', 32)]];
+        foreach ($responses as $number => $fields) {
+            file_put_contents($this->root . '/response-overrides.json', json_encode([
+                'push_create' => ['status' => 'error', 'reason' => 'commit_required'] + $fields,
+            ]));
+            $local_docroot = $this->root . '/malformed-local-' . $number;
+            $push_state_directory = $this->root . '/malformed-state-' . $number;
+            mkdir($local_docroot);
+            $options = $this->senderOptions($local_docroot, $push_state_directory);
+            $sender = $this->startSender($options);
+            try {
+                $this->assertFalse($sender->next_step());
+                $this->assertSame('failed', $sender->get_status());
+                $this->assertSame('unexpected_response', $sender->get_reason());
+                $this->assertStringContainsString('blocking_push_session_id', $sender->get_detail());
+                $this->assertSame('creating', $sender->get_phase());
+                $this->assertFalse($sender->next_step());
+                $state = $this->loadActiveState($push_state_directory);
+                $this->assertSame('creating', $state['phase']);
+                $this->assertNull($state['blocking_push_session_id']);
+            } finally {
+                $this->closeSender($sender);
+            }
+            unlink($this->root . '/response-overrides.json');
+            $sender = $this->resumeSender($options);
+            try {
+                $this->assertTrue($sender->next_step());
+                $this->assertSame('starting_plan', $sender->get_phase());
+            } finally {
+                $this->closeSender($sender);
+            }
+        }
+    }
+
+    /** A missing target session ends this run and returns the durable phase to creating. */
+    public function testSenderCanResumeAfterTheBlockingPushSessionIsNotFound(): void
+    {
+        file_put_contents($this->root . '/response-overrides.json', json_encode([
+            'push_create' => ['status' => 'error', 'reason' => 'commit_required',
+                'blocking_push_session_id' => str_repeat('e', 32)],
+        ]));
+        $local_docroot = $this->root . '/missing-blocking-local';
+        $push_state_directory = $this->root . '/missing-blocking-state';
+        mkdir($local_docroot);
+        $options = $this->senderOptions($local_docroot, $push_state_directory);
+        $sender = $this->startSender($options);
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('finishing_previous_commit', $sender->get_phase());
+            unlink($this->root . '/response-overrides.json');
+            $this->assertFalse($sender->next_step());
+            $this->assertSame('push_not_found', $sender->get_reason());
+            $this->assertSame('creating', $sender->get_phase());
+            $this->assertFalse($sender->next_step());
+            $state = $this->loadActiveState($push_state_directory);
+            $this->assertSame('creating', $state['phase']);
+            $this->assertNull($state['blocking_push_session_id']);
+        } finally {
+            $this->closeSender($sender);
+        }
+        $sender = $this->resumeSender($options);
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('starting_plan', $sender->get_phase());
+            $this->assertSame("push_create\npush_commit\npush_create\n", file_get_contents($this->root . '/request.log'));
+        } finally {
+            $this->closeSender($sender);
+        }
+    }
+
+    /** Local abort leaves the live target session intact and sends no HTTP request. */
+    public function testFilesPushAbortDoesNotContactTheTarget(): void
+    {
+        $local_docroot = $this->root . '/abort-local';
+        $state_directory = $this->root . '/abort-cli-state';
+        mkdir($local_docroot);
+        mkdir($state_directory);
+        file_put_contents($local_docroot . '/next.txt', 'next');
+        $push_state_directory = $this->filesPushStateDirectory($state_directory);
+        $sender = $this->startSender($this->senderOptions($local_docroot, $push_state_directory));
+        try {
+            $this->assertTrue($sender->next_step());
+            $this->assertSame('starting_plan', $sender->get_phase());
+            $push_session_id = $this->loadActiveState($push_state_directory)['push_session_id'];
+        } finally {
+            $this->closeSender($sender);
+        }
+        $request_log = file_get_contents($this->root . '/request.log');
+        $this->credential_options = [];
+        $aborted = $this->runFilesPushCli($local_docroot, $state_directory, [], '/', ['--abort']);
+        $this->assertSame(0, $aborted['exit'], $aborted['output']);
+        $this->assertSame('aborted', $this->lastCliCommandResult($aborted['stdout'])['status']);
+        $this->assertSame($request_log, file_get_contents($this->root . '/request.log'));
+        $this->assertNull($this->loadActiveState($push_state_directory));
+        $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
+        $this->assertDirectoryExists($this->reprint_directory . '/.reprint/push/' . $push_session_id);
+        $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
+        $this->assertFileDoesNotExist($this->docroot . '/next.txt');
+    }
+
+    /** Older senders stored the unvalidated target field in this phase. */
+    public function testSenderResumesLegacyInvalidBlockingPushSessionState(): void
+    {
+        foreach ([null, 17, [], 'short', str_repeat('z', 32)] as $number => $blocking_push_session_id) {
+            $local_docroot = $this->root . '/legacy-blocking-local-' . $number;
+            $push_state_directory = $this->root . '/legacy-blocking-state-' . $number;
+            mkdir($local_docroot);
+            $options = $this->senderOptions($local_docroot, $push_state_directory);
+            $sender = $this->startSender($options);
+            $this->closeSender($sender);
+            $state = $this->loadActiveState($push_state_directory);
+            // This is the record the old create_push_session() writer produced
+            // after a commit_required response containing the value above.
+            $state['phase'] = 'finishing_previous_commit';
+            $state['blocking_push_session_id'] = $blocking_push_session_id;
+            file_put_contents($push_state_directory . '/sender.json', json_encode($state));
+            $sender = $this->resumeSender($options);
+            try {
+                $this->assertTrue($sender->next_step());
+                $this->assertSame('creating', $sender->get_phase());
+                $this->assertFileDoesNotExist($this->root . '/request.log');
+                $this->assertNull($this->loadActiveState($push_state_directory)['blocking_push_session_id']);
+            } finally {
+                $this->closeSender($sender);
+            }
+        }
+    }
+
     public function testHighLevelSenderFinishesPreviousCommitBeforeCreatingItsPushSession(): void
     {
         $client = $this->newClient(self::SECRET);
@@ -1219,31 +1352,44 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNotSame(realpath($this->docroot), base64_decode($push_metadata['docroot_b64'], true));
     }
 
-    public function testDefaultPushDirectoryIsSiblingOfCanonicalDocumentRoot(): void
+    /** A nested document root does not identify a private location beside it. */
+    public function testPushRequiresAnExplicitPrivateDirectory(): void
     {
         file_put_contents($this->reprint_configuration_path, '');
+        $push_session_id = str_repeat('7', 32);
+
+        $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+
+        $this->assertSame('failed', $response['status'], (string) json_encode($response));
+        $this->assertSame('not_configured', $response['reason']);
+        $this->assertSame(503, $response['response']['http_code']);
+        $this->assertStringContainsString('reprint_directory', $response['detail']);
+        $this->assertStringContainsString('outside all web roots', $response['detail']);
+        $this->assertStringContainsString('reprint_server_api_options', $response['detail']);
+        $default_directory = dirname($this->docroot)
+            . '/.reprint-' . substr(hash('sha256', (string) realpath($this->docroot)), 0, 12);
+        $this->assertDirectoryDoesNotExist($default_directory);
+    }
+
+    /** An explicit private path still works when DOCUMENT_ROOT is a symlink. */
+    public function testConfiguredPushDirectoryUsesCanonicalDocumentRoot(): void
+    {
         $document_root_link = $this->root . '/document-root-link';
         symlink($this->docroot, $document_root_link);
-        $this->writeDocrootConfiguration([
-            'document_root' => $document_root_link,
-        ]);
+        $this->writeDocrootConfiguration(['document_root' => $document_root_link]);
         $push_session_id = str_repeat('7', 32);
+
         $response = $this->newClient(self::SECRET)->send_push_request('POST', 'push_create', [
             'push_session_id' => $push_session_id,
         ], ['created']);
 
         $this->assertSame('complete', $response['status'], (string) json_encode($response));
-        $canonical_docroot = realpath($this->docroot);
-        $this->assertIsString($canonical_docroot);
-        $default_reprint_directory = dirname($canonical_docroot)
-            . '/.reprint-' . substr(hash('sha256', $canonical_docroot), 0, 12);
-        $this->assertDirectoryExists($default_reprint_directory . '/.reprint/push/' . $push_session_id);
-        $lexical_document_root_reprint_directory = dirname($document_root_link)
-            . '/.reprint-' . substr(hash('sha256', $document_root_link), 0, 12);
-        $this->assertDirectoryDoesNotExist($lexical_document_root_reprint_directory);
-        $wordpress_root_reprint_directory = $this->docroot
-            . '/.reprint-' . substr(hash('sha256', (string) realpath($this->wordpress_root)), 0, 12);
-        $this->assertDirectoryDoesNotExist($wordpress_root_reprint_directory);
+        $push_directory = $this->reprint_directory . '/.reprint/push/' . $push_session_id;
+        $this->assertDirectoryExists($push_directory);
+        $metadata = json_decode( (string) file_get_contents($push_directory . '/push.json'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(realpath($this->docroot), base64_decode($metadata['docroot_b64'], true));
     }
 
     public function testParentSegmentInExcludedPathReturnsNotConfigured(): void
@@ -1258,6 +1404,74 @@ final class PushEndpointsTest extends TestCase {
         $this->assertSame('Excluded path must not contain a parent component: Li4vYmFk.', $response['detail']);
         $this->assertSame(503, $response['response']['http_code']);
         $this->assertArrayNotHasKey('trace', $response['response']);
+    }
+
+    public function testSymlinkedPluginInsideDocumentRootExcludesBothPaths(): void
+    {
+        $physical_plugin_path = 'shared/reprint';
+        $physical_plugin_directory = $this->docroot . '/' . $physical_plugin_path;
+        $logical_plugin_path = 'wp-content/plugins/reprint';
+        $logical_plugin_directory = $this->docroot . '/' . $logical_plugin_path;
+        mkdir($physical_plugin_directory, 0700, true);
+        mkdir(dirname($logical_plugin_directory), 0700, true);
+        foreach (['index.php', 'lib.php', 'compat.php'] as $file) {
+            copy(dirname(__DIR__) . '/reprint-server-wp/' . $file, $physical_plugin_directory . '/' . $file);
+        }
+        symlink(dirname(__DIR__) . '/vendor', $physical_plugin_directory . '/vendor');
+        symlink($physical_plugin_directory, $logical_plugin_directory);
+        $plugin_index_hash = hash_file('sha256', $physical_plugin_directory . '/index.php');
+        $this->writeExcludedPaths([]);
+        $this->writeDocrootConfiguration([
+            'document_root' => $this->docroot,
+            'wp_plugin_dir' => dirname($logical_plugin_directory),
+            'plugin_basename' => 'reprint/index.php',
+            'plugin_directory' => $physical_plugin_directory,
+        ]);
+        $client = $this->newClient(self::SECRET);
+        $push_session_id = str_repeat('b', 32);
+        $create = $client->send_push_request('POST', 'push_create', [
+            'push_session_id' => $push_session_id,
+        ], ['created']);
+        $this->assertSame('complete', $create['status'], (string) json_encode($create));
+
+        foreach ([$physical_plugin_path, $logical_plugin_path] as $plugin_path) {
+            $upload = $this->sendUploadRequest($client, $push_session_id, [[
+                'type' => 'file', 'path' => $plugin_path . '/index.php',
+                'total_bytes' => 4, 'offset' => 0, 'payload' => 'new!',
+            ]]);
+            $this->assertSame('failed', $upload['status'], (string) json_encode($upload));
+            $this->assertSame('invalid_request', $upload['reason']);
+            $delete = $this->sendUploadRequest($client, $push_session_id, [[
+                'type' => 'delete-list', 'offset' => 0, 'complete' => true,
+                'payload' => $plugin_path . "\0",
+            ]]);
+            $this->assertSame('failed', $delete['status'], (string) json_encode($delete));
+            $this->assertSame('invalid_request', $delete['reason']);
+        }
+        $this->assertEqualsCanonicalizing([
+            base64_encode($physical_plugin_path), base64_encode($logical_plugin_path),
+        ], $create['response']['excluded_paths_b64']);
+        $delete_parent = $this->sendUploadRequest($client, $push_session_id, [[
+            'type' => 'delete-list', 'offset' => 0, 'complete' => true, 'payload' => "shared\0",
+        ]]);
+        $this->assertSame('failed', $delete_parent['status'], (string) json_encode($delete_parent));
+        $this->assertSame('invalid_request', $delete_parent['reason']);
+
+        $sibling_path = 'shared/other/file.txt';
+        $upload = $this->sendUploadRequest($client, $push_session_id, [
+            ['type' => 'file', 'path' => $sibling_path, 'total_bytes' => 4, 'offset' => 0, 'payload' => 'safe'],
+            ['type' => 'delete-list', 'offset' => 0, 'complete' => true, 'payload' => ''],
+        ]);
+        $this->assertSame('complete', $upload['status'], (string) json_encode($upload));
+        do {
+            $commit = $client->send_push_request('POST', 'push_commit', [
+                'push_session_id' => $push_session_id,
+            ], ['accepted']);
+            $this->assertSame('complete', $commit['status'], (string) json_encode($commit));
+        } while ($commit['response']['send_next_request']);
+        $this->assertSame('safe', file_get_contents($this->docroot . '/' . $sibling_path));
+        $this->assertTrue(is_link($logical_plugin_directory));
+        $this->assertSame($plugin_index_hash, hash_file('sha256', $physical_plugin_directory . '/index.php'));
     }
 
     public function testSymlinkedPluginLogicalPathIsExcludedFromPush(): void
@@ -2917,6 +3131,46 @@ final class PushEndpointsTest extends TestCase {
         $this->assertNull($this->loadActiveState($push_state_directory));
     }
 
+    public function testFilesDiffAndPushLeaveTheActiveLocalSqliteDatabaseBehind(): void
+    {
+        $filesystem_root = $this->root . '/sqlite-local';
+        $state_directory = $this->root . '/sqlite-state';
+        mkdir($filesystem_root . '/wp-content/database', 0700, true);
+        $database_path = $filesystem_root . '/wp-content/database/custom.sqlite';
+        $database = new PDO('sqlite:' . $database_path);
+        $database->exec('CREATE TABLE local_data (value TEXT)');
+        unset($database);
+        foreach (['-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+            file_put_contents($database_path . $suffix, 'local database companion');
+        }
+        file_put_contents($filesystem_root . '/theme.css', 'body {}');
+        file_put_contents($filesystem_root . '/ordinary.sqlite', 'site content');
+        $this->writeFilesPushPreflight($state_directory, '/');
+        $client = new ImportClient($this->remote_reprint_api_url, $state_directory, $filesystem_root, ['allow_http' => true]);
+        $client->get_state()->set_preflight_record([
+            'http_code' => 200,
+            'data' => ['runtime' => ['document_root' => '/']],
+        ]);
+        $client->get_state()->apply->target_engine = 'sqlite';
+        $client->get_state()->apply->target_sqlite_path = $database_path;
+        $client->save_state();
+        file_put_contents(dirname($this->filesPushStateDirectory($state_directory)) . '/local_index.jsonl', '');
+
+        $diff = $this->runFilesDiffCli($filesystem_root, $state_directory);
+        $this->assertSame(0, $diff['exit'], $diff['output']);
+        $paths = array_column($this->cliJsonLines($diff['stdout']), 'path_b64');
+        $this->assertNotContains(base64_encode('wp-content/database/custom.sqlite'), $paths);
+        $this->assertContains(base64_encode('ordinary.sqlite'), $paths);
+        $push = $this->runFilesPushCli($filesystem_root, $state_directory);
+        $this->assertSame(0, $push['exit'], $push['output']);
+        $this->assertSame('body {}', file_get_contents($this->docroot . '/theme.css'));
+        $this->assertSame('site content', file_get_contents($this->docroot . '/ordinary.sqlite'));
+        foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
+            $this->assertFileDoesNotExist($this->docroot . '/wp-content/database/custom.sqlite' . $suffix);
+            $this->assertFileExists($database_path . $suffix);
+        }
+    }
+
     public function testCompletedFilesPushWritesTheLocalIndexUsedByFilesDiff(): void
     {
         $local_docroot = $this->root . '/push-diff-local-docroot';
@@ -4046,6 +4300,7 @@ final class PushEndpointsTest extends TestCase {
             'REPRINT_PUSH_TEST_DIRECTORY_CONFIG' => $this->reprint_configuration_path,
             'REPRINT_PUSH_TEST_EXCLUDED_PATHS_CONFIG' => $this->excluded_paths_configuration_path,
             'REPRINT_PUSH_TEST_REQUEST_LOG' => $this->root . '/request.log',
+            'REPRINT_PUSH_TEST_RESPONSE_CONFIG' => $this->root . '/response-overrides.json',
             'REPRINT_PUSH_TEST_GATE_ENDPOINT_CONFIG' => $this->gate_endpoint_configuration_path,
             'REPRINT_PUSH_TEST_GATE_READY' => $this->gate_ready_path,
             'REPRINT_PUSH_TEST_GATE_RELEASE' => $this->gate_release_path,

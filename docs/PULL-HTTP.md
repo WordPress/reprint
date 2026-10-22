@@ -32,6 +32,10 @@ the endpoint in the body, so this fallback keeps them working. Existing
 multipart file-list uploads keep their file part, and their options may stay
 in the query string.
 
+For `file_fetch`, send the requested paths in the multipart `file_list` upload.
+The server ignores any `file_list_path` request parameter. That option remains
+available to direct PHP callers of `endpoint_file_fetch()`.
+
 Requests are signed over newline-joined fields behind a version label. The
 connection token uses `reprint-hmac-sha256-v2`, and a key uses
 `reprint-rsa-sha256-v1` plus its key id. The remaining fields are the nonce,
@@ -67,3 +71,17 @@ POST bodies.
 A backward-compatibility test bypasses the strict WAF and sends legacy GET
 query parameters, then uploads a multipart file list with its endpoint and
 options still in the query. Normal export requests in the other tests use POST parameters.
+
+## Output before the response
+
+A blank line before `<?php` in the site's `index.php` can send the HTTP headers
+before Reprint loads. Preflight still returns its JSON object. Streaming pull
+endpoints send uncompressed multipart data when they can no longer set headers.
+The client skips leading spaces, tabs, and line breaks before detecting the
+`--boundary-` line in the body. Part headers carry the cursors and other stream
+metadata as before. This does not buffer the response or change the protocol.
+
+This fallback does not accept HTML or PHP warning text before the boundary.
+It also cannot restore an HTTP status or CORS header after headers were sent;
+a browser may still block a cross-origin request. Remove the early output on
+the source site to restore those headers and gzip compression.

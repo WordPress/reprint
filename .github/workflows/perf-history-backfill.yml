@@ -18,7 +18,7 @@ on:
         default: '20'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: perf-history
@@ -33,8 +33,9 @@ jobs:
 
     steps:
       - name: Checkout latest trunk (host for bench scripts)
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          persist-credentials: false
           ref: trunk
           submodules: true
           path: host
@@ -46,16 +47,16 @@ jobs:
           git clone --no-local host src-historical
           (cd src-historical && git fetch origin '+refs/heads/trunk:refs/remotes/origin/trunk')
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
       # because every Launchpad endpoint flakes regularly. The
       # script below detects PHP is already on PATH and skips its
       # apt install path.
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: ${{ env.PHP_VERSION }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
@@ -71,14 +72,10 @@ jobs:
 
       - name: Install e2e dependencies
         working-directory: host/tests/e2e
-        run: npm install
+        run: npm ci
 
       - name: Download wp-cli
-        run: |
-          if [ ! -f /tmp/wp-cli.phar ]; then
-            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
-            chmod +x /tmp/wp-cli.phar
-          fi
+        run: tests/e2e/ci/download-wp-cli.sh
 
       - name: Checkout gh-pages worktree
         working-directory: host
@@ -175,14 +172,30 @@ jobs:
             echo "::endgroup::"
           done < /tmp/shas-asc.txt
 
-      - name: Commit and push gh-pages
-        working-directory: pages
-        run: |
-          set -euo pipefail
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No new data points to publish."
-            exit 0
-          fi
-          git commit -m "perf: backfill trunk commits since ${{ github.event.inputs.since }}"
-          git push origin gh-pages
+      - name: Upload completed performance history
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: perf-history-backfill-data
+          path: pages/data/history.json
+
+  publish:
+    name: Publish performance history
+    needs: backfill
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: perf-history-backfill-data
+          path: ${{ runner.temp }}/perf-history-data
+
+      - name: Publish completed performance history
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bin/publish-performance-history.sh "$RUNNER_TEMP/perf-history-data/history.json"

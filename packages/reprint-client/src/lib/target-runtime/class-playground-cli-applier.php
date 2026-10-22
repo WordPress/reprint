@@ -34,6 +34,8 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  */
 class PlaygroundCliApplier implements RuntimeApplier
 {
+    private const CLI_VERSION = '3.1.29';
+
     /**
      * Playground's internal document root path in the virtual filesystem.
      */
@@ -319,7 +321,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         $lines[] = '';
 
         $args = [];
-        $args[] = 'npx @wp-playground/cli@latest server';
+        $args[] = 'npx --yes @wp-playground/cli@' . self::CLI_VERSION . ' server';
 
         // Mount the WordPress directory layout. For standard sites this
         // is a single mount. For WPCloud-style sites, three mounts

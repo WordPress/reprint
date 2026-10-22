@@ -34,6 +34,48 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertStringContainsString('endpoint-handlers-loaded', $result['output']);
     }
 
+    public function testPreflightOnlyBootstrapsTheConfiguredWordPressRoot(): void
+    {
+        foreach ([false, true] as $configured) {
+            $directory = sys_get_temp_dir() . '/preflight-bootstrap-' . bin2hex(random_bytes(6));
+            mkdir($directory . '/chosen', 0700, true);
+            mkdir($directory . '/configured', 0700, true);
+            file_put_contents($directory . '/chosen/wp-load.php', '<?php file_put_contents(__DIR__ . "/loaded", "chosen");');
+            file_put_contents($directory . '/configured/wp-load.php', '<?php file_put_contents(__DIR__ . "/loaded", "configured");');
+            // phpcs:disable WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Generates PHP literals for the subprocess.
+            $script = "<?php\nrequire " . var_export(realpath(self::AUTOLOAD_PATH), true) . ";\n"
+                . 'require ' . var_export(realpath(__DIR__ . '/../lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php'), true) . ";\n"
+                . 'require ' . var_export(realpath(self::EXPORT_PATH), true) . ";\n"
+                . '$directory = ' . var_export($directory, true) . ";\n"
+                . ( $configured ? '$configured_root = true;' : '$configured_root = false;' )
+                . <<<'PHP'
+            define('SQLITE_DB_DROPIN_VERSION', 'test');
+            $database = new WP_PDO_MySQL_On_SQLite('mysql-on-sqlite:path=:memory:;dbname=wordpress');
+            $database->exec('CREATE TABLE wp_options (option_id bigint PRIMARY KEY, option_name varchar(191), option_value longtext)');
+            $GLOBALS['@pdo'] = $database->get_connection()->get_pdo();
+            $GLOBALS['wpdb'] = (object) ['dbh' => $database, 'prefix' => 'wp_'];
+            if ($configured_root) { define('ABSPATH', $directory . '/configured/'); }
+            ob_start();
+            $result = endpoint_preflight(['directory' => $directory . '/chosen']);
+            ob_end_clean();
+            $result = $result['stats'];
+            echo json_encode(['connected' => $result['database']['connected'], 'wp' => $result['database']['wp']]);
+            PHP;
+            // phpcs:enable WordPress.PHP.DevelopmentFunctions.error_log_var_export
+            try {
+                $result = $this->runPhpCode($script);
+                $this->assertSame(0, $result['status'], $result['output']);
+                $preflight = json_decode($result['output'], true, 512, JSON_THROW_ON_ERROR);
+                $this->assertTrue($preflight['connected'], $result['output']);
+                $this->assertFileDoesNotExist($directory . '/chosen/loaded');
+                $this->assertSame($configured, $preflight['wp']['wp_load_attempted']);
+                $this->assertSame($configured, file_exists($directory . '/configured/loaded'));
+            } finally {
+                $this->removePath($directory);
+            }
+        }
+    }
+
     public function testNormalizePathListKeepsTheFilesystemRoot(): void
     {
         $export_path = realpath(self::EXPORT_PATH);
@@ -68,6 +110,45 @@ final class ExportLibraryLoadTest extends TestCase {
         $this->assertSame(0, $result['status'], $result['output']);
         $roots = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame('/', $roots[0]['root']);
+    }
+
+    public function testPreflightReportsImporterIniDirectivesWhenIniGetAllIsDisabled(): void
+    {
+        $autoload_path = realpath(self::AUTOLOAD_PATH);
+        $this->assertNotFalse($autoload_path, 'Composer autoloader must exist');
+        $export_path = realpath(self::EXPORT_PATH);
+        $this->assertNotFalse($export_path, 'export.php must exist');
+
+        $result = $this->runPhpCode(
+            "<?php\nif (function_exists('ini_get_all')) { echo 'ini_get_all-not-disabled'; exit(1); }\n"
+            . "require " . var_export($autoload_path, true) . ";\n"
+            . "require " . var_export($export_path, true) . ";\n"
+            . "ob_start();\n"
+            . "\$preflight = endpoint_preflight(['directory' => '/']);\n"
+            . "ob_end_clean();\n"
+            . "echo json_encode(\$preflight['stats']['runtime']['ini_get_all'], JSON_UNESCAPED_SLASHES);\n",
+            ['-d', 'disable_functions=ini_get_all', '-d', 'memory_limit=345M', '-d', 'max_input_vars=1234']
+        );
+
+        $this->assertSame(0, $result['status'], $result['output']);
+        $ini = json_decode(trim($result['output']), true, 512, JSON_THROW_ON_ERROR);
+        $directives = array_keys($ini);
+        sort($directives);
+        $this->assertSame(
+            [
+                'auto_append_file',
+                'auto_prepend_file',
+                'max_execution_time',
+                'max_input_time',
+                'max_input_vars',
+                'memory_limit',
+                'post_max_size',
+                'upload_max_filesize',
+            ],
+            $directives
+        );
+        $this->assertSame('345M', $ini['memory_limit']);
+        $this->assertSame('1234', $ini['max_input_vars']);
     }
 
     public function testPluginRuntimeLoaderSkipsAutoloadAlreadyLoadedThroughSymlinkedPluginDirectory(): void
@@ -290,6 +371,28 @@ final class ExportLibraryLoadTest extends TestCase {
         }
     }
 
+    public function testCompressionProbesKeepFilesystemPathsAndSkipStreamUrls(): void
+    {
+        $code = '<?php require base64_decode(\'' . base64_encode(self::AUTOLOAD_PATH) . '\');'
+            . 'require base64_decode(\'' . base64_encode(self::EXPORT_PATH) . '\');' . <<<'PHP'
+        chdir(__DIR__);
+        file_put_contents('text.neon', 'services: { example: Example }');
+        file_put_contents('binary.neon', "\0binary");
+        $archive = new PharData(__DIR__ . '/archive.tar');
+        $archive['text.neon'] = 'archive text';
+        echo json_encode([
+            file_fetch_paths_should_gzip([__DIR__ . '/text.neon']),
+            file_fetch_paths_should_gzip(['text.neon']),
+            file_fetch_paths_should_gzip(['binary.neon']),
+            path_head_looks_like_text('file://' . __DIR__ . '/text.neon'),
+            path_head_looks_like_text('phar://' . __DIR__ . '/archive.tar/text.neon'),
+        ]);
+        PHP;
+        $result = $this->runPhpCode($code);
+        $this->assertSame(0, $result['status'], $result['output']);
+        $this->assertSame([true, true, false, false, false], json_decode(trim($result['output']), true));
+    }
+
     private function runExportWith(string $setup_script): array
     {
         $autoload_path = realpath(self::AUTOLOAD_PATH);
@@ -311,6 +414,7 @@ final class ExportLibraryLoadTest extends TestCase {
     }
 
     /**
+     * @param string[] $php_options PHP CLI options placed before the script, such as `-d` settings.
      * @return array {
      *     PHP runner result.
      *
@@ -319,7 +423,7 @@ final class ExportLibraryLoadTest extends TestCase {
      * }
      * @phpstan-return array{output:string,status:int}
      */
-    private function runPhpCode(string $php_code): array
+    private function runPhpCode(string $php_code, array $php_options = []): array
     {
         $tmp_dir = sys_get_temp_dir() . '/export-library-test-' . uniqid();
         mkdir($tmp_dir, 0755, true);
@@ -334,7 +438,7 @@ final class ExportLibraryLoadTest extends TestCase {
             ];
 
             $process = proc_open(
-                [PHP_BINARY, $tmp_dir . '/run.php'],
+                array_merge([PHP_BINARY], $php_options, [$tmp_dir . '/run.php']),
                 $descriptors,
                 $pipes,
                 $tmp_dir

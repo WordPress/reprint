@@ -58,6 +58,7 @@ function reprint_server_compat_expose_legacy_names(): void {
     add_filter(
         'reprint_server_api_options',
         static function ($options) {
+            // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Preserve the released Site Export filter name for integrations using the old API.
             $options = apply_filters('site_export_api_options', $options);
             if (!is_array($options)) {
                 \WordPress\Reprint\Server\Plugin\push_error(
@@ -158,6 +159,7 @@ function reprint_server_compat_migrate_legacy_options(): void {
     }
 }
 
+// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Released aliases must keep their names for existing callers.
 function _site_export_error(int $code, string $message): void {
     \WordPress\Reprint\Server\Plugin\error($code, $message);
 }
@@ -217,3 +219,4 @@ function _site_export_update_push_authorization(bool $enabled): bool {
 function _site_export_handle_api_request(array $options = []): void {
     \WordPress\Reprint\Server\Plugin\handle_api_request($options);
 }
+// phpcs:enable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound

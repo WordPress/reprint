@@ -61,7 +61,7 @@ const OPTIONS_BY_IMPORTER = new Map(
 const PLAYGROUND_PHP_BINARY = process.env.BENCH_PLAYGROUND_PHP_BINARY || join(PROJECT_ROOT, 'tests', 'e2e', 'ci', 'playground-php.sh');
 const PLAYGROUND_PHP_VERSION = process.env.PLAYGROUND_PHP_VERSION || '8.3';
 const REGISTRY = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'site-registry.json'), 'utf-8'));
-const MYSQL_PARSER_MANIFEST = process.env.WP_MYSQL_PARSER_EXTENSION_MANIFEST || '';
+const MYSQL_PARSER_ENABLED = process.env.WP_MYSQL_PARSER_EXTENSION === '1';
 
 async function seedSourceDb() {
     const dbName = `e2e_${SITE.replace(/-/g, '_')}`;
@@ -213,7 +213,7 @@ function playgroundPhpEnv() {
 }
 
 function runNativeMysqlParserProof({ requireParser }) {
-    if (!MYSQL_PARSER_MANIFEST) {
+    if (!MYSQL_PARSER_ENABLED) {
         return {
             ok: true,
             details: {
@@ -261,7 +261,7 @@ function proofFailureResult(stage, start, proof, details) {
         stdout: proof.stdout || '',
         details: {
             ...details,
-            wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
+            wp_mysql_parser: MYSQL_PARSER_ENABLED ? 'enabled' : 'disabled',
             native_parser_proof: 'failed',
         },
     };
@@ -278,7 +278,7 @@ function runPlaygroundSqliteDbPullBenchmark() {
     const baseDetails = {
         condition: 'db-pull in PHP.wasm',
         runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
-        wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
+        wp_mysql_parser: MYSQL_PARSER_ENABLED ? 'enabled' : 'disabled',
     };
     if (!proof.ok) {
         return proofFailureResult('playground-sqlite-db-pull', start, proof, baseDetails);
@@ -314,7 +314,7 @@ function runPlaygroundSqliteDbApplyBenchmark() {
     const baseDetails = {
         condition: 'db-apply to SQLite in PHP.wasm',
         runtime: `php.wasm ${PLAYGROUND_PHP_VERSION}`,
-        wp_mysql_parser: MYSQL_PARSER_MANIFEST ? 'enabled' : 'disabled',
+        wp_mysql_parser: MYSQL_PARSER_ENABLED ? 'enabled' : 'disabled',
     };
     if (!proof.ok) {
         return proofFailureResult('playground-sqlite-db-apply', start, proof, baseDetails);

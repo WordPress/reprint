@@ -17,11 +17,11 @@ jobs:
     name: Build reprint.phar (PR)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.5'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
@@ -41,7 +41,7 @@ jobs:
           done
       - run: ./bin/build-reprint-phar.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: client-phar-pr
           path: reprint.phar
@@ -50,12 +50,12 @@ jobs:
     name: Build reprint.phar (trunk)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: trunk
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.5'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
@@ -75,7 +75,7 @@ jobs:
           done
       - run: ./bin/build-reprint-phar.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: client-phar-trunk
           path: reprint.phar
@@ -89,7 +89,7 @@ jobs:
       PHP_VERSION: '8.5'
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           submodules: true
 
@@ -106,18 +106,18 @@ jobs:
           echo "Focused stages: $stages"
 
       - name: Download PR phar
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: client-phar-pr
           path: phars/pr
 
       - name: Download trunk phar
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: client-phar-trunk
           path: phars/trunk
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '24'
 
@@ -127,7 +127,7 @@ jobs:
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
       # because every Launchpad endpoint flakes regularly.
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: ${{ env.PHP_VERSION }}
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3
@@ -141,14 +141,10 @@ jobs:
 
       - name: Install e2e dependencies
         working-directory: tests/e2e
-        run: npm install
+        run: npm ci
 
       - name: Download wp-cli
-        run: |
-          if [ ! -f /tmp/wp-cli.phar ]; then
-            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
-            chmod +x /tmp/wp-cli.phar
-          fi
+        run: tests/e2e/ci/download-wp-cli.sh
 
       - name: Bench PR
         working-directory: tests/e2e
@@ -166,7 +162,7 @@ jobs:
           BENCH_PLAYGROUND_PHP_BINARY: ${{ github.workspace }}/tests/e2e/ci/playground-php.sh
           PLAYGROUND_PHP_USE_WASM_RUNNER: '1'
           PLAYGROUND_PHP_VERSION: '8.3'
-          WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
+          WP_MYSQL_PARSER_EXTENSION: '1'
         run: node benchmark/bench-pull.mjs
 
       - name: Reset benchmark sites before trunk
@@ -196,7 +192,7 @@ jobs:
           # comparison shows a constant ~10× "improvement" attributable to
           # the parser, on every PR — which has nothing to do with what
           # the PR actually changes. Keep both sides on the same parser.
-          WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
+          WP_MYSQL_PARSER_EXTENSION: '1'
         # Don't fail the whole job if trunk's bench fails — we still want
         # to publish the PR's numbers.
         continue-on-error: true
@@ -210,7 +206,7 @@ jobs:
 
       - name: Upload benchmark artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pull-pipeline-bench
           path: |
@@ -238,7 +234,20 @@ jobs:
         # The step summary and artifact already contain the benchmark result.
         # A GitHub comment outage must not replace that result with a red check.
         continue-on-error: true
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2
         with:
           header: pull-pipeline-perf
           path: tests/e2e/bench-results.md
+
+  ci-result:
+    name: Performance result
+    needs: [build-pr-phar, build-trunk-phar, bench]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

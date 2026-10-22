@@ -390,7 +390,7 @@ if (!function_exists('submit_button')) {
 
 if (!function_exists('home_url')) {
     function home_url(string $path = ''): string {
-        return 'https://example.test/' . ltrim($path, '/');
+        return ( $GLOBALS['reprint_server_test_home_url'] ?? 'https://example.test/' ) . ltrim($path, '/');
     }
 }
 
@@ -403,6 +403,12 @@ if (!function_exists('admin_url')) {
 if (!function_exists('network_admin_url')) {
     function network_admin_url(string $path = ''): string {
         return 'https://example.test/wp-admin/network/' . ltrim($path, '/');
+    }
+}
+
+if (!function_exists('wp_parse_url')) {
+    function wp_parse_url(string $url, int $component = -1) {
+        return parse_url($url, $component);
     }
 }
 
@@ -543,6 +549,7 @@ abstract class ReprintServerPluginTestCase extends TestCase
         $this->original_reprint_server_push_enabled_environment = getenv('REPRINT_SERVER_PUSH_ENABLED');
 
         $GLOBALS['reprint_server_test_multisite'] = false;
+        $GLOBALS['reprint_server_test_home_url'] = 'https://example.test/';
         $GLOBALS['reprint_server_test_user_can_manage_network'] = false;
         $GLOBALS['reprint_server_test_network_options'] = [];
         $GLOBALS['reprint_server_test_options'] = [];
@@ -601,7 +608,6 @@ abstract class ReprintServerPluginTestCase extends TestCase
 
     protected function renderAdminPage(): string
     {
-        SettingsPage::get_instance()->register_settings_fields();
         ob_start();
         SettingsPage::get_instance()->render_admin_page();
         return (string) ob_get_clean();

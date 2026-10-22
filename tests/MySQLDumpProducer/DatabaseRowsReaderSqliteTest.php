@@ -37,6 +37,27 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
         }
     }
 
+    public function testNumericLiteralFormattingRejectsTextValues(): void
+    {
+        // Legacy SQLite sources can store text under numeric column metadata.
+        // Check the formatter directly; the current SQLite driver uses STRICT tables.
+        $producer = new MySQLDumpProducer(new PDO('sqlite::memory:'));
+        $format = new ReflectionMethod($producer, 'format_value');
+        foreach (['0', '-12', '18446744073709551615', '.5', '1.25e-10'] as $value) {
+            $this->assertSame($value, $format->invoke($producer, $value, 'BIGINT'));
+        }
+        foreach (['1); SELECT 7; --', '', 'NULL', 'INF', 'NaN', '0xFF'] as $value) {
+            try {
+                $format->invoke($producer, $value, 'BIGINT');
+            } catch (RuntimeException $error) {
+                $this->assertStringContainsString('Cannot export nonnumeric value', $error->getMessage());
+                $this->assertStringContainsString(base64_encode($value), $error->getMessage());
+                continue;
+            }
+            $this->fail('A nonnumeric value was emitted as a numeric literal.');
+        }
+    }
+
     public function testFloatingPointValuesAndResumedKeysWithMultibyteDecimalSeparator(): void
     {
         $locale = setlocale(LC_NUMERIC, 0);
@@ -230,6 +251,26 @@ final class DatabaseRowsReaderSqliteTest extends TestCase {
             1,
             $other_connection->exec("UPDATE wp_posts SET post_content = 'changed' WHERE ID = 2")
         );
+    }
+
+    public function testSqlDumpResumesAfterEveryFragmentWithGeneratedStates(): void
+    {
+        $cursor = null;
+        $sql = '';
+        $steps = 0;
+        do {
+            $producer = new MySQLDumpProducer($this->open_database(), ['cursor' => $cursor, 'batch_size' => 1]);
+            $more = $producer->next_sql_fragment();
+            if ($more) {
+                $sql .= $producer->get_sql_fragment() . "\n";
+                $cursor = $producer->get_reentrancy_cursor();
+            }
+            $producer->close();
+            $this->assertLessThan(40, ++$steps);
+        } while ($more);
+        $this->assertStringContainsString('INSERT INTO `wp_posts`', $sql);
+        $this->assertStringContainsString(base64_encode('https://old.example/one'), $sql);
+        $this->assertStringContainsString(base64_encode('https://old.example/two'), $sql);
     }
 
     private function open_database(): WP_PDO_MySQL_On_SQLite

@@ -174,6 +174,14 @@ class ShortcodeProcessor {
 	private $scan_at_after_failure = null;
 
 	/**
+	 * Failed attribute suffixes, with one bit per quote state in each byte.
+	 * Lazily allocated so plain text does not need a second input-sized string.
+	 *
+	 * @var string
+	 */
+	private $failed_attribute_states = '';
+
+	/**
 	 * Constructor.
 	 *
 	 * @param string $text Text containing possible shortcode markup.
@@ -569,10 +577,9 @@ class ShortcodeProcessor {
 	/**
 	 * Replaces the current attribute value with minimal lexical changes.
 	 *
-	 * Existing quotes are retained when possible. An unquoted value gains
-	 * quotes only when the replacement cannot be represented unquoted. The
-	 * method refuses values containing both unescaped quote delimiters when
-	 * quoting is required.
+	 * Keep the original delimiter, including an unquoted value. A shortcode
+	 * can sit inside an HTML attribute; adding or switching quotes can close
+	 * that outer attribute. Refuse replacements that need different delimiters.
 	 *
 	 * @param string $value Replacement attribute value.
 	 * @return bool Whether the update was enqueued.
@@ -590,14 +597,7 @@ class ShortcodeProcessor {
 
 		if ( null !== $quote ) {
 			if ( $this->contains_unescaped_quote( $value, $quote ) ) {
-				$alternate_quote = '"' === $quote ? "'" : '"';
-				if ( $this->contains_unescaped_quote( $value, $alternate_quote ) ) {
-					return false;
-				}
-
-				$start  = $attribute['value_start'] - 1;
-				$length = $attribute['value_length'] + 2;
-				$text   = $alternate_quote . $value . $alternate_quote;
+				return false;
 			}
 		} else {
 			$requires_quotes = ! $this->can_use_unquoted_attribute_value( $value );
@@ -612,13 +612,7 @@ class ShortcodeProcessor {
 			}
 
 			if ( $requires_quotes ) {
-				if ( ! $this->contains_unescaped_quote( $value, '"' ) ) {
-					$text = '"' . $value . '"';
-				} elseif ( ! $this->contains_unescaped_quote( $value, "'" ) ) {
-					$text = "'" . $value . "'";
-				} else {
-					return false;
-				}
+				return false;
 			}
 		}
 
@@ -839,10 +833,21 @@ class ShortcodeProcessor {
 			);
 		}
 
+		if ( '' === $this->failed_attribute_states ) {
+			$this->failed_attribute_states = str_repeat( "\0", $this->length );
+		}
+
 		$attributes_start = $at;
 		$first_quote_at   = null;
 		$quote            = null;
 		while ( $at < $this->length ) {
+			// The remaining scan depends only on this offset and quote state.
+			$state_bit = null === $quote ? 1 : ( '"' === $quote ? 2 : 4 );
+			$states    = ord( $this->failed_attribute_states[ $at ] );
+			if ( $states & $state_bit ) {
+				break;
+			}
+			$this->failed_attribute_states[ $at ] = chr( $states | $state_bit );
 			$byte = $this->text[ $at ];
 
 			if ( null !== $quote ) {
@@ -871,6 +876,12 @@ class ShortcodeProcessor {
 			if ( ']' !== $byte ) {
 				++$at;
 				continue;
+			}
+
+			// Only failed scans remain cached. A complete token may be scanned
+			// again after next_token() returns its preceding text token.
+			for ( $clear_at = $attributes_start; $clear_at <= $at; ++$clear_at ) {
+				$this->failed_attribute_states[ $clear_at ] = "\0";
 			}
 
 			$attributes_end = $at;

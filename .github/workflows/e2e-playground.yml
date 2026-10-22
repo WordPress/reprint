@@ -10,11 +10,11 @@ jobs:
     name: Build reprint.phar
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: true
 
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.2'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
@@ -23,7 +23,7 @@ jobs:
 
       - run: ./bin/build-reprint-phar.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: client-phar-playground
           path: reprint.phar
@@ -39,18 +39,18 @@ jobs:
         shard: [1, 2, 3, 4]
     env:
       PLAYGROUND_PHP_VERSION: '8.3'
-      WP_MYSQL_PARSER_EXTENSION_MANIFEST: https://wordpress.github.io/sqlite-database-integration/wp_mysql_parser-wasm-extension/latest/manifest.json
+      WP_MYSQL_PARSER_EXTENSION: '1'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: true
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: client-phar-playground
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "24"
           cache: npm
@@ -61,7 +61,7 @@ jobs:
       # PHP comes from the runner's pre-cached toolcache via this
       # action; we don't try to apt-install ondrej/php ourselves
       # because every Launchpad endpoint flakes regularly.
-      - uses: shivammathur/setup-php@v2
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.2'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring, curl, xml, sqlite3, gd
@@ -75,21 +75,21 @@ jobs:
 
       - name: Install E2E dependencies
         working-directory: tests/e2e
-        run: npm install
+        run: npm ci
 
-      - name: Install Playground CLI
-        run: npm install -g @wp-playground/cli@3.1.54
+      - name: Test PHP.wasm extension checksums
+        run: node --test tests/e2e/ci/php-wasm-runner.test.mjs
 
       - name: Verify Playground CLI PHP works
         run: |
           echo "=== Playground CLI version ==="
-          npx @wp-playground/cli --version || echo "no --version flag"
+          tests/e2e/node_modules/.bin/wp-playground-cli --version || echo "no --version flag"
 
           echo "=== Test PHP execution ==="
-          npx @wp-playground/cli php -- -r "echo 'Hello from Playground PHP ' . PHP_VERSION . PHP_EOL;"
+          tests/e2e/node_modules/.bin/wp-playground-cli php -- -r "echo 'Hello from Playground PHP ' . PHP_VERSION . PHP_EOL;"
 
           echo "=== Test PHAR with mount ==="
-          npx @wp-playground/cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
+          tests/e2e/node_modules/.bin/wp-playground-cli php --mount="${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" -- "${GITHUB_WORKSPACE}/reprint.phar" --help || echo "EXIT: $?"
 
       - name: Verify wp_mysql_parser extension is selected
         env:
@@ -105,10 +105,7 @@ jobs:
         working-directory: tests/e2e
         run: |
           # Download WP-CLI (normally done by Vitest globalSetup, but we need it here)
-          if [ ! -f /tmp/wp-cli.phar ]; then
-            curl -sfL "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar" -o /tmp/wp-cli.phar
-            chmod +x /tmp/wp-cli.phar
-          fi
+          ci/download-wp-cli.sh
 
           # Provision the "basic" site
           node --input-type=module <<'NODESCRIPT'
@@ -157,7 +154,7 @@ jobs:
         working-directory: tests/e2e
         # Run every test file once across four runners because each WASM PHP
         # invocation has substantial startup overhead.
-        run: npx vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000
+        run: npx --no-install vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000
 
       - name: Debug logs
         if: always()
@@ -171,17 +168,15 @@ jobs:
           echo "--- Nginx config test ---"
           sudo nginx -t 2>&1 || true
 
-  e2e-playground-result:
+  ci-result:
     name: E2E (Playground CLI)
-    needs: e2e-playground
+    needs: [build-phar, e2e-playground]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      - name: Require every Playground CLI E2E shard to pass
+      - name: Require every PR job to pass
         env:
-          PLAYGROUND_E2E_RESULT: ${{ needs.e2e-playground.result }}
+          JOB_RESULTS: ${{ toJSON(needs) }}
         run: |
-          if [ "$PLAYGROUND_E2E_RESULT" != "success" ]; then
-            echo "One or more Playground CLI E2E shards did not pass."
-            exit 1
-          fi
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

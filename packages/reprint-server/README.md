@@ -47,3 +47,9 @@ Do not propose changes in this package repository. Open issues and pull requests
 https://github.com/WordPress/reprint
 
 The package repository is overwritten from `packages/reprint-server` in the monorepo during releases, so direct changes here will be lost.
+
+Preflight reports WordPress roots found under the requested `directory` paths,
+but does not load PHP from those paths. A standalone host route that needs
+WordPress metadata must define `ABSPATH` to its configured WordPress root or
+load WordPress before serving the request. When `get_option()` is already
+available, preflight uses that running WordPress instance.

@@ -59,17 +59,10 @@ fi
 # ── Locate or download Box ────────────────────────────────────────
 
 BOX_PHAR="$PROJECT_ROOT/box.phar"
-if ! [ -f "$BOX_PHAR" ]; then
-    echo "Downloading box.phar …"
-    BOX_PHAR_DOWNLOAD="$BOX_PHAR.download"
-    rm -f "$BOX_PHAR_DOWNLOAD"
-    curl --fail --silent --show-error --location \
-        --retry 5 --retry-delay 1 --retry-all-errors --connect-timeout 15 \
-        "https://github.com/box-project/box/releases/latest/download/box.phar" \
-        -o "$BOX_PHAR_DOWNLOAD"
-    mv "$BOX_PHAR_DOWNLOAD" "$BOX_PHAR"
-    chmod +x "$BOX_PHAR"
-fi
+"$SCRIPT_DIR/download-verified.sh" \
+    'https://github.com/box-project/box/releases/download/4.7.0/box.phar' \
+    '3d390eeaec33288098fe83f8a54c60cc575cb6be295f38ff4482b4b4f26f8d52' \
+    "$BOX_PHAR"
 
 # ── Compute version ──────────────────────────────────────────────
 #

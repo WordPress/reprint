@@ -1,0 +1,81 @@
+name: Update Playground inputs
+
+on:
+  schedule:
+    - cron: '43 7 * * 1'
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-playground-inputs
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: node --test tests/e2e/ci/update-playground-inputs.test.mjs
+
+  update:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: trunk
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - name: Check upstream packages and parser builds
+        run: node bin/update-playground-inputs.mjs
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Open or update the dependency PR
+        id: update_pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          # Use the existing repository token so the update starts normal CI.
+          token: ${{ secrets.GH_TOKEN }}
+          branch: codex/update-playground-inputs
+          commit-message: '[CI] Update Playground packages and parser binaries'
+          title: '[CI] Update Playground packages and parser binaries'
+          body: |
+            Updates the Playground CLI, its PHP.wasm packages, and generated runtime startup together. Parser binaries come from one recorded upstream commit, with a SHA-256 for each supported PHP version.
+
+            GitHub merges this update automatically after the required CI checks pass. Failed checks leave the PR open.
+          add-paths: |
+            tests/e2e/package.json
+            tests/e2e/package-lock.json
+            packages/reprint-client/src/lib/target-runtime/class-playground-cli-applier.php
+            tests/e2e/ci/wp-mysql-parser-extension.json
+      - name: Enable auto-merge
+        if: steps.update_pr.outputs.pull-request-number != ''
+        run: gh pr merge --squash --auto --match-head-commit "$EXPECTED_COMMIT" "$PR_NUMBER"
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          PR_NUMBER: ${{ steps.update_pr.outputs.pull-request-number }}
+          EXPECTED_COMMIT: ${{ steps.update_pr.outputs.pull-request-head-sha }}
+
+  ci-result:
+    name: Playground input updater result
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

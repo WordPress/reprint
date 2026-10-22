@@ -45,6 +45,29 @@ class TerminalProgressTest extends TestCase {
         }
     }
 
+    /** @dataProvider terminalText */
+    public function testTextControlsAreVisibleWithoutChangingUnicode(string $text, string $expected): void
+    {
+        $this->assertSame($expected, \TerminalProgress::escape_text($text));
+    }
+
+    /** @return array<string,array{string,string}> Raw text and its printable terminal form. */
+    public static function terminalText(): array
+    {
+        return [
+            'screen clear' => ["name\033[2J.txt", 'name\\x1b[2J.txt'],
+            'window title' => ["\033]0;title\007", '\\x1b]0;title\\x07'],
+            'line breaks' => ["one\rtwo\nthree\tfour", 'one\\x0dtwo\\x0athree\\x09four'],
+            'NUL and DEL' => ["\0x\x7f", '\\x00x\\x7f'],
+            'UTF-8 C1' => ["\xc2\x9b2J", '\\x9b2J'],
+            'raw C1' => ["\x9b2J", '\\x9b2J'],
+            'invalid byte' => ["name\xff\033[2J", 'name\\xff\\x1b[2J'],
+            'Unicode' => ['café 🐢 żółw', 'café 🐢 żółw'],
+            'plain path' => ['folder\\new/photo.txt', 'folder\\new/photo.txt'],
+            'empty' => ['', ''],
+        ];
+    }
+
     public static function precedingDraws(): array
     {
         return [

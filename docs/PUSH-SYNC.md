@@ -172,9 +172,14 @@ A push plan is an internal part of the sender lifecycle:
    preflight document root. The sender enters `creating`, stores the document
    root's local relative path in `sender.json`, and requests
    at most 100 target exclusions from `push_create`. If another push session
-   has an active commit, the sender stores its `blocking_push_session_id`, enters
+   has an active commit, the sender requires a 32-character lowercase hexadecimal
+   `blocking_push_session_id` before storing it and entering
    `finishing_previous_commit`, and sends one bounded `push_commit` request per
-   step until that commit finishes. It then returns to `creating`. A successful
+   step until that commit finishes. It then returns to `creating`. A malformed
+   blocking ID fails the run without leaving `creating`. A `push_not_found`
+   response while finishing the previous commit fails the run and stores
+   `creating` for the next resume. Older checkpoints with an invalid blocking ID
+   return to `creating` in one local step without sending a request. A successful
    create combines the target exclusions with at most 100 caller exclusions
    and stores the result in `excluded_paths.json` after creating the active
    `plan/` directory. The combined list stays with that plan across resume.
@@ -207,6 +212,14 @@ A push plan is an internal part of the sender lifecycle:
    sender-owned exclusions file. After the target confirms removal of a
    discarded push session, the sender removes the same files without changing
    the local index for that remote Reprint API URL.
+
+`files-push --abort` removes the local `plan/`, `excluded_paths.json`, and
+`sender.json`, plus `excluded_paths.json.tmp` and `sender.json.tmp`, under the
+Reprint process lock. It does not decode the sender checkpoint, require preflight
+or a connection credential, or send a request. It keeps the completed local index,
+pull state, and local site files unchanged. It does not cancel a target commit
+already in progress or remove staged target work. The next push starts a fresh
+local sender and may still need to finish that target commit.
 
 Until the sender stores the initial PushPlan cursor, `starting_plan` remains
 the durable phase. An interrupted start is repeated and overwrites its initial
@@ -343,14 +356,20 @@ a direct embedder passes the same array to
 `WordPress\Reprint\Server\Plugin\handle_api_request()`.
 The document-root path must resolve to an existing directory. `ABSPATH` remains
 the default only for pull endpoints because it may point at a separate shared
-WordPress core tree. Push work lives in a document-root-specific private
-directory beside the resolved absolute document root unless server configuration
-supplies `reprint_directory`.
-Configured reprint directories must remain outside the document root; the HTTP
-endpoints reject an inside path because they do not yet apply the indexing and
-web-access protections described below. The plugin always excludes its logical
-installed directory from push, including when that directory is a symlink to a
-physical target outside the document root. A platform hook or embedding router
+WordPress core tree. Push requires an explicit `reprint_directory` in the trusted
+API-options array; there is no inferred directory. The host must choose a private
+push directory outside every web-served tree, on the same filesystem as the
+document root. A sibling of one document root can still be served by a parent
+virtual host, and PHP cannot enumerate those other roots. Missing configuration
+returns `not_configured` (HTTP 503) before a push session is created. Pull endpoints
+are unchanged. Existing unfinished pushes require their existing private directory
+to remain configured; selecting a new empty directory does not move their state.
+The HTTP endpoints also reject a directory inside the current document root
+because they do not yet apply the indexing and web-access protections described
+below. The plugin always excludes its logical installed directory from push,
+including when that directory is a symlink to a physical target outside the
+document root. If the physical target is also inside the document root, both
+document-root-relative paths are excluded. A platform hook or embedding router
 must choose its document root, reprint directory, and excluded paths as server
 configuration; request parameters cannot select any of them.
 
@@ -811,3 +830,9 @@ Files first, followed by full database overwrite and then selective database cha
     returns the exact committed state the driver needs to retry. The commit step
     gets the main budgeted loop: process until a deadline or operation limit,
     return progress, and let the driver re-enter until complete.
+
+The active local SQLite database is not part of files-diff or files-push.
+Both commands derive its path from the saved db-apply target and exclude that
+file, its `-wal`, `-shm`, and `-journal` companions, and its
+`.reprint-import.lock` file. Other SQLite files remain ordinary site content.
+Use db-push to transfer the active local database.

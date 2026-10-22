@@ -27,14 +27,17 @@ class PhpSerializationProcessor
 {
     private const DIGITS = '0123456789';
 
+    // Container recursion needs its own bound, separate from nested string rewrites.
+    private const MAX_NESTING_DEPTH = 512;
+
     /** @var string The original serialized data. */
     private $data;
 
     /** @var int Cached length of the original data. */
     private $data_length;
 
-    /** @var bool Whether the input was malformed. */
-    private $malformed = false;
+    /** @var string|null Parsing failure: malformed input or a nesting limit. */
+    private $parse_error = null;
 
     /**
      * Bookmarks recording the position of each string value in the input.
@@ -68,8 +71,8 @@ class PhpSerializationProcessor
      * Parse the input upfront, recording the position of every string value.
      *
      * The constructor validates the entire serialized structure. If parsing
-     * fails at any point, is_malformed() will return true and next_value()
-     * will immediately return false.
+     * fails or exceeds 512 nested containers, is_malformed() returns true
+     * and next_value() immediately returns false.
      *
      * @param string $serialized The PHP serialized data.
      */
@@ -79,19 +82,19 @@ class PhpSerializationProcessor
         $this->data_length = strlen($serialized);
 
         if ($this->data_length === 0) {
-            $this->malformed = true;
+            $this->parse_error = 'malformed';
             return;
         }
 
         $pos = 0;
-        if (!$this->parse_value($pos, true)) {
-            $this->malformed = true;
+        if (!$this->parse_value($pos, true, 0)) {
+            $this->parse_error = $this->parse_error ?? 'malformed';
             return;
         }
 
         // If there's trailing data, the input is malformed
         if ($pos !== $this->data_length) {
-            $this->malformed = true;
+            $this->parse_error = 'malformed';
         }
     }
 
@@ -99,11 +102,11 @@ class PhpSerializationProcessor
      * Advance to the next string value in the serialized data.
      *
      * @return bool True if there is another value, false if iteration is
-     *              complete or input was malformed.
+     *              complete or input could not be parsed.
      */
     public function next_value(): bool
     {
-        if ($this->malformed) {
+        if ($this->is_malformed()) {
             return false;
         }
         $this->cursor++;
@@ -139,13 +142,19 @@ class PhpSerializationProcessor
     }
 
     /**
-     * Whether the serialized input was malformed.
+     * Whether the serialized input was malformed or exceeded the nesting limit.
      *
-     * @return bool True if the parser encountered invalid serialized data.
+     * @return bool True if parsing failed or exceeded the nesting limit.
      */
     public function is_malformed(): bool
     {
-        return $this->malformed;
+        return $this->parse_error !== null;
+    }
+
+    /** Whether parsing stopped at the container nesting limit. */
+    public function exceeded_nesting_limit(): bool
+    {
+        return $this->parse_error === 'nesting_limit';
     }
 
     /**
@@ -203,11 +212,17 @@ class PhpSerializationProcessor
      * @param int  &$pos     Current byte offset (updated in place).
      * @param bool $is_value Whether this position is a value (true) or
      *                       a key/property name (false).
+     * @param int  $depth    Number of enclosing arrays and objects.
      * @return bool True if parsing succeeded.
      */
-    private function parse_value(int &$pos, bool $is_value): bool
+    private function parse_value(int &$pos, bool $is_value, int $depth): bool
     {
         if (!isset($this->data[$pos])) {
+            return false;
+        }
+
+        if (( $this->data[$pos] === 'a' || $this->data[$pos] === 'O' ) && $depth >= self::MAX_NESTING_DEPTH) {
+            $this->parse_error = 'nesting_limit';
             return false;
         }
 
@@ -223,9 +238,9 @@ class PhpSerializationProcessor
             case 'N':
                 return $this->parse_null($pos);
             case 'a':
-                return $this->parse_array($pos);
+                return $this->parse_array($pos, $depth + 1);
             case 'O':
-                return $this->parse_object($pos);
+                return $this->parse_object($pos, $depth + 1);
             case 'C':
                 return $this->parse_custom($pos);
             case 'r':
@@ -374,7 +389,7 @@ class PhpSerializationProcessor
      * Keys are parsed with is_value=false (they're structural, not content).
      * Values are parsed with is_value=true so they get bookmarked.
      */
-    private function parse_array(int &$pos): bool
+    private function parse_array(int &$pos, int $depth): bool
     {
         if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== 'a' || $this->data[$pos + 1] !== ':') {
             return false;
@@ -397,12 +412,12 @@ class PhpSerializationProcessor
 
         for ($i = 0; $i < $count; $i++) {
             // Parse key (string or integer, not a value)
-            if (!$this->parse_value($pos, false)) {
+            if (!$this->parse_value($pos, false, $depth)) {
                 return false;
             }
 
             // Parse value (with bookmark)
-            if (!$this->parse_value($pos, true)) {
+            if (!$this->parse_value($pos, true, $depth)) {
                 return false;
             }
         }
@@ -427,7 +442,7 @@ class PhpSerializationProcessor
      * preserved correctly because we read by byte count, not by scanning
      * for delimiters.
      */
-    private function parse_object(int &$pos): bool
+    private function parse_object(int &$pos, int $depth): bool
     {
         if (!isset($this->data[$pos + 1]) || $this->data[$pos] !== 'O' || $this->data[$pos + 1] !== ':') {
             return false;
@@ -471,12 +486,12 @@ class PhpSerializationProcessor
 
         for ($i = 0; $i < $prop_count; $i++) {
             // Parse property name (not a value — structural)
-            if (!$this->parse_value($pos, false)) {
+            if (!$this->parse_value($pos, false, $depth)) {
                 return false;
             }
 
             // Parse property value (with bookmark)
-            if (!$this->parse_value($pos, true)) {
+            if (!$this->parse_value($pos, true, $depth)) {
                 return false;
             }
         }

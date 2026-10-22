@@ -67,9 +67,10 @@ $streaming_context = null;
  * Content-Type header, an output stream, and the global $streaming_context so
  * error handlers can emit structured error chunks mid-stream.
  *
- * @param bool $require_headers If true, throws when headers were already sent
- *                              (use for endpoints that can't degrade gracefully).
- * @param bool $gzip If true, emit Content-Encoding: gzip and compress the body.
+ * If output started before Reprint loaded, send uncompressed multipart data.
+ * The client can read its boundary and metadata from the response body.
+ *
+ * @param bool $gzip If true and headers can still be sent, compress the body.
  * @return array {
  *     Multipart stream context.
  *
@@ -78,7 +79,7 @@ $streaming_context = null;
  * }
  * @phpstan-return array{gz: GzipOutputStream, boundary: string}
  */
-function begin_multipart_stream(bool $require_headers = false, bool $gzip = true): array
+function begin_multipart_stream(bool $gzip = true): array
 {
     global $streaming_context;
 
@@ -107,12 +108,6 @@ function begin_multipart_stream(bool $require_headers = false, bool $gzip = true
      */
     $boundary = "boundary-" . bin2hex(Utils::generate_random_bytes(16));
     $can_send_headers = !headers_sent();
-
-    if ($require_headers && !$can_send_headers) {
-        throw new RuntimeException(
-            "Cannot begin multipart stream: headers already sent"
-        );
-    }
 
     if ($can_send_headers) {
         @header("Content-Type: multipart/mixed; boundary=\"$boundary\"");
@@ -466,12 +461,14 @@ set_error_handler(function ($errno, $errstr, $errfile, $errline) {
         return true;
     }
 
-    http_response_code(500);
-    // Hosts such as Hostinger rewrite domains so links and assets stay on a
-    // preview domain while the stored site URL still uses the real domain.
-    // This lets users preview a site before changing DNS, but also rewrites
-    // application/json bodies. Octet-stream bypasses Hostinger's filter.
-    @header("Content-Type: application/octet-stream");
+    if (!headers_sent()) {
+        http_response_code(500);
+        // Hosts such as Hostinger rewrite domains so links and assets stay on a
+        // preview domain while the stored site URL still uses the real domain.
+        // This lets users preview a site before changing DNS, but also rewrites
+        // application/json bodies. Octet-stream bypasses Hostinger's filter.
+        @header("Content-Type: application/octet-stream");
+    }
     echo json_encode($error);
     exit(1);
 });
@@ -497,12 +494,14 @@ set_exception_handler(function ($e) {
         return;
     }
 
-    http_response_code(500);
-    // Hosts such as Hostinger rewrite domains so links and assets stay on a
-    // preview domain while the stored site URL still uses the real domain.
-    // This lets users preview a site before changing DNS, but also rewrites
-    // application/json bodies. Octet-stream bypasses Hostinger's filter.
-    header("Content-Type: application/octet-stream");
+    if (!headers_sent()) {
+        http_response_code(500);
+        // Hosts such as Hostinger rewrite domains so links and assets stay on a
+        // preview domain while the stored site URL still uses the real domain.
+        // This lets users preview a site before changing DNS, but also rewrites
+        // application/json bodies. Octet-stream bypasses Hostinger's filter.
+        header("Content-Type: application/octet-stream");
+    }
     echo json_encode($error);
     exit(1);
 });
@@ -783,7 +782,7 @@ function detect_wp_roots(array $start_paths): array
 }
 
 /**
- * Streams SQL dump fragments as gzipped multipart chunks.
+ * Streams SQL dump fragments as multipart chunks, gzipped when headers allow.
  */
 function endpoint_sql_chunk(
     array $config,
@@ -903,7 +902,7 @@ function endpoint_sql_chunk(
     }
 
 
-    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(true);
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream();
 
     // E2E test hook: after gzip stream initialization
     if (getenv('REPRINT_SERVER_TEST_MODE')) {
@@ -1949,7 +1948,12 @@ function endpoint_preflight(array $config): array
     }
     $credential_roots = normalize_path_list($credential_roots);
 
-    $db["wp"]["wp_load_path"] = $wp_load_path;
+    // Scanned directories describe files to export, not PHP to bootstrap.
+    // Only the host-configured WordPress root may supply executable setup.
+    $wp_bootstrap_path = defined("ABSPATH")
+        ? Utils::wp_join_unix_paths(ABSPATH, "wp-load.php")
+        : null;
+    $db["wp"]["wp_load_path"] = $wp_bootstrap_path;
     $db["wp"]["wp_load_loaded"] = function_exists("get_option");
 
     $creds = null;
@@ -2039,7 +2043,7 @@ function endpoint_preflight(array $config): array
                 $wp_load_attempted = false;
                 $wp_load_error = null;
                 $wp_loaded = $db["wp"]["wp_load_loaded"];
-                if (!$wp_loaded && $wp_load_path !== null) {
+                if (!$wp_loaded && $wp_bootstrap_path !== null) {
                     $wp_load_attempted = true;
                     $errors = [];
                     $handler = function ($errno, $errstr) use (&$errors) {
@@ -2047,7 +2051,7 @@ function endpoint_preflight(array $config): array
                         return true;
                     };
                     set_error_handler($handler);
-                    $include_result = @include_once $wp_load_path;
+                    $include_result = @include_once $wp_bootstrap_path;
                     restore_error_handler();
                     if ($include_result === false) {
                         $wp_load_error = !empty($errors)
@@ -2556,6 +2560,27 @@ function endpoint_preflight(array $config): array
         }
     }
 
+    // Some hosts disable ini_get_all(). Fall back to the directives the
+    // importer reads from runtime.ini_get_all, so add a directive here
+    // whenever the importer starts reading a new one.
+    if (function_exists("ini_get_all")) {
+        $ini_directives = ini_get_all(null, false);
+    } else {
+        $ini_directives = [];
+        foreach ([
+            "auto_prepend_file",
+            "auto_append_file",
+            "memory_limit",
+            "upload_max_filesize",
+            "post_max_size",
+            "max_execution_time",
+            "max_input_vars",
+            "max_input_time",
+        ] as $directive) {
+            $ini_directives[$directive] = ini_get($directive);
+        }
+    }
+
     // -- Assemble and return the preflight response --
     $ok =
         $preflight_error === null &&
@@ -2627,8 +2652,9 @@ function endpoint_preflight(array $config): array
             // Every effective INI directive as computed by the PHP runtime
             // after merging php.ini, scanned .ini files, and htaccess
             // overrides.  This captures the full configuration without
-            // needing to read the .ini files themselves.
-            "ini_get_all" => ini_get_all(null, false),
+            // needing to read the .ini files themselves.  Narrowed to the
+            // importer's directives when ini_get_all() is disabled.
+            "ini_get_all" => $ini_directives,
             "temp_dir" => function_exists("sys_get_temp_dir") ? sys_get_temp_dir() : null,
             "document_root" => $_SERVER["DOCUMENT_ROOT"] ?? null,
             "script_filename" => $_SERVER["SCRIPT_FILENAME"] ?? null,
@@ -2656,10 +2682,14 @@ function endpoint_preflight(array $config): array
     // preview domain while the stored site URL still uses the real domain.
     // This lets users preview a site before changing DNS, but also rewrites
     // application/json bodies. Octet-stream bypasses Hostinger's filter.
-    header("Content-Type: application/octet-stream");
+    if (!headers_sent()) {
+        header("Content-Type: application/octet-stream");
+    }
     $json = json_encode($response);
     if ($json === false) {
-        http_response_code(500);
+        if (!headers_sent()) {
+            http_response_code(500);
+        }
         echo '{"error":"Failed to serialize preflight response: ' . json_last_error_msg() . '"}';
     } else {
         echo $json;
@@ -2784,7 +2814,7 @@ function stream_file_producer(
 ): array {
     prepare_streaming_response();
 
-    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream(false, $gzip);
+    ['gz' => $gz, 'boundary' => $boundary] = begin_multipart_stream($gzip);
 
     // E2E test hook: after gzip stream initialization (file producer)
     if (getenv('REPRINT_SERVER_TEST_MODE')) {
@@ -3674,6 +3704,18 @@ function path_extension_compressibility(string $path): string
  */
 function path_head_looks_like_text(string $path): bool
 {
+    // A client can upload a file-list entry such as ftp://host/template.neon.
+    // Its unknown extension sends it here for a byte probe. is_file()/fopen()
+    // can then contact that FTP host just to decide whether to use gzip,
+    // even though the file producer looks for this name under a local source
+    // directory. Skip stream URLs before either call. Check native absolute
+    // paths first so Windows paths such as C://site/template.neon still work.
+    if (
+        !Utils::is_absolute_path($path, Utils::native_path_format())
+        && preg_match('~^[a-z][a-z0-9+.-]*://~i', $path) === 1
+    ) {
+        return false;
+    }
     if (!is_file($path)) {
         return false;
     }

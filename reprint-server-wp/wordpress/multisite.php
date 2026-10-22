@@ -79,6 +79,7 @@ function get_multisite_export_context(): array {
     // This runs for each multisite API request, including file requests.
     // get_col() holds the whole database table-name list in memory; this setup
     // cost grows with the number of tables, despite cheap per-path file filters.
+    // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching -- Export validation needs the current table inventory, including plugin tables added since the last request.
     foreach ($wpdb->get_col('SHOW TABLES') as $table) {
         if (strpos($table, $base_prefix) !== 0) {
             continue;

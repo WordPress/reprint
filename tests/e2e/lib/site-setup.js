@@ -6,10 +6,10 @@
  * tools (curl, tar, mysql, wp-cli).
  */
 import {
-    cpSync, existsSync, writeFileSync, mkdirSync,
+    cpSync, existsSync, readFileSync, writeFileSync, mkdirSync,
     openSync, closeSync, unlinkSync, constants, renameSync, symlinkSync,
 } from 'node:fs';
-import { execSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { createConnection } from 'mysql2/promise';
@@ -24,6 +24,12 @@ const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
 const WP_VERSION = process.env.E2E_WORDPRESS_VERSION || REGISTRY.wpVersion;
+const WP_ARCHIVES = createRequire(import.meta.url)('../wordpress-archives.json');
+const WP_SHA256 = WP_ARCHIVES[WP_VERSION];
+if (!WP_SHA256) {
+    throw new Error(`Record the SHA-256 for WordPress ${WP_VERSION} in wordpress-archives.json before provisioning it.`);
+}
+const WP_READY_CONTENTS = `${WP_VERSION} ${WP_SHA256}\n`;
 const WP_CLI_PHP_BINARY = process.env.E2E_WP_CLI_PHP_BINARY || 'php';
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const SERVER_PROJECT_ROOT = process.env.E2E_SERVER_PROJECT_ROOT || PROJECT_ROOT;
@@ -44,7 +50,7 @@ const MARKER = '.e2e-provisioned';
  * Uses a lock file to prevent races when Node runs test files in parallel.
  */
 async function ensureWpTemplate() {
-    if (existsSync(WP_READY)) {
+    if (existsSync(WP_READY) && readFileSync(WP_READY, 'utf8') === WP_READY_CONTENTS) {
         return;
     }
 
@@ -60,23 +66,22 @@ async function ensureWpTemplate() {
 
     if (acquired) {
         try {
-            if (existsSync(WP_READY)) {
+            if (existsSync(WP_READY) && readFileSync(WP_READY, 'utf8') === WP_READY_CONTENTS) {
                 return;
             }
             console.log(`Downloading WordPress ${WP_VERSION}...`);
-            execSync(
-                `curl -sfL "https://wordpress.org/wordpress-${WP_VERSION}.tar.gz" -o "${WP_TARBALL}"`,
-                { timeout: 120000 }
-            );
+            execFileSync(join(PROJECT_ROOT, 'bin/download-verified.sh'), [
+                `https://wordpress.org/wordpress-${WP_VERSION}.tar.gz`, WP_SHA256, WP_TARBALL,
+            ], { timeout: 120000, stdio: 'inherit' });
             execSync(`rm -rf "${WP_TEMPLATE}" && mkdir -p "${WP_TEMPLATE}" && tar xzf "${WP_TARBALL}" -C "${WP_TEMPLATE}" --strip-components=1`);
-            writeFileSync(WP_READY, `${WP_VERSION}\n`);
+            writeFileSync(WP_READY, WP_READY_CONTENTS);
             console.log(`WordPress template ready at ${WP_TEMPLATE}`);
         } finally {
             try { unlinkSync(WP_LOCK); } catch {}
         }
     } else {
         const deadline = Date.now() + 120000;
-        while (!existsSync(WP_READY)) {
+        while (!(existsSync(WP_READY) && readFileSync(WP_READY, 'utf8') === WP_READY_CONTENTS)) {
             if (Date.now() > deadline) {
                 throw new Error('Timed out waiting for WordPress template download');
             }

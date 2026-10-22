@@ -95,7 +95,7 @@ final class FilesPushCommandTest extends TestCase
 
     public function testFilesPushRejectsOptionsOutsideItsExactAllowlist(): void
     {
-        foreach (['--abort', '--filter=none', '--docroot=' . $this->localTree, '--duty=0.5'] as $rejectedOption) {
+        foreach (['--filter=none', '--docroot=' . $this->localTree, '--duty=0.5'] as $rejectedOption) {
             $result = $this->runCli([
                 'files-push',
                 'https://example.test/?reprint-api=1',
@@ -134,6 +134,74 @@ final class FilesPushCommandTest extends TestCase
             '--force-http is accepted only by files-push and db-push.',
             $rewriteUrlWithForceHttpSource['output']
         );
+    }
+
+    /** Local abort needs neither a saved preflight nor a connection credential. */
+    public function testFilesPushAbortClearsCorruptLocalActiveStateWithoutChangingOtherPaths(): void
+    {
+        $remote = 'https://example.test/?reprint-api=1';
+        $remote_state_directory = $this->stateDirectory . '/remotes/' . md5($remote);
+        $push_state_directory = $remote_state_directory . '/push';
+        mkdir($push_state_directory . '/plan', 0700, true);
+        file_put_contents($remote_state_directory . '/local_index.jsonl', "keep index\n");
+        // Deliberately corrupt sender JSON; abort must not depend on decoding it.
+        file_put_contents($push_state_directory . '/sender.json', 'unfinished JSON');
+        file_put_contents($push_state_directory . '/sender.json.tmp', 'unfinished replacement');
+        file_put_contents($push_state_directory . '/excluded_paths.json', '[]');
+        file_put_contents($push_state_directory . '/excluded_paths.json.tmp', 'unfinished replacement');
+        file_put_contents($push_state_directory . '/plan/fresh_local_index.jsonl', 'unfinished index');
+        file_put_contents($this->localTree . '/keep.txt', 'keep local file');
+        mkdir($remote_state_directory . '/pull');
+        file_put_contents($remote_state_directory . '/pull/state.json', 'keep pull state');
+        file_put_contents($remote_state_directory . '/pull/index.wal', 'keep pull journal');
+        foreach ([1, 2] as $attempt) {
+            $result = $this->runCli(['files-push', $remote, '--state-dir=' . $this->stateDirectory,
+                '--fs-root=' . $this->localTree, '--abort']);
+            $this->assertSame(0, $result['exit'], $result['output']);
+            $this->assertStringContainsString('aborted', $result['output']);
+            $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
+            $this->assertFileDoesNotExist($push_state_directory . '/sender.json.tmp');
+            $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json');
+            $this->assertFileDoesNotExist($push_state_directory . '/excluded_paths.json.tmp');
+            $this->assertDirectoryDoesNotExist($push_state_directory . '/plan');
+            $this->assertSame("keep index\n", file_get_contents($remote_state_directory . '/local_index.jsonl'));
+            $this->assertSame('keep local file', file_get_contents($this->localTree . '/keep.txt'));
+            $this->assertSame('keep pull state', file_get_contents($remote_state_directory . '/pull/state.json'));
+            $this->assertSame('keep pull journal', file_get_contents($remote_state_directory . '/pull/index.wal'));
+        }
+    }
+
+    /** Corrupt checkpoints can be cleared with the HTTP permission supplied to the client. */
+    public function testDirectFilesPushAbortClearsCorruptStateWithTheClientHttpPermission(): void
+    {
+        $remote = 'http://127.0.0.1:1/?reprint-api=1';
+        $push_state_directory = $this->stateDirectory . '/remotes/' . md5($remote) . '/push';
+        mkdir($push_state_directory, 0700, true);
+        file_put_contents($push_state_directory . '/sender.json', '{}');
+        $client = new ImportClient($remote, $this->stateDirectory, $this->localTree,
+            ['signal_handling_command' => 'files-push', 'insecure' => true]);
+        $client->run(['command' => 'files-push', 'abort' => true]);
+        $this->assertFileDoesNotExist($push_state_directory . '/sender.json');
+        $this->assertSame(0, $client->exit_code);
+    }
+
+    /** Abort cannot remove a corrupt checkpoint while another command holds the process lock. */
+    public function testFilesPushAbortKeepsCorruptStateWhenTheProcessLockIsHeld(): void
+    {
+        $remote = 'https://example.test/?reprint-api=1';
+        $push_state_directory = $this->stateDirectory . '/remotes/' . md5($remote) . '/push';
+        mkdir($push_state_directory, 0700, true);
+        file_put_contents($push_state_directory . '/sender.json', 'keep active state');
+        $processLock = new \ReprintProcessLock($this->stateDirectory);
+        try {
+            $result = $this->runCli(['files-push', $remote, '--state-dir=' . $this->stateDirectory,
+                '--fs-root=' . $this->localTree, '--abort']);
+            $this->assertSame(1, $result['exit'], $result['output']);
+            $this->assertStringContainsString('Another Reprint process is using the state directory', $result['output']);
+            $this->assertSame('keep active state', file_get_contents($push_state_directory . '/sender.json'));
+        } finally {
+            $processLock->close();
+        }
     }
 
     public function testFilesPushRejectsAnInvalidProgressMode(): void
@@ -382,6 +450,63 @@ final class FilesPushCommandTest extends TestCase
         $this->assertStringContainsString("X-Auth-Timestamp: ", $request);
         $this->assertStringNotContainsString("Content-Type: multipart/mixed", $request);
         $this->assertStringNotContainsString("Expect: 100-continue", $request);
+    }
+
+    /** @dataProvider failureOutputModes */
+    public function testRemoteFailureDetailIsEscapedOnlyForTheTerminal(string $mode): void
+    {
+        if (!function_exists('pcntl_fork')) {
+            $this->markTestSkipped('The wire response test requires pcntl.');
+        }
+        $listener = stream_socket_server('tcp://127.0.0.1:0');
+        $this->assertIsResource($listener);
+        $address = stream_socket_get_name($listener, false);
+        $url = 'http://' . $address . '/?reprint-api=1';
+        $this->writePreflightState($url);
+        $detail = "target\033[2J\007\rrefused";
+        $child = pcntl_fork();
+        $this->assertNotSame(-1, $child);
+        if ($child === 0) {
+            $connection = stream_socket_accept($listener, 5);
+            if ($connection === false) {
+                exit(2);
+            }
+            stream_set_timeout($connection, 5);
+            $request = '';
+            while (strpos($request, "\r\n\r\n") === false && !feof($connection)) {
+                $bytes = fread($connection, 65536);
+                if ($bytes === false || $bytes === '') {
+                    break;
+                }
+                $request .= $bytes;
+            }
+            $body = json_encode(['status' => 'failed', 'reason' => 'forbidden', 'detail' => $detail]);
+            fwrite($connection, "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: " . strlen($body) . "\r\nConnection: close\r\n\r\n" . $body);
+            fclose($connection);
+            fclose($listener);
+            exit(0);
+        }
+        try {
+            $result = $this->runFilesPush($url, ['--secret=token', '--allow-unsafe-http', '--progress=' . $mode]);
+            pcntl_waitpid($child, $status);
+            $this->assertSame(0, pcntl_wexitstatus($status));
+            $this->assertSame(1, $result['exit'], $result['output']);
+            if ($mode === 'tty') {
+                $this->assertStringNotContainsString("\033[2J", $result['stdout']);
+                $this->assertStringContainsString('target\\x1b[2J\\x07\\x0drefused', $result['stdout']);
+            } else {
+                $record = $this->lastWorkflowResult($result['stdout']);
+                $this->assertSame($detail, $record['detail']);
+            }
+        } finally {
+            fclose($listener);
+        }
+    }
+
+    /** @return array<string,array{string}> Terminal and machine-readable views of one response. */
+    public static function failureOutputModes(): array
+    {
+        return ['terminal' => ['tty'], 'JSONL' => ['jsonl']];
     }
 
     public function testFilesPushMasksTheSharedSecretInOutputAndStateFiles(): void
