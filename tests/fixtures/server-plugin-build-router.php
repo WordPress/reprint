@@ -1,6 +1,8 @@
 <?php
 /** Serve only an extracted plugin, with host configuration granting all push access. */
 
+// phpcs:disable WordPress.Security.NonceVerification.Recommended -- Isolated package fixture routes test requests, not WordPress form submissions.
+
 define('ABSPATH', getenv('REPRINT_TEST_DOCROOT') . '/');
 define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', getenv('REPRINT_TEST_PLUGIN') . '/');
 define('REPRINT_SERVER_PUSH_ENABLED', true);
@@ -9,13 +11,13 @@ define('SITE_EXPORT_PUSH_ENABLED', true);
 // A standalone consumer must not need the WordPress adapter to enforce the flag.
 if (isset($_GET['standalone'])) {
     require getenv('REPRINT_TEST_PLUGIN') . '/vendor/autoload.php';
-    $push_options = [
+    $reprint_test_push_options = [
         'docroot' => getenv('REPRINT_TEST_DOCROOT'),
         'reprint_directory' => getenv('REPRINT_TEST_DOCROOT') . '-push-state',
     ];
     \WordPress\Reprint\Server\HTTPServer::serve([
-        'push' => $push_options,
-        'database_push' => $push_options,
+        'push' => $reprint_test_push_options,
+        'database_push' => $reprint_test_push_options,
         'handlers' => ['push_future_probe' => static function () { echo 'Push handler reached.'; }],
     ]);
     exit;
@@ -26,18 +28,18 @@ require getenv('REPRINT_TEST_PLUGIN') . '/index.php';
 if (isset($_GET['admin_probe'])) {
     \WordPress\Reprint\Server\Plugin\load_server_runtime();
     \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests($_GET['admin_probe'] === 'key');
-    $page = \WordPress\Reprint\Server\Plugin\SettingsPage::get_instance();
+    $reprint_test_page = \WordPress\Reprint\Server\Plugin\SettingsPage::get_instance();
     ob_start();
-    $page->render_admin_page();
-    $html = ob_get_clean();
-    $configuration = \WordPress\Reprint\Server\Plugin\get_configuration_state();
+    $reprint_test_page->render_admin_page();
+    $reprint_test_html = ob_get_clean();
+    $reprint_test_configuration = \WordPress\Reprint\Server\Plugin\get_configuration_state();
     echo json_encode([
-        'html' => $html,
-        'push_supported' => $configuration['push_supported'],
-        'push_enabled' => $configuration['push_enabled'],
+        'html' => $reprint_test_html,
+        'push_supported' => $reprint_test_configuration['push_supported'],
+        'push_enabled' => $reprint_test_configuration['push_enabled'],
         'push_actions' => array_values(array_filter($GLOBALS['reprint_test_actions'], static function ($name) { return strpos($name, 'admin_post_reprint_server_save_') === 0 && strpos($name, 'push_access') !== false; })),
         'token_grant' => \WordPress\Reprint\Server\Plugin\change_push_access(true),
-        'key_grant' => \WordPress\Reprint\Server\Plugin\change_key_push_access($configuration['enrolled_keys'][0]['key_id'], true),
+        'key_grant' => \WordPress\Reprint\Server\Plugin\change_key_push_access($reprint_test_configuration['enrolled_keys'][0]['key_id'], true),
         'token_authorized' => \WordPress\Reprint\Server\Plugin\is_push_authorized(),
         'token_grant_written' => \WordPress\Reprint\Server\Plugin\update_push_authorization(true),
     ]);
@@ -76,6 +78,8 @@ function get_option($name, $default = false) {
     }
     return $default;
 }
+
+// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- WordPress function names required by the packaged administrator.
 
 /** Record registered actions without running a WordPress request lifecycle. */
 function add_action($name) { $GLOBALS['reprint_test_actions'][] = $name; }
