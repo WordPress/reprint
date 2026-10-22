@@ -709,12 +709,22 @@ without writing a file to disk. Use `--sql-output` to choose the mode:
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
 php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --sql-output=stdout | mysql -u root my_database
+    --sql-output=stdout | mysql --binary-mode --local-infile=0 -u import_user -p my_database
 
 # Stream directly into MySQL — no intermediate file, no pipe
 php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
+    --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=import_user --mysql-password=secret
 ```
+
+For a pipe into the `mysql` CLI, keep `--binary-mode` and `--local-infile=0`.
+The first disables local client commands such as `source` and `system` while
+reading piped input; the second disables `LOAD DATA LOCAL INFILE`. These flags
+do not filter SQL statements. See the [MySQL client options](https://dev.mysql.com/doc/refman/8.4/en/mysql-command-options.html#option_mysql_binary-mode).
+
+Use a database account limited to the target database rather than a server
+administrator account. Both the CLI pipe and `--sql-output=mysql` execute SQL
+from the source with the permissions of the supplied account. `stdout` writes
+the dump unchanged, so the program reading it must choose how to process it.
 
 The three modes:
 
