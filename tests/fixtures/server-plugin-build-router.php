@@ -23,7 +23,7 @@ if (isset($_GET['standalone'])) {
     exit;
 }
 
-require getenv('REPRINT_TEST_PLUGIN') . '/index.php';
+require getenv('REPRINT_TEST_PLUGIN') . '/' . getenv('REPRINT_TEST_PLUGIN_ENTRY');
 
 if (isset($_GET['admin_probe'])) {
     \WordPress\Reprint\Server\Plugin\load_server_runtime();
@@ -35,6 +35,8 @@ if (isset($_GET['admin_probe'])) {
     $reprint_test_configuration = \WordPress\Reprint\Server\Plugin\get_configuration_state();
     echo json_encode([
         'html' => $reprint_test_html,
+        'plugin_file' => \WordPress\Reprint\Server\Plugin\PLUGIN_FILE,
+        'activation_file' => $GLOBALS['reprint_test_activation_file'],
         'push_supported' => $reprint_test_configuration['push_supported'],
         'push_enabled' => $reprint_test_configuration['push_enabled'],
         'push_actions' => array_values(array_filter($GLOBALS['reprint_test_actions'], static function ($name) { return strpos($name, 'admin_post_reprint_server_save_') === 0 && strpos($name, 'push_access') !== false; })),
@@ -84,7 +86,7 @@ function get_option($name, $default = false) {
 /** Record registered actions without running a WordPress request lifecycle. */
 function add_action($name) { $GLOBALS['reprint_test_actions'][] = $name; }
 /** Ignore activation registration outside WordPress. */
-function register_activation_hook() {}
+function register_activation_hook($file) { $GLOBALS['reprint_test_activation_file'] = $file; }
 /** Use the packaged plugin basename. */
 function plugin_basename($path) { return basename($path); }
 /** Allow the administrator page to render. */

@@ -23,6 +23,9 @@ test('WordPress.org excludes push while the GitHub package retains it', async ()
             await mkdir(extracted);
             await run('unzip', ['-q', archive, '-d', extracted]);
             const plugin = target === 'github' ? extracted : join(extracted, 'reprint');
+            const entry = target === 'wordpress-org' ? 'reprint.php' : 'index.php';
+            assert.ok((await readdir(plugin)).includes(entry), `${target}: missing ${entry}`);
+            if (target === 'wordpress-org') assert.ok(!(await readdir(plugin)).includes('index.php'));
             const server = join(plugin, 'vendor/wp-php-toolkit/reprint-server/src');
             const files = await readdir(server);
             for (const filename of ['class-push-session.php', 'class-push-endpoints.php', 'class-database-push.php', 'class-database-push-endpoints.php', 'class-multipart-processor.php', 'class-mysqli-driver-pdo.php', 'class-mysqli-driver-pdo-statement.php']) {
@@ -37,11 +40,18 @@ test('WordPress.org excludes push while the GitHub package retains it', async ()
             const library = await readFile(join(plugin, 'lib.php'), 'utf8');
             const configuration = await readFile(join(plugin, 'wordpress/configuration.php'), 'utf8');
             const page = await readFile(join(plugin, 'wordpress/reprint-server.php'), 'utf8');
+            if (target === 'wordpress-org') {
+                assert.doesNotMatch(page, /PLUGIN_DIR \. 'index\.php'/);
+                assert.match(page, /register_activation_hook\(PLUGIN_FILE/);
+                assert.match(page, /plugin_basename\(PLUGIN_FILE/);
+                assert.match(page, /plugins_url\('wordpress\/reprint-server\.js', PLUGIN_FILE/);
+                assert.match(page, /plugins_url\('wordpress\/reprint-server\.css', PLUGIN_FILE/);
+            }
             for (const [source, symbol] of [[library, 'function update_push_authorization('], [configuration, 'function change_key_push_access('], [page, 'function handle_push_access_save('], [page, 'reprint_server_save_key_push_access']]) {
                 assert.ok(source.includes(symbol), `${target}: shared source ${symbol}`);
             }
             await run('php', ['tests/server-plugin-package.php', plugin, '', target], { cwd: project });
-            await checkRequests(plugin, target, root);
+            await checkRequests(plugin, entry, target, root);
         }
     } finally {
         await rm(root, { recursive: true, force: true });
@@ -81,7 +91,7 @@ test('unknown build targets stop packaging', async () => {
 });
 
 /** Exercise the packaged entry point even when trusted host configuration grants push. */
-async function checkRequests(plugin, target, root) {
+async function checkRequests(plugin, entry, target, root) {
     const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 3072 });
     const publicKeyBytes = publicKey.export({ type: 'spki', format: 'der' });
     const keyId = createHash('sha256').update(publicKeyBytes).digest('hex').slice(0, 16);
@@ -104,7 +114,7 @@ async function checkRequests(plugin, target, root) {
     const port = listener.address().port;
     await new Promise(resolve => listener.close(resolve));
     const server = spawn('php', ['-S', `127.0.0.1:${port}`, '-t', docroot, join(project, 'tests/fixtures/server-plugin-build-router.php')], {
-        env: { ...process.env, REPRINT_TEST_PLUGIN: plugin, REPRINT_TEST_DOCROOT: docroot, REPRINT_SERVER_PUSH_ENABLED: 'true', REPRINT_TEST_PUBLIC_KEY: publicKeyBytes.toString('base64') },
+        env: { ...process.env, REPRINT_TEST_PLUGIN: plugin, REPRINT_TEST_PLUGIN_ENTRY: entry, REPRINT_TEST_DOCROOT: docroot, REPRINT_SERVER_PUSH_ENABLED: 'true', REPRINT_TEST_PUBLIC_KEY: publicKeyBytes.toString('base64') },
         stdio: ['ignore', 'ignore', 'pipe'],
     });
     let log = '';
@@ -135,6 +145,8 @@ async function checkRequests(plugin, target, root) {
             const text = await response.text();
             assert.equal(response.status, 200, text + log);
             const page = JSON.parse(text);
+            assert.equal(page.plugin_file, join(plugin, entry));
+            assert.equal(page.activation_file, join(plugin, entry));
             assert.equal(page.push_supported, target === 'github');
             assert.equal(page.push_enabled, target === 'github');
             assert.equal(page.push_actions.length, target === 'github' ? 2 : 0);

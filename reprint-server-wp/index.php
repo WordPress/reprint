@@ -17,6 +17,11 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// The distribution build may rename this file without rewriting its callers.
+if (!defined('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_FILE')) {
+    define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_FILE', __FILE__);
+}
+
 require_once __DIR__ . '/compat.php';
 reprint_server_compat_normalize_legacy_request();
 require_once __DIR__ . '/lib.php';

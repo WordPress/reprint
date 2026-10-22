@@ -10,7 +10,11 @@ $reprint_plugin_directory = rtrim($argv[1], '/');
 $reprint_project_directory = dirname(__DIR__);
 $reprint_package_target = isset($argv[3]) ? $argv[3] : 'github';
 reprint_require_plugin_package(in_array($reprint_package_target, ['github', 'wordpress-org'], true), 'Unknown plugin package target: ' . $reprint_package_target . '.');
-foreach (['index.php', 'lib.php', 'compat.php', 'uninstall.php', 'readme.txt', 'LICENSE', 'vendor/autoload.php'] as $reprint_relative_file) {
+$reprint_entry_file = $reprint_package_target === 'wordpress-org' ? 'reprint.php' : 'index.php';
+if ($reprint_package_target === 'wordpress-org') {
+    reprint_require_plugin_package(!file_exists($reprint_plugin_directory . '/index.php'), 'The WordPress.org main plugin file must be reprint.php, not index.php.');
+}
+foreach ([$reprint_entry_file, 'lib.php', 'compat.php', 'uninstall.php', 'readme.txt', 'LICENSE', 'vendor/autoload.php'] as $reprint_relative_file) {
     reprint_require_plugin_package(is_file($reprint_plugin_directory . '/' . $reprint_relative_file), 'The plugin package is missing ' . $reprint_relative_file . '.');
 }
 
@@ -31,7 +35,9 @@ foreach (['reprint-server-wp' => '', 'packages/reprint-server/src' => 'vendor/wp
             reprint_require_plugin_package(!file_exists($reprint_plugin_directory . '/' . $reprint_destination_prefix . $reprint_relative_file), 'The WordPress.org package must not contain ' . $reprint_relative_file . '.');
             continue;
         }
-        $reprint_packaged_file = $reprint_destination_prefix . $reprint_relative_file;
+        $reprint_packaged_file = $reprint_package_target === 'wordpress-org' && $reprint_destination_prefix === '' && $reprint_relative_file === 'index.php'
+            ? 'reprint.php'
+            : $reprint_destination_prefix . $reprint_relative_file;
         reprint_require_plugin_package(is_file($reprint_plugin_directory . '/' . $reprint_packaged_file), 'The plugin package is missing ' . $reprint_packaged_file . '.');
     }
 }
@@ -48,7 +54,7 @@ foreach (['LICENSE', 'vendor/wp-php-toolkit/reprint-server/LICENSE'] as $reprint
     reprint_require_plugin_package(is_file($reprint_license_file) && file_get_contents($reprint_license_file) === file_get_contents($reprint_project_directory . '/LICENSE'), 'The plugin package must include the repository GPL license at ' . $reprint_relative_file . '.');
 }
 
-$reprint_plugin_header = file_get_contents($reprint_plugin_directory . '/index.php');
+$reprint_plugin_header = file_get_contents($reprint_plugin_directory . '/' . $reprint_entry_file);
 $reprint_plugin_readme = file_get_contents($reprint_plugin_directory . '/readme.txt');
 $reprint_plugin_version = reprint_plugin_package_header($reprint_plugin_header, 'Version');
 foreach (['Plugin Name', 'Plugin URI', 'Requires at least', 'Requires PHP', 'Text Domain', 'License', 'License URI'] as $reprint_header_name) {

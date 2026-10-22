@@ -40,7 +40,7 @@ function reprint_server_compat_adopt_legacy_constants(): void {
  * Publishes the loaded library under the released Site Export names.
  *
  * The library requires this once its own constants exist, which is also
- * before index.php applies the endpoint configuration filter.
+ * before the plugin entry point applies the endpoint configuration filter.
  */
 function reprint_server_compat_expose_legacy_names(): void {
     foreach (reprint_server_compat_constants() as $legacy_name => $canonical_name) {

@@ -22,7 +22,8 @@ Build the downloads-only WordPress.org ZIP with:
 ./bin/build-server-plugin.sh reprint-wordpress-org.zip wordpress-org
 ```
 
-This ZIP contains a `reprint/` directory. The build sets
+This ZIP contains `reprint/reprint.php` as its main file. The GitHub ZIP keeps
+`index.php` so existing activations keep working. The build sets
 `define('REPRINT_PUSH_AVAILABLE', false)` in the server package's
 `src/build-features.php` and omits the file-push and database-push implementation
 files before Composer generates its classmap. Shared PHP files stay intact.
