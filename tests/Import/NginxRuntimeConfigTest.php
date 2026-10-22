@@ -35,6 +35,7 @@ class NginxRuntimeConfigTest extends TestCase {
         $this->assertStringContainsString('root "' . strtr($root, ['\\' => '\\\\', '"' => '\\"']) . '";', $config);
         $this->assertStringContainsString('server_name "local;{draft}\\"quote\'\\\\host";', $config);
         $this->assertStringContainsString('memory_limit=256M', $config);
+        $this->assertStringContainsString('listen 127.0.0.1:8882;', $config);
     }
 
     /** @dataProvider unsupported_values */
@@ -74,6 +75,12 @@ class NginxRuntimeConfigTest extends TestCase {
         $root = $this->directory . '/site name;{draft}"quote\'\\path#name';
         mkdir($root);
         file_put_contents($root . '/index.html', 'literal document root');
+        mkdir($root . '/assets');
+        mkdir($root . '/assets/.git');
+        file_put_contents($root . '/assets/site.css', 'public stylesheet');
+        foreach (['.env', 'assets/.git/config', 'assets/.hidden.php'] as $path) {
+            file_put_contents($root . '/' . $path, 'local configuration');
+        }
         // Use an empty include so the test does not depend on a system FPM setup.
         file_put_contents($this->directory . '/fastcgi_params', '');
         $listener = stream_socket_server('tcp://127.0.0.1:0', $error_number, $error);
@@ -106,7 +113,13 @@ class NginxRuntimeConfigTest extends TestCase {
                 usleep(20000);
             } while (microtime(true) < $deadline);
             $this->assertSame('literal document root', $body, file_get_contents($this->directory . '/stderr'));
+            $this->assertSame('public stylesheet', file_get_contents('http://' . $address . '/assets/site.css'));
             $context = stream_context_create(['http' => ['ignore_errors' => true]]);
+            foreach (['.env', 'assets/.git/config', 'assets/.hidden.php'] as $path) {
+                $body = file_get_contents('http://' . $address . '/' . $path, false, $context);
+                $this->assertStringContainsString('404', $http_response_header[0]);
+                $this->assertStringNotContainsString('local configuration', $body);
+            }
             foreach (['', '-wal', '-shm', '-journal', '.reprint-import.lock'] as $suffix) {
                 $body = file_get_contents('http://' . $address . '/custom%20data.sqlite' . $suffix, false, $context);
                 $this->assertStringContainsString('404', $http_response_header[0]);
