@@ -4,7 +4,7 @@ When working from this monorepo checkout, run `composer install` in
 `reprint-server-wp/` to populate the bundled `vendor/` directory used by the
 plugin runtime. GitHub release ZIPs already include that vendor tree.
 
-The maintained source keeps its PHP 7.2 type declarations. The release build
+The maintained source keeps its PHP 7.2 type declarations. The GitHub release build
 copies that source to a temporary directory and removes unsupported syntax from
 the copy. The resulting plugin ZIP supports pull endpoints on PHP 5.6.20 or
 newer. Push endpoints require PHP 7.2 or newer.
@@ -43,7 +43,10 @@ installation. Do not activate both copies on the same site.
 `bin/stamp-plugin-version.sh` stamps the plugin header, runtime version, and
 readme stable tag before the release build. Development branches keep a `-dev`
 version; publish a ZIP built from a numbered release tag for directory review.
-The build also sets the generated readme and plugin header to PHP 5.6.20.
+The GitHub build sets the generated readme and plugin header to PHP 5.6.20.
+The WordPress.org build keeps the maintained PHP 7.2 source and declares PHP
+7.2 in both places and in its Composer manifests. It does not need the PHP 5.6
+downgrade tool. CI parses and smoke-tests that package on PHP 7.2.
 
 `tests/server-plugin-package.php` checks the staged package and the ZIP
 extracted by the release workflow. It checks the maintained PHP files and admin

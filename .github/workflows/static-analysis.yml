@@ -148,6 +148,25 @@ jobs:
           tools: composer:2.9.7
       - run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
       - run: node --test tests/server-plugin-build.test.mjs
+      - name: Build directory package for the minimum PHP runtime
+        run: |
+          ./bin/build-server-plugin.sh "$RUNNER_TEMP/reprint-wordpress-org.zip" wordpress-org
+          unzip -q "$RUNNER_TEMP/reprint-wordpress-org.zip" -d "$RUNNER_TEMP/wordpress-org"
+      - name: Set up the directory package PHP minimum
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '7.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+          tools: none
+      - name: Parse and run the directory package on PHP 7.2
+        run: |
+          plugin_directory="$RUNNER_TEMP/wordpress-org/reprint"
+          find "$plugin_directory" -type f -name '*.php' -print0 | xargs -0 -n1 php -l
+          php tests/server-plugin-package.php "$plugin_directory" "" wordpress-org
+      - name: Test signed directory-package requests on PHP 7.2
+        env:
+          REPRINT_PACKAGED_PLUGIN_DIRECTORY: ${{ runner.temp }}/wordpress-org/reprint
+        run: node --test --test-name-pattern='minimum PHP runtime' tests/server-plugin-build.test.mjs
 
   workflow-inputs:
     name: Workflow inputs and publishing
