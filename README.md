@@ -273,7 +273,7 @@ Download the latest release artifacts from [GitHub Releases](../../releases):
 ### Authentication
 
 The source host decides how the importer authenticates, and nothing configures this. Where PHP has the OpenSSL
-extension (`openssl_verify` exists) the plugin accepts only signatures made with an enrolled public key; a
+extension (`openssl_verify` exists) the plugin accepts only signatures made with an enrolled Migration Token (the client's public key); a
 connection token sent to such a host is refused with `requires_key_auth`. Where OpenSSL is missing the plugin
 accepts only a connection token shared by both sides, and a key signature is refused with `requires_token_auth`.
 The settings page under **Tools → Reprint Server** (the network settings page on multisite) says which of the two
@@ -281,17 +281,17 @@ the host accepts. The importer never retries with the other scheme.
 
 Key clients from v0.10.12 on work with this plugin, and this client's key signatures work with plugins from v0.10.12 on. Token authentication changed format: update the client and the plugin together. The plugin tells an older token client to update, and the client tells you to update the plugin when the site's plugin is older.
 
-**Public keys.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 3072-bit RSA key, stores
-the private half at `<state-dir>/remotes/<md5-of-url>/key.pem` with mode `0600`, and prints the key id and the
-public key as one line. Paste that line into the enrollment form under Tools → Reprint Server. In JSONL or compact
+**Migration Tokens.** Run `reprint keygen <url> --state-dir=DIR` once per site. It generates a 3072-bit RSA key, stores
+the private half at `<state-dir>/remotes/<md5-of-url>/key.pem` with mode `0600`, and prints the Migration Token ID and the
+Migration Token as one line. Paste that line into the enrollment form under Tools → Reprint Server. In JSONL or compact
 output, which `--progress=auto` selects when stdout is not a terminal, it prints no text; its final `reprint_report`
 record carries `key_id`, `key_path`, `public_key`, and the same text in `message`. Every later command
 against that site finds the key in the state directory, so no credential flag is needed. `reprint pull` with no
-credential does the same generation itself, prints the key, and exits with code 4: enrollment is needed, nothing
+credential does the same generation itself, prints the Migration Token, and exits with code 4: enrollment is needed, nothing
 failed, and running the same command again after enrolling continues. Every other remote command refuses with a
 message naming `reprint keygen` and `--secret`. `--private-key-path=PATH` uses a key stored elsewhere
 (`keygen --out=PATH` writes one there) instead of the state directory. Deleting the state directory destroys the
-private half, so the enrolled public key stops working. The plugin's key table also has a Remove button for each key.
+private half, so the enrolled Migration Token stops working. The plugin's access table also has a **Remove Migration Token** button for each token.
 A site that only has a connection token answers `no_keys_enrolled` (HTTP 503) on an OpenSSL host until a key is enrolled.
 
 Instead of enrolling keys on the settings page, the plugin can be pre-packaged with a
@@ -709,12 +709,22 @@ without writing a file to disk. Use `--sql-output` to choose the mode:
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
 php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --sql-output=stdout | mysql -u root my_database
+    --sql-output=stdout | mysql --binary-mode --local-infile=0 -u import_user -p my_database
 
 # Stream directly into MySQL — no intermediate file, no pipe
 php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET" \
-    --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=root --mysql-password=secret
+    --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=import_user --mysql-password=secret
 ```
+
+For a pipe into the `mysql` CLI, keep `--binary-mode` and `--local-infile=0`.
+The first disables local client commands such as `source` and `system` while
+reading piped input; the second disables `LOAD DATA LOCAL INFILE`. These flags
+do not filter SQL statements. See the [MySQL client options](https://dev.mysql.com/doc/refman/8.4/en/mysql-command-options.html#option_mysql_binary-mode).
+
+Use a database account limited to the target database rather than a server
+administrator account. Both the CLI pipe and `--sql-output=mysql` execute SQL
+from the source with the permissions of the supplied account. `stdout` writes
+the dump unchanged, so the program reading it must choose how to process it.
 
 The three modes:
 
@@ -940,14 +950,18 @@ php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
 The nginx runtime keeps document roots and host names as literal configuration
 values, including spaces and punctuation. Dollar signs and control characters
 in the document root, output path, or host are rejected before files are written.
+Its generated listener binds to `127.0.0.1`, and requests for dotfiles or paths
+inside dot-directories return 404. To accept remote clients, change the `listen`
+address in the generated `nginx.conf`. The configured SQLite database and its
+companion files also return 404, even when their names do not start with a dot.
 
 The command accepts either `--fs-root` (the raw download directory — the remote
 `document_root` path is appended automatically) or `--flat-document-root` (a
 directory created by `flat-docroot`, used as-is). These are mutually exclusive.
 
-Host and port default to the URL rewrite target from `db-apply` (so the server
-listens on the same address the database was rewritten to). Override with
-`--host` and `--port`.
+Host and port default to the URL rewrite target from `db-apply`. Override with
+`--host` and `--port`. For nginx, the host sets `server_name`; the listener
+remains on `127.0.0.1` unless you edit the generated configuration.
 
 The database written into `runtime.php` is the one `db-apply` connected to. To
 point the runtime at a database `db-apply` did not create — a local database you
@@ -1408,7 +1422,7 @@ The `key` object describes the private key stored for this remote at
 no `--secret` or `--private-key-path`. It holds the key `id`, the private key
 `path`, and the one-line `publicKey` to enroll on the site. It is `null` when no
 key is stored, so a host integration can tell whether to run `keygen` and can
-enroll the existing public key again after the site reports `AUTH_UNKNOWN_KEY`:
+enroll the existing Migration Token again after the site reports `AUTH_UNKNOWN_KEY`:
 
 ```bash
 php reprint.phar pull-metadata "$URL" --state-dir="$STATE_DIR" | jq -r '.key.publicKey'

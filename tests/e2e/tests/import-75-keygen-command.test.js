@@ -43,7 +43,7 @@ describe('Import: keygen command', () => {
             { ...keygenOptions, extraArgs: ['--progress=tty'] },
         );
         assert.equal(result.exitCode, 0, result.stdout + result.stderr);
-        assert.match(result.stdout, /Key id:\s+[0-9a-f]{16}/);
+        assert.match(result.stdout, /Migration Token ID:\s+[0-9a-f]{16}/);
         // The key sits at column 0 on its own line so a whole-line copy
         // carries nothing but the key into the enrollment form.
         assert.match(result.stdout, /^MII[A-Za-z0-9+/]+=*$/m, 'one-line public key at column 0');

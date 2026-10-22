@@ -41,6 +41,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
     {
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('Authorize a tool to copy this site', $html);
+        $this->assertStringContainsString('Paste the Migration Token shown by the tool you want to use.', $html);
+        $this->assertStringNotContainsString('public key', strip_tags($html));
         $this->assertStringNotContainsString('reprint-server-status', $html);
         $this->assertStringNotContainsString('reprint-server-host-details', $html);
         $this->assertStringNotContainsString('Host details', $html);
@@ -54,10 +56,11 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $document = new DOMDocument();
         $document->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
         $xpath = new DOMXPath($document);
+        $this->assertCount(1, $xpath->query('//label[@for="reprint_server_public_key" and normalize-space(.)="Migration Token"]'));
         $this->assertCount(1, $xpath->query('//textarea[@id="reprint_server_public_key" and @required and @aria-describedby="reprint-server-public-key-help reprint-server-public-key-permission" and not(ancestor::details)]'));
         $this->assertCount(1, $xpath->query('//input[@type="submit" and @value="Authorize tool" and contains(@class, "button-primary")]'));
-        $this->assertCount(1, $xpath->query('//details[not(@open)]/summary[contains(., "public key yet")]'));
-        $this->assertCount(1, $xpath->query('//details[summary[contains(., "public key yet")]]//pre[contains(., "reprint keygen")]'));
+        $this->assertCount(1, $xpath->query('//details[not(@open)]/summary[contains(., "Migration Token yet")]'));
+        $this->assertCount(1, $xpath->query('//details[summary[contains(., "Migration Token yet")]]//pre[contains(., "reprint keygen")]'));
         $this->assertCount(0, $xpath->query('//details[contains(@class, "reprint-server-manage-access")]'));
     }
 
@@ -104,7 +107,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('Tool authorized', $html);
         $this->assertStringContainsString('Return to your tool to start or resume the copy.', $html);
-        $this->assertStringContainsString('This key allows downloads. It cannot change files on this site.', $html);
+        $this->assertStringContainsString('This Migration Token allows downloads. It cannot change files on this site.', $html);
         $this->assertStringNotContainsString('id="reprint_server_public_key"', $html);
         $this->assertStringNotContainsString('notice-success', $html);
         $this->assertStringContainsString('Authorize another tool', $html);
@@ -119,7 +122,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $_GET = ['reprint_server_notice' => 'enrolled', 'reprint_server_key_id' => $entry['key_id']];
         $html = $this->renderAdminPage();
         $this->assertStringNotContainsString('It cannot change files on this site.', $html);
-        $this->assertStringContainsString('This key also allows push to upload, replace, and delete files', $html);
+        $this->assertStringContainsString('This Migration Token also allows push to upload, replace, and delete files', $html);
     }
 
     public function testAnOldEnrollmentResultDoesNotHideTheFormAfterItsKeyIsRemoved(): void
@@ -243,7 +246,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $document = new DOMDocument();
         $document->loadHTML($this->renderAdminPage(), LIBXML_NOERROR | LIBXML_NOWARNING);
         $xpath = new DOMXPath($document);
-        foreach (['Allow push for key ', 'Save push access for key ', 'Remove key '] as $label) {
+        foreach (['Allow push for Migration Token ', 'Save push access for Migration Token ', 'Remove Migration Token '] as $label) {
             $this->assertCount(1, $xpath->query('//input[normalize-space(@aria-label)="' . $label . $entry['key_id'] . '"]'));
         }
         $this->assertCount(4, $xpath->query('//table[contains(@class, "reprint-server-key-table")]//td[@data-label]'));
@@ -1063,7 +1066,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('id="reprint_server_connection_token"', $html);
         $this->assertStringNotContainsString('reprint_server_enroll_public_key', $html, 'a token host cannot use newly enrolled keys');
-        $this->assertStringNotContainsString('Stored public keys', $html);
+        $this->assertStringNotContainsString('Stored Migration Tokens', $html);
     }
 
     public function testAdminPageListsEnrolledKeysWithRemoveAndPushControls(): void
@@ -1073,10 +1076,31 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $html = $this->renderAdminPage();
 
         $this->assertStringContainsString($entry['key_id'], $html);
+        $this->assertStringContainsString('Migration Token ID', $html);
+        $this->assertStringContainsString('Remove Migration Token', $html);
+        $this->assertStringNotContainsString('public key', strip_tags($html));
         $this->assertStringContainsString(gmdate('Y-m-d', $entry['added_at']), $html);
         $this->assertStringContainsString('reprint_server_remove_public_key', $html);
         $this->assertStringContainsString('reprint_server_save_key_push_access', $html);
         $this->assertStringContainsString('reprint_server_key_id', $html);
+    }
+
+    public function testMigrationTokenNoticesUseTheFormLabel(): void
+    {
+        $notices = [
+            'enroll_invalid' => 'That is not a usable Migration Token.',
+            'enroll_no_openssl' => 'This host cannot read Migration Tokens',
+            'enroll_duplicate' => 'That Migration Token is already enrolled.',
+            'enroll_storage_failure' => 'Failed to save the Migration Token.',
+            'key_removed' => 'Migration Token removed.',
+            'remove_storage_failure' => 'Failed to remove the Migration Token.',
+        ];
+        foreach ($notices as $notice => $message) {
+            $_GET['reprint_server_notice'] = $notice;
+            $html = $this->renderAdminPage();
+            $this->assertStringContainsString($message, $html);
+            $this->assertStringNotContainsString('public key', strip_tags($html));
+        }
     }
 
     public function testAdminPageOmitsEnrollmentWhenTheFileOverrideIsActive(): void
@@ -1251,7 +1275,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringNotContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
         $this->assertStringNotContainsString('reprint_server_save_network_token', $html);
         $this->assertStringContainsString('reprint_server_enroll_public_key', $html);
-        $this->assertStringContainsString('Enrolled public keys can pull any site in this network.', $html);
+        $this->assertStringContainsString('Enrolled Migration Tokens can pull any site in this network.', $html);
         $this->assertStringNotContainsString('This network token can pull any site in this network.', $html);
     }
 

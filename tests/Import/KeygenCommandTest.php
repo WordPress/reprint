@@ -73,8 +73,10 @@ final class KeygenCommandTest extends TestCase
         $this->assertSame(0, $result['exit_code'], $result['output']);
         $expected_path = ImportClient::key_file_path($url, $this->state_dir);
         $this->assertFileExists($expected_path);
-        $this->assertStringContainsString('Key id:', $result['output']);
+        $this->assertStringContainsString('Migration Token ID:', $result['output']);
         $this->assertStringContainsString('Stored at:', $result['output']);
+        $this->assertStringContainsString('Enroll this Migration Token', $result['output']);
+        $this->assertStringNotContainsString('public key', $result['output']);
         $this->assertStringContainsString('Tools → Reprint Server', $result['output']);
         $this->assertMatchesRegularExpression('/^MII[A-Za-z0-9+\/]+=*$/m', $result['output'], 'prints the one-line public key');
     }
@@ -105,8 +107,8 @@ final class KeygenCommandTest extends TestCase
 
     private function printedKeyId(string $output): string
     {
-        $this->assertMatchesRegularExpression('/^  Key id:\s+([0-9a-f]{16})$/m', $output);
-        preg_match('/^  Key id:\s+([0-9a-f]{16})$/m', $output, $match);
+        $this->assertMatchesRegularExpression('/^  Migration Token ID:\s+([0-9a-f]{16})$/m', $output);
+        preg_match('/^  Migration Token ID:\s+([0-9a-f]{16})$/m', $output, $match);
         return $match[1];
     }
 
@@ -131,6 +133,7 @@ final class KeygenCommandTest extends TestCase
         );
         $this->assertStringStartsWith('MII', $report['public_key']);
         $this->assertStringContainsString($report['public_key'], $report['message']);
+        $this->assertStringContainsString('Enroll this Migration Token', $report['message']);
     }
 
     public function testKeygenOutWritesElsewhere(): void

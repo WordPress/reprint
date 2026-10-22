@@ -150,8 +150,8 @@ async function checkRequests(plugin, target, root) {
         }
         for (const [notice, message] of [
             ['saved', 'Push access updated.'],
-            ['key_push_saved', 'Push access for the key updated.'],
-            ['key_removed', 'Public key removed.'],
+            ['key_push_saved', 'Push access for the Migration Token updated.'],
+            ['key_removed', 'Migration Token removed.'],
         ]) {
             const response = await fetch(`http://127.0.0.1:${port}/?admin_probe=key&reprint_server_notice=${notice}`);
             const text = await response.text();
