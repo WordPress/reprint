@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Builds the PHP 5.6-compatible Reprint Server WordPress plugin ZIP from the typed
-# source tree. The source checkout is never rewritten; all downgrade work is
-# confined to a temporary staging directory.
+# Builds the Reprint Server plugin ZIP for GitHub (PHP 5.6) or WordPress.org
+# (PHP 7.2). The source checkout is never rewritten; all target-specific work
+# is confined to a temporary staging directory.
 #
 # Usage:
 #   ./bin/build-server-plugin.sh
@@ -21,6 +21,12 @@ if [ "$#" -gt 2 ] || [[ "$TARGET" != "github" && "$TARGET" != "wordpress-org" ]]
     exit 1
 fi
 
+if [ "$TARGET" = "wordpress-org" ]; then
+    MINIMUM_PHP_VERSION="7.2"
+else
+    MINIMUM_PHP_VERSION="5.6.20"
+fi
+
 case "$OUTPUT_PATH" in
     /*) ;;
     *) OUTPUT_PATH="$(pwd)/$OUTPUT_PATH" ;;
@@ -33,7 +39,7 @@ for command_name in php composer zip; do
     fi
 done
 
-if [ ! -x "$PROJECT_ROOT/tools/php56-build/vendor/bin/rector" ]; then
+if [ "$TARGET" = "github" ] && [ ! -x "$PROJECT_ROOT/tools/php56-build/vendor/bin/rector" ]; then
     echo "Error: Reprint Server build dependencies are missing." >&2
     echo "Run: composer install --no-dev --working-dir=tools/php56-build" >&2
     exit 1
@@ -71,12 +77,15 @@ if [ "$TARGET" = "wordpress-org" ]; then
     php "$PROJECT_ROOT/bin/prepare-wordpress-org-plugin.php" "$BUILD_ROOT"
 fi
 
-php "$PROJECT_ROOT/bin/downgrade-server-plugin.php" "$BUILD_ROOT"
+if [ "$TARGET" = "github" ]; then
+    php "$PROJECT_ROOT/bin/downgrade-server-plugin.php" "$BUILD_ROOT"
+fi
 
-# The Composer packages describe the typed source requirement. Only the
-# generated plugin distribution advertises and resolves for PHP 5.6.
+# Resolve the packaged runtime for the target’s declared PHP minimum. The
+# WordPress.org build keeps the maintained PHP 7.2 source without downgrading it.
 php -r '
 $paths = array($argv[1], $argv[2]);
+$minimum_php_version = $argv[3];
 foreach ($paths as $path) {
     $contents = file_get_contents($path);
     $manifest = json_decode($contents, true);
@@ -84,7 +93,7 @@ foreach ($paths as $path) {
         fwrite(STDERR, "Error: could not read Composer manifest " . $path . ".\n");
         exit(1);
     }
-    $manifest["require"]["php"] = ">=5.6.20";
+    $manifest["require"]["php"] = ">=" . $minimum_php_version;
     if ($path === $argv[1]) {
         if (!isset($manifest["config"]) || !is_array($manifest["config"])) {
             $manifest["config"] = array();
@@ -92,7 +101,7 @@ foreach ($paths as $path) {
         if (!isset($manifest["config"]["platform"]) || !is_array($manifest["config"]["platform"])) {
             $manifest["config"]["platform"] = array();
         }
-        $manifest["config"]["platform"]["php"] = "5.6.20";
+        $manifest["config"]["platform"]["php"] = $minimum_php_version;
     }
     file_put_contents(
         $path,
@@ -101,16 +110,17 @@ foreach ($paths as $path) {
 }
 ' \
     "$BUILD_ROOT/reprint-server-wp/composer.json" \
-    "$BUILD_ROOT/packages/reprint-server/composer.json"
+    "$BUILD_ROOT/packages/reprint-server/composer.json" \
+    "$MINIMUM_PHP_VERSION"
 
 sed -i.bak \
-    's/^ \* Requires PHP: .*/ * Requires PHP: 5.6.20/' \
+    "s/^ \* Requires PHP: .*/ * Requires PHP: $MINIMUM_PHP_VERSION/" \
     "$BUILD_ROOT/reprint-server-wp/index.php"
 rm -f "$BUILD_ROOT/reprint-server-wp/index.php.bak"
-sed -i.bak 's/^Requires PHP: .*/Requires PHP: 5.6.20/' "$BUILD_ROOT/reprint-server-wp/readme.txt"
+sed -i.bak "s/^Requires PHP: .*/Requires PHP: $MINIMUM_PHP_VERSION/" "$BUILD_ROOT/reprint-server-wp/readme.txt"
 rm -f "$BUILD_ROOT/reprint-server-wp/readme.txt.bak"
 
-if ! grep -Fq ' * Requires PHP: 5.6.20' "$BUILD_ROOT/reprint-server-wp/index.php"; then
+if ! grep -Fq " * Requires PHP: $MINIMUM_PHP_VERSION" "$BUILD_ROOT/reprint-server-wp/index.php"; then
     echo "Error: failed to set the generated plugin PHP requirement." >&2
     exit 1
 fi

@@ -64,7 +64,8 @@ foreach (['Requires at least', 'Requires PHP', 'License', 'License URI'] as $rep
     reprint_require_plugin_package(reprint_plugin_package_header($reprint_plugin_readme, $reprint_header_name) === reprint_plugin_package_header($reprint_plugin_header, $reprint_header_name), 'The readme and plugin header disagree on ' . $reprint_header_name . '.');
 }
 reprint_require_plugin_package(reprint_plugin_package_header($reprint_plugin_readme, 'Stable tag') === $reprint_plugin_version, 'The readme Stable tag must match the plugin Version.');
-reprint_require_plugin_package(reprint_plugin_package_header($reprint_plugin_header, 'Requires PHP') === '5.6.20', 'The generated plugin must declare PHP 5.6.20.');
+$reprint_minimum_php = $reprint_package_target === 'wordpress-org' ? '7.2' : '5.6.20';
+reprint_require_plugin_package(reprint_plugin_package_header($reprint_plugin_header, 'Requires PHP') === $reprint_minimum_php, 'The ' . $reprint_package_target . ' plugin must declare PHP ' . $reprint_minimum_php . '.');
 if (isset($argv[2]) && $argv[2] !== '') {
     reprint_require_plugin_package(preg_match('/^[0-9]+(?:\.[0-9]+)+$/', $reprint_plugin_version) === 1, 'A published plugin must have a numeric stable version; observed ' . $reprint_plugin_version . '.');
     reprint_require_plugin_package($reprint_plugin_version === $argv[2], 'The plugin Version must match release ' . $argv[2] . '; observed ' . $reprint_plugin_version . '.');

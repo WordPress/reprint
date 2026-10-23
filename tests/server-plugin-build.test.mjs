@@ -26,6 +26,14 @@ test('WordPress.org excludes push while the GitHub package retains it', async ()
             const entry = target === 'wordpress-org' ? 'reprint.php' : 'index.php';
             assert.ok((await readdir(plugin)).includes(entry), `${target}: missing ${entry}`);
             if (target === 'wordpress-org') assert.ok(!(await readdir(plugin)).includes('index.php'));
+            const minimumPhp = target === 'wordpress-org' ? '7.2' : '5.6.20';
+            const readme = await readFile(join(plugin, 'readme.txt'), 'utf8');
+            assert.ok(readme.includes(`Requires PHP: ${minimumPhp}\n`), `${target}: wrong PHP requirement`);
+            const manifest = JSON.parse(await readFile(join(plugin, 'composer.json'), 'utf8'));
+            assert.equal(manifest.require.php, `>=${minimumPhp}`);
+            assert.equal(manifest.config.platform.php, minimumPhp);
+            const serverManifest = JSON.parse(await readFile(join(plugin, 'vendor/wp-php-toolkit/reprint-server/composer.json'), 'utf8'));
+            assert.equal(serverManifest.require.php, `>=${minimumPhp}`);
             const server = join(plugin, 'vendor/wp-php-toolkit/reprint-server/src');
             const files = await readdir(server);
             for (const filename of ['class-push-session.php', 'class-push-endpoints.php', 'class-database-push.php', 'class-database-push-endpoints.php', 'class-multipart-processor.php', 'class-mysqli-driver-pdo.php', 'class-mysqli-driver-pdo-statement.php']) {
@@ -88,6 +96,15 @@ test('WordPress.org preparation keeps shared PHP files unchanged', async () => {
 test('unknown build targets stop packaging', async () => {
     await assert.rejects(run('bash', ['bin/build-server-plugin.sh', 'unused.zip', 'unknown'], { cwd: project }), /observed target: unknown/);
     await assert.rejects(run('php', ['bin/prepare-wordpress-org-plugin.php', project], { cwd: project }), /separate-staging-directory/);
+});
+
+test('WordPress.org package on its minimum PHP runtime', { skip: !process.env.REPRINT_PACKAGED_PLUGIN_DIRECTORY }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'reprint-minimum-php-test-'));
+    try {
+        await checkRequests(process.env.REPRINT_PACKAGED_PLUGIN_DIRECTORY, 'wordpress-org', root);
+    } finally {
+        await rm(root, { recursive: true, force: true });
+    }
 });
 
 /** Exercise the packaged entry point even when trusted host configuration grants push. */

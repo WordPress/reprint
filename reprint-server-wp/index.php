@@ -7,7 +7,7 @@
  * Requires at least: 4.7
  * Requires PHP: 7.2
  * Text Domain: reprint
- * PHP 5.6 support: release builds downgrade a copy of this PHP 7.2 source and set its requirement to 5.6.20.
+ * PHP 5.6 support: GitHub builds downgrade a copy of this PHP 7.2 source and set its requirement to 5.6.20.
  * Author: WordPress Contributors
  * License: GPL-2.0-or-later
  * License URI: https://www.gnu.org/licenses/gpl-2.0.html
