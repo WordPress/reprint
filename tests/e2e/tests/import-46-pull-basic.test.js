@@ -69,6 +69,8 @@ describe('Import: Pull Basic', { timeout: 180000 }, () => {
         assert.ok(existsSync(stateFile), 'Expected pull/state.json to exist');
         const state = JSON.parse(readFileSync(stateFile, 'utf-8'));
         assertPullPipelineComplete(state);
+        assert.equal(Object.hasOwn(state.apply, 'target_pass'), false,
+            'The checkpoint must not store the target MySQL password');
 
         const expectedServerPhpVersion = process.env.E2E_EXPECTED_SERVER_PHP_VERSION;
         if (expectedServerPhpVersion) {
