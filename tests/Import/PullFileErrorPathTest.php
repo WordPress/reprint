@@ -138,21 +138,34 @@ final class PullFileErrorPathTest extends TestCase
             $this->assertSame('keep sibling', file_get_contents($sibling));
         }
         $this->assertFileDoesNotExist($client->pull_state_directory . '/index.wal');
+        $this->assertStringContainsString('Skipped file error outside the pull selection:', file_get_contents($client->state_dir . '/audit.log'));
     }
 
-    /** Existing parent links cannot turn invalidation into an external removal. */
-    public function testMappedFileErrorChecksThePhysicalParentBeforeRemovingAFile(): void
+    /**
+     * Existing parent links cannot turn invalidation into an external removal.
+     * @dataProvider external_parent_targets
+     */
+    public function testMappedFileErrorChecksThePhysicalParentBeforeRemovingAFile(bool $target_exists): void
     {
-        file_put_contents($this->root . '/outside/item', 'keep outside');
+        if ($target_exists) {
+            file_put_contents($this->root . '/outside/item', 'keep outside');
+        }
         symlink($this->root . '/outside', $this->root . '/files/alias');
         $client = $this->new_client();
-        try {
-            $this->receive_error($client, base64_encode('/alias/item'), 'files');
-        } catch (\RuntimeException $error) {
-            $this->assertStringContainsString('outside filesystem root', $error->getMessage());
+        $this->receive_error($client, base64_encode('/alias/item'), 'files');
+        if ($target_exists) {
+            $this->assertSame('keep outside', file_get_contents($this->root . '/outside/item'));
+        } else {
+            $this->assertFileDoesNotExist($this->root . '/outside/item');
         }
-        $this->assertSame('keep outside', file_get_contents($this->root . '/outside/item'));
         $this->assertFileDoesNotExist($client->pull_state_directory . '/index.wal');
+        $this->assertStringContainsString('Skipped file error cleanup:', file_get_contents($client->state_dir . '/audit.log'));
+    }
+
+    /** @return array<string, array{bool}> External parent with and without a surviving target file. */
+    public static function external_parent_targets(): array
+    {
+        return ['existing file' => [true], 'missing file' => [false]];
     }
 
     /** A path error closes the matching partial file before clearing its local bytes. */
@@ -207,18 +220,52 @@ final class PullFileErrorPathTest extends TestCase
     }
 
     /** @dataProvider invalid_error_paths */
-    public function testInvalidErrorPathsAreRefusedBeforeDispatch(string $path): void
+    public function testInvalidErrorPathsAreLoggedAndIgnored(string $path, string $path_format): void
     {
+        file_put_contents($this->root . '/outside/item', 'keep outside');
+        file_put_contents($this->root . '/files/item', 'keep local');
         $client = $this->new_client();
-        $this->expectException(\InvalidArgumentException::class);
+        $client->get_state()->set_preflight_record(['data' => ['path_format' => $path_format]]);
         $this->receive_error($client, base64_encode($path), 'files');
+        $this->assertSame('keep outside', file_get_contents($this->root . '/outside/item'));
+        $this->assertSame('keep local', file_get_contents($this->root . '/files/item'));
+        $this->assertFileDoesNotExist($client->pull_state_directory . '/index.wal');
+        $this->assertStringContainsString('Skipped remote error:', file_get_contents($client->state_dir . '/audit.log'));
+    }
+
+    public function testIgnoredErrorDoesNotDiscardTheFollowingFilePart(): void
+    {
+        file_put_contents($this->root . '/outside/item', 'keep outside');
+        $client = $this->new_client();
+        file_put_contents($this->root . '/parts.json', json_encode([
+            ['headers' => ['X-Chunk-Type' => 'error'], 'body' => json_encode([
+                'error_type' => 'file_missing', 'path' => base64_encode('/../outside/item'), 'message' => 'File disappeared',
+            ])],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/item'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4'], 'body' => 'keep'],
+            ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']],
+        ]));
+        ( new \ReflectionMethod($client, 'fetch_file_batch') )->invoke($client, [], null);
+        $this->assertSame('keep', file_get_contents($this->root . '/files/item'));
+        $this->assertSame('keep outside', file_get_contents($this->root . '/outside/item'));
+    }
+
+    public function testUnixErrorPathPreservesLiteralBackslashes(): void
+    {
+        file_put_contents($this->root . '/files/back\\slash', 'partial');
+        $client = $this->new_client();
+        $this->receive_error($client, base64_encode('/back\\slash'), 'files');
+        $this->assertFileDoesNotExist($this->root . '/files/back\\slash');
     }
 
     /** @return array<string,list<string>> Invalid remote absolute path spellings. */
     public static function invalid_error_paths(): array
     {
-        return ['traversal' => ['/../../outside/item'], 'relative' => ['../outside/item'],
-            'NUL' => ["/item\0tail"]];
+        return ['Unix traversal' => ['/../../outside/item', 'unix'], 'Unix relative' => ['../outside/item', 'unix'],
+            'Unix NUL' => ["/item\0tail", 'unix'],
+            'Windows traversal' => ['D:\\site\\..\\..\\outside\\item', 'windows'],
+            'Windows relative' => ['..\\outside\\item', 'windows'],
+            'Windows NUL' => ["D:\\site\\item\0tail", 'windows']];
     }
 
     /** Construct a normal credentialed client for the test source. */

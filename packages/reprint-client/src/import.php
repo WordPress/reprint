@@ -12889,16 +12889,13 @@ class ImportClient
                 return;
             }
             $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
-            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
-                $resolved_parent = realpath(dirname($local_absolute_path));
-                $path_format = Utils::native_path_format();
-                if ($resolved_parent === false || !Utils::path_is_same_as_or_descendant_of(
-                    Utils::normalize_path_separators($resolved_parent, $path_format),
-                    Utils::normalize_path_separators($this->filesystem_root, $path_format)
-                )) {
-                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path error rendered by the CLI, not HTML.
-                    throw new RuntimeException("Refusing file error removal outside filesystem root: {$local_absolute_path}");
-                }
+            try {
+                // A missing-file error may refer to a vanished local file.
+                // Check its parent even when the file itself no longer exists.
+                $this->assert_local_path_within_root(dirname($local_absolute_path));
+            } catch (RuntimeException $error) {
+                $this->audit_log('Skipped file error cleanup: ' . $error->getMessage(), true);
+                return;
             }
             $context->remote_file_path = null;
             $context->remote_file_size = null;
@@ -13322,7 +13319,14 @@ class ImportClient
                 if ($chunk_type === "error") {
                     $error = json_decode($current_chunk["body"] ?? "", true);
                     if (is_array($error) && isset($error["path"]) && $error["path"] !== "") {
-                        $this->assert_valid_received_path($error["path"], "remote error path");
+                        try {
+                            $this->assert_valid_received_path($error["path"], "remote error path");
+                        } catch (\InvalidArgumentException $exception) {
+                            $this->audit_log('Skipped remote error: ' . $exception->getMessage(), true);
+                            // The following part must start fresh after an ignored error.
+                            $current_chunk = null;
+                            return;
+                        }
                     }
                 }
                 if ($chunk_type === "file" && !empty($current_chunk["body_streamed"])) {

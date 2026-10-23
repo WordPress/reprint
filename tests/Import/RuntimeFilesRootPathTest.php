@@ -200,6 +200,24 @@ final class RuntimeFilesRootPathTest extends TestCase
         $this->assertCount(2, file($this->request_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
     }
 
+    public function testRuntimeDownloaderLogsAndIgnoresInvalidErrorPaths(): void
+    {
+        $client = new \ImportClient(
+            $this->target_url . '&' . http_build_query([
+                'returned_path' => base64_encode('/../../outside.txt'),
+                'requested_path' => base64_encode('/runtime.php'),
+                'chunk_type' => 'error',
+            ]),
+            $this->state_directory,
+            $this->filesystem_root,
+            ['allow_http' => true],
+        );
+        $client->run_preflight();
+        $this->assertSame(['.', '..'], scandir($this->state_directory . '/runtime_files'));
+        $this->assertStringContainsString('Skipped remote error:', file_get_contents($this->state_directory . '/audit.log'));
+        $this->assertCount(3, file($this->request_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+    }
+
     /** @return array<string,list<string>> Part type and path header for each case. */
     public static function received_path_fields(): array
     {
@@ -209,7 +227,6 @@ final class RuntimeFilesRootPathTest extends TestCase
             'index entry' => ['index', 'X-Index-Path'],
             'missing file' => ['missing', 'X-File-Path'],
             'filesystem root' => ['metadata', 'X-Filesystem-Root'],
-            'error path' => ['error', ''],
         ];
     }
 
@@ -284,6 +301,7 @@ if (isset($_GET['chunk_type'])) {
         $headers[$_GET['path_header']] = $returned_path;
     }
     $write_part($headers, $body);
+    $write_part(array('X-Chunk-Type' => 'completion', 'X-Status' => 'complete'));
     echo "--{$boundary}--\r\n";
     return;
 }
