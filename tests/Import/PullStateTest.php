@@ -35,6 +35,17 @@ class PullStateTest extends TestCase
         $this->assertSame(12, $state->apply->statements_executed);
     }
 
+    public function testIndexOffsetRoundTripsAndOlderCheckpointsAdoptTheirExistingFile(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        $data['index'] = ['cursor' => 'older-cursor'];
+        $state = \PullState::from_array($data);
+        $this->assertNull($state->index->bytes_written);
+        $this->assertSame('older-cursor', $state->index->cursor);
+        $state->index->bytes_written = 1234;
+        $this->assertSame(1234, \PullState::from_array($state->to_array())->index->bytes_written);
+    }
+
     public function testStateRoundTripsToPersistedArraySchema(): void
     {
         $state = new \PullState();

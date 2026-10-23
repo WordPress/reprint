@@ -82,6 +82,7 @@ require_once __DIR__ . '/lib/wp-stubs.php';
 
 // Streaming protocol parsers.
 require_once __DIR__ . '/lib/protocol/class-multipart-stream-parser.php';
+require_once __DIR__ . '/lib/protocol/class-json-array-stream-parser.php';
 
 // Adaptive request sizing and pacing.
 require_once __DIR__ . '/lib/tuning/class-adaptive-tuner.php';
@@ -9207,11 +9208,6 @@ class ImportClient
         }
 
         $next_remote_index_file_mode = file_exists($this->next_remote_index_file) ? "a" : "w";
-        // Initialize the index counter from the existing file so resume
-        // shows a monotonically increasing count.
-        if ($next_remote_index_file_mode === "a" && $this->next_remote_index_entries_counted === 0) {
-            $this->next_remote_index_entries_counted = $this->count_newlines($this->next_remote_index_file);
-        }
         if ($next_remote_index_file_mode === "w") {
             $this->audit_log(
                 "FILE CREATE | {$this->next_remote_index_file} | downloading next remote index from the beginning",
@@ -9221,11 +9217,37 @@ class ImportClient
                 "FILE APPEND | {$this->next_remote_index_file} | resuming next remote index download",
             );
         }
-        $next_remote_index_file_handle = fopen($this->next_remote_index_file, $next_remote_index_file_mode);
+        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "c+b");
         if (!$next_remote_index_file_handle) {
             throw new RuntimeException("Failed to open next remote index file");
         }
 
+        $index_state = $this->get_state()->index;
+        $file_size = fstat($next_remote_index_file_handle)["size"];
+        if ($index_state->bytes_written === null) {
+            // Older checkpoints lack a byte offset. Adopt their current file
+            // size before this client starts streaming more entries.
+            $index_state->bytes_written = $file_size;
+            $this->save_state();
+        }
+        if ($index_state->bytes_written > $file_size) {
+            fclose($next_remote_index_file_handle);
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local checkpoint error rendered as CLI text.
+            throw new RuntimeException("Cannot resume index at byte {$index_state->bytes_written}: the local file has only {$file_size} bytes.");
+        }
+        // A process can die after writing entries but before their part closes.
+        // Re-read that source part rather than append behind its unfinished tail.
+        if (!ftruncate($next_remote_index_file_handle, $index_state->bytes_written)
+            || fseek($next_remote_index_file_handle, $index_state->bytes_written) !== 0) {
+            fclose($next_remote_index_file_handle);
+            throw new RuntimeException("Cannot restore the next remote index to its saved byte offset.");
+        }
+        // Initialize the index counter from the existing file so resume
+        // shows a monotonically increasing count. Discard unconfirmed bytes first.
+        if ($this->next_remote_index_entries_counted === 0) {
+            $this->next_remote_index_entries_counted = $this->count_newlines($this->next_remote_index_file);
+        }
+        $confirmed_entries_count = $this->next_remote_index_entries_counted;
         $next_remote_index_is_complete = false;
         $chunks_since_save = 0;
 
@@ -9270,6 +9292,8 @@ class ImportClient
             &$next_remote_index_is_complete,
             &$chunks_since_save,
             $next_remote_index_file_handle,
+            $index_state,
+            &$confirmed_entries_count,
             $context
         ) {
             if ($this->shutdown_requested) {
@@ -9280,30 +9304,13 @@ class ImportClient
                 pcntl_signal_dispatch();
             }
 
-            $chunks_since_save++;
-            if ($chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
-                $this->get_state()->index->cursor = $cursor;
-                $this->save_state();
-                $chunks_since_save = 0;
-            }
-
-            if (isset($chunk["headers"]["x-cursor"])) {
-                $cursor = $chunk["headers"]["x-cursor"];
-            }
-
+            $is_streaming_body = !empty($chunk["is_streaming_body"]);
             $chunk_type = $chunk["headers"]["x-chunk-type"] ?? "";
 
             if ($chunk_type === "index_batch") {
-                $body = $chunk["body"] ?? "";
-                if ($body === "") {
-                    return;
-                }
-                $items = json_decode($body, true);
-                if (!is_array($items)) {
-                    throw new RuntimeException(
-                        "Invalid index batch JSON received from server",
-                    );
-                }
+                $items = array_key_exists("index_entry", $chunk)
+                    ? [$chunk["index_entry"]]
+                    : [];
                 foreach ($items as $item) {
                     if (!is_array($item)) {
                         continue;
@@ -9370,10 +9377,13 @@ class ImportClient
                         $next_remote_index_file_handle,
                         $next_remote_index_json_line . "\n"
                     );
-                    if ($next_remote_index_bytes_written === false) {
+                    if ($next_remote_index_bytes_written !== strlen($next_remote_index_json_line) + 1) {
                         throw new RuntimeException("Failed to write to next remote index file (disk full?)");
                     }
                     $this->next_remote_index_entries_counted++;
+                }
+                if ($is_streaming_body) {
+                    return;
                 }
                 if ($this->next_remote_index_entries_counted > 0) {
                     $this->progress->show_progress_line(
@@ -9416,15 +9426,34 @@ class ImportClient
                 } catch (RuntimeException $e) {
                     // The exporter flushes completed batches before a fatal
                     // error. Keep those entries when a later command resumes.
-                    $this->get_state()->index->cursor = $cursor;
+                    $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
+                    $index_state->cursor = $cursor;
                     $this->save_state();
                     throw $e;
+                }
+            }
+            if (!$is_streaming_body) {
+                if (!fflush($next_remote_index_file_handle)) {
+                    throw new RuntimeException("Cannot flush the next remote index before saving its cursor.");
+                }
+                $byte_offset = ftell($next_remote_index_file_handle);
+                if ($byte_offset === false) {
+                    throw new RuntimeException("Cannot read the next remote index byte offset after completing a part.");
+                }
+                $index_state->bytes_written = $byte_offset;
+                $confirmed_entries_count = $this->next_remote_index_entries_counted;
+                $cursor = $chunk["headers"]["x-cursor"] ?? $cursor;
+                $index_state->cursor = $cursor;
+                if (++$chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+                    $this->save_state();
+                    $chunks_since_save = 0;
                 }
             }
         };
 
         $cursor_before = $cursor;
         $request_start = microtime(true);
+        $interrupted = false;
         try {
             $this->fetch_streaming($url, $context, $post_data, "file_index");
         } catch (TransientInterruptionException $e) {
@@ -9436,9 +9465,19 @@ class ImportClient
                 $cursor,
                 $e,
             );
-            return false;
+            $interrupted = true;
         } finally {
+            // Keep complete parts, but remove entries from an interrupted or
+            // malformed part. A new process makes the same check when opening.
+            $this->next_remote_index_entries_counted = $confirmed_entries_count;
+            $truncated = ftruncate($next_remote_index_file_handle, $index_state->bytes_written);
             fclose($next_remote_index_file_handle);
+            if (!$truncated) {
+                throw new RuntimeException("Cannot discard the unfinished next remote index tail.");
+            }
+        }
+        if ($interrupted) {
+            return false;
         }
         $this->get_state()->consecutive_interrupted_responses = 0;
         $wall_time = microtime(true) - $request_start;
@@ -13188,8 +13227,9 @@ class ImportClient
      * creation sites inside fetch_streaming.
      *
      * File parts are forwarded as body data arrives so large files are written
-     * to disk incrementally. Non-file parts are still accumulated until
-     * complete because they are small metadata/progress JSON payloads.
+     * to disk incrementally. Index arrays likewise emit one entry at a time;
+     * only the complete event may advance their cursor. Other parts still hold
+     * their SQL or metadata body until complete.
      */
     private function make_chunk_handler(
         StreamingContext $context,
@@ -13213,6 +13253,27 @@ class ImportClient
 
             if ($event["type"] === "body") {
                 $chunk_type = $headers["x-chunk-type"] ?? "";
+                if ($chunk_type === "index_batch") {
+                    if (!$current_chunk) {
+                        $current_chunk = [
+                            "headers" => $headers,
+                            "index_parser" => new \Reprint\Importer\Protocol\JsonArrayStreamParser(
+                                static function ($entry) use ($context, $headers): void {
+                                    if ($context->on_chunk) {
+                                        ( $context->on_chunk )([
+                                            "headers" => $headers,
+                                            "body" => "",
+                                            "index_entry" => $entry,
+                                            "is_streaming_body" => true,
+                                        ]);
+                                    }
+                                }
+                            ),
+                        ];
+                    }
+                    $current_chunk["index_parser"]->feed($event["data"]);
+                    return;
+                }
                 if ($chunk_type === "file") {
                     if (!$current_chunk) {
                         $current_chunk = [
@@ -13254,6 +13315,10 @@ class ImportClient
                 }
             } elseif ($event["type"] === "complete") {
                 $chunk_type = $headers["x-chunk-type"] ?? "";
+                if (isset($current_chunk["index_parser"])) {
+                    $current_chunk["index_parser"]->finish();
+                    $current_chunk = ["headers" => $headers, "body" => ""];
+                }
                 if ($chunk_type === "error") {
                     $error = json_decode($current_chunk["body"] ?? "", true);
                     if (is_array($error) && isset($error["path"]) && $error["path"] !== "") {
