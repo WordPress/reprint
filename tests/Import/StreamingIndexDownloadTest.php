@@ -202,6 +202,9 @@ final class StreamingIndexDownloadTest extends TestCase
         }
         fclose($handle);
         $this->assertSame(40000, $files);
+        // The importer runs in another process; filesize() may still hold the
+        // size observed by this test when it killed the first importer.
+        clearstatcache(true, $this->index_path());
         $this->assertGreaterThan(16 * 1048576, filesize($this->index_path()));
     }
 }
