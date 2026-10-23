@@ -123,9 +123,12 @@ function is_push_endpoint(string $endpoint): bool {
     return strpos($endpoint, 'push_') === 0;
 }
 
-/** Returns whether this PHP runtime can serve push endpoints. */
+/** Returns whether this build and PHP runtime can serve push endpoints. */
 function push_is_supported(): bool {
-    return PHP_VERSION_ID >= 70200;
+    if (!defined('REPRINT_PUSH_AVAILABLE') && load_server_runtime() === null) {
+        return false;
+    }
+    return REPRINT_PUSH_AVAILABLE && PHP_VERSION_ID >= 70200;
 }
 
 /** Resolves dot segments in a slash-delimited path without touching the filesystem. */
@@ -191,6 +194,7 @@ function load_server_runtime(): ?string {
         }
 
         require_once $autoload_path;
+        require_once dirname($export_path) . '/build-features.php';
         require_once $compat_path;
         $loaded_export_path = $export_path;
         return $export_path;
@@ -441,6 +445,14 @@ function is_push_authorized(): bool {
  *                                          push flag decides instead of the token fingerprint.
  */
 function get_push_authorization_error(?string $authenticated_key_id = null): ?string {
+    if (!push_is_supported()) {
+        if (!defined('REPRINT_PUSH_AVAILABLE')) {
+            return 'The Reprint Server runtime is missing. Reinstall the plugin release package.';
+        }
+        return REPRINT_PUSH_AVAILABLE
+            ? 'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
+            : 'Push is not included in this build.';
+    }
     if (function_exists('is_multisite') && is_multisite()) {
         return 'Push into a multisite network is not supported. Pull the selected site into a fresh target instead.';
     }
@@ -479,7 +491,7 @@ function get_push_authorization_error(?string $authenticated_key_id = null): ?st
  * current token therefore cannot inherit the prior token's write authority.
  */
 function update_push_authorization(bool $enabled): bool {
-    if (!function_exists('update_option')) {
+    if (( $enabled && !push_is_supported() ) || !function_exists('update_option')) {
         return false;
     }
 
@@ -683,12 +695,17 @@ function handle_api_request(array $options = []): void {
         $authenticated_key_id = $authenticator->authenticated_key_id();
     }
 
-    if (!push_is_supported() && is_push_endpoint($endpoint)) {
-        push_error(
-            503,
-            'push_disabled',
-            'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
-        );
+    if (is_push_endpoint($endpoint) && !push_is_supported()) {
+        if (defined('REPRINT_PUSH_AVAILABLE') && !REPRINT_PUSH_AVAILABLE) {
+            push_error(403, 'push_disabled', 'Push is not included in this build.');
+        }
+        if (PHP_VERSION_ID < 70200) {
+            push_error(
+                503,
+                'push_disabled',
+                'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
+            );
+        }
     }
 
     // Authentication completes first. Every push operation requires current

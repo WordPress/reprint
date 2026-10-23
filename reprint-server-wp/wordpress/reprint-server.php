@@ -26,10 +26,12 @@ class SettingsPage {
         add_action('admin_menu', [$this, 'add_admin_menu']);
         add_action('network_admin_menu', [$this, 'add_network_admin_menu']);
         add_action('admin_post_reprint_server_save_network_token', [$this, 'handle_network_token_save']);
-        add_action('admin_post_reprint_server_save_push_access', [$this, 'handle_push_access_save']);
         add_action('admin_post_reprint_server_enroll_public_key', [$this, 'handle_public_key_enroll']);
         add_action('admin_post_reprint_server_remove_public_key', [$this, 'handle_public_key_remove']);
-        add_action('admin_post_reprint_server_save_key_push_access', [$this, 'handle_key_push_access_save']);
+        if (push_is_supported()) {
+            add_action('admin_post_reprint_server_save_push_access', [$this, 'handle_push_access_save']);
+            add_action('admin_post_reprint_server_save_key_push_access', [$this, 'handle_key_push_access_save']);
+        }
         add_action('admin_post_reprint_server_remove_connection_token', [$this, 'handle_connection_token_remove']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
         add_filter(
@@ -315,7 +317,14 @@ class SettingsPage {
                     <?php else: ?>
                         <?php if ($configured): ?>
                             <p><?php echo esc_html__('Use the saved connection token in your tool. Anyone with it can download your database and files.', 'reprint'); ?></p>
-                            <p><?php echo esc_html__('Changing the token disconnects tools using the old token and revokes its push access.', 'reprint'); ?></p>
+                            <p>
+                            <?php
+                            echo esc_html($configuration['push_supported']
+                                ? __('Changing the token disconnects tools using the old token and revokes its push access.', 'reprint')
+                                : __('Changing the token disconnects tools using the old token.', 'reprint')
+                            );
+                            ?>
+                            </p>
                         <?php endif; ?>
                         <?php $this->render_connection_token_form(); ?>
                     <?php endif; ?>
@@ -370,7 +379,7 @@ class SettingsPage {
                                 <?php $this->render_connection_token_form(); ?>
                             </details>
                         <?php endif; ?>
-                        <?php if ($configured && !is_multisite()): ?>
+                        <?php if ($configured && !is_multisite() && ( !defined('REPRINT_PUSH_AVAILABLE') || REPRINT_PUSH_AVAILABLE )): ?>
                             <p><?php echo esc_html__('You do not need push access when moving this site to another host.', 'reprint'); ?></p>
                             <?php $this->render_push_access_form($configuration); ?>
                         <?php endif; ?>
@@ -472,6 +481,7 @@ class SettingsPage {
      * @param array $configuration Configuration returned by get_configuration_state().
      */
     private function render_public_keys_section(array $configuration): void {
+        $show_push_access = ( !defined('REPRINT_PUSH_AVAILABLE') || REPRINT_PUSH_AVAILABLE ) && !is_multisite() && $configuration['required_scheme'] === 'key';
         $file_override = $configuration['has_public_keys_file'];
         $post_url = admin_url('admin-post.php');
         if ($file_override) {
@@ -481,7 +491,7 @@ class SettingsPage {
         }
         ?>
         <?php if ($configuration['enrolled_keys'] !== []): ?>
-        <?php if (!is_multisite() && $configuration['required_scheme'] === 'key'): ?>
+        <?php if ($show_push_access): ?>
             <p><?php echo esc_html__('Allow push only if a tool needs to upload, replace, or delete files in this site’s document root, except excluded paths. Downloads do not need push access.', 'reprint'); ?></p>
             <?php if (!$configuration['push_supported']): ?>
                 <p><?php echo esc_html__('Push access requires PHP 7.2 or newer. Downloads remain available.', 'reprint'); ?></p>
@@ -496,7 +506,7 @@ class SettingsPage {
                 <tr>
                     <th scope="col"><?php echo esc_html__('Migration Token ID', 'reprint'); ?></th>
                     <th scope="col"><?php echo esc_html__('Added', 'reprint'); ?></th>
-                    <?php if (!is_multisite() && $configuration['required_scheme'] === 'key'): ?>
+                    <?php if ($show_push_access): ?>
                         <th scope="col"><?php echo esc_html__('Push access', 'reprint'); ?></th>
                     <?php endif; ?>
                     <th scope="col"><?php echo esc_html__('Actions', 'reprint'); ?></th>
@@ -512,7 +522,7 @@ class SettingsPage {
                 <tr>
                     <td data-label="<?php echo esc_attr__('Migration Token ID', 'reprint'); ?>"><code><?php echo esc_html($entry['key_id']); ?></code></td>
                     <td data-label="<?php echo esc_attr__('Added', 'reprint'); ?>"><?php echo esc_html($entry['added_at'] > 0 ? gmdate('Y-m-d', $entry['added_at']) : '—'); ?></td>
-                    <?php if (!is_multisite() && $configuration['required_scheme'] === 'key'): ?>
+                    <?php if ($show_push_access): ?>
                     <td data-label="<?php echo esc_attr__('Push access', 'reprint'); ?>">
                         <?php if (!$configuration['push_supported'] || $configuration['managed_push_enabled'] !== null || $file_override): ?>
                             <?php echo esc_html($key_may_push ? __('Allowed', 'reprint') : __('Downloads only', 'reprint')); ?>
@@ -575,6 +585,9 @@ class SettingsPage {
 
     /** Render the push-access form or its read-only state. */
     private function render_push_access_form(array $configuration): void {
+        if (defined('REPRINT_PUSH_AVAILABLE') && !REPRINT_PUSH_AVAILABLE) {
+            return;
+        }
         if (!$configuration['push_supported']) {
             $unsupported_message = sprintf(
                 /* translators: %s: Current PHP version. */
@@ -655,12 +668,6 @@ class SettingsPage {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value selects a read-only notice.
         $result = sanitize_key(wp_unslash($_GET['reprint_server_notice']));
         $notices = [
-            'saved' => ['success', __('Push access updated.', 'reprint')],
-            'unchanged' => ['success', __('Push access was already up to date.', 'reprint')],
-            'unsupported' => ['error', __('Push access requires PHP 7.2 or newer. Downloads remain available.', 'reprint')],
-            'managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
-            'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
-            'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
             'enroll_invalid' => ['error', __('That is not a usable Migration Token. Copy the Migration Token from your tool and paste it here.', 'reprint')],
             'enroll_no_openssl' => ['error', __('This host cannot read Migration Tokens because the OpenSSL extension is missing. Clients authenticate with the connection token here.', 'reprint')],
             'enroll_duplicate' => ['info', __('That Migration Token is already enrolled.', 'reprint')],
@@ -672,20 +679,31 @@ class SettingsPage {
             'remove_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled Migration Tokens.', 'reprint')],
             'remove_storage_failure' => ['error', __('Failed to remove the Migration Token.', 'reprint')],
             'remove_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
-            'key_push_saved' => ['success', __('Push access for the Migration Token updated.', 'reprint')],
-            'key_push_unchanged' => ['success', __('Push access for the Migration Token was already up to date.', 'reprint')],
-            'key_push_unknown' => ['error', __('That Migration Token is not enrolled.', 'reprint')],
-            'key_push_multisite' => ['info', __('Push is not supported on multisite networks.', 'reprint')],
-            'key_push_unsupported' => ['error', __('Push access requires PHP 7.2 or newer.', 'reprint')],
-            'key_push_managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
-            'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided Migration Tokens.', 'reprint')],
-            'key_push_storage_failure' => ['error', __('Failed to save push access for the Migration Token.', 'reprint')],
-            'key_push_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
             'network_token_saved' => ['success', __('Connection token saved.', 'reprint')],
             'network_token_unchanged' => ['success', __('Connection token was already up to date.', 'reprint')],
             'token_removed' => ['success', __('Connection token removed.', 'reprint')],
             'token_remove_storage_failure' => ['error', __('Failed to remove the connection token.', 'reprint')],
         ];
+        // A saved push-result URL can be reloaded after changing distributions.
+        if (!defined('REPRINT_PUSH_AVAILABLE') || REPRINT_PUSH_AVAILABLE) {
+            $notices += [
+                'saved' => ['success', __('Push access updated.', 'reprint')],
+                'unchanged' => ['success', __('Push access was already up to date.', 'reprint')],
+                'unsupported' => ['error', __('Push access requires PHP 7.2 or newer. Downloads remain available.', 'reprint')],
+                'managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
+                'not_configured' => ['error', __('Configure a connection token before enabling push access.', 'reprint')],
+                'storage_failure' => ['error', __('Failed to save push access.', 'reprint')],
+                'key_push_saved' => ['success', __('Push access for the Migration Token updated.', 'reprint')],
+                'key_push_unchanged' => ['success', __('Push access for the Migration Token was already up to date.', 'reprint')],
+                'key_push_unknown' => ['error', __('That Migration Token is not enrolled.', 'reprint')],
+                'key_push_multisite' => ['info', __('Push is not supported on multisite networks.', 'reprint')],
+                'key_push_unsupported' => ['error', __('Push access requires PHP 7.2 or newer.', 'reprint')],
+                'key_push_managed' => ['info', __('Push access is managed by your hosting provider.', 'reprint')],
+                'key_push_file_override' => ['error', __('public-keys.php is active. Push grants cannot be stored for file-provided Migration Tokens.', 'reprint')],
+                'key_push_storage_failure' => ['error', __('Failed to save push access for the Migration Token.', 'reprint')],
+                'key_push_runtime_missing' => ['error', __('The Reprint Server runtime is missing. Run composer install in the plugin directory or reinstall the release package.', 'reprint')],
+            ];
+        }
         if (!isset($notices[$result])) {
             return;
         }

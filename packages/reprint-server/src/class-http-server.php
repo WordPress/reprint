@@ -4,10 +4,12 @@ namespace WordPress\Reprint\Server;
 
 use InvalidArgumentException;
 
+require_once __DIR__ . '/build-features.php';
+
 if (!class_exists('WordPress\\Reprint\\Server\\ResourceBudget', false)) {
     require_once __DIR__ . '/class-resource-budget.php';
 }
-if (!class_exists(PushConfigurationException::class, false)) {
+if (REPRINT_PUSH_AVAILABLE && !class_exists(PushConfigurationException::class, false)) {
     require_once __DIR__ . '/class-push-configuration-exception.php';
 }
 
@@ -60,7 +62,7 @@ final class HTTPServer {
         $this->cursor_header_name = $options['cursor_header_name'] ?? 'HTTP_X_EXPORT_CURSOR';
         $this->default_directory = $options['default_directory'] ?? null;
         $this->push_endpoints = null;
-        if (array_key_exists('push', $options)) {
+        if (REPRINT_PUSH_AVAILABLE && array_key_exists('push', $options)) {
             try {
                 if (!is_array($options['push'])) {
                     throw new InvalidArgumentException('The push HTTP server option must be an array.');
@@ -79,7 +81,7 @@ final class HTTPServer {
                 // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
             }
         }
-        if (isset($options['database_push'])) {
+        if (REPRINT_PUSH_AVAILABLE && isset($options['database_push'])) {
             require_once __DIR__ . '/class-database-push-endpoints.php';
             $this->database_push_endpoints = new DatabasePushEndpoints($options['database_push']);
         }
@@ -388,6 +390,26 @@ final class HTTPServer {
             );
         }
 
+        if (strpos($endpoint, 'push_') === 0 && ( !REPRINT_PUSH_AVAILABLE || PHP_VERSION_ID < 70200 )) {
+            http_response_code(REPRINT_PUSH_AVAILABLE ? 503 : 403);
+            header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+            header('Pragma: no-cache');
+            header('Expires: 0');
+            // Hosts such as Hostinger rewrite domains so links and assets stay on a
+            // preview domain while the stored site URL still uses the real domain.
+            // This lets users preview a site before changing DNS, but also rewrites
+            // application/json bodies. Octet-stream bypasses Hostinger's filter.
+            header('Content-Type: application/octet-stream');
+            echo json_encode([
+                'status' => 'rejected',
+                'reason' => 'push_disabled',
+                'detail' => REPRINT_PUSH_AVAILABLE
+                    ? 'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.'
+                    : 'Push is not included in this build.',
+            ]);
+            return;
+        }
+
         if (!isset($this->handlers[$endpoint])) {
             throw new InvalidArgumentException(
                 "Invalid endpoint: '{$endpoint}'. Valid endpoints: " . $this->get_valid_endpoints_message()
@@ -396,23 +418,6 @@ final class HTTPServer {
 
         $handler = $this->handlers[$endpoint];
         if (self::is_push_endpoint($endpoint)) {
-            if (PHP_VERSION_ID < 70200) {
-                http_response_code(503);
-                header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-                header('Pragma: no-cache');
-                header('Expires: 0');
-                // Hosts such as Hostinger rewrite domains so links and assets stay on a
-                // preview domain while the stored site URL still uses the real domain.
-                // This lets users preview a site before changing DNS, but also rewrites
-                // application/json bodies. Octet-stream bypasses Hostinger's filter.
-                header('Content-Type: application/octet-stream');
-                echo json_encode([
-                    'status' => 'rejected',
-                    'reason' => 'push_disabled',
-                    'detail' => 'Push endpoints require PHP 7.2 or newer; observed PHP ' . PHP_VERSION . '.',
-                ]);
-                return;
-            }
             call_user_func($handler, $config);
             return;
         }

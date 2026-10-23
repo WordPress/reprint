@@ -7,12 +7,19 @@
 # Usage:
 #   ./bin/build-server-plugin.sh
 #   ./bin/build-server-plugin.sh /path/to/reprint-exporter-wp.zip
+#   ./bin/build-server-plugin.sh /path/to/reprint-wordpress-org.zip wordpress-org
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_PATH="${1:-$PROJECT_ROOT/reprint-exporter-wp.zip}"
+TARGET="${2:-github}"
+
+if [ "$#" -gt 2 ] || [[ "$TARGET" != "github" && "$TARGET" != "wordpress-org" ]]; then
+    echo "Usage: $0 [output.zip] [github|wordpress-org]; observed target: $TARGET" >&2
+    exit 1
+fi
 
 case "$OUTPUT_PATH" in
     /*) ;;
@@ -59,6 +66,10 @@ rm -f \
     "$BUILD_ROOT/reprint-server-wp/composer.lock" \
     "$BUILD_ROOT/reprint-server-wp/secret.php" \
     "$BUILD_ROOT/reprint-server-wp/public-keys.php"
+
+if [ "$TARGET" = "wordpress-org" ]; then
+    php "$PROJECT_ROOT/bin/prepare-wordpress-org-plugin.php" "$BUILD_ROOT"
+fi
 
 php "$PROJECT_ROOT/bin/downgrade-server-plugin.php" "$BUILD_ROOT"
 
@@ -112,7 +123,7 @@ COMPOSER_DISABLE_NETWORK=1 COMPOSER_MIRROR_PATH_REPOS=1 composer update \
     --prefer-dist \
     --working-dir="$BUILD_ROOT/reprint-server-wp"
 
-php "$PROJECT_ROOT/tests/server-plugin-package.php" "$BUILD_ROOT/reprint-server-wp"
+php "$PROJECT_ROOT/tests/server-plugin-package.php" "$BUILD_ROOT/reprint-server-wp" "" "$TARGET"
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 # zip updates an existing archive in place, so remove any leftover first. The
@@ -121,7 +132,13 @@ mkdir -p "$(dirname "$OUTPUT_PATH")"
 rm -f "$OUTPUT_PATH"
 (
     cd "$BUILD_ROOT/reprint-server-wp"
-    zip -qr "$OUTPUT_PATH" . -x './secret.php' './public-keys.php'
+    if [ "$TARGET" = "wordpress-org" ]; then
+        cd "$BUILD_ROOT"
+        mv reprint-server-wp reprint
+        zip -qr "$OUTPUT_PATH" reprint
+    else
+        zip -qr "$OUTPUT_PATH" . -x './secret.php' './public-keys.php'
+    fi
 )
 
 echo "Built $OUTPUT_PATH"

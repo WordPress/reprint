@@ -2,6 +2,8 @@ includes:
     - tests/phpstan/phpstan-baseline.neon
 
 parameters:
+    dynamicConstantNames:
+        - REPRINT_PUSH_AVAILABLE
     bootstrapFiles:
         - tests/phpstan/phpstan-bootstrap.php
     stubFiles:

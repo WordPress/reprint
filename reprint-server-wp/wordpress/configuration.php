@@ -279,7 +279,7 @@ function revoke_push_authorization_after_connection_token_added(): void {
  *     @type bool      $is_configured Whether a credential the host accepts exists: an enrolled key on a key host,
  *                                    an effective connection token on an HMAC host.
  *     @type bool      $has_connection_token_file Whether secret.php supplies the effective connection token.
- *     @type bool      $push_supported Whether this PHP runtime can serve push endpoints.
+ *     @type bool      $push_supported Whether this build and PHP runtime can serve push endpoints.
  *     @type bool|null $managed_push_enabled Hosting-provider push policy, or null when the site controls it.
  *     @type bool      $push_enabled Whether push is authorized for any enrolled key on a key host, or for the
  *                                   current connection token on an HMAC host.

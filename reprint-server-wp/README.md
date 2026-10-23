@@ -16,6 +16,24 @@ assets, uninstall routine, `readme.txt`, GPL license, and the mirrored server
 runtime. The ZIP name remains `reprint-exporter-wp.zip`, with files at its root,
 so WordPress keeps the existing installed directory when users upgrade.
 
+Build the downloads-only WordPress.org ZIP with:
+
+```sh
+./bin/build-server-plugin.sh reprint-wordpress-org.zip wordpress-org
+```
+
+This ZIP contains a `reprint/` directory. The build sets
+`define('REPRINT_PUSH_AVAILABLE', false)` in the server package's
+`src/build-features.php` and omits the file-push and database-push implementation
+files before Composer generates its classmap. Shared PHP files stay intact.
+The flag blocks push dispatch, hides push controls, and prevents push grants.
+Host constants, environment variables, and API options cannot enable push in
+this build. The GitHub ZIP sets the flag to `true` and keeps push and its
+existing filename and layout. This is a build choice, not a site setting.
+
+Both targets are built and checked in CI, including requests through the
+packaged entry point with a host configuration that grants push.
+
 The WordPress.org submission proposes `reprint`, matching the existing translation
 domain. The Plugins Team must approve the final slug. A directory installation
 would use that slug as its folder name; it does not rename an existing GitHub

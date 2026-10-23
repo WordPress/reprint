@@ -164,6 +164,7 @@ final class ExportLibraryLoadTest extends TestCase {
         file_put_contents($autoload_path, "<?php\n");
         file_put_contents($compatibility_path, "<?php\n");
         file_put_contents($export_path, "<?php\n");
+        copy(__DIR__ . '/../packages/reprint-server/src/build-features.php', dirname($export_path) . '/build-features.php');
 
         if (!symlink($physical_plugin_directory, $linked_plugin_directory)) {
             $this->removePath($tmp_dir);
