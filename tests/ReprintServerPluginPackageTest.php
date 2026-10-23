@@ -31,6 +31,12 @@ class ReprintServerPluginPackageTest extends TestCase {
         $this->assertStringStartsWith("=== Reprint ===\n", file_get_contents($plugin_directory . 'readme.txt'));
     }
 
+    /** Use the case-sensitive WordPress.org account name supplied in directory review. */
+    public function testReadmeListsTheWordPressOrgContributor(): void {
+        $readme = file_get_contents($this->project_directory . '/reprint-server-wp/readme.txt');
+        $this->assertMatchesRegularExpression('/^Contributors: zieladam$/m', $readme);
+    }
+
     /** @dataProvider versionProvider */
     public function testStampKeepsTheHeaderRuntimeAndReadmeVersionsTogether(string $version): void {
         exec('bash ' . escapeshellarg($this->project_directory . '/bin/stamp-plugin-version.sh') . ' ' . escapeshellarg($version) . ' 2>&1', $output, $exit_code);
