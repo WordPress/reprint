@@ -123,6 +123,10 @@ COMPOSER_DISABLE_NETWORK=1 COMPOSER_MIRROR_PATH_REPOS=1 composer update \
     --prefer-dist \
     --working-dir="$BUILD_ROOT/reprint-server-wp"
 
+if [ "$TARGET" = "wordpress-org" ]; then
+    mv "$BUILD_ROOT/reprint-server-wp/index.php" "$BUILD_ROOT/reprint-server-wp/reprint.php"
+fi
+
 php "$PROJECT_ROOT/tests/server-plugin-package.php" "$BUILD_ROOT/reprint-server-wp" "" "$TARGET"
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"

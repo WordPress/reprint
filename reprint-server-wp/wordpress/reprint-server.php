@@ -35,7 +35,7 @@ class SettingsPage {
         add_action('admin_post_reprint_server_remove_connection_token', [$this, 'handle_connection_token_remove']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
         add_filter(
-            'plugin_action_links_' . plugin_basename(PLUGIN_DIR . 'index.php'),
+            'plugin_action_links_' . plugin_basename(PLUGIN_FILE),
             [$this, 'add_settings_link']
         );
     }
@@ -110,7 +110,7 @@ class SettingsPage {
 
         wp_enqueue_script(
             'reprint-server-admin',
-            plugins_url('wordpress/reprint-server.js', PLUGIN_DIR . 'index.php'),
+            plugins_url('wordpress/reprint-server.js', PLUGIN_FILE),
             ['wp-a11y'],
             VERSION,
             true
@@ -118,7 +118,7 @@ class SettingsPage {
 
         wp_enqueue_style(
             'reprint-server-admin',
-            plugins_url('wordpress/reprint-server.css', PLUGIN_DIR . 'index.php'),
+            plugins_url('wordpress/reprint-server.css', PLUGIN_FILE),
             [],
             VERSION
         );
@@ -764,7 +764,7 @@ add_action('plugins_loaded', function() {
     SettingsPage::get_instance();
 });
 
-register_activation_hook(PLUGIN_DIR . 'index.php', function() {
+register_activation_hook(PLUGIN_FILE, function() {
     if (!wp_doing_ajax() && is_admin()) {
         set_transient('reprint_server_activated', 1, 30);
     }

@@ -29,6 +29,10 @@ if (!defined(__NAMESPACE__ . '\\VERSION')) {
 if (!defined(__NAMESPACE__ . '\\PLUGIN_DIR')) {
     define(__NAMESPACE__ . '\\PLUGIN_DIR', plugin_dir_path(__FILE__));
 }
+// Library-only consumers retain the released entry filename unless they supply it.
+if (!defined(__NAMESPACE__ . '\\PLUGIN_FILE')) {
+    define(__NAMESPACE__ . '\\PLUGIN_FILE', PLUGIN_DIR . 'index.php');
+}
 if (!defined(__NAMESPACE__ . '\\CONNECTION_TOKEN_FILE')) {
     define(__NAMESPACE__ . '\\CONNECTION_TOKEN_FILE', PLUGIN_DIR . 'secret.php');
 }
@@ -797,7 +801,7 @@ function handle_api_request(array $options = []): void {
                 // Keep the registered installation path lexical until its
                 // document-root-relative name is known. realpath() would turn a
                 // symlinked plugin into its outside target and omit protection.
-                $registered_plugin_file = str_replace('\\', '/', plugin_basename(PLUGIN_DIR . 'index.php'));
+                $registered_plugin_file = str_replace('\\', '/', plugin_basename(PLUGIN_FILE));
                 $registered_plugin_directory = dirname($registered_plugin_file);
                 $logical_plugin_directory = normalize_path(
                     str_replace('\\', '/', (string) WP_PLUGIN_DIR)
