@@ -1459,7 +1459,10 @@ from the tracker. The file is deleted entirely once all entries are cleared.
 File errors from a file-fetch response use the same path mapping and selection
 as file downloads. Their base64 paths are decoded before local cleanup and
 remote-index invalidation. Errors during database or index work do not remove
-local files. Existing parent links are checked before a file is removed.
+local files. Existing parent links are checked before a file is removed or its
+index entry is invalidated, including when the file is already missing. Errors
+with invalid paths or parents outside the local root are logged and skipped;
+later parts in the response are still processed.
 
 #### `audit.log` — append-only event log
 
