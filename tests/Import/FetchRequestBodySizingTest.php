@@ -140,11 +140,7 @@ class FetchRequestBodySizingTest extends TestCase
 
     private function writeBatchFile(int $bytes): string
     {
-        $directory = $this->pullStateDirectory . '/fetch-batches';
-        if (!is_dir($directory)) {
-            mkdir($directory, 0700);
-        }
-        $path = tempnam($directory, 'file-fetch-');
+        $path = $this->tempDir . '/batch-' . uniqid() . '.json';
         file_put_contents($path, '[' . str_repeat('x', max(0, $bytes - 2)) . ']');
 
         return $path;

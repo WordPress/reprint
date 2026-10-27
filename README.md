@@ -1029,10 +1029,10 @@ skip that local cleanup. See the host-plugin section above for push exclusions.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 
-The missing-upload proxy reads a separate runtime status file containing only
-its enabled flag. Pull checkpoints stay private to the client. Playground
-requires `--state-dir` outside the mounted WordPress directories. Run
-`apply-runtime` again to refresh an existing runtime's generated configuration.
+Playground previews serve downloaded files only. They do not proxy missing
+uploads from the source or add a pull-state mount. Keep `--state-dir` outside
+the site directories. Run `apply-runtime` again to refresh an existing
+runtime's generated configuration.
 
 For Playground CI, set `PHP_BINARY=tests/e2e/ci/playground-php.sh`. The wrapper
 delegates to `@wp-playground/cli php` by default. When

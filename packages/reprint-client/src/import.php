@@ -294,12 +294,6 @@ class ImportClient
     /** @var string Pull state file which persists command, cursor, and stage across invocations. */
     private $pull_state_file;
 
-    /** @var string Runtime-only proxy status; never loaded as command state. */
-    private $remote_upload_proxy_status_file;
-
-    /** @var bool|null Last proxy status published by this process. */
-    private $published_remote_upload_proxy_enabled = null;
-
     /** @var ProgressReporter File-pull counters, screen snapshots, JSONL output and write throttling. */
     private ProgressReporter $progress_reporter;
 
@@ -333,9 +327,6 @@ class ImportClient
 
     /** @var string Path to the replacement fetch list built during mirror planning. */
     private $fetch_list_replacement_file;
-
-    /** @var string Private directory containing only generated fetch batches. */
-    private $fetch_batch_directory;
 
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
@@ -646,7 +637,6 @@ class ImportClient
         $this->pull_state_directory = wp_join_unix_paths($remote_state_directory, "pull");
         $this->local_index_file = wp_join_unix_paths($remote_state_directory, "local_index.jsonl");
         $this->pull_state_file = wp_join_unix_paths($this->pull_state_directory, "state.json");
-        $this->remote_upload_proxy_status_file = wp_join_unix_paths($remote_state_directory, "runtime/upload-proxy.json");
         $this->remote_index_file = wp_join_unix_paths($this->pull_state_directory, "remote-index.jsonl");
         $this->pull_index_wal_path =
             wp_join_unix_paths($this->pull_state_directory, "index.wal");
@@ -658,7 +648,6 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
         $this->fetch_list_replacement_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl.new");
-        $this->fetch_batch_directory = wp_join_unix_paths($this->pull_state_directory, "fetch-batches");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
         $this->progress_reporter = new ProgressReporter(
@@ -5936,32 +5925,6 @@ class ImportClient
             $wordpress_index_php = wp_join_unix_paths($local_document_root, 'index.php');
         }
 
-        if ($runtime === 'playground-cli') {
-            // A site-directory mount must not expose the private state through
-            // a parent directory after the explicit state-file mount is gone.
-            $mounted_directories = [$local_document_root];
-            $resolved_index_php = $wordpress_index_php === '' ? false : realpath($wordpress_index_php);
-            if ($resolved_index_php !== false) {
-                $mounted_directories[] = dirname($resolved_index_php);
-            }
-            foreach ([$this->state_dir, $this->remote_state_directory] as $private_directory) {
-                $resolved_private_directory = realpath($private_directory);
-                if ($resolved_private_directory === false) {
-                    continue;
-                }
-                foreach ($mounted_directories as $mounted_directory) {
-                    if (Utils::path_is_same_as_or_descendant_of($resolved_private_directory, $mounted_directory)) {
-                        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI paths, never HTML output.
-                        throw new InvalidArgumentException(
-                            'Playground requires the state directory outside the mounted WordPress directories. '
-                            . "The state directory {$private_directory} is inside {$mounted_directory}."
-                        );
-                        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-                    }
-                }
-            }
-        }
-
         if ($multisite_target !== null) {
             if ($wordpress_index_php === '') {
                 throw new InvalidArgumentException('The selected multisite runtime requires its imported WordPress files.');
@@ -6310,10 +6273,13 @@ class ImportClient
         }
 
         $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL"] = $base_url;
-        $this->write_remote_upload_proxy_status();
-        $manifest->constants["REPRINT_REMOTE_UPLOAD_PROXY_STATUS_FILE"] =
-            realpath($this->remote_upload_proxy_status_file)
-            ?: $this->remote_upload_proxy_status_file;
+        $pull_state_directory =
+            realpath($this->pull_state_directory)
+            ?: $this->pull_state_directory;
+        $manifest->constants["REPRINT_PULL_STATE_FILE"] = wp_join_unix_paths(
+            Utils::trim_right_slash($pull_state_directory, Utils::native_path_format()),
+            "state.json"
+        );
         $manifest->routes[] = [
             "handler" => "remote-upload-proxy",
             "path_pattern" => "/wp-content/uploads/.*",
@@ -9864,26 +9830,6 @@ class ImportClient
 
         $batch_entries = $fetch_state->batch_entries;
 
-        // tempnam() truncates filename prefixes on Windows. Use the private
-        // batch directory, not a filename pattern, to decide which saved paths
-        // may be uploaded or removed. Rebuild older batches from the saved
-        // fetch-list offset without opening or deleting their paths.
-        $batch_directory = realpath($this->fetch_batch_directory);
-        if (
-            $batch_file !== null
-            && (
-                $batch_directory === false
-                || realpath(dirname($batch_file)) !== $batch_directory
-                || is_link($batch_file)
-                || !is_file($batch_file)
-            )
-        ) {
-            $batch_file = null;
-            $this->get_state()->current_file = null;
-            $this->get_state()->current_file_bytes = null;
-            $this->get_state()->current_css_cursor = null;
-        }
-
         // Reset the batch if the request body budget has dropped below this batch's list size.
         if (
             $batch_file !== null
@@ -9982,11 +9928,6 @@ class ImportClient
     {
         $limit = $this->fetch_request_body_budget();
 
-        if (!is_dir($this->fetch_batch_directory) && !mkdir($this->fetch_batch_directory, 0700, true)) {
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, never HTML output.
-            throw new RuntimeException("Cannot create private fetch batch directory: {$this->fetch_batch_directory}");
-        }
-
         // Open the fetch list and seek to where the previous batch left off.
         $handle = fopen($list_file, "r");
         if (!$handle) {
@@ -10000,16 +9941,10 @@ class ImportClient
         // The output is a temp file containing a JSON array of base64 path
         // records. Paths are arbitrary bytes and cannot appear directly in JSON.
         // This file gets uploaded as the request body for the file_fetch endpoint.
-        $tmp = tempnam($this->fetch_batch_directory, "file-fetch-");
-        if ($tmp === false || realpath(dirname($tmp)) !== realpath($this->fetch_batch_directory)) {
-            // tempnam() may fall back to the system temporary directory when
-            // it cannot create a file in the requested directory.
-            if ($tmp !== false) {
-                @unlink($tmp);
-            }
+        $tmp = tempnam(sys_get_temp_dir(), "file-fetch-");
+        if ($tmp === false) {
             fclose($handle);
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, never HTML output.
-            throw new RuntimeException("Failed to create fetch batch file in {$this->fetch_batch_directory}");
+            throw new RuntimeException("Failed to create fetch batch file");
         }
         $out = fopen($tmp, "w");
         if (!$out) {
@@ -15017,10 +14952,6 @@ class ImportClient
             throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
         }
 
-        if (is_file($this->remote_upload_proxy_status_file)) {
-            $this->write_remote_upload_proxy_status();
-        }
-
         $files_pulled = $this->progress_reporter->get_batch_files_done(); // Completed in this batch
         $has_cursor =
             !empty($state["active_resumable_command"]["remote_cursor"] ?? null) ||
@@ -15038,14 +14969,12 @@ class ImportClient
         );
 
         /**
-         * save_state() writes separate files for different readers:
+         * save_state() writes two files for different readers:
          *
          * 1. state.json tells the next PHP process where to resume. Write it
          *    after every completed unit of work so a stopped pull can continue.
          * 2. progress.json tells a polling UI what the pull is doing. The UI
          *    needs a recent update, but it does not need every checkpoint.
-         * 3. runtime/upload-proxy.json publishes only the proxy switch when a
-         *    runtime uses it. Update it only when that switch changes.
          *
          * In a test with 30,000 files, save_state() ran 30,179 times. Each
          * progress.json update wrote about 185 bytes to a temporary file and
@@ -15059,31 +14988,6 @@ class ImportClient
          * may not save another checkpoint afterward.
          */
         $this->write_progress_file_if_due();
-    }
-
-    /** Publish the proxy switch without exposing command checkpoints to runtimes. */
-    private function write_remote_upload_proxy_status(): void
-    {
-        $enabled = $this->should_enable_remote_upload_proxy();
-        if ($this->published_remote_upload_proxy_enabled === $enabled) {
-            return;
-        }
-
-        $directory = dirname($this->remote_upload_proxy_status_file);
-        // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem errors, never HTML output.
-        if (!is_dir($directory) && !mkdir($directory, 0700, true) && !is_dir($directory)) {
-            throw new RuntimeException("Cannot create upload proxy status directory: {$directory}");
-        }
-        $json = json_encode(["proxy_enabled" => $enabled]) . "\n";
-        $temporary_file = $this->remote_upload_proxy_status_file . ".tmp";
-        if (file_put_contents($temporary_file, $json) !== strlen($json)) {
-            throw new RuntimeException("Cannot write upload proxy status file: {$temporary_file}");
-        }
-        if (!rename($temporary_file, $this->remote_upload_proxy_status_file)) {
-            throw new RuntimeException("Cannot publish upload proxy status file: {$this->remote_upload_proxy_status_file}");
-        }
-        // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
-        $this->published_remote_upload_proxy_enabled = $enabled;
     }
 
     /** Immediately write the latest screen snapshot, including on shutdown or error. */
