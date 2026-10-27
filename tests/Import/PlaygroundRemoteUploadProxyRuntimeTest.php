@@ -13,6 +13,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
     private $fsRoot;
     private $outputDir;
     private $pullStateFile;
+    private $proxyStatusFile;
 
     protected function setUp(): void
     {
@@ -25,10 +26,13 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         mkdir($this->fsRoot, 0755, true);
         mkdir($this->outputDir, 0755, true);
         mkdir($stateDir . '/pull', 0755, true);
+        mkdir($stateDir . '/runtime', 0755, true);
 
         file_put_contents($this->fsRoot . '/index.php', "<?php echo 'ok';\n");
         $this->pullStateFile = $stateDir . '/pull/state.json';
         file_put_contents($this->pullStateFile, "{\"command\":\"files-pull\",\"status\":\"partial\"}\n");
+        $this->proxyStatusFile = $stateDir . '/runtime/upload-proxy.json';
+        file_put_contents($this->proxyStatusFile, "{\"proxy_enabled\":true}\n");
     }
 
     protected function tearDown(): void
@@ -62,13 +66,13 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         rmdir($dir);
     }
 
-    public function testPlaygroundMountsProxyStateFileIntoVfs(): void
+    public function testPlaygroundMountsOnlyProxyStatusIntoVfs(): void
     {
         $manifest = new \RuntimeManifest('other');
         $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
             'https://source.example/wp-content/uploads';
-        $manifest->constants['REPRINT_PULL_STATE_FILE'] =
-            $this->pullStateFile;
+        $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_STATUS_FILE'] =
+            $this->proxyStatusFile;
         $manifest->routes[] = [
             'handler' => 'remote-upload-proxy',
             'path_pattern' => '/wp-content/uploads/.*',
@@ -86,22 +90,25 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $startSh = file_get_contents($this->outputDir . '/start.sh');
 
         $this->assertStringContainsString(
-            "/tmp/reprint/state.json",
+            "/tmp/reprint/upload-proxy.json",
             $runtime,
         );
         $this->assertStringNotContainsString($this->pullStateFile, $runtime);
         $this->assertStringContainsString(
-            "--mount='" . $this->pullStateFile . ":/tmp/reprint/state.json'",
+            "--mount='" . $this->proxyStatusFile . ":/tmp/reprint/upload-proxy.json'",
             $startSh,
         );
+        $this->assertStringNotContainsString($this->pullStateFile, $startSh);
         // start.json should contain the same mount as structured data.
         $startJson = json_decode(file_get_contents($this->outputDir . '/start.json'), true);
         $this->assertNotNull($startJson, 'start.json should be valid JSON');
 
         $mount_sources = array_column($startJson['mounts'], 'source');
         $mount_targets = array_column($startJson['mounts'], 'target');
-        $this->assertContains($this->pullStateFile, $mount_sources);
-        $this->assertContains('/tmp/reprint/state.json', $mount_targets);
+        $this->assertContains($this->proxyStatusFile, $mount_sources);
+        $this->assertNotContains($this->pullStateFile, $mount_sources);
+        $this->assertContains('/tmp/reprint/upload-proxy.json', $mount_targets);
+        $this->assertNotContains('/tmp/reprint/state.json', $mount_targets);
     }
 
     public function testPlaygroundConfigNormalizesATrailingOutputDirectorySlash(): void

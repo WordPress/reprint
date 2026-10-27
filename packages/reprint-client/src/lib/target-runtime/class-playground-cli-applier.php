@@ -157,8 +157,8 @@ class PlaygroundCliApplier implements RuntimeApplier
     {
         $mounts = [];
         $runtime_file_mounts = [
-            'REPRINT_PULL_STATE_FILE'
-                => '/tmp/reprint/state.json',
+            'REPRINT_REMOTE_UPLOAD_PROXY_STATUS_FILE'
+                => '/tmp/reprint/upload-proxy.json',
         ];
 
         foreach ($runtime_file_mounts as $constant_name => $vfs_path) {

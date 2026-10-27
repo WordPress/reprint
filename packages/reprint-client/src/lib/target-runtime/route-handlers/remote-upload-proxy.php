@@ -17,28 +17,19 @@ function remote_upload_proxy_code(): string
  */
 (function() {
 	if (!defined('REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL')) return;
-	if (!defined('REPRINT_PULL_STATE_FILE')) return;
+	if (!defined('REPRINT_REMOTE_UPLOAD_PROXY_STATUS_FILE')) return;
 	if (!function_exists('curl_init')) return;
 
 	$proxy_enabled = false;
-	$pull_state_file = REPRINT_PULL_STATE_FILE;
+	$proxy_status_file = REPRINT_REMOTE_UPLOAD_PROXY_STATUS_FILE;
 	if (
-		is_string($pull_state_file) &&
-		$pull_state_file !== '' &&
-		is_readable($pull_state_file)
+		is_string($proxy_status_file) &&
+		$proxy_status_file !== '' &&
+		is_readable($proxy_status_file)
 	) {
-		$pull_state = json_decode((string) file_get_contents($pull_state_file), true);
-		if (is_array($pull_state)) {
-			$filter = $pull_state['filter'] ?? 'none';
-			$command = $pull_state['active_resumable_command']['command_name'] ?? null;
-			$status = $pull_state['active_resumable_command']['completion_state'] ?? null;
-			$proxy_enabled =
-				$filter === 'essential-files' ||
-				(
-					$command === 'files-pull' &&
-					$status !== null &&
-					$status !== 'complete'
-				);
+		$proxy_status = json_decode((string) file_get_contents($proxy_status_file), true);
+		if (is_array($proxy_status)) {
+			$proxy_enabled = ($proxy_status['proxy_enabled'] ?? false) === true;
 		}
 	}
 

@@ -184,6 +184,112 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
     }
 
+    public function testProxyStopsAfterFilesPullCompletesInAnotherClient(): void
+    {
+        $url = $this->startProxyRuntime();
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $client->get_state()->filter = 'none';
+        $client->get_state()->active_resumable_command->command_name = 'files-pull';
+        $client->get_state()->active_resumable_command->completion_state = 'partial';
+        $client->save_state();
+        $this->assertSame(206, $this->request($url . '/wp-content/uploads/missing.txt')[0]);
+
+        $next_client = $this->makeClient();
+        $this->loadClientState($next_client);
+        $next_client->get_state()->active_resumable_command->completion_state = 'complete';
+        $next_client->save_state();
+        $this->assertSame(404, $this->request($url . '/wp-content/uploads/missing.txt')[0]);
+        $this->assertSame("GET /missing.txt\n", file_get_contents($this->tempDir . '/upstream-requests'));
+        $this->assertSame(
+            ['proxy_enabled' => false],
+            json_decode(file_get_contents(dirname($client->pull_state_directory) . '/runtime/upload-proxy.json'), true)
+        );
+        $next_client->get_state()->filter = 'essential-files';
+        $next_client->save_state();
+        $this->assertSame(206, $this->request($url . '/wp-content/uploads/missing.txt')[0]);
+    }
+
+    public function testTamperedProxyStatusCannotChangeClientCommandState(): void
+    {
+        $this->writeState(['filter' => 'essential-files']);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->runApplyRuntime($client);
+        $state_file = $client->pull_state_directory . '/state.json';
+        $saved_state = file_get_contents($state_file);
+        $status_file = dirname($client->pull_state_directory) . '/runtime/upload-proxy.json';
+        $this->assertFileExists($status_file);
+        $this->assertSame(['proxy_enabled' => true], json_decode(file_get_contents($status_file), true));
+        $published_inode = fileinode($status_file);
+        $client->save_state();
+        clearstatcache(true, $status_file);
+        $this->assertSame($published_inode, fileinode($status_file));
+
+        file_put_contents($status_file, json_encode([
+            'proxy_enabled' => false,
+            'fetch' => ['batch_file' => 'base64:' . base64_encode($this->tempDir . '/unrelated.txt')],
+            'apply' => ['target_sqlite_path' => $this->tempDir . '/unrelated.sqlite'],
+        ]));
+        $this->assertSame($saved_state, file_get_contents($state_file));
+        $next_client = $this->makeClient();
+        $this->loadClientState($next_client);
+        $this->assertSame($client->get_state()->to_array(), $next_client->get_state()->to_array());
+        $next_client->save_state();
+        $this->assertSame(['proxy_enabled' => true], json_decode(file_get_contents($status_file), true));
+    }
+
+    public function testTamperedProxyStatusRequiresAnExplicitBoolean(): void
+    {
+        $url = $this->startProxyRuntime();
+        $status_file = dirname($this->makeClient()->pull_state_directory) . '/runtime/upload-proxy.json';
+        $this->assertFileExists($status_file);
+        foreach (['', 'null', '[]', '{', '{"proxy_enabled":"true"}', '{"proxy_enabled":1}'] as $contents) {
+            file_put_contents($status_file, $contents);
+            $this->assertSame(404, $this->request($url . '/wp-content/uploads/missing.txt')[0]);
+        }
+        $this->assertFileDoesNotExist($this->tempDir . '/upstream-requests');
+        unlink($status_file);
+        $this->assertSame(404, $this->request($url . '/wp-content/uploads/missing.txt')[0]);
+    }
+
+    public function testPlaygroundRequiresStateOutsideTheMountedSite(): void
+    {
+        $this->stateDir = $this->fsRoot . '/.reprint';
+        mkdir($this->stateDir, 0700, true);
+        $this->writeState(['filter' => 'essential-files']);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('outside the mounted WordPress directories');
+        $client->run_apply_runtime([
+            'runtime' => 'playground-cli',
+            'output_dir' => $this->outputDir,
+            'flat_document_root' => $this->fsRoot,
+        ]);
+    }
+
+    public function testPlaygroundDoesNotMountTheWorkingDirectoryWhenCoreIsMissing(): void
+    {
+        $this->writeState(['preflight' => ['data' => ['database' => ['wp' => [
+            'paths_urls' => ['abspath' => '/missing-core'],
+        ]]]]]);
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        $working_directory = getcwd();
+        chdir($this->tempDir);
+        try {
+            $client->run_apply_runtime([
+                'runtime' => 'playground-cli',
+                'output_dir' => $this->outputDir,
+            ]);
+        } finally {
+            chdir($working_directory);
+        }
+        $config = json_decode(file_get_contents($this->outputDir . '/start.json'), true);
+        $this->assertSame(realpath($this->fsRoot), $config['mounts_before_install'][0]['source']);
+    }
+
     private function startProxyRuntime(): string
     {
         mkdir($this->tempDir . '/upstream');
@@ -355,9 +461,9 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
         $this->assertStringContainsString(
-            "define('REPRINT_PULL_STATE_FILE', '"
-                . $resolvedPullStateDirectory
-                . "/state.json');",
+            "define('REPRINT_REMOTE_UPLOAD_PROXY_STATUS_FILE', '"
+                . dirname($resolvedPullStateDirectory)
+                . "/runtime/upload-proxy.json');",
             $runtime,
         );
         $this->assertStringNotContainsString(
@@ -394,7 +500,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
         $this->assertStringContainsString(
-            "REPRINT_PULL_STATE_FILE",
+            "REPRINT_REMOTE_UPLOAD_PROXY_STATUS_FILE",
             $runtime,
         );
         $this->assertStringContainsString(
@@ -422,7 +528,7 @@ class RemoteUploadProxyRuntimeTest extends TestCase
             $runtime,
         );
         $this->assertStringNotContainsString(
-            "REPRINT_PULL_STATE_FILE",
+            "REPRINT_REMOTE_UPLOAD_PROXY_STATUS_FILE",
             $runtime,
         );
         $this->assertStringNotContainsString(
