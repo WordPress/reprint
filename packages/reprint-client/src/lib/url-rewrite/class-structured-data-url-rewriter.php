@@ -941,10 +941,50 @@ class StructuredDataUrlRewriter
 
                     $this->rewrite_json_script_body($p);
 
+                    $has_block_attribute_update = false;
                     while ( $p->next_raw_url_in_current_token() ) {
                         $rewritten = $this->rewrite_url_field($p->get_raw_url(), $p->get_url_base());
                         if ($rewritten !== false) {
                             $p->set_url($rewritten['raw_url'], $rewritten['parsed_url']);
+                            $has_block_attribute_update = '#block-comment' === $p->get_token_type();
+                        }
+                    }
+                    if ( $has_block_attribute_update && ! $parsed_nested_block_attributes ) {
+                        $block_attributes = $p->get_block_attributes();
+                        if ( is_array( $block_attributes ) ) {
+                            // A Safe SVG block can have attributes like these:
+                            // {
+                            //   "svgURL": "https://source.test/icon.svg",
+                            //   "imageSizes": {
+                            //     "full": {
+                            //       "source_url": "https://source.test/icon.svg"
+                            //     }
+                            //   }
+                            // }
+                            //
+                            // For a https://source.test -> https://target.test rewrite,
+                            // set_url() above changes svgURL in the parsed array of block
+                            // attributes. It does not visit source_url inside imageSizes -> full,
+                            // so that URL still points at https://source.test.
+                            //
+                            // Without this branch, the raw-text rewrite below would:
+                            // 1. Call get_updated_html(), writing the updated array into the comment.
+                            // 2. Queue an edit of the whole comment to change the remaining URL.
+                            //
+                            // get_updated_html() leaves the array marked as changed. When
+                            // next_token() runs, the toolkit queues another edit of the text
+                            // inside that same comment. The array still has the old source_url.
+                            // Applying both edits means replacing the whole comment and part of
+                            // that comment at the same time. This can duplicate text. With
+                            // several blocks, parsing those copies can make more copies until
+                            // PHP runs out of memory.
+                            //
+                            // Rewrite the remaining URLs in the same array instead, save it with
+                            // set_block_attributes(), and mark this block as already handled.
+                            // That skips the raw-text rewrite below. The toolkit can then write
+                            // both URL changes from the array without overlapping edits.
+                            $p->set_block_attributes( $this->rewrite_inferred_block_attribute_values( $block_attributes ) );
+                            $parsed_nested_block_attributes = true;
                         }
                     }
                     if ( ! $parsed_nested_block_attributes ) {
