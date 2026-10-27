@@ -161,6 +161,23 @@ class FetchRequestBodySizingTest extends TestCase
         $this->assertLessThan(filesize($this->fetchListFile), $batch['next_offset']);
     }
 
+    public function testBrandedBatchCountsTheMarkerAgainstTheRequestBodyBudget(): void
+    {
+        [$client, $reflection] = $this->prepareClient(64 * 1024);
+        $client->get_state()->set_preflight_record([
+            'data' => ['capabilities' => ['rot13_base64_request_values' => true]],
+        ]);
+        $saved_fetch_list = file_get_contents($this->fetchListFile);
+        $batch = $reflection->getMethod('prepare_fetch_batch')->invoke($client, $this->fetchListFile, 0);
+        $this->assertLessThanOrEqual(64 * 1024, filesize($batch['file']));
+        $this->assertLessThan(filesize($this->fetchListFile), $batch['next_offset']);
+        $records = json_decode(file_get_contents($batch['file']), true);
+        $this->assertCount($batch['entries'], $records);
+        $this->assertStringStartsWith('rp.', $records[0]['path']);
+        $this->assertSame('/var/www/web/wp-content/uploads/2026/01/file-00000.jpg', base64_decode(str_rot13(substr($records[0]['path'], 3)), true));
+        $this->assertSame($saved_fetch_list, file_get_contents($this->fetchListFile));
+    }
+
     public function testAnOversizedBatchIsRebuiltFromTheSamePlaceInTheList(): void
     {
         // A batch outlives many requests: the exporter streams what its

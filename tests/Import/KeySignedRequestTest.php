@@ -157,18 +157,18 @@ final class KeySignedRequestTest extends TestCase {
         ( new \ReflectionMethod($client, 'initialize_credential') )->invoke(
             $client, true, ['private_key_path' => $this->private_key_path]
         );
-        $client->get_state()->set_preflight_record([
-            'data' => ['capabilities' => ['base64_path_parameters' => true]],
-        ]);
         $preflight = ( new \ReflectionMethod($client, 'fetch_json') )->invoke(
             $client, \WordPress\Reprint\Server\Utils::endpoint_url($url, 'preflight'), []
         );
         $this->assertSame(200, $preflight['http_code']);
+        $this->assertTrue($preflight['json']['capabilities']['rot13_base64_request_values']);
+        $client->get_state()->set_preflight_record(['data' => $preflight['json']]);
         $file_list_path = $this->root . '/file-list.json';
         file_put_contents($file_list_path, json_encode([['path' => base64_encode($remote_path)]]));
         $request = ( new \ReflectionMethod($client, 'build_request') )->invoke(
             $client, 'file_fetch', null, ['directory' => [$this->root . '/remote']]
         );
+        $this->assertStringStartsWith('rp.', $request['params']['directory'][0]);
         $context = new StreamingContext();
         $received = '';
         $context->on_chunk = static function (array $chunk) use (&$received, $context): void {
@@ -195,6 +195,134 @@ final class KeySignedRequestTest extends TestCase {
         $masked_url = str_replace('http://', 'http://***@', $this->url);
         $this->assertStringContainsString($masked_url . '&endpoint=preflight', $audit_log);
         $this->assertStringContainsString($masked_url . '&endpoint=file_fetch', $audit_log);
+    }
+
+    public function testBrandedFormPathsCanResumeAFileIndex(): void
+    {
+        $remote_directory = $this->root . '/remote';
+        $expected_paths = [];
+        for ($index = 0; $index < 230; $index++) {
+            $path = $remote_directory . '/' . sprintf('%03d.txt', $index);
+            file_put_contents($path, 'file');
+            $expected_paths[] = $path;
+        }
+        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
+        ( new \ReflectionMethod($client, 'initialize_credential') )->invoke(
+            $client, true, ['private_key_path' => $this->private_key_path]
+        );
+        $preflight = ( new \ReflectionMethod($client, 'fetch_json') )->invoke(
+            $client, \WordPress\Reprint\Server\Utils::endpoint_url($this->url, 'preflight'), ['directory' => $remote_directory]
+        );
+        $this->assertSame(200, $preflight['http_code']);
+        $this->assertTrue($preflight['json']['capabilities']['rot13_base64_request_values']);
+        $client->get_state()->set_preflight_record(['data' => $preflight['json']]);
+
+        $cursor = null;
+        $initial_paths = [];
+        $resumed_paths = [];
+        $first_batch_paths = [];
+        foreach ([false, true] as $resume) {
+            $params = ['directory' => [$remote_directory], 'batch_size' => 100];
+            if (!$resume) {
+                $params['list_dir'] = $remote_directory;
+            }
+            $request = ( new \ReflectionMethod($client, 'build_request') )->invoke($client, 'file_index', $cursor, $params);
+            $this->assertStringStartsWith('rp.', $request['params']['directory'][0]);
+            if ($resume) {
+                $this->assertSame('rp.' . str_rot13($cursor), $request['params']['cursor']);
+            }
+            $context = new StreamingContext();
+            $context->on_chunk = static function (array $chunk) use (&$cursor, &$initial_paths, &$resumed_paths, &$first_batch_paths, $resume, $context): void {
+                if (( $chunk['headers']['x-chunk-type'] ?? '' ) === 'completion') {
+                    $context->saw_completion = true;
+                }
+                if (!isset($chunk['index_entry'])) {
+                    return;
+                }
+                $path = base64_decode($chunk['index_entry']['path'], true);
+                if ($resume) {
+                    $resumed_paths[] = $path;
+                } else {
+                    $initial_paths[] = $path;
+                    // Continue from the first completed batch, not from the
+                    // final cursor after the entire index has been sent.
+                    $cursor = $cursor ?? $chunk['headers']['x-cursor'];
+                    if ($cursor === $chunk['headers']['x-cursor']) {
+                        $first_batch_paths[] = $path;
+                    }
+                }
+            };
+            ( new \ReflectionMethod($client, 'fetch_streaming') )->invoke(
+                $client, $request['url'], $context, $request['params'], 'file_index'
+            );
+            $this->assertTrue($context->saw_completion, file_get_contents($this->root . '/server.log'));
+            $this->assertIsString($cursor);
+        }
+
+        $this->assertCount(100, $first_batch_paths);
+        $this->assertSame($expected_paths, $initial_paths);
+        $this->assertSame(array_slice($initial_paths, 100), $resumed_paths);
+        $this->assertSame([], array_intersect($first_batch_paths, $resumed_paths));
+    }
+
+    public function testBrandedFileFetchCursorResumesAfterACompletedFileChunk(): void
+    {
+        $remote_absolute_path = $this->root . '/remote/resumable.bin';
+        $contents = str_repeat("download\0bytes\xff", 6000);
+        file_put_contents($remote_absolute_path, $contents);
+        $file_list_path = $this->root . '/saved-file-list.json';
+        $saved_file_list = json_encode([['path' => base64_encode($remote_absolute_path)]]);
+        file_put_contents($file_list_path, $saved_file_list);
+        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
+        ( new \ReflectionMethod($client, 'initialize_credential') )->invoke(
+            $client, true, ['private_key_path' => $this->private_key_path]
+        );
+        $preflight = ( new \ReflectionMethod($client, 'fetch_json') )->invoke(
+            $client, \WordPress\Reprint\Server\Utils::endpoint_url($this->url, 'preflight'), []
+        );
+        $this->assertTrue($preflight['json']['capabilities']['rot13_base64_request_values']);
+        $client->get_state()->set_preflight_record(['data' => $preflight['json']]);
+
+        $cursor = null;
+        $confirmed_prefix = '';
+        $initial_contents = '';
+        $resumed_contents = '';
+        foreach ([false, true] as $resume) {
+            $client->get_state()->fetch->cursor = $cursor;
+            $saved_cursor = $cursor;
+            $request = ( new \ReflectionMethod($client, 'build_request') )->invoke($client, 'file_fetch', $cursor, [
+                'directory' => [$this->root . '/remote'], 'chunk_size' => 16 * 1024,
+            ]);
+            if ($resume) {
+                $this->assertSame('rp.' . str_rot13($cursor), $request['params']['cursor']);
+            }
+            $context = new StreamingContext();
+            $context->on_chunk = static function (array $chunk) use (&$cursor, &$confirmed_prefix, &$initial_contents, &$resumed_contents, $resume, $context): void {
+                if (( $chunk['headers']['x-chunk-type'] ?? '' ) === 'completion') {
+                    $context->saw_completion = true;
+                } elseif (( $chunk['headers']['x-chunk-type'] ?? '' ) === 'file') {
+                    if ($resume) {
+                        $resumed_contents .= $chunk['body'];
+                    } else {
+                        $initial_contents .= $chunk['body'];
+                        $cursor = $cursor ?? $chunk['headers']['x-cursor'];
+                        if ($cursor === $chunk['headers']['x-cursor']) {
+                            $confirmed_prefix .= $chunk['body'];
+                        }
+                    }
+                }
+            };
+            ( new \ReflectionMethod($client, 'fetch_streaming') )->invoke(
+                $client, $request['url'], $context,
+                $request['params'] + ['file_list' => new \CURLFile($file_list_path, 'application/json', 'file-list.json')], 'file_fetch'
+            );
+            $this->assertTrue($context->saw_completion, file_get_contents($this->root . '/server.log'));
+            $this->assertSame($saved_cursor, $client->get_state()->fetch->cursor);
+            $this->assertSame($saved_file_list, file_get_contents($file_list_path));
+        }
+        $this->assertSame($contents, $initial_contents);
+        $this->assertSame(16 * 1024, strlen($confirmed_prefix));
+        $this->assertSame(substr($contents, strlen($confirmed_prefix)), $resumed_contents);
     }
 
     /** A cursor after wp_posts must not include it in the next batch. */

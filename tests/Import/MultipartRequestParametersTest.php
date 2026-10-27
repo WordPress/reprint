@@ -57,26 +57,37 @@ final class MultipartRequestParametersTest extends TestCase {
     }
 
     /** @dataProvider query_separators */
-    public function testMultipartFieldsAndFileUploadDoNotDependOnQuerySeparator(string $separator): void
+    public function testMultipartFieldsAndFileUploadDoNotDependOnQuerySeparator(string $separator, bool $branded_paths, bool $prepared_branded_paths = false, int $file_count = 2): void
     {
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
         ( new \ReflectionProperty($client, 'hmac_client') )->setValue(
             $client, new \Site_Export_HMAC_Client('multipart-test-secret')
         );
         $client->get_state()->set_preflight_record([
-            'data' => ['capabilities' => ['base64_path_parameters' => true]],
+            'data' => ['capabilities' => [
+                'base64_path_parameters' => true,
+                'rot13_base64_request_values' => $branded_paths,
+            ]],
         ]);
         $paths = [
             $this->root . '/remote/one/space & plus+ percent% equals=.txt',
             $this->root . '/remote/two/unicode-ł.txt',
         ];
         $contents = ["first\0file\xff\r\n", "second file &+=%\n"];
+        for ($index = 2; $index < $file_count; $index++) {
+            $paths[] = $this->root . '/remote/one/file-' . $index . '.txt';
+            $contents[] = 'file ' . $index;
+        }
         $file_list = [];
         foreach ($paths as $index => $path) {
             file_put_contents($path, $contents[$index]);
-            $file_list[] = ['path' => base64_encode($path)];
+            $encoded_path = base64_encode($path);
+            $file_list[] = ['path' => $prepared_branded_paths ? 'rp.' . str_rot13($encoded_path) : $encoded_path];
         }
         $file_list_json = json_encode($file_list);
+        if ($file_count > 2) {
+            $this->assertGreaterThan(8192, strlen($file_list_json));
+        }
         $file_list_path = $this->root . '/file-list.json';
         file_put_contents($file_list_path, $file_list_json);
         $params = [
@@ -98,13 +109,18 @@ final class MultipartRequestParametersTest extends TestCase {
         $request = ( new \ReflectionMethod($client, 'build_request') )->invoke(
             $client, 'file_fetch', null, $params
         );
+        $this->assertSame(
+            $branded_paths ? 'rp.' . str_rot13(base64_encode($this->root . '/remote/one')) : base64_encode($this->root . '/remote/one'),
+            $request['params']['directory'][0]
+        );
         $context = new StreamingContext();
-        $received = '';
+        $received = [];
         $context->on_chunk = static function (array $chunk) use (&$received, $context): void {
             if (( $chunk['headers']['x-chunk-type'] ?? '' ) === 'completion') {
                 $context->saw_completion = true;
             } elseif (( $chunk['headers']['x-chunk-type'] ?? '' ) === 'file') {
-                $received .= $chunk['body'];
+                $remote_absolute_path = base64_decode($chunk['headers']['x-file-path'], true);
+                $received[$remote_absolute_path] = ( $received[$remote_absolute_path] ?? '' ) . $chunk['body'];
             }
         };
 
@@ -132,14 +148,50 @@ final class MultipartRequestParametersTest extends TestCase {
             '/nested%2Fapi?%72eprint-api=1&site-export-api%5Bflag%5D=1&endpoint=file_fetch',
             file_get_contents($this->root . '/request-target.txt')
         );
-        $this->assertSame($file_list_json, file_get_contents($this->root . '/uploaded-file-list.json'));
+        $uploaded_file_list = json_decode(file_get_contents($this->root . '/uploaded-file-list.json'), true);
+        $this->assertSame(array_map(static function (string $path) use ($branded_paths): array {
+            $encoded_path = base64_encode($path);
+            return ['path' => $branded_paths ? 'rp.' . str_rot13($encoded_path) : $encoded_path];
+        }, $paths), $uploaded_file_list);
+        $this->assertSame($file_list_json, file_get_contents($file_list_path));
         $this->assertTrue($context->saw_completion);
-        $this->assertSame(implode('', $contents), $received);
+        $expected_contents = array_combine($paths, $contents);
+        ksort($expected_contents);
+        ksort($received);
+        $this->assertSame($expected_contents, $received);
     }
 
     public static function query_separators(): array
     {
-        return ['ampersand' => ['&'], 'HTML entity' => ['&amp;'], 'semicolon' => [';']];
+        return [
+            'ampersand' => ['&', false],
+            'HTML entity' => ['&amp;', false],
+            'semicolon' => [';', false],
+            'branded ampersand' => ['&', true],
+            'branded HTML entity' => ['&amp;', true],
+            'branded semicolon' => [';', true],
+            'already branded upload' => ['&', true, true],
+            'upload larger than one read' => ['&', true, false, 200],
+        ];
+    }
+
+    public function testRuntimeFileListUsesTheBrandedFormat(): void
+    {
+        $remote_absolute_path = $this->root . '/remote/one/runtime.php';
+        file_put_contents($remote_absolute_path, '<?php // runtime file');
+        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
+        ( new \ReflectionProperty($client, 'hmac_client') )->setValue($client, new \Site_Export_HMAC_Client('multipart-test-secret'));
+        $client->get_state()->set_preflight_record([
+            'data' => ['capabilities' => ['rot13_base64_request_values' => true]],
+        ]);
+        $downloaded = ( new \ReflectionMethod($client, 'fetch_files_into') )->invoke(
+            $client, $this->root . '/runtime', [$remote_absolute_path]
+        );
+        $this->assertSame(1, $downloaded);
+        $this->assertSame('<?php // runtime file', file_get_contents($this->root . '/runtime' . $remote_absolute_path));
+        $this->assertSame([
+            ['path' => 'rp.' . str_rot13(base64_encode($remote_absolute_path))],
+        ], json_decode(file_get_contents($this->root . '/uploaded-file-list.json'), true));
     }
 
     private function remove_directory(string $directory): void
