@@ -5,26 +5,27 @@ Save a site once, then run commands without repeating its URL, paths, and mappin
 ```bash
 reprint remote add source https://example.com \
   --fs-root=./files \
-  --secret-file=./reprint.secret \
   --target-engine=sqlite \
   --rewrite-url https://example.com http://localhost:8881
 
-reprint preflight
-reprint pull
-reprint files-diff
-reprint files-push
+reprint keygen --remote=source
+# Enroll the printed Migration Token under Tools > Reprint Server.
+reprint preflight --remote=source
+reprint pull --remote=source
+reprint files-diff --remote=source
+reprint files-push --remote=source
 ```
 
-Put the connection token in `reprint.secret` first. Keep that file outside the
-filesystem root and out of version control. The token is read only by commands
-that use it; `files-diff` and `config show` do not read it.
+`keygen --remote=source` writes `key.pem` in the named remote state directory.
+After enrollment, pull and push use that file. A first `pull` without credentials
+also generates its enrollment key there. To reuse an existing key file, save
+`--private-key-path=FILE` with `remote add` instead.
 
-For key authentication, omit `--secret-file` and run `reprint keygen` with the
-saved config. It writes `key.pem` in the named remote state directory. Enroll
-the printed public key on the site; pull and push then use that same file.
-A first `pull` without credentials also generates its enrollment key there.
-An explicit `--private-key-path=FILE` replaces a saved `--secret-file` for that
-invocation without changing the config.
+On hosts without OpenSSL, use `--secret-file=FILE` for the legacy connection
+token. Keep credential files outside the filesystem root and out of version
+control. Only commands that use credentials read them; `files-diff` and
+`config show` do not. Explicit credentials replace a saved credential-file
+setting for that invocation without editing the config.
 
 ## What gets saved
 
@@ -38,7 +39,7 @@ The JSON has a `remote` section with `name`, `remote_reprint_api_url`, and
 `--`. Repeated options are arrays; `remap` and `rewrite-url` are arrays of
 `[FROM, TO]` pairs. Edit this file to change saved defaults.
 
-Reusable settings include the filesystem root and state directory, secret-file
+Reusable settings include the filesystem root and state directory, credential-file
 path, pull selections and mappings, database target, and runtime settings.
 Action flags such as `--abort`, `--commit`, and `--force` cannot be saved.
 Neither can `--insecure`, raw secrets, or database passwords. Pass those only
@@ -53,10 +54,14 @@ state from earlier URL-based commands.
 
 ## Selecting settings
 
-Only `.reprint/config.json` in the current directory is discovered. There is
-no search through parent directories and no global config.
+Transfer commands load saved settings only with `--remote=NAME` or `--config=FILE`.
+`--remote=source` reads `.reprint/config.json` in the current directory and checks
+that its remote is named `source`. There is no search through parent directories
+and no global config. A missing URL alone never loads a config.
 
 ```bash
+reprint pull --remote=source
+reprint files-pull --remote=source --include :wp-uploads:
 reprint pull --config=/work/example/.reprint/config.json
 reprint config show --command=files-pull
 reprint config show --command=files-pull --include :wp-uploads:
@@ -75,15 +80,20 @@ settings are retained by command state or cannot change during unfinished work.
 location. Use a separate config and state directory for another local copy.
 
 Paths supplied to `remote add` are resolved against the current directory and
-saved as absolute paths. The default `state-dir` is `state`, relative to the
-config directory. If you edit a saved local path to be relative, it is always
+saved as absolute paths. For `config.json`, the default `state-dir` is `state`, relative to the
+config directory. Other config filenames get `<filename>.state`; two custom
+config files in one directory therefore get separate default state directories. If you edit a saved local path to be relative, it is always
 resolved against the config directory, regardless of where you run Reprint.
 Paths supplied directly to a later command keep their existing CLI meaning.
 
-An explicit positional URL bypasses automatic config discovery. It cannot be
-combined with `--config`. `--no-config` also disables discovery. Existing scripts
-that supply a URL, state directory, and filesystem root keep their current
-behavior and URL-based state layout.
+An explicit positional URL never loads config settings. It cannot be combined
+with `--remote` or `--config`. `--no-config` also prevents config loading and
+cannot be combined with either selector. Existing scripts that supply a URL,
+state directory, and filesystem root keep their URL-based state layout.
+
+For example, `reprint pull https://example.com --fs-root=./files` fails because
+`--state-dir` is missing, even if a nearby config supplies it. Optional arguments
+keep their normal command defaults rather than saved config values.
 
 `recover` and `post-process` continue to require explicit arguments. Their
 filesystem root is the ready-to-run WordPress directory, not the raw download
@@ -103,7 +113,7 @@ the config.
 
 ```bash
 reprint remote set-url source https://www.example.com
-reprint preflight
+reprint preflight --remote=source
 ```
 
 This changes only the saved address. It does not change URL rewrites, path
@@ -118,13 +128,15 @@ alone cannot establish that two sites are the same.
 
 An unfinished pull, files-push, or database push blocks the change. Finish or
 explicitly abort it at the old address first. A committed database push must
-finish `db-push --cleanup` before changing the address. Reprint keeps its local
+finish `db-push --remote=source --cleanup` before changing the address. Reprint keeps its local
 session until the target confirms cleanup or discard.
 
 Preflight at the new address compares the document root, path format, and
 WordPress directory paths with the previous successful report. Different paths
-require a separate config. A failed request does not erase that previous
-report. Commands that use saved preflight refuse the old-address report;
+require a separate config. Failed attempts remain visible as failed reports;
+a small fingerprint retains the last successful path check across retries and
+process exits. A failure at either address cannot erase that check. Commands
+that use saved preflight refuse the old-address report;
 `db-push` also requires a fresh preflight when a saved report names the old URL.
 High-level `pull` runs its normal preflight stage.
 

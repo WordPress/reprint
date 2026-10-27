@@ -10,7 +10,13 @@ use WordPress\Reprint\Server\Utils;
 
 // phpcs:disable WordPress.Security.EscapeOutput -- This class prints CLI text and JSON, not HTML.
 
-/** Local CLI settings. Loading this class never discovers or changes a config. */
+/**
+ * Load saved CLI settings only after the caller selects a remote or config file.
+ *
+ * Config commands also use this class. Its lock remains held through command
+ * execution so set-url cannot replace settings under an open transfer.
+ * Loading the class itself performs no filesystem or network operations.
+ */
 final class SavedRemoteConfig {
     /** @var string|null Named remote state directory, or null for explicit URL commands. */
     public ?string $remote_state_directory = null;
@@ -26,6 +32,7 @@ final class SavedRemoteConfig {
      */
     public function prepare(array $arguments, array $definitions): ?array {
         $config_file = null;
+        $remote_name = null;
         $no_config = false;
         $value_arguments = 0;
         foreach ($arguments as $index => $argument) {
@@ -45,6 +52,12 @@ final class SavedRemoteConfig {
                 }
                 $config_file = self::absolute_path(substr($argument, 9), getcwd());
                 unset($arguments[$index]);
+            } elseif (strpos($argument, '--remote=') === 0) {
+                if ($remote_name !== null || substr($argument, 9) === '') {
+                    throw new InvalidArgumentException('Provide exactly one non-empty --remote=NAME.');
+                }
+                $remote_name = substr($argument, 9);
+                unset($arguments[$index]);
             } elseif ($argument === '--no-config') {
                 $no_config = true;
                 unset($arguments[$index]);
@@ -52,25 +65,28 @@ final class SavedRemoteConfig {
         }
         $arguments = array_values($arguments);
         $command = $arguments[1];
-        if ($no_config && $config_file !== null) {
-            throw new InvalidArgumentException('--config and --no-config cannot be combined.');
+        if ($no_config && ( $config_file !== null || $remote_name !== null )) {
+            throw new InvalidArgumentException('--no-config cannot be combined with --config or --remote.');
         }
         $config_command = in_array($command, ['remote', 'config'], true);
         $explicit_url = !$config_command && isset($arguments[2]) && strpos($arguments[2], '-') !== 0;
-        if ($explicit_url && $config_file !== null) {
-            throw new InvalidArgumentException('Use either an explicit remote Reprint API URL or --config, not both.');
+        if ($explicit_url && ( $config_file !== null || $remote_name !== null )) {
+            throw new InvalidArgumentException('Use either an explicit remote Reprint API URL or saved settings selected by --remote / --config, not both.');
         }
         if ($no_config || $explicit_url || in_array($command, ['recover', 'post-process'], true)) {
-            if ($config_command || $config_file !== null) {
+            if ($config_command || $config_file !== null || $remote_name !== null) {
                 throw new InvalidArgumentException('This command cannot use the selected config options.');
             }
             return $arguments;
         }
-        $explicit_config = $config_file !== null;
-        $config_file = $config_file ?? self::absolute_path('.reprint/config.json', getcwd());
-        if (!$config_command && !$explicit_config && !is_file($config_file)) {
+        // An omitted URL is not permission to fill in settings from a nearby file.
+        if (!$config_command && $config_file === null && $remote_name === null) {
             return $arguments;
         }
+        if ($command === 'remote' && $remote_name !== null) {
+            throw new InvalidArgumentException('remote commands select the remote by its positional name; do not pass --remote.');
+        }
+        $config_file = $config_file ?? self::absolute_path('.reprint/config.json', getcwd());
         if ($command === 'remote' && ( $arguments[2] ?? '' ) === 'add') {
             if (count($arguments) < 5) {
                 throw new InvalidArgumentException('Usage: reprint remote add NAME URL --fs-root=DIR [settings]');
@@ -90,10 +106,15 @@ final class SavedRemoteConfig {
                     $config['local'][$name] = $value;
                 }
             }
+            if (isset($provided['secret-file'], $provided['private-key-path'])) {
+                throw new InvalidArgumentException('--secret-file and --private-key-path cannot be saved together. Choose one credential file.');
+            }
             if (empty($config['local']['fs-root'])) {
                 throw new InvalidArgumentException('remote add requires --fs-root=DIR.');
             }
-            $config['local']['state-dir'] = $config['local']['state-dir'] ?? 'state';
+            // Custom configs in one directory must not share their default indexes or key file.
+            $default_state_directory = basename($config_file) === 'config.json' ? 'state' : basename($config_file) . '.state';
+            $config['local']['state-dir'] = $config['local']['state-dir'] ?? $default_state_directory;
             $state_dir = self::absolute_path($config['local']['state-dir'], dirname($config_file));
             self::validate_paths($config_file, $state_dir, $config['local']['fs-root']);
             if (!is_dir(dirname($config_file)) && !mkdir(dirname($config_file), 0700, true)) {
@@ -125,6 +146,9 @@ final class SavedRemoteConfig {
             throw new InvalidArgumentException('Invalid Reprint config structure in ' . $config_file . '.');
         }
         self::validate_remote($config['remote']['name'], $config['remote']['remote_reprint_api_url']);
+        if ($remote_name !== null && $remote_name !== $config['remote']['name']) {
+            throw new InvalidArgumentException('No saved remote named ' . $remote_name . ' in ' . $config_file . '.');
+        }
         $saved = [];
         foreach (['local' => $config['local'], 'remote' => $config['remote']['options']] as $scope => $settings) {
             foreach ($settings as $name => $value) {
@@ -195,15 +219,20 @@ final class SavedRemoteConfig {
         }
         $overridden_targets = [];
         foreach ($definitions as $definition) {
-            if (array_key_exists($definition['name'], $provided)) {
-                $overridden_targets[] = $definition['target'];
+            if (isset($definition['config_scope']) && array_key_exists($definition['name'], $provided)) {
+                // --follow-symlinks has flag and path forms with different targets.
+                $provided_definition = self::definition($definition['name'], $provided[$definition['name']], $definitions);
+                $overridden_targets[$provided_definition['target']] = true;
             }
         }
         if (isset($provided['secret']) || isset($provided['private-key-path'])) {
-            $overridden_targets[] = 'secret_file';
+            $overridden_targets['secret_file'] = true;
+        }
+        if (isset($provided['secret']) || isset($provided['secret-file'])) {
+            $overridden_targets['private_key_path'] = true;
         }
         if ($command === 'apply-runtime' && isset($provided['flat-document-root'])) {
-            $overridden_targets[] = 'filesystem_root';
+            $overridden_targets['filesystem_root'] = true;
         }
         $effective_arguments = [$arguments[0], $command, $config['remote']['remote_reprint_api_url']];
         $origins = [];
@@ -216,7 +245,7 @@ final class SavedRemoteConfig {
             if ($name === 'rewrite-url' && $command === 'db-push') {
                 $applicable = false;
             }
-            if (!$applicable || in_array($definition['target'], $overridden_targets, true)) {
+            if (!$applicable || isset($overridden_targets[$definition['target']])) {
                 continue;
             }
             $effective_arguments = array_merge($effective_arguments, self::option_arguments($definition, $value));
@@ -244,7 +273,7 @@ final class SavedRemoteConfig {
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
             return null;
         }
-        if (isset($pull_state['preflight']['url']) && $pull_state['preflight']['url'] !== $config['remote']['remote_reprint_api_url']) {
+        if (isset($pull_state['preflight']['url']) && !in_array($pull_state['preflight']['url'], [$config['remote']['remote_reprint_api_url'], Utils::endpoint_url($config['remote']['remote_reprint_api_url'], 'preflight')], true)) {
             self::assert_no_transfer($this->remote_state_directory, $pull_state);
             if ($command === 'db-push') {
                 throw new RuntimeException('The remote Reprint API URL changed. Run preflight at the saved address before transferring.');
@@ -313,13 +342,18 @@ final class SavedRemoteConfig {
                 return $definition;
             }
         }
-        throw new InvalidArgumentException('Cannot save option ' . $name . ' with this value. Use a supported reusable setting; use --rewrite-url pairs instead of --new-site-url, and --secret-file instead of --secret.');
+        throw new InvalidArgumentException('Cannot save option ' . $name . ' with this value. Use a supported reusable setting; use --rewrite-url pairs instead of --new-site-url, and --secret-file / --private-key-path instead of inline credentials.');
     }
 
     /**
      * Encode one validated setting for the existing parser, without a shell.
      *
-     * @param array $definition CLI definition with name, type, and optional repeatable.
+     * @param array $definition {
+     *     CLI option grammar from import.php.
+     *     @type string $name Canonical flag name, without dashes.
+     *     @type string $type Flag, scalar value, or two-arguments pair grammar.
+     *     @type bool $repeatable Whether scalar values form a repeated list. Optional.
+     * }
      * @param mixed $value Validated setting value.
      * @return string[] CLI arguments.
      */
@@ -378,7 +412,10 @@ final class SavedRemoteConfig {
      * A new address must never receive another address's unfinished work.
      *
      * @param string $remote_state_directory Named remote state directory.
-     * @param array  $pull_state Saved pull state, with active_resumable_command when present.
+     * @param array $pull_state {
+     *     Current saved pull state.
+     *     @type array $active_resumable_command Checkpoint with command_name and completion_state.
+     * }
      */
     private static function assert_no_transfer(string $remote_state_directory, array $pull_state): void {
         $active = $pull_state['active_resumable_command'] ?? [];
@@ -394,7 +431,11 @@ final class SavedRemoteConfig {
      * Publish settings atomically while the config lock is held.
      *
      * @param string $config_file Config file to publish.
-     * @param array  $config Local settings and one named remote.
+     * @param array $config {
+     *     Local settings and exactly one named remote.
+     *     @type array $remote Name, remote_reprint_api_url, and reusable option values.
+     *     @type array $local  Local CLI settings, including fs-root and state-dir.
+     * }
      */
     private static function write_config(string $config_file, array $config): void {
         $json = json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";

@@ -435,8 +435,8 @@ exporter API URL, and its `filesystem root` is the resolved absolute directory s
 root as a path beneath that filesystem root. Local relative paths beneath the document root become document-root-relative paths; other local paths do not
 become push or delete work. On a host with OpenSSL it uses the key in the
 remote state directory or `--private-key-path=PATH`; on a host without OpenSSL
-it uses `--secret=TOKEN` or `--secret-file=FILE`. `--insecure` or `REPRINT_INSECURE_TLS=1` explicitly
-allows plain HTTP and skips HTTPS certificate and hostname checks for that
+it uses `--secret=TOKEN` or `--secret-file=FILE`. `--insecure` or
+`REPRINT_INSECURE_TLS=1` explicitly allows plain HTTP and skips HTTPS certificate and hostname checks for that
 invocation.
 
 `files-push` uses the shared progress output mode. It never stores that mode in
