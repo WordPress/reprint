@@ -267,9 +267,9 @@ The deployment job uses the GitHub Actions environment `svn` in
 generated in the [SVN account settings](https://profiles.wordpress.org/zieladam/profile/edit/group/3/?screen=svn-password).
 Do not use the account login password.
 
-Allowed publishing accounts are hardcoded in `release-wporg.yml`. The check
-runs before checking out release code. It checks who started or reran this
-workflow and, for automatic releases, who started or reran **Tag Release**.
+`adamziel` is the only publishing account allowed by `release-wporg.yml`.
+The check runs before checking out release code. It checks who started or
+reran this workflow and, for automatic releases, who started or reran **Tag Release**.
 Repository admins are not automatically exempt from this list.
 
 This is a workflow check, not a protected environment approval rule. Someone

@@ -43,7 +43,7 @@ jobs:
           # Check reruns of both this workflow and the Tag Release workflow.
           for ACTOR in "$TRIGGERING_ACTOR" "${UPSTREAM_TRIGGERING_ACTOR:-$TRIGGERING_ACTOR}"; do
             case "$ACTOR" in
-              akirk|brandonpayton|WPprodigy|adamziel) ;;
+              adamziel) ;;
               *)
                 echo "::error::Account '$ACTOR' is not allowed to publish Reprint."
                 exit 1

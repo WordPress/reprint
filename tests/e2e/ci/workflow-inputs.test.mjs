@@ -71,7 +71,7 @@ test('WordPress.org deploys the checked downloads-only ZIP after GitHub publishi
     assert.match(source, /SVN_PASSWORD: \$\{\{ secrets\.SVN_PASSWORD \}\}/);
 });
 
-test('WordPress.org checks the publishing and upstream rerun accounts before release code runs', async () => {
+test('WordPress.org permits only adamziel for publishing and upstream reruns before release code runs', async () => {
     const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
     const step = source.split(/(?=^      - )/m)[1];
     assert.match(step, /name: Check publishing user/);
@@ -79,11 +79,13 @@ test('WordPress.org checks the publishing and upstream rerun accounts before rel
     assert.match(step, /UPSTREAM_TRIGGERING_ACTOR: \$\{\{ github\.event\.workflow_run\.triggering_actor\.login \}\}/);
     const command = step.match(/run: \|\n((?: {10}[^\n]+\n?)+)/)[1].replace(/^ {10}/gm, '');
     for (const [actor, upstreamActor, allowed] of [
-        ['akirk', '', true],
-        ['brandonpayton', '', true],
-        ['WPprodigy', '', true],
+        ['akirk', '', false],
+        ['brandonpayton', '', false],
+        ['WPprodigy', '', false],
         ['adamziel', '', true],
-        ['akirk', 'adamziel', true],
+        ['adamziel', 'adamziel', true],
+        ['akirk', 'adamziel', false],
+        ['adamziel', 'akirk', false],
         ['other-user', '', false],
         ['other-user', 'adamziel', false],
         ['adamziel', 'other-user', false],
