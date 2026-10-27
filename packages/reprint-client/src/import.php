@@ -13043,21 +13043,30 @@ class ImportClient
         unset($params['endpoint']);
         $preflight_record = $this->get_state()->preflight_record();
         // Preflight keeps the legacy path parameters so a new client can learn
-        // whether an older server supports the base64 form before using it.
-        $server_supports_base64_paths = $endpoint !== 'preflight'
-            && !empty($preflight_record['data']['capabilities']['base64_path_parameters']);
-        if ($server_supports_base64_paths) {
+        // which path encoding an older server supports before using it.
+        $path_encoding = null;
+        if ($endpoint !== 'preflight') {
+            if (!empty($preflight_record['data']['capabilities']['rot13_base64_path_parameters'])) {
+                $path_encoding = 'rot13-base64';
+            } elseif (!empty($preflight_record['data']['capabilities']['base64_path_parameters'])) {
+                $path_encoding = 'base64';
+            }
+        }
+        if ($path_encoding !== null) {
             foreach (["directory", "list_dir", "pulled_before"] as $parameter) {
                 if (!array_key_exists($parameter, $params)) {
                     continue;
                 }
-                if (is_array($params[$parameter])) {
-                    foreach ($params[$parameter] as $key => $path) {
-                        $params[$parameter][$key] = base64_encode($path);
-                    }
-                } else {
-                    $params[$parameter] = base64_encode($params[$parameter]);
+                $paths = is_array($params[$parameter]) ? $params[$parameter] : [$params[$parameter]];
+                foreach ($paths as $key => $path) {
+                    $encoded_path = base64_encode($path);
+                    // The marker selects our decoder; ROT13 keeps a firewall's
+                    // ordinary base64 decoder from recovering the source path.
+                    $paths[$key] = $path_encoding === 'rot13-base64'
+                        ? 'rp.' . str_rot13($encoded_path)
+                        : $encoded_path;
                 }
+                $params[$parameter] = is_array($params[$parameter]) ? $paths : reset($paths);
             }
         }
         // Keep the source export protocol value accepted by existing servers.

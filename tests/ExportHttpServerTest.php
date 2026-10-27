@@ -108,6 +108,56 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame(['/srv/site/removed'], $config['pulled_before']);
     }
 
+    /** @dataProvider branded_path_transports */
+    public function testParsesBrandedPathsAlongsideLegacyPaths(string $transport): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $path = PHP_OS === 'WINNT' ? 'D:/Sites/example.test' : '/srv/site';
+        $binary_path = $path . "/binary-\xff";
+        $parameters = [
+            'directory' => [2 => $path, 5 => base64_encode($path), 8 => 'rp.' . str_rot13(base64_encode($binary_path))],
+            'list_dir' => 'rp.' . str_rot13(base64_encode($path)),
+            'pulled_before' => ['rp.' . str_rot13(base64_encode($path . '/removed'))],
+        ];
+        $config = $server->parse_http_config(
+            $transport === 'query' ? $parameters : [],
+            $transport === 'form' ? $parameters : [],
+            $transport === 'json' ? ['CONTENT_TYPE' => 'application/json'] : [],
+            $transport === 'json' ? json_encode($parameters) : ''
+        );
+
+        $this->assertSame([2 => $path, 5 => $path, 8 => $binary_path], $config['directory']);
+        $this->assertSame($path, $config['list_dir']);
+        $this->assertSame([$path . '/removed'], $config['pulled_before']);
+    }
+
+    public static function branded_path_transports(): array
+    {
+        return ['query' => ['query'], 'form' => ['form'], 'json' => ['json']];
+    }
+
+    /** @dataProvider invalid_branded_paths */
+    public function testRejectsInvalidBrandedPaths(string $value): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessageMatches('/^list_dir must be an absolute path.*; observed ' . preg_quote(json_encode($value), '/') . '\.$/');
+        $server->parse_http_config([], ['list_dir' => $value]);
+    }
+
+    public static function invalid_branded_paths(): array
+    {
+        return [
+            'empty payload' => ['rp.'],
+            'invalid alphabet' => ['rp.!'],
+            'invalid padding' => ['rp.Y3EgpN='],
+            'relative path' => ['rp.' . str_rot13(base64_encode('relative/path'))],
+            'repeated marker' => ['rp.rp.Y3EgpN=='],
+            'unknown marker' => ['rx.Y3EgpN=='],
+            'missing transform' => ['rp.' . base64_encode('/tmp')],
+        ];
+    }
+
     /** A Windows server accepts either separator, regardless of the client OS. */
     public function testParsesWindowsPathParameters(): void
     {
@@ -118,11 +168,11 @@ final class ExportHttpServerTest extends TestCase
         foreach (['D:\\Sites\\example.test/', 'D:/Sites/example.test', '\\\\server\\share\\Sites'] as $path) {
             $config = $server->parse_http_config([
                 'endpoint' => 'file_index',
-                'directory' => [$path, base64_encode($path)],
-                'list_dir' => base64_encode($path),
-                'pulled_before' => [base64_encode($path)],
+                'directory' => [$path, base64_encode($path), 'rp.' . str_rot13(base64_encode($path))],
+                'list_dir' => 'rp.' . str_rot13(base64_encode($path)),
+                'pulled_before' => ['rp.' . str_rot13(base64_encode($path))],
             ]);
-            $this->assertSame([$path, $path], $config['directory']);
+            $this->assertSame([$path, $path, $path], $config['directory']);
             $this->assertSame($path, $config['list_dir']);
             $this->assertSame([$path], $config['pulled_before']);
         }
@@ -146,7 +196,7 @@ final class ExportHttpServerTest extends TestCase
 
         $this->expectException(InvalidArgumentException::class);
         $this->expectExceptionMessage(
-            'directory entry 1 must be an absolute path or a base64-encoded absolute path; observed "not base64".'
+            'directory entry 1 must be an absolute path, a base64-encoded absolute path, or an rp.-prefixed ROT13-base64 absolute path; observed "not base64".'
         );
 
         $server->parse_http_config([], [

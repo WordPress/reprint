@@ -209,7 +209,8 @@ final class HTTPServer {
     }
 
     /**
-     * Parses HTTP values, including raw or base64-encoded Unix and Windows paths.
+     * Parses HTTP values, including raw, base64, and rp.-prefixed ROT13-base64
+     * Unix and Windows paths.
      *
      * @param array<string, mixed> $get
      * @param array<string, mixed> $post
@@ -268,10 +269,12 @@ final class HTTPServer {
                 $path_values = is_array($value) ? $value : [$value];
                 $decoded_paths = [];
                 foreach ($path_values as $path_key => $path_value) {
-                    // Do not decode first: PHP accepts a raw path such as /tmp
+                    // Do not decode unmarked paths first: PHP accepts /tmp
                     // as strict base64 and turns it into unrelated bytes. Check
                     // for an absolute root in this source host's format before decoding.
-                    if (is_string($path_value) && Utils::is_absolute_path($path_value, Utils::native_path_format())) {
+                    if (is_string($path_value) && substr($path_value, 0, 3) === 'rp.') {
+                        $decoded_path = base64_decode(str_rot13(substr($path_value, 3)), true);
+                    } elseif (is_string($path_value) && Utils::is_absolute_path($path_value, Utils::native_path_format())) {
                         $decoded_path = $path_value;
                     } else {
                         $decoded_path = is_string($path_value)
@@ -289,7 +292,7 @@ final class HTTPServer {
                         // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- The exception reports the rejected HTTP parameter and value to the API caller.
                         throw new InvalidArgumentException(
                             $key . $entry
-                            . ' must be an absolute path or a base64-encoded absolute path; observed '
+                            . ' must be an absolute path, a base64-encoded absolute path, or an rp.-prefixed ROT13-base64 absolute path; observed '
                             . $observed . '.'
                         );
                         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped

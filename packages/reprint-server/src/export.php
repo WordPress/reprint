@@ -2594,6 +2594,7 @@ function endpoint_preflight(array $config): array
         "path_format" => Utils::native_path_format(),
         "capabilities" => [
             "base64_path_parameters" => true,
+            "rot13_base64_path_parameters" => true,
         ],
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),

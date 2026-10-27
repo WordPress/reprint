@@ -57,14 +57,17 @@ final class MultipartRequestParametersTest extends TestCase {
     }
 
     /** @dataProvider query_separators */
-    public function testMultipartFieldsAndFileUploadDoNotDependOnQuerySeparator(string $separator): void
+    public function testMultipartFieldsAndFileUploadDoNotDependOnQuerySeparator(string $separator, bool $branded_paths): void
     {
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
         ( new \ReflectionProperty($client, 'hmac_client') )->setValue(
             $client, new \Site_Export_HMAC_Client('multipart-test-secret')
         );
         $client->get_state()->set_preflight_record([
-            'data' => ['capabilities' => ['base64_path_parameters' => true]],
+            'data' => ['capabilities' => [
+                'base64_path_parameters' => true,
+                'rot13_base64_path_parameters' => $branded_paths,
+            ]],
         ]);
         $paths = [
             $this->root . '/remote/one/space & plus+ percent% equals=.txt',
@@ -97,6 +100,10 @@ final class MultipartRequestParametersTest extends TestCase {
         ];
         $request = ( new \ReflectionMethod($client, 'build_request') )->invoke(
             $client, 'file_fetch', null, $params
+        );
+        $this->assertSame(
+            $branded_paths ? 'rp.' . str_rot13(base64_encode($this->root . '/remote/one')) : base64_encode($this->root . '/remote/one'),
+            $request['params']['directory'][0]
         );
         $context = new StreamingContext();
         $received = '';
@@ -139,7 +146,14 @@ final class MultipartRequestParametersTest extends TestCase {
 
     public static function query_separators(): array
     {
-        return ['ampersand' => ['&'], 'HTML entity' => ['&amp;'], 'semicolon' => [';']];
+        return [
+            'ampersand' => ['&', false],
+            'HTML entity' => ['&amp;', false],
+            'semicolon' => [';', false],
+            'branded ampersand' => ['&', true],
+            'branded HTML entity' => ['&amp;', true],
+            'branded semicolon' => [';', true],
+        ];
     }
 
     private function remove_directory(string $directory): void
