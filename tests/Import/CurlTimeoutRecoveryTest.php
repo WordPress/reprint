@@ -244,6 +244,7 @@ class CurlTimeoutRecoveryTest extends TestCase
         return [
             'bad request' => ['400 Bad Request'],
             'misdirected request' => ['421 Misdirected Request'],
+            'shared-host resource limit' => ['508 Resource Limit Is Reached'],
         ];
     }
 

@@ -8,20 +8,9 @@ file_put_contents('requests.log', $reprint_endpoint . "\n", FILE_APPEND);
 file_put_contents('request-times.log', json_encode([
     'endpoint' => $reprint_endpoint,
     'time' => microtime(true),
+    // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- Record the actual header for retry assertions, not WordPress input.
+    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
 ]) . "\n", FILE_APPEND);
-// Supply site metadata without requiring a WordPress database. File indexes
-// and file contents below are produced by the real endpoint.
-if ($reprint_endpoint === 'preflight') {
-    header('Content-Type: application/json');
-    echo json_encode([
-        'ok' => true,
-        'protocol_version' => 3,
-        'capabilities' => ['base64_path_parameters' => true],
-        'runtime' => ['document_root' => getcwd() . '/remote', 'ini_get_all' => []],
-        'wp_detect' => ['roots' => [['path' => getcwd() . '/remote']]],
-    ]);
-    return;
-}
 $reprint_status = (int) file_get_contents('proxy-status');
 if (is_file('proxy-recover-at') && microtime(true) >= (float) file_get_contents('proxy-recover-at')) {
     $reprint_status = 200;
@@ -37,7 +26,7 @@ if ($reprint_endpoint === file_get_contents('proxy-endpoint') && !in_array($repr
         return;
     }
     http_response_code($reprint_status);
-    if ($reprint_status === 429) {
+    if ($reprint_status === 429 || is_file('proxy-retry-after')) {
         $reprint_retry_after = is_file('proxy-retry-after') ? file_get_contents('proxy-retry-after') : '1';
         $reprint_retry_after_sequence = json_decode($reprint_retry_after, true);
         if (is_array($reprint_retry_after_sequence) && $reprint_retry_after_sequence !== []) {
@@ -49,6 +38,9 @@ if ($reprint_endpoint === file_get_contents('proxy-endpoint') && !in_array($repr
             'rfc850' => 'l, d-M-y H:i:s \\G\\M\\T',
             'asctime' => 'D M j H:i:s Y',
         ];
+        if ($reprint_retry_after === 'long-date') {
+            $reprint_retry_after = gmdate('D, d M Y H:i:s \\G\\M\\T', time() + 14400);
+        }
         if (isset($reprint_date_formats[$reprint_retry_after])) {
             $reprint_retry_after = gmdate($reprint_date_formats[$reprint_retry_after], time() + 2);
         }
@@ -56,10 +48,24 @@ if ($reprint_endpoint === file_get_contents('proxy-endpoint') && !in_array($repr
             header('Retry-After: ' . $reprint_retry_after);
         }
         header('Content-Type: text/html');
-        echo '<!doctype html><html>Too Many Requests</html>';
+        echo '<!doctype html><html>Upstream unavailable</html>';
     } else {
         echo 'Upstream unavailable';
     }
+    return;
+}
+
+// Supply site metadata without requiring a WordPress database. File indexes
+// and file contents below are produced by the real endpoint.
+if ($reprint_endpoint === 'preflight') {
+    header('Content-Type: application/json');
+    echo json_encode([
+        'ok' => true,
+        'protocol_version' => 3,
+        'capabilities' => ['base64_path_parameters' => true],
+        'runtime' => ['document_root' => getcwd() . '/remote', 'ini_get_all' => []],
+        'wp_detect' => ['roots' => [['path' => getcwd() . '/remote']]],
+    ]);
     return;
 }
 
