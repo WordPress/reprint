@@ -987,21 +987,6 @@ class StructuredDataUrlRewriter
                             //   actual:   <!-- wp:safe-svg/svg-icon {JSON} /--> wp:safe-svg/svg-icon {JSON} /-->
                             // {JSON} stands for the block attributes above. The second block
                             // name and JSON have no opening <!--, so they become ordinary post text.
-                            //
-                            // With more input, the error can also copy later blocks. To copy the
-                            // unchanged text between edits, the toolkit subtracts the previous
-                            // edit's end from the next edit's start. The inner edit starts
-                            // before the whole-comment edit ends, so this length is negative.
-                            // PHP treats a negative substr() length as "stop this many bytes
-                            // before the end of the input", rather than as an empty gap.
-                            // For a long enough input, that copies following blocks into the
-                            // output. The parser reads those copies as new blocks and repeats
-                            // the same edits, growing the post until PHP runs out of memory.
-                            //
-                            // Rewrite the remaining URLs in the same array instead, save it with
-                            // set_block_attributes(), and mark this block as already handled.
-                            // That skips the raw-text rewrite below. The toolkit can then write
-                            // both URL changes from the array without overlapping edits.
                             $p->set_block_attributes( $this->rewrite_inferred_block_attribute_values( $block_attributes ) );
                             $parsed_nested_block_attributes = true;
                         }
