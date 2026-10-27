@@ -57,6 +57,54 @@ class DiagnoseHttpErrorTest extends TestCase
         );
     }
 
+    public function testResponseHeaderCollectionNormalizesNamesAndKeepsOtherHeaders(): void
+    {
+        $method = ( new \ReflectionClass(\ImportClient::class) )->getMethod('collect_response_header');
+        $response_headers = [];
+        foreach ([
+            "HTTP/1.1 403 Forbidden\r\n",
+            "Server: cloudflare\r\n",
+            "CF-Mitigated: \tchallenge \t\r\n",
+            "Location: https://example.com:8443/api\r\n",
+            "X-Request-Id: first\r\n",
+            "x-request-id: second\r\n",
+            "\r\n",
+        ] as $header_line) {
+            $method->invokeArgs(null, [&$response_headers, $header_line]);
+        }
+
+        $this->assertSame([
+            'server' => 'cloudflare',
+            'cf-mitigated' => 'challenge',
+            'location' => 'https://example.com:8443/api',
+            'x-request-id' => 'second',
+        ], $response_headers);
+    }
+
+    public function testNewResponseClearsPreviouslyCollectedHeaders(): void
+    {
+        $method = ( new \ReflectionClass(\ImportClient::class) )->getMethod('collect_response_header');
+        $response_headers = ['cf-mitigated' => 'challenge', 'x-request-id' => 'previous'];
+
+        $method->invokeArgs(null, [&$response_headers, "HTTP/1.1 200 OK\r\n"]);
+        $this->assertSame([], $response_headers);
+        $method->invokeArgs(null, [&$response_headers, "Content-Type: application/json\r\n"]);
+        $this->assertSame(['content-type' => 'application/json'], $response_headers);
+    }
+
+    public function testCloudflareDiagnosisReadsTheResponseHeaderMap(): void
+    {
+        $client = new \ImportClient('https://example.com', sys_get_temp_dir(), sys_get_temp_dir());
+        $method = ( new \ReflectionClass(\ImportClient::class) )->getMethod('diagnose_http_error');
+        $result = $method->invoke($client, 403, '', null, null, [
+            'server' => 'cloudflare',
+            'cf-mitigated' => 'challenge',
+        ]);
+
+        $this->assertSame('CLOUDFLARE_CHALLENGE', $result['code']);
+        $this->assertStringContainsString('Cloudflare', $result['message']);
+    }
+
     // ── Redirects ────────────────────────────────────────────────
 
     public function testRedirectWithTargetUrl()

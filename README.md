@@ -370,6 +370,11 @@ are null. Failures exit with code 1.
 `progress.json` receives the same `error` and `error_code` as the command's
 JSON result, rather than a generic "Preflight failed" message.
 
+Responses with `cf-mitigated: challenge` use `CLOUDFLARE_CHALLENGE` in preflight
+and downloads. Reprint cannot complete Cloudflare browser challenges. Ask the
+site administrator to disable the challenge for POST requests to the Reprint
+API URL or allowlist the migration machine's IP address, then try again.
+
 Some hosts, including [Hostinger](https://www.hostinger.com/support/2489693-how-to-access-your-website-content-without-a-domain-in-hostinger/),
 provide preview domains so you can browse a site before its real domain points
 at the host. They replace the real domain in outgoing pages so links and assets
