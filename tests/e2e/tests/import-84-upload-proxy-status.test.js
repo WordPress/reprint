@@ -40,7 +40,11 @@ if ($argv[2] === 'setup') {
     file_put_contents($root . '/state-path.txt', $client->pull_state_directory . '/state.json');
 } else {
     $reflection = new ReflectionClass($client);
-    $reflection->getProperty('state')->setValue($client, $reflection->getMethod('load_state')->invoke($client));
+    $load_state = $reflection->getMethod('load_state');
+    $load_state->setAccessible(true);
+    $state_property = $reflection->getProperty('state');
+    $state_property->setAccessible(true);
+    $state_property->setValue($client, $load_state->invoke($client));
     $client->get_state()->active_resumable_command->completion_state = 'complete';
     $client->save_state();
 }
