@@ -437,12 +437,24 @@ share this count. A successful request or a failed request that advances the
 cursor resets it.
 
 HTTP `429` reports `RATE_LIMITED`, including when the host sends an HTML block
-page. Before repeating a streaming request after a temporary HTTP failure,
-Reprint waits for a valid `Retry-After` header, expressed as seconds or an
-HTTP date. For consecutive `429` failures without a valid header, it waits
-5, 10, and 15 seconds before the three retries. The wait starts after saving
-the durable cursor. Stopping the process during that wait does not discard
+page. These responses do not shrink file chunks, index batches, or SQL batches:
+smaller batches would require more requests. Before repeating a streaming
+request after a temporary HTTP failure, Reprint waits for a valid `Retry-After`
+header, expressed as seconds or an HTTP date, capped at 30 seconds per wait.
+The audit log retains the original
+header; `retry_after_seconds` reports the actual capped wait. For consecutive
+`429` failures without a valid header, it waits 5, 10, and 15 seconds before
+the three retries. The wait starts after saving the durable cursor.
+Stopping the process during that wait does not discard
 saved transfer progress. Successful requests do not gain any delay.
+
+Upstream HTTP `508` resource-limit responses are also temporary failures.
+Preflight uses the same waits and attempt limits for upstream HTTP `429`,
+`503`, and `508`, retrying the same User-Agent rather than cycling through
+headers immediately. It saves the failed report before waiting and exits `3`
+if the retry limit is reached. A later run fetches a fresh report. Explicit
+Reprint authentication and configuration refusals remain permanent failures.
+These waits also apply with `--no-adaptive`.
 
 While waiting, Reprint prints the HTTP failure and wait time. JSONL and compact
 output include a lifecycle record with `event: "retry"`, `http_code`,

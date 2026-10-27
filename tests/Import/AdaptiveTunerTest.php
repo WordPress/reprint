@@ -275,6 +275,24 @@ class AdaptiveTunerTest extends TestCase
         $this->assertSame(0, $tuner->get_state()["error_backoff_remaining"]);
     }
 
+    public function testRateLimitsHoldAllSizesSteadyAcrossRepeatedFailures(): void
+    {
+        $tuner = $this->makeTuner();
+        $before = $tuner->get_state();
+        foreach (["file_fetch", "file_index", "sql_chunk"] as $endpoint) {
+            $params = $tuner->get_request_params($endpoint);
+            for ($attempt = 0; $attempt < 4; $attempt++) {
+                $result = $tuner->tune_after_error($endpoint, ["http_code" => 429]);
+                $this->assertSame("backoff", $result["decision"]);
+                $this->assertSame($params, $tuner->get_request_params($endpoint));
+                $this->assertSame(3, $result["error_backoff_remaining"]);
+            }
+        }
+        $after = $tuner->get_state();
+        unset($before["error_backoff_remaining"], $after["error_backoff_remaining"]);
+        $this->assertSame($before, $after);
+    }
+
     public function testHoldsSteadyDuringBackoff(): void
     {
         $tuner = $this->makeTuner(["error_backoff_requests" => 5]);

@@ -414,7 +414,7 @@ class DiagnoseHttpErrorTest extends TestCase
             421,
             '<!doctype html><title>Misdirected Request</title>',
         ));
-        foreach ([520, 521, 522, 523, 524] as $http_code) {
+        foreach ([508, 520, 521, 522, 523, 524] as $http_code) {
             $this->assertTrue(
                 $this->isPotentiallyTransientHttpError(
                     $http_code,

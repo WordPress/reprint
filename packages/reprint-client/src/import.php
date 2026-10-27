@@ -230,6 +230,9 @@ class ImportClient
     /** HTTP 429 fallback waits; one final request follows the last wait. */
     private const RATE_LIMIT_RETRY_DELAYS = [5, 10, 15];
 
+    /** Do not hold a migration process for hours on a host's Retry-After. */
+    private const MAX_RETRY_WAIT_SECONDS = 30;
+
     /** Maximum response header bytes retained for failed request audit logging. */
     private const MAX_AUDIT_RESPONSE_HEADER_BYTES = 65536;
 
@@ -264,6 +267,7 @@ class ImportClient
         502, // Bad Gateway
         503, // Service Unavailable
         504, // Gateway Timeout
+        508, // Shared hosts also use this for temporary resource limits.
         // Non-standard reverse-proxy origin failures, most often from Cloudflare.
         520, // Unknown origin response
         521, // Origin refused the connection
@@ -1537,9 +1541,20 @@ class ImportClient
         }
 
         // preflight fetches a new report; preflight-assert reads the saved one.
-        // Both return their exit code to the CLI so it can append a command report.
+        // Both leave the CLI to append a command report, including on exit 3.
         if ($command === "preflight") {
-            $this->run_preflight();
+            try {
+                $this->run_preflight();
+            } catch (RetryLaterException $e) {
+                $this->output_progress([
+                    "status" => "error",
+                    "error" => $e->getMessage(),
+                    "error_code" => $this->last_error_code,
+                    "message" => "Error: " . $e->getMessage(),
+                ] + $this->get_error_details($e), true);
+                $this->write_progress_file($e->getMessage());
+                throw $e;
+            }
             $this->run_preflight_report();
             return;
         }
@@ -3203,7 +3218,40 @@ class ImportClient
         foreach ($user_agents as $ua) {
             $this->get_state()->user_agent = $ua;
             $this->request_context_headers['User-Agent'] = $ua;
-            $result = $this->fetch_json($url, $post_data);
+            do {
+                $result = $this->fetch_json($url, $post_data);
+                if (
+                    !in_array($result['http_code'], [429, 503, 508], true)
+                    || $result['error_code'] === 'CLOUDFLARE_CHALLENGE'
+                    || !$this->is_potentially_transient_http_error($result['http_code'], $result['body'] ?? '')
+                ) {
+                    break;
+                }
+
+                // A host limit is not a User-Agent refusal. Keep the same
+                // request, and replace any older successful report before
+                // waiting so an interrupted preflight cannot leave it usable.
+                $this->get_state()->set_preflight_record([
+                    'timestamp' => time(),
+                    'url' => $url,
+                    'http_code' => $result['http_code'],
+                    'elapsed' => $result['elapsed'],
+                    'ok' => null,
+                    'data' => null,
+                    'error' => $result['error'],
+                    'error_code' => $result['error_code'],
+                    'response_body_preview' => substr($result['body'] ?? '', 0, 200),
+                ]);
+                $this->assert_can_retry_after_interrupted_response(
+                    'preflight',
+                    null,
+                    null,
+                    new TransientInterruptionException($result['error']),
+                );
+            } while (true);
+            if ($result['ok'] && $result['http_code'] === 200) {
+                $this->get_state()->consecutive_interrupted_responses = 0;
+            }
             $payload = $result["json"] ?? null;
             if ($payload !== null || self::is_reprint_error_response($result["http_code"], $result["body"])) {
                 $this->audit_log("USER-AGENT OK | {$ua}", false);
@@ -13539,10 +13587,11 @@ class ImportClient
         if ($retry_after_seconds === null || $retry_after_seconds === 0) {
             return;
         }
+        $retry_after_seconds = min($retry_after_seconds, self::MAX_RETRY_WAIT_SECONDS);
 
         $seconds_label = $retry_after_seconds === 1 ? 'second' : 'seconds';
         $message = $exception->getMessage() . "\nWaiting {$retry_after_seconds} {$seconds_label} before retrying {$phase}.";
-        $this->audit_log("HTTP RETRY | {$phase} | {$message}", true);
+        $this->audit_log("HTTP RETRY | {$phase} | Retry-After: " . ( $this->last_retry_after ?? '(absent)' ) . " | {$message}", true);
         $this->progress->clear_progress_line();
         $this->progress->print_line($message . "\n");
         $this->output_progress([
@@ -14028,8 +14077,9 @@ class ImportClient
             CURLOPT_TIMEOUT => 30,
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_HEADERFUNCTION => static function ($ch, $header_line) use (&$response_headers) {
+            CURLOPT_HEADERFUNCTION => function ($ch, $header_line) use (&$response_headers) {
                 self::collect_response_header($response_headers, $header_line);
+                $this->last_retry_after = $response_headers['retry-after'] ?? null;
                 return strlen($header_line);
             },
             CURLOPT_RETURNTRANSFER => true,
@@ -14065,6 +14115,7 @@ class ImportClient
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
 
         if ($http_code !== 200 || ( $response_headers['cf-mitigated'] ?? null ) === 'challenge') {
+            $this->last_http_code = $http_code;
             $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url, $url, $response_headers);
             return [
                 "ok" => false,
@@ -14536,7 +14587,7 @@ class ImportClient
         }
     }
 
-    /** Decide whether a streaming HTTP error is potentially transient. */
+    /** Decide whether an HTTP error is potentially transient. */
     private function is_potentially_transient_http_error(int $http_code, string $body): bool
     {
         if (self::is_reprint_error_response($http_code, $body)) {

@@ -100,11 +100,148 @@ final class RetryLaterExitCodeTest extends TestCase {
             ['files-pull', 523, 'file_fetch'],
             ['files-pull', 524, 'file_fetch'],
             ['files-pull', 503, 'file_index'],
+            ['files-pull', 508, 'file_index'],
+            ['files-pull', 508, 'file_fetch'],
             ['files-pull', 429, 'file_index'],
             ['files-pull', 0, 'file_fetch'],
             ['files-pull', -1, 'file_fetch'],
             ['db-index', 503, 'db_index'],
+            ['db-index', 508, 'db_index'],
         ];
+    }
+
+    /** @dataProvider long_retry_after_headers */
+    public function testLongRetryAfterIsCappedOnTheWire(int $http_code, string $retry_after): void
+    {
+        file_put_contents($this->root . '/proxy-status', (string) $http_code);
+        file_put_contents($this->root . '/proxy-retry-after', $retry_after);
+        file_put_contents($this->root . '/proxy-recover-at', (string) ( microtime(true) + 0.9 ));
+        $process = $this->start_command('files-pull', 'jsonl', ['--no-adaptive']);
+        try {
+            $retry = $this->wait_for_retry($process);
+            $this->assertSame(30, $retry['retry_after_seconds']);
+
+            $deadline = microtime(true) + 35;
+            do {
+                $status = proc_get_status($process);
+                if (!$status['running']) {
+                    break;
+                }
+                usleep(20000);
+            } while (microtime(true) < $deadline);
+            $this->assertFalse($status['running'], file_get_contents($this->root . '/client.log'));
+            $this->assertSame(0, $status['exitcode'], file_get_contents($this->root . '/client.log'));
+        } finally {
+            proc_terminate($process);
+            proc_close($process);
+        }
+        $times = $this->request_times_for('file_index');
+        $this->assertCount(2, $times);
+        $this->assertGreaterThanOrEqual(29.9, $times[1] - $times[0]);
+        $this->assertLessThan(35, $times[1] - $times[0]);
+        $this->assertSame(
+            file_get_contents($this->root . '/remote/example.txt'),
+            file_get_contents($this->root . '/files' . $this->root . '/remote/example.txt')
+        );
+        $audit_log = file_get_contents($this->root . '/state/audit.log');
+        $this->assertStringContainsString('Waiting 30 seconds', $audit_log);
+        $this->assertStringContainsString('Retry-After: ', $audit_log);
+    }
+
+    public static function long_retry_after_headers(): array
+    {
+        return [
+            '429 seconds' => [429, '14400'],
+            '503 HTTP date' => [503, 'long-date'],
+        ];
+    }
+
+    /** @dataProvider temporary_preflight_responses */
+    public function testTemporaryPreflightWaitsOnTheSameUserAgentThenRecovers(string $command, int $http_code): void
+    {
+        file_put_contents($this->root . '/requests.log', '');
+        file_put_contents($this->root . '/request-times.log', '');
+        file_put_contents($this->root . '/proxy-endpoint', 'preflight');
+        file_put_contents($this->root . '/proxy-status', (string) $http_code);
+        file_put_contents($this->root . '/proxy-retry-after', '1');
+        file_put_contents($this->root . '/proxy-recover-at', (string) ( microtime(true) + 0.9 ));
+        $result = $this->run_command($command);
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $times = $this->request_times_for('preflight');
+        $this->assertCount(2, $times);
+        $this->assertGreaterThanOrEqual(0.9, $times[1] - $times[0]);
+        $requests = array_map(static function (string $line): array {
+            return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
+        }, file($this->root . '/request-times.log', FILE_IGNORE_NEW_LINES));
+        $this->assertSame($requests[0]['user_agent'], $requests[1]['user_agent']);
+        $this->assertStringContainsString('"retry_after_seconds":1', $result['output']);
+        $state_file = glob($this->root . '/state/remotes/*/pull/state.json')[0];
+        $state = json_decode(file_get_contents($state_file), true);
+        $this->assertNull($state['preflight']['error']);
+        $this->assertSame(0, $state['consecutive_interrupted_responses']);
+    }
+
+    /** @dataProvider temporary_preflight_responses */
+    public function testTemporaryPreflightExitsThreeAtTheRetryLimit(string $command, int $http_code): void
+    {
+        file_put_contents($this->root . '/requests.log', '');
+        file_put_contents($this->root . '/proxy-endpoint', 'preflight');
+        file_put_contents($this->root . '/proxy-status', (string) $http_code);
+        file_put_contents($this->root . '/proxy-retry-after', '0');
+        $result = $this->run_command($command);
+        $this->assertSame(3, $result['exit_code'], $result['output']);
+        $limit = $http_code === 429 ? 4 : 3;
+        $this->assertSame($limit, substr_count(file_get_contents($this->root . '/requests.log'), "preflight\n"));
+        $this->assert_error_details($result, $limit, $http_code);
+        $state_file = glob($this->root . '/state/remotes/*/pull/state.json')[0];
+        $state = json_decode(file_get_contents($state_file), true);
+        $this->assertSame($http_code, $state['preflight']['http_code']);
+        $this->assertNull($state['preflight']['data']);
+        $this->assertNotEmpty($state['preflight']['error']);
+
+        file_put_contents($this->root . '/proxy-status', '200');
+        $result = $this->run_command($command);
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $this->assertStringNotContainsString('"event":"retry"', $result['output']);
+    }
+
+    public static function temporary_preflight_responses(): array
+    {
+        $cases = [];
+        foreach (['preflight', 'pull-files'] as $command) {
+            foreach ([429, 503, 508] as $http_code) {
+                $cases[$command . ' HTTP ' . $http_code] = [$command, $http_code];
+            }
+        }
+        return $cases;
+    }
+
+    public function testInterruptedPreflightReplacesTheOlderReportBeforeWaiting(): void
+    {
+        file_put_contents($this->root . '/proxy-endpoint', 'preflight');
+        file_put_contents($this->root . '/proxy-status', '429');
+        file_put_contents($this->root . '/proxy-retry-after', '14400');
+        $process = $this->start_command('preflight', 'jsonl', ['--no-adaptive']);
+        try {
+            $retry = $this->wait_for_retry($process);
+            $this->assertSame(30, $retry['retry_after_seconds']);
+            $state_file = glob($this->root . '/state/remotes/*/pull/state.json')[0];
+            $state = json_decode(file_get_contents($state_file), true);
+            $this->assertNull($state['preflight']['data']);
+            $this->assertSame('RATE_LIMITED', $state['preflight']['error_code']);
+            $this->assertSame(1, $state['consecutive_interrupted_responses']);
+        } finally {
+            proc_terminate($process);
+            proc_close($process);
+        }
+        $this->assertStringContainsString('Retry-After: 14400', file_get_contents($this->root . '/state/audit.log'));
+        file_put_contents($this->root . '/proxy-status', '200');
+        $result = $this->run_command('preflight');
+        $this->assertSame(0, $result['exit_code'], $result['output']);
+        $this->assertStringNotContainsString('"event":"retry"', $result['output']);
+        $state = json_decode(file_get_contents($state_file), true);
+        $this->assertTrue($state['preflight']['data']['ok']);
+        $this->assertSame(0, $state['consecutive_interrupted_responses']);
     }
 
     /** @dataProvider retry_after_headers */
@@ -149,23 +286,7 @@ final class RetryLaterExitCodeTest extends TestCase {
         file_put_contents($this->root . '/proxy-retry-after', $retry_after);
         $process = $this->start_command('files-pull');
         try {
-            $deadline = microtime(true) + 5;
-            $retry = null;
-            do {
-                foreach (file($this->root . '/client.log', FILE_IGNORE_NEW_LINES) as $line) {
-                    $record = json_decode($line, true);
-                    if (( $record['event'] ?? null ) === 'retry') {
-                        $retry = $record;
-                        break;
-                    }
-                }
-                if ($retry !== null || !proc_get_status($process)['running']) {
-                    break;
-                }
-                usleep(20000);
-            } while (microtime(true) < $deadline);
-
-            $this->assertNotNull($retry, file_get_contents($this->root . '/client.log'));
+            $retry = $this->wait_for_retry($process);
             $this->assertSame($seconds, $retry['retry_after_seconds']);
             $this->assertSame('RATE_LIMITED', $retry['error_code']);
             usleep(100000);
@@ -340,20 +461,52 @@ final class RetryLaterExitCodeTest extends TestCase {
         return ['exit_code' => proc_close($process), 'output' => file_get_contents($this->root . '/client.log')];
     }
 
-    /** @return resource Running CLI process. */
-    private function start_command(string $command, string $progress = 'jsonl')
+    /**
+     * @param string[] $extra_arguments Additional CLI arguments.
+     * @return resource Running CLI process.
+     */
+    private function start_command(string $command, string $progress = 'jsonl', array $extra_arguments = [])
     {
         $process = proc_open(
             [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
                 $command, $this->remote_reprint_api_url, '--allow-unsafe-http',
                 '--state-dir=' . $this->root . '/state', '--fs-root=' . $this->root . '/files',
-                '--progress=' . $progress, '--index-batch-start=100', '--index-batch-min=100', '--secret=test-secret'],
+                '--progress=' . $progress, '--index-batch-start=100', '--index-batch-min=100', '--secret=test-secret', ...$extra_arguments],
             [0 => ['pipe', 'r'], 1 => ['file', $this->root . '/client.log', 'w'], 2 => ['redirect', 1]],
             $pipes
         );
         $this->assertIsResource($process);
         fclose($pipes[0]);
         return $process;
+    }
+
+    /**
+     * @param resource $process CLI process waiting to retry.
+     * @return array { Retry lifecycle record.
+     *     @type string $event               Retry event name.
+     *     @type string $error_code          Diagnosed failure code.
+     *     @type int    $retry_after_seconds Planned wait.
+     * }
+     */
+    private function wait_for_retry($process): array
+    {
+        $deadline = microtime(true) + 5;
+        $retry = null;
+        do {
+            foreach (file($this->root . '/client.log', FILE_IGNORE_NEW_LINES) as $line) {
+                $record = json_decode($line, true);
+                if (( $record['event'] ?? null ) === 'retry') {
+                    $retry = $record;
+                    break;
+                }
+            }
+            if ($retry !== null || !proc_get_status($process)['running']) {
+                break;
+            }
+            usleep(20000);
+        } while (microtime(true) < $deadline);
+        $this->assertNotNull($retry, file_get_contents($this->root . '/client.log'));
+        return $retry;
     }
 
     /** @return float[] Arrival times for requests to the selected endpoint. */

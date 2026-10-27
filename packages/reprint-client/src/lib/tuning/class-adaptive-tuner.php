@@ -9,7 +9,7 @@ namespace Reprint\Importer\Tuning;
  * objective is to maximize useful work per request without pushing a host into
  * timeouts or response buffering. The tuner tracks endpoint throughput, applies
  * additive increase / multiplicative decrease, shrinks immediately on request
- * errors, and computes duty-cycle sleep between requests.
+ * errors other than HTTP 429, and computes duty-cycle sleep between requests.
  */
 class AdaptiveTuner
 {
@@ -226,7 +226,7 @@ class AdaptiveTuner
 
         $ep = self::ENDPOINTS[$endpoint] ?? null;
         $size_key = $ep["size_key"] ?? null;
-        if ($ep !== null) {
+        if ($ep !== null && $http_code !== 429) {
             $this->state[$size_key] = $this->clamp_endpoint_size(
                 $ep,
                 (int) round((int) $this->state[$size_key] * (float) $this->config["error_decrease_factor"]),
