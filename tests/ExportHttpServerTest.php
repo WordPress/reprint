@@ -232,6 +232,33 @@ final class ExportHttpServerTest extends TestCase
         $this->assertSame('{"offset":10}', $config['cursor']);
     }
 
+    public function testBrandedCursorPreservesItsJsonAndNestedPathEncoding(): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $cursor_json = '{"path":"L3RtcA==","bytes":16384}';
+        $cursor = 'rp.' . str_rot13(base64_encode($cursor_json));
+        $config = $server->normalize_config(['endpoint' => 'file_fetch', 'cursor' => $cursor]);
+        $this->assertSame($cursor_json, $config['cursor']);
+    }
+
+    /** @dataProvider invalid_branded_cursors */
+    public function testRejectsInvalidBrandedCursors(string $cursor, string $message): void
+    {
+        $server = new \WordPress\Reprint\Server\HTTPServer();
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage($message);
+        $server->decode_cursor($cursor);
+    }
+
+    public static function invalid_branded_cursors(): array
+    {
+        return [
+            'invalid base64' => ['rp.!', 'Cursor must be base64-encoded'],
+            'repeated marker' => ['rp.rp.Y3EgpN==', 'Cursor must be base64-encoded'],
+            'invalid json' => ['rp.' . str_rot13(base64_encode('not json')), 'Cursor must be valid JSON'],
+        ];
+    }
+
     public function testNormalizeConfigAppliesDefaultDirectoryEvenWhenListDirPresent(): void
     {
         $server = new \WordPress\Reprint\Server\HTTPServer([

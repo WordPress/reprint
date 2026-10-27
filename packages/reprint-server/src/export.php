@@ -2594,7 +2594,7 @@ function endpoint_preflight(array $config): array
         "path_format" => Utils::native_path_format(),
         "capabilities" => [
             "base64_path_parameters" => true,
-            "rot13_base64_path_parameters" => true,
+            "rot13_base64_request_values" => true,
         ],
         "wp_detect" => [
             "found" => !empty($wp_detect["roots"]),
@@ -3512,7 +3512,7 @@ function endpoint_file_fetch(
     $decoded = json_decode($raw, true);
     if (!is_array($decoded)) {
         throw new InvalidArgumentException(
-            "file_list must be a JSON array of base64 path records"
+            "file_list must be a JSON array of base64 or rp.-prefixed ROT13-base64 path records"
         );
     }
     $paths = [];
@@ -3522,12 +3522,12 @@ function endpoint_file_fetch(
             $encoded_path = $entry["path"] ?? null;
         }
         $path = is_string($encoded_path)
-            ? base64_decode($encoded_path, true)
+            ? Utils::decode_request_base64($encoded_path)
             : false;
         // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, never HTML output.
         if (!is_string($path) || $path === "") {
             throw new InvalidArgumentException(
-                "file_list entry {$entry_index} must contain a nonempty base64 path"
+                "file_list entry {$entry_index} must contain a nonempty base64 path or rp.-prefixed ROT13-base64 path"
             );
         }
         // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped

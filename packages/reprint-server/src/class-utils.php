@@ -1284,4 +1284,18 @@ final class Utils
         }
     }
 
+    /**
+     * Decodes ordinary base64 or an rp.-prefixed ROT13-base64 request value.
+     *
+     * @param string $value Encoded path or cursor from a pull request.
+     * @return string|false Decoded bytes, or false for invalid base64.
+     */
+    public static function decode_request_base64(string $value)
+    {
+        if (substr($value, 0, 3) === 'rp.') {
+            $value = str_rot13(substr($value, 3));
+        }
+        return base64_decode($value, true);
+    }
+
 }

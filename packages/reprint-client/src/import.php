@@ -9938,9 +9938,9 @@ class ImportClient
             fseek($handle, $offset);
         }
 
-        // The output is a temp file containing a JSON array of base64 path
+        // The output is a temp file containing a JSON array of encoded path
         // records. Paths are arbitrary bytes and cannot appear directly in JSON.
-        // This file gets uploaded as the request body for the file_fetch endpoint.
+        // These records are uploaded in the file_fetch multipart body.
         $tmp = tempnam(sys_get_temp_dir(), "file-fetch-");
         if ($tmp === false) {
             fclose($handle);
@@ -9983,7 +9983,7 @@ class ImportClient
                 continue;
             }
             $json_entry = json_encode(
-                ["path" => $decoded["path"]],
+                ["path" => $this->encode_request_base64($decoded["path"])],
                 JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
             );
             $prefix = $first ? "" : ",";
@@ -13044,15 +13044,11 @@ class ImportClient
         $preflight_record = $this->get_state()->preflight_record();
         // Preflight keeps the legacy path parameters so a new client can learn
         // which path encoding an older server supports before using it.
-        $path_encoding = null;
-        if ($endpoint !== 'preflight') {
-            if (!empty($preflight_record['data']['capabilities']['rot13_base64_path_parameters'])) {
-                $path_encoding = 'rot13-base64';
-            } elseif (!empty($preflight_record['data']['capabilities']['base64_path_parameters'])) {
-                $path_encoding = 'base64';
-            }
-        }
-        if ($path_encoding !== null) {
+        $server_supports_base64_paths = $endpoint !== 'preflight' && (
+            !empty($preflight_record['data']['capabilities']['rot13_base64_request_values'])
+            || !empty($preflight_record['data']['capabilities']['base64_path_parameters'])
+        );
+        if ($server_supports_base64_paths) {
             foreach (["directory", "list_dir", "pulled_before"] as $parameter) {
                 if (!array_key_exists($parameter, $params)) {
                     continue;
@@ -13060,11 +13056,7 @@ class ImportClient
                 $paths = is_array($params[$parameter]) ? $params[$parameter] : [$params[$parameter]];
                 foreach ($paths as $key => $path) {
                     $encoded_path = base64_encode($path);
-                    // The marker selects our decoder; ROT13 keeps a firewall's
-                    // ordinary base64 decoder from recovering the source path.
-                    $paths[$key] = $path_encoding === 'rot13-base64'
-                        ? 'rp.' . str_rot13($encoded_path)
-                        : $encoded_path;
+                    $paths[$key] = $this->encode_request_base64($encoded_path);
                 }
                 $params[$parameter] = is_array($params[$parameter]) ? $paths : reset($paths);
             }
@@ -13079,7 +13071,7 @@ class ImportClient
             $params["set_value_format"] = "unsigned";
         }
         if ($cursor !== null) {
-            $params["cursor"] = $cursor;
+            $params["cursor"] = $this->encode_request_base64($cursor);
         }
         return ['url' => Utils::endpoint_url($this->remote_reprint_api_url, $endpoint), 'params' => $params];
     }
@@ -14181,6 +14173,58 @@ class ImportClient
     ): void {
         $this->reset_request_error_state();
 
+        // A pending batch may have been prepared by an older client. Encode
+        // an upload copy, never the saved batch or its path-based cursor.
+        // tmpfile() keeps the copy alive through cURL and removes it on return.
+        $encoded_file_list = null;
+        if (!empty($this->get_state()->preflight_record()['data']['capabilities']['rot13_base64_request_values'])
+            && isset($post_data['file_list']) && $post_data['file_list'] instanceof CURLFile) {
+            $file_list = $post_data['file_list'];
+            $file_list_input = fopen($file_list->getFilename(), 'rb');
+            $encoded_file_list = tmpfile();
+            if ($file_list_input === false || $encoded_file_list === false) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local file-list I/O error rendered as CLI text.
+                throw new RuntimeException('Could not open the file list or its temporary encoded upload: ' . $file_list->getFilename() . '.');
+            }
+            $write_file_list = static function (string $bytes) use ($encoded_file_list): void {
+                if (fwrite($encoded_file_list, $bytes) !== strlen($bytes)) {
+                    throw new RuntimeException('Could not write the encoded file-list upload.');
+                }
+            };
+            $write_file_list('[');
+            $first_entry = true;
+            $file_list_parser = new \Reprint\Importer\Protocol\JsonArrayStreamParser(
+                function ($entry) use ($write_file_list, &$first_entry): void {
+                    if (is_array($entry) && isset($entry['path']) && is_string($entry['path'])
+                        && substr($entry['path'], 0, 3) !== 'rp.') {
+                        $entry['path'] = $this->encode_request_base64($entry['path']);
+                    }
+                    $separator = $first_entry ? '' : ',';
+                    $write_file_list($separator . json_encode($entry, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR));
+                    $first_entry = false;
+                }
+            );
+            try {
+                while (!feof($file_list_input)) {
+                    $bytes = fread($file_list_input, 8192);
+                    if ($bytes === false) {
+                        throw new RuntimeException('Could not read the file-list upload: ' . $file_list->getFilename() . '.');
+                    }
+                    $file_list_parser->feed($bytes);
+                }
+                $file_list_parser->finish();
+                $write_file_list(']');
+                if (!fflush($encoded_file_list)) {
+                    throw new RuntimeException('Could not flush the encoded file-list upload.');
+                }
+            } finally {
+                fclose($file_list_input);
+            }
+            $post_data['file_list'] = new CURLFile(
+                stream_get_meta_data($encoded_file_list)['uri'], $file_list->getMimeType(), $file_list->getPostFilename()
+            );
+        }
+
         // Log HTTP request details
         $log_parts = ["HTTP_REQUEST", "POST", self::mask_url_credentials($url)];
 
@@ -14575,6 +14619,17 @@ class ImportClient
                 "Invalid response: missing completion chunk from server.",
             );
         }
+    }
+
+    /** Wrap already-base64 request data only after the source reports support. */
+    private function encode_request_base64(string $encoded_value): string
+    {
+        $preflight_record = $this->get_state()->preflight_record();
+        // The marker selects our decoder; ROT13 keeps a firewall's ordinary
+        // base64 decoder from recovering paths in this value.
+        return !empty($preflight_record['data']['capabilities']['rot13_base64_request_values'])
+            ? 'rp.' . str_rot13($encoded_value)
+            : $encoded_value;
     }
 
     /**

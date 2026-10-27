@@ -179,7 +179,7 @@ final class RequestUrlPathEncodingTest extends TestCase
         $client->get_state()->set_preflight_record([
             'data' => ['capabilities' => [
                 'base64_path_parameters' => $legacy_capability,
-                'rot13_base64_path_parameters' => true,
+                'rot13_base64_request_values' => true,
             ]],
         ]);
         $binary_path = "/srv/binary-\xff";
@@ -193,7 +193,7 @@ final class RequestUrlPathEncodingTest extends TestCase
         $this->assertSame([2 => 'rp.Y3EgpN==', 5 => 'rp.' . str_rot13(base64_encode($binary_path))], $request['params']['directory']);
         $this->assertSame('rp.Y3EgpN==', $request['params']['list_dir']);
         $this->assertSame(['rp.' . str_rot13(base64_encode('D:\\Sites\\removed'))], $request['params']['pulled_before']);
-        $this->assertSame($cursor, $request['params']['cursor'] ?? null);
+        $this->assertSame($cursor === null ? null : 'rp.' . str_rot13($cursor), $request['params']['cursor'] ?? null);
         $this->assertFalse(base64_decode($request['params']['list_dir'], true));
         $this->assertSame('rp.', urlencode('rp.'));
         parse_str(http_build_query($request['params']), $received);
@@ -296,7 +296,7 @@ final class RequestUrlPathEncodingTest extends TestCase
         $client->get_state()->set_preflight_record([
             'data' => ['capabilities' => [
                 'base64_path_parameters' => true,
-                'rot13_base64_path_parameters' => true,
+                'rot13_base64_request_values' => true,
             ]],
         ]);
         $build_request = (new \ReflectionClass($client))->getMethod('build_request');
@@ -320,7 +320,7 @@ final class RequestUrlPathEncodingTest extends TestCase
             $this->root . '/files'
         );
         $client->get_state()->set_preflight_record([
-            'data' => ['capabilities' => ['rot13_base64_path_parameters' => true]],
+            'data' => ['capabilities' => ['rot13_base64_request_values' => true]],
         ]);
         $cursor = base64_encode('{"table":"wp_postmeta","offset":250}');
         $params = [
@@ -337,8 +337,19 @@ final class RequestUrlPathEncodingTest extends TestCase
         $this->assertSame('https://example.com/?site-export-api&route=export&endpoint=sql_chunk', $request['url']);
         $this->assertSame($params + [
             'multisite_mode' => 'one-site-network-v1',
-            'cursor' => $cursor,
+            'cursor' => 'rp.' . str_rot13($cursor),
         ], $request['params']);
+    }
+
+    public function testCursorKeepsItsLegacyEncodingWithoutTheNewCapability(): void
+    {
+        $client = new \ImportClient('https://example.com/', $this->root . '/state', $this->root . '/files');
+        $client->get_state()->set_preflight_record([
+            'data' => ['capabilities' => ['base64_path_parameters' => true]],
+        ]);
+        $cursor = base64_encode('{"path":"L3RtcA==","bytes":16384}');
+        $request = (new \ReflectionMethod($client, 'build_request'))->invoke($client, 'file_fetch', $cursor);
+        $this->assertSame($cursor, $request['params']['cursor']);
     }
 
     /** @dataProvider sql_output_modes */

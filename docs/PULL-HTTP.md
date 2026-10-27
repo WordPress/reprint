@@ -33,6 +33,7 @@ multipart file-list uploads keep their file part, and their options may stay
 in the query string.
 
 For `file_fetch`, send the requested paths in the multipart `file_list` upload.
+Each record's `path` uses ordinary base64 or the branded encoding below.
 The server ignores any `file_list_path` request parameter. That option remains
 available to direct PHP callers of `endpoint_file_fetch()`.
 
@@ -72,7 +73,7 @@ A backward-compatibility test bypasses the strict WAF and sends legacy GET
 query parameters, then uploads a multipart file list with its endpoint and
 options still in the query. Normal export requests in the other tests use POST parameters.
 
-## Branded request path encoding
+## Branded pull request values
 
 For example, `/tmp` travels as `rp.Y3EgpN==`. The client base64-encodes the
 path bytes, applies ROT13 to that text, and prepends the three ASCII bytes
@@ -83,7 +84,7 @@ $encoded_path = 'rp.' . str_rot13(base64_encode($path));
 $path = base64_decode(str_rot13(substr($encoded_path, 3)), true);
 ```
 
-The server checks for `rp.` before selecting this decoder. A marked value
+The server checks for `rp.` before selecting this decoder. A marked path
 must decode to an absolute path in the source host's path format. Empty or
 invalid base64 and relative paths are rejected; a failed marked value is not
 tried again as another format. Unix and Windows paths and non-UTF-8 filename
@@ -96,14 +97,31 @@ The payload still uses `+`, `/`, and `=` where base64 would use them; the
 existing form encoder escapes those characters as before. Multipart forms
 carry the same marked value without URL encoding.
 
-The new preflight capability is `rot13_base64_path_parameters: true`. Clients
-prefer it for `directory`, `list_dir`, and `pulled_before`, including array
-entries. Servers continue reporting `base64_path_parameters: true` for old
-clients. A client talking to an older server sends ordinary base64 when that
-older capability is present, or raw paths when neither capability is present.
-Preflight itself always sends raw paths so it can discover the supported
-format. New servers accept raw paths, ordinary base64, and marked values.
+The new preflight capability is `rot13_base64_request_values: true`. It selects
+this format for `directory`, `list_dir`, and `pulled_before`, including array
+entries, as well as uploaded file-list paths and the returned `cursor`.
+Servers continue reporting `base64_path_parameters: true` for old clients.
+Without the new capability, the directory parameters use ordinary base64
+when the older capability is present, or raw paths when neither is present.
+Cursors and uploaded file-list paths keep ordinary base64 for older servers.
+Preflight itself always sends raw paths so it can discover the supported format.
 The protocol version remains 3 because older clients and servers still work.
+
+The cursor returned in a response remains ordinary base64. When sending it
+back, the client adds `rp.` and applies ROT13 to that existing base64 text;
+it does not base64-encode the cursor a second time or change its nested paths.
+The server removes the marker, undoes ROT13, and runs the existing cursor JSON
+validation. The saved cursor remains unchanged, so resuming does not require
+rewriting state or converting the producer's cursor structure.
+
+For file downloads, each `file_list` record has a marked `path`. This includes
+runtime-file downloads and batches prepared before the new client was installed.
+Immediately before upload, the client streams an encoded temporary copy one
+entry at a time. Already-marked paths are copied without encoding them again.
+The input list is not rewritten, and the temporary copy is removed when the
+request returns or throws. Newly prepared batches already count the marker
+bytes against the request-body budget. The server accepts ordinary base64 and
+marked entries, including both formats in one upload.
 
 This avoids handing a source path directly to a firewall's ordinary base64
 decoder. A reported migration source redirected file-index requests after
@@ -113,9 +131,9 @@ A permissive base64 decoder may ignore the period, and a firewall can implement
 this transform too. The encoding adds no secrecy or authentication; HTTPS and
 the existing signed request contract are unchanged.
 
-Response headers, response cursors, file-list uploads, saved indexes, and SQL
-row-filter values keep their existing encodings. Only the three request path
-parameters above use the new format.
+Response headers, response cursors, saved indexes, and SQL row-filter values
+keep their existing encodings. Push requests and their multipart part headers
+are outside this change.
 
 ## Output before the response
 

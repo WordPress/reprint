@@ -272,13 +272,11 @@ final class HTTPServer {
                     // Do not decode unmarked paths first: PHP accepts /tmp
                     // as strict base64 and turns it into unrelated bytes. Check
                     // for an absolute root in this source host's format before decoding.
-                    if (is_string($path_value) && substr($path_value, 0, 3) === 'rp.') {
-                        $decoded_path = base64_decode(str_rot13(substr($path_value, 3)), true);
-                    } elseif (is_string($path_value) && Utils::is_absolute_path($path_value, Utils::native_path_format())) {
+                    if (is_string($path_value) && Utils::is_absolute_path($path_value, Utils::native_path_format())) {
                         $decoded_path = $path_value;
                     } else {
                         $decoded_path = is_string($path_value)
-                            ? base64_decode($path_value, true)
+                            ? Utils::decode_request_base64($path_value)
                             : false;
                     }
                     if (
@@ -356,10 +354,10 @@ final class HTTPServer {
     }
 
     public function decode_cursor(string $cursor_b64): string {
-        $cursor_json = base64_decode($cursor_b64, true);
+        $cursor_json = Utils::decode_request_base64($cursor_b64);
         if ($cursor_json === false) {
             throw new InvalidArgumentException(
-                'Cursor must be base64-encoded. Received invalid base64: ' . substr($cursor_b64, 0, 50)
+                'Cursor must be base64-encoded or rp.-prefixed ROT13-base64. Received invalid base64: ' . substr($cursor_b64, 0, 50)
             );
         }
 
