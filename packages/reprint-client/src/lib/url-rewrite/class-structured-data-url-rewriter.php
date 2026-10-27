@@ -973,11 +973,30 @@ class StructuredDataUrlRewriter
                             //
                             // get_updated_html() leaves the array marked as changed. When
                             // next_token() runs, the toolkit queues another edit of the text
-                            // inside that same comment. The array still has the old source_url.
-                            // Applying both edits means replacing the whole comment and part of
-                            // that comment at the same time. This can duplicate text. With
-                            // several blocks, parsing those copies can make more copies until
-                            // PHP runs out of memory.
+                            // inside that same comment, using the parsed attributes where
+                            // source_url still points at https://source.test.
+                            //
+                            // The toolkit builds a new output string by copying unchanged input
+                            // and adding each edit's replacement text. It expects the edits to
+                            // cover separate parts of the input.
+                            //
+                            // For one block, it adds the whole rewritten comment to the output,
+                            // then adds the inner-text replacement after that comment. Finally,
+                            // it copies input after the inner range, including the original -->:
+                            //   expected: <!-- wp:safe-svg/svg-icon {JSON} /-->
+                            //   actual:   <!-- wp:safe-svg/svg-icon {JSON} /--> wp:safe-svg/svg-icon {JSON} /-->
+                            // {JSON} stands for the block attributes above. The second block
+                            // name and JSON have no opening <!--, so they become ordinary post text.
+                            //
+                            // With more input, the error can also copy later blocks. To copy the
+                            // unchanged text between edits, the toolkit subtracts the previous
+                            // edit's end from the next edit's start. The inner edit starts
+                            // before the whole-comment edit ends, so this length is negative.
+                            // PHP treats a negative substr() length as "stop this many bytes
+                            // before the end of the input", rather than as an empty gap.
+                            // For a long enough input, that copies following blocks into the
+                            // output. The parser reads those copies as new blocks and repeats
+                            // the same edits, growing the post until PHP runs out of memory.
                             //
                             // Rewrite the remaining URLs in the same array instead, save it with
                             // set_block_attributes(), and mark this block as already handled.
