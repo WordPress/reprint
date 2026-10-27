@@ -13619,11 +13619,12 @@ class ImportClient
      * @param string|null $request_url  Full URL of the diagnosed request, endpoint included. A
      *                                  signature mismatch names its signed target. Without it
      *                                  the message names the API URL.
-     * @param string|null $cf_mitigated Value of the final response's cf-mitigated header.
+     * @param array<string, string> $response_headers Final response headers keyed by lowercase name.
+     *                                               Repeated names keep their last value.
      */
-    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null, ?string $request_url = null, ?string $cf_mitigated = null): array
+    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null, ?string $request_url = null, array $response_headers = []): array
     {
-        if ($cf_mitigated === 'challenge') {
+        if ( ( $response_headers['cf-mitigated'] ?? null ) === 'challenge' ) {
             return [
                 'code' => 'CLOUDFLARE_CHALLENGE',
                 'message' =>
@@ -14012,7 +14013,7 @@ class ImportClient
             ...$this->get_base_headers("application/json"),
             ...($this->get_auth_headers('POST', $url)),
         ];
-        $cf_mitigated = null;
+        $response_headers = [];
 
         curl_setopt_array($ch, [
             CURLOPT_POST => true,
@@ -14027,12 +14028,8 @@ class ImportClient
             CURLOPT_TIMEOUT => 30,
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_HEADERFUNCTION => static function ($ch, $header_line) use (&$cf_mitigated) {
-                if (strncmp($header_line, 'HTTP/', 5) === 0) {
-                    $cf_mitigated = null;
-                } elseif (stripos($header_line, 'cf-mitigated:') === 0) {
-                    $cf_mitigated = trim(substr($header_line, strlen('cf-mitigated:')));
-                }
+            CURLOPT_HEADERFUNCTION => static function ($ch, $header_line) use (&$response_headers) {
+                self::collect_response_header($response_headers, $header_line);
                 return strlen($header_line);
             },
             CURLOPT_RETURNTRANSFER => true,
@@ -14067,8 +14064,8 @@ class ImportClient
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
 
-        if ($http_code !== 200 || $cf_mitigated === 'challenge') {
-            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url, $url, $cf_mitigated);
+        if ($http_code !== 200 || ( $response_headers['cf-mitigated'] ?? null ) === 'challenge') {
+            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url, $url, $response_headers);
             return [
                 "ok" => false,
                 "http_code" => $http_code,
@@ -14088,7 +14085,7 @@ class ImportClient
             if ($json === null && json_last_error() !== JSON_ERROR_NONE) {
                 // HTTP 200 but body isn't valid JSON — likely an HTML page
                 // from a site that doesn't have the exporter installed.
-                $diagnosis = $this->diagnose_http_error(200, $body);
+                $diagnosis = $this->diagnose_http_error(200, $body, null, $url, $response_headers);
                 if (
                     $diagnosis['code'] === 'HTML_RESPONSE' ||
                     $diagnosis['code'] === 'WORDFENCE_BLOCKED'
@@ -14156,8 +14153,8 @@ class ImportClient
         $last_progress_check = microtime(true);
         $last_bytes_received = 0;
         $error_body = "";
-        $response_headers = "";
-        $cf_mitigated = null;
+        $audit_response_headers = "";
+        $response_headers = [];
 
         // Build headers to look like a real browser
         $headers = [
@@ -14230,18 +14227,16 @@ class ImportClient
                 &$parser,
                 $context,
                 &$current_chunk,
-                &$response_headers,
-                &$cf_mitigated
+                &$audit_response_headers,
+                &$response_headers
             ) {
                 $len = strlen($header_line);
+                self::collect_response_header($response_headers, $header_line);
 
                 if (strncmp($header_line, 'HTTP/', 5) === 0) {
                     $this->last_retry_after = null;
-                    $cf_mitigated = null;
                 } elseif (stripos($header_line, 'Retry-After:') === 0) {
                     $this->last_retry_after = trim(substr($header_line, strlen('Retry-After:')));
-                } elseif (stripos($header_line, 'cf-mitigated:') === 0) {
-                    $cf_mitigated = trim(substr($header_line, strlen('cf-mitigated:')));
                 }
 
                 $audit_header_line = rtrim($header_line, "\r\n");
@@ -14256,11 +14251,11 @@ class ImportClient
                 }
                 if (
                     $audit_header_line !== '' &&
-                    strlen($response_headers) < self::MAX_AUDIT_RESPONSE_HEADER_BYTES
+                    strlen($audit_response_headers) < self::MAX_AUDIT_RESPONSE_HEADER_BYTES
                 ) {
                     $remaining_header_bytes =
-                        self::MAX_AUDIT_RESPONSE_HEADER_BYTES - strlen($response_headers);
-                    $response_headers .= substr(
+                        self::MAX_AUDIT_RESPONSE_HEADER_BYTES - strlen($audit_response_headers);
+                    $audit_response_headers .= substr(
                         $audit_header_line . "\n",
                         0,
                         $remaining_header_bytes,
@@ -14462,7 +14457,7 @@ class ImportClient
         $context->response_stats["ttfb"] = $ttfb;
         $context->response_stats["total_time"] = $total_time;
 
-        if ($http_code !== 200 || $cf_mitigated === 'challenge') {
+        if ($http_code !== 200 || ( $response_headers['cf-mitigated'] ?? null ) === 'challenge') {
             $this->last_http_code = (int) $http_code;
             if ($endpoint !== null) {
                 $this->handle_tuner_error($endpoint, [
@@ -14473,8 +14468,8 @@ class ImportClient
                 ]);
             }
 
-            $response_headers_for_log = $response_headers !== ''
-                ? rtrim($response_headers, "\n")
+            $response_headers_for_log = $audit_response_headers !== ''
+                ? rtrim($audit_response_headers, "\n")
                 : '(none)';
 
             // Log what we received
@@ -14486,7 +14481,7 @@ class ImportClient
                 true,
             );
 
-            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url, $url, $cf_mitigated);
+            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url, $url, $response_headers);
             $error_msg = $this->format_diagnosed_error($diagnosis);
 
             // Append stack trace from the server if available.
@@ -14519,6 +14514,25 @@ class ImportClient
             throw new TransientInterruptionException(
                 "Invalid response: missing completion chunk from server.",
             );
+        }
+    }
+
+    /**
+     * Collect one response's headers separately from the capped audit log.
+     * A new status line discards headers from an interim or proxy response.
+     *
+     * @param array<string, string> $response_headers Headers keyed by lowercase name, keeping the last value for repeated names.
+     * @param string                $header_line      One raw response header line from cURL.
+     */
+    private static function collect_response_header(array &$response_headers, string $header_line): void
+    {
+        if (strncmp($header_line, 'HTTP/', 5) === 0) {
+            $response_headers = [];
+            return;
+        }
+        $separator = strpos($header_line, ':');
+        if ($separator !== false) {
+            $response_headers[strtolower(substr($header_line, 0, $separator))] = trim(substr($header_line, $separator + 1));
         }
     }
 
