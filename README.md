@@ -254,8 +254,32 @@ To cut a release, run the **Tag Release** workflow from the GitHub Actions tab
 (`.github/workflows/tag-release.yml`) and pick a bump type (`patch`, `minor`,
 `major`, or `custom`). It creates and pushes the `vMAJOR.MINOR.PATCH` tag, then
 bumps `trunk` to the next `-dev` version. Pushing the tag automatically triggers
-the build, which publishes the GitHub Release (`reprint.phar` +
-`reprint-exporter-wp.zip`) and the Composer packages to Packagist.
+the build, which publishes the GitHub Release (`reprint.phar`,
+`reprint-exporter-wp.zip`, and `reprint-wordpress-org.zip`) and the Composer
+packages to Packagist. After the GitHub release is published, **Deploy to
+WordPress.org** downloads and checks the downloads-only
+`reprint-wordpress-org.zip`, then publishes it to the `reprint` SVN repository.
+Draft releases and prereleases are rejected.
+
+The deployment job uses the GitHub Actions environment `svn` in
+`WordPress/reprint`. Store its secrets there: `SVN_USERNAME` set to `zieladam`
+(case-sensitive, not an email address), and `SVN_PASSWORD` set to the password
+generated in the [SVN account settings](https://profiles.wordpress.org/zieladam/profile/edit/group/3/?screen=svn-password).
+Do not use the account login password.
+
+Allowed publishing accounts are hardcoded in `release-wporg.yml`. The check
+runs before checking out release code. It checks who started or reran this
+workflow and, for automatic releases, who started or reran **Tag Release**.
+Repository admins are not automatically exempt from this list.
+
+This is a workflow check, not a protected environment approval rule. Someone
+who can change the workflow could remove the check. Configure required
+reviewers on `svn` if approval must be enforced separately from workflow code.
+
+To publish an existing GitHub release or retry only the SVN deployment, run
+**Deploy to WordPress.org** manually and enter its tag, such as `v0.11.3`.
+The deployment uses that release's ZIP without rebuilding it. The SVN action
+leaves an already-published version unchanged.
 
 ---
 

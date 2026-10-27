@@ -130,3 +130,16 @@ jobs:
             release-files/reprint-exporter-wp.zip
             release-files/reprint-wordpress-org.zip
           generate_release_notes: true
+
+  deploy-wporg:
+    name: Deploy to WordPress.org
+    needs: [release, publish]
+    if: github.repository == 'WordPress/reprint'
+    uses: ./.github/workflows/release-wporg.yml
+    permissions:
+      contents: read
+    with:
+      tag: ${{ needs.release.outputs.tag }}
+    secrets:
+      SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+      SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}

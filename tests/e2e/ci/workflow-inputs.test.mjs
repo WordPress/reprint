@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 
@@ -40,6 +42,86 @@ test('build and benchmark jobs leave publishing to separate jobs', async () => {
                 assert.match(step, /persist-credentials: false/, filename);
             }
         }
+    }
+});
+
+test('WordPress.org deploys the checked downloads-only ZIP after GitHub publishing', async () => {
+    const release = await readFile(new URL('release.yml', workflows), 'utf8');
+    const deploy = release.slice(release.indexOf('\n  deploy-wporg:'));
+    assert.match(deploy, /needs: \[release, publish\]/);
+    assert.match(deploy, /uses: \.\/\.github\/workflows\/release-wporg\.yml/);
+    assert.match(deploy, /tag: \$\{\{ needs\.release\.outputs\.tag \}\}/);
+    const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
+    assert.match(source, /^  workflow_call:/m);
+    assert.match(source, /^  workflow_dispatch:/m);
+    assert.match(source, /if: github\.repository == 'WordPress\/reprint'/);
+    assert.match(source, /^    environment: svn$/m);
+    for (const name of ['SVN_USERNAME', 'SVN_PASSWORD']) {
+        assert.ok(deploy.includes(name + ': ${{ secrets.' + name + ' }}'));
+    }
+    assert.match(source, /group: release-wporg\n  cancel-in-progress: false/);
+    assert.match(source, /ref: \$\{\{ steps\.resolve\.outputs\.tag \}\}/);
+    assert.match(source, /persist-credentials: false/);
+    assert.match(source, /--json isDraft,isPrerelease/);
+    assert.match(source, /--pattern reprint-wordpress-org\.zip/);
+    assert.doesNotMatch(source, /reprint-exporter-wp\.zip/);
+    assert.match(source, /php tests\/server-plugin-package\.php reprint "\$VERSION" wordpress-org/);
+    assert.match(source, /SLUG: reprint\n          BUILD_DIR: reprint/);
+    assert.match(source, /SVN_USERNAME: \$\{\{ secrets\.SVN_USERNAME \}\}/);
+    assert.match(source, /SVN_PASSWORD: \$\{\{ secrets\.SVN_PASSWORD \}\}/);
+});
+
+test('WordPress.org checks the publishing and upstream rerun accounts before release code runs', async () => {
+    const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
+    const step = source.split(/(?=^      - )/m)[1];
+    assert.match(step, /name: Check publishing user/);
+    assert.match(step, /TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}/);
+    assert.match(step, /UPSTREAM_TRIGGERING_ACTOR: \$\{\{ github\.event\.workflow_run\.triggering_actor\.login \}\}/);
+    const command = step.match(/run: \|\n((?: {10}[^\n]+\n?)+)/)[1].replace(/^ {10}/gm, '');
+    for (const [actor, upstreamActor, allowed] of [
+        ['akirk', '', true],
+        ['brandonpayton', '', true],
+        ['WPprodigy', '', true],
+        ['adamziel', '', true],
+        ['akirk', 'adamziel', true],
+        ['other-user', '', false],
+        ['other-user', 'adamziel', false],
+        ['adamziel', 'other-user', false],
+        ['github-actions[bot]', '', false],
+        ['adamziel-other-user', '', false],
+        ['', '', false],
+    ]) {
+        const check = run('bash', ['-e', '-o', 'pipefail', '-c', command], {
+            env: { ...process.env, TRIGGERING_ACTOR: actor, UPSTREAM_TRIGGERING_ACTOR: upstreamActor },
+        });
+        if (allowed) {
+            await check;
+        } else {
+            await assert.rejects(check, /is not allowed to publish Reprint/);
+        }
+    }
+});
+
+test('WordPress.org accepts only stable version tags', async () => {
+    const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
+    const step = source.split(/(?=^      - )/m).find((part) => part.includes('name: Resolve release tag'));
+    const command = step.match(/run: \|\n((?: {10}[^\n]+\n?)+)/)[1].replace(/^ {10}/gm, '');
+    const directory = await mkdtemp(join(tmpdir(), 'reprint-release-tag-'));
+    try {
+        for (const tag of ['v0.12.0', '0.12.0', 'v0.12.0-beta.1', 'v0.12.0-dev', 'trunk', '../../v0.12.0', 'v0.12.0\nother=value']) {
+            const output = join(directory, encodeURIComponent(tag));
+            const check = run('bash', ['-e', '-o', 'pipefail', '-c', command], {
+                env: { ...process.env, RELEASE_TAG: tag, GITHUB_OUTPUT: output },
+            });
+            if (tag === 'v0.12.0' || tag === '0.12.0') {
+                await check;
+                assert.equal(await readFile(output, 'utf8'), 'tag=v0.12.0\nversion=0.12.0\n');
+            } else {
+                await assert.rejects(check, /must be a stable version/, tag);
+            }
+        }
+    } finally {
+        await rm(directory, { recursive: true, force: true });
     }
 });
 

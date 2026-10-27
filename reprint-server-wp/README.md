@@ -35,10 +35,10 @@ existing filename and layout. This is a build choice, not a site setting.
 Both targets are built and checked in CI, including requests through the
 packaged entry point with a host configuration that grants push.
 
-The WordPress.org submission proposes `reprint`, matching the existing translation
-domain. The Plugins Team must approve the final slug. A directory installation
-would use that slug as its folder name; it does not rename an existing GitHub
-installation. Do not activate both copies on the same site.
+The approved WordPress.org slug is `reprint`, matching the existing translation
+domain. A directory installation uses that slug as its folder name; it does not
+rename an existing GitHub installation. Do not activate both copies on the same
+site.
 
 `bin/stamp-plugin-version.sh` stamps the plugin header, runtime version, and
 readme stable tag before the release build. Development branches keep a `-dev`
