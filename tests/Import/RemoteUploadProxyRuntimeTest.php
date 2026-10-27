@@ -184,6 +184,32 @@ class RemoteUploadProxyRuntimeTest extends TestCase
         );
     }
 
+    public function testProxyWithoutAStateFileStaysEnabled(): void
+    {
+        // Playground runtimes omit the pull state file because their mounts
+        // would let the imported site rewrite it. apply-runtime's decision holds.
+        $url = $this->startProxyRuntime();
+        $runtime = preg_replace(
+            "/^.*define\\('REPRINT_PULL_STATE_FILE'.*\\n/m",
+            '',
+            file_get_contents($this->outputDir . '/runtime.php'),
+            -1,
+            $removed,
+        );
+        $this->assertSame(1, $removed);
+        file_put_contents($this->outputDir . '/runtime.php', $runtime);
+        $this->writeState([
+            'active_resumable_command' => [
+                'command_name' => 'files-pull',
+                'completion_state' => 'complete',
+            ],
+        ]);
+
+        [$status, $body] = $this->request($url . '/wp-content/uploads/2026/missing.txt');
+        $this->assertSame(206, $status);
+        $this->assertSame('remote photo', $body);
+    }
+
     private function startProxyRuntime(): string
     {
         mkdir($this->tempDir . '/upstream');

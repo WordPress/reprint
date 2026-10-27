@@ -62,8 +62,11 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         rmdir($dir);
     }
 
-    public function testPlaygroundMountsProxyStateFileIntoVfs(): void
+    public function testPlaygroundNeverMountsThePullStateFile(): void
     {
+        // Playground mounts are writable, and the VM runs the imported site's
+        // own code. The next importer run trusts pull/state.json, so the VM must
+        // not be able to reach it.
         $manifest = new \RuntimeManifest('other');
         $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
             'https://source.example/wp-content/uploads';
@@ -85,23 +88,19 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $runtime = file_get_contents($this->outputDir . '/runtime.php');
         $startSh = file_get_contents($this->outputDir . '/start.sh');
 
-        $this->assertStringContainsString(
-            "/tmp/reprint/state.json",
-            $runtime,
-        );
-        $this->assertStringNotContainsString($this->pullStateFile, $runtime);
-        $this->assertStringContainsString(
-            "--mount='" . $this->pullStateFile . ":/tmp/reprint/state.json'",
-            $startSh,
-        );
-        // start.json should contain the same mount as structured data.
-        $startJson = json_decode(file_get_contents($this->outputDir . '/start.json'), true);
-        $this->assertNotNull($startJson, 'start.json should be valid JSON');
+        $startJson = file_get_contents($this->outputDir . '/start.json');
 
-        $mount_sources = array_column($startJson['mounts'], 'source');
-        $mount_targets = array_column($startJson['mounts'], 'target');
-        $this->assertContains($this->pullStateFile, $mount_sources);
-        $this->assertContains('/tmp/reprint/state.json', $mount_targets);
+        $this->assertStringContainsString("defined('REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL')", $runtime);
+        $this->assertStringNotContainsString("define('REPRINT_PULL_STATE_FILE'", $runtime);
+        foreach ([$runtime, $startSh, $startJson] as $generated) {
+            $this->assertStringNotContainsString($this->tempDir . '/state', $generated);
+            $this->assertStringNotContainsString('state.json', $generated);
+        }
+        $config = json_decode($startJson, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame(
+            [$this->outputDir . '/runtime.php'],
+            array_column($config['mounts'], 'source'),
+        );
     }
 
     public function testPlaygroundConfigNormalizesATrailingOutputDirectorySlash(): void

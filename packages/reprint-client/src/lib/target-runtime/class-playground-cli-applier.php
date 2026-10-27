@@ -55,10 +55,11 @@ class PlaygroundCliApplier implements RuntimeApplier
         $saved_sqlite = $manifest->sqlite;
         $manifest->sqlite = null;
 
-        // Route handlers that need importer state must use VFS paths inside
-        // Playground. Rewrite those constants and mount the underlying host
-        // files into the VM before we generate runtime.php/start.sh.
-        $extra_mounts = $this->prepare_extra_mounts($manifest);
+        // The VM runs the imported site's own code, and Playground mounts are
+        // writable. Never mount the importer's pull state, which the next
+        // importer run trusts. Without the state file, the remote upload proxy
+        // stays enabled as apply-runtime decided.
+        unset($manifest->constants['REPRINT_PULL_STATE_FILE']);
 
         // 1. Write runtime.php using the VFS path (/wordpress) as fs-root.
         //    Inside Playground, the host's fs-root is mounted at /wordpress,
@@ -98,7 +99,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             $runtime_path,
             $port,
             $options,
-            $extra_mounts,
         );
         write_runtime_file($start_path, $start_script);
         chmod($start_path, 0755);
@@ -114,7 +114,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             $runtime_path,
             $port,
             $options,
-            $extra_mounts,
         );
         write_runtime_file($config_path, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
         $summary[] = "Wrote {$config_path}";
@@ -141,39 +140,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             '$schema' => 'https://playground.wordpress.net/blueprint-schema.json',
             'landingPage' => '/',
         ];
-    }
-
-    /**
-     * Rewrite host-side runtime helper files to VFS paths and return the
-     * corresponding Playground mounts.
-     *
-     * Some route handlers need files produced outside the mounted WordPress
-     * tree. Playground can only see files that are mounted explicitly, so we
-     * map those constants to /tmp paths in the VM.
-     *
-     * @return string[]
-     */
-    private function prepare_extra_mounts(RuntimeManifest $manifest): array
-    {
-        $mounts = [];
-        $runtime_file_mounts = [
-            'REPRINT_PULL_STATE_FILE'
-                => '/tmp/reprint/state.json',
-        ];
-
-        foreach ($runtime_file_mounts as $constant_name => $vfs_path) {
-            $host_path = $manifest->constants[$constant_name] ?? null;
-            if (!is_string($host_path) || $host_path === '') {
-                continue;
-            }
-
-            $manifest->constants[$constant_name] = $vfs_path;
-            if (file_exists($host_path)) {
-                $mounts[] = $host_path . ':' . $vfs_path;
-            }
-        }
-
-        return $mounts;
     }
 
     /**
@@ -248,8 +214,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         string $output_dir,
         string $runtime_path,
         int $port,
-        array $options,
-        array $extra_mounts = []
+        array $options
     ): array {
         $config = [
             'document_root' => self::VFS_ROOT,
@@ -279,16 +244,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             'target' => self::VFS_ROOT . '/wp-content/mu-plugins/0-playground-runtime.php',
         ];
 
-        // Additional runtime helper files (e.g. state files for the
-        // remote upload proxy).
-        foreach ($extra_mounts as $mount) {
-            [$source, $target] = explode(':', $mount, 2);
-            $config['mounts'][] = [
-                'source' => $source,
-                'target' => $target,
-            ];
-        }
-
         return $config;
     }
 
@@ -305,10 +260,9 @@ class PlaygroundCliApplier implements RuntimeApplier
         string $output_dir,
         string $runtime_path,
         int $port,
-        array $options,
-        array $extra_mounts = []
+        array $options
     ): string {
-        $config = $this->generate_start_config($filesystem_root, $output_dir, $runtime_path, $port, $options, $extra_mounts);
+        $config = $this->generate_start_config($filesystem_root, $output_dir, $runtime_path, $port, $options);
 
         $lines = [];
         $lines[] = '#!/usr/bin/env bash';
@@ -331,8 +285,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         }
 
         // Mount runtime.php as a mu-plugin (0- prefix ensures it loads
-        // first) and any additional runtime helper files (e.g. state
-        // files for the remote upload proxy).
+        // first).
         foreach ($config['mounts'] as $mount) {
             $args[] = '--mount=' . escapeshellarg($mount['source'] . ':' . $mount['target']);
         }

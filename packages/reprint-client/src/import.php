@@ -328,6 +328,9 @@ class ImportClient
     /** @var string Path to the replacement fetch list built during mirror planning. */
     private $fetch_list_replacement_file;
 
+    /** @var string Path to pull/fetch-batch.json — the only batch file a file_fetch request uploads. */
+    private $fetch_batch_file;
+
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
 
@@ -648,6 +651,8 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl");
         $this->fetch_list_replacement_file =
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl.new");
+        $this->fetch_batch_file =
+            wp_join_unix_paths($this->pull_state_directory, "fetch-batch.json");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
         $this->progress_reporter = new ProgressReporter(
@@ -9830,6 +9835,16 @@ class ImportClient
 
         $batch_entries = $fetch_state->batch_entries;
 
+        // Only the batch file this client writes may be uploaded or removed. A state
+        // naming any other path leaves that path untouched and rebuilds the batch.
+        if ($batch_file !== null && $batch_file !== $this->fetch_batch_file) {
+            $this->audit_log("FETCH | ignoring unexpected batch file {$batch_file}");
+            $batch_file = null;
+            $this->get_state()->current_file = null;
+            $this->get_state()->current_file_bytes = null;
+            $this->get_state()->current_css_cursor = null;
+        }
+
         // Reset the batch if the request body budget has dropped below this batch's list size.
         if (
             $batch_file !== null
@@ -9909,15 +9924,15 @@ class ImportClient
      * budget from fetch_request_body_budget().  Always includes at least one
      * path, even if it alone exceeds the budget.
      *
-     * The batch file is written to a temp file and intended to be uploaded as
-     * the request body for the file_fetch endpoint.
+     * The batch is written to pull/fetch-batch.json and intended to be uploaded
+     * as the request body for the file_fetch endpoint.
      *
      * @param string $list_file Path to the JSONL fetch list.
      * @param int    $offset    Byte offset into the fetch list file.
      * @return array|null {
      *     Prepared fetch batch, or null if no paths remain.
      *
-     *     @type string $file        Temporary batch file path.
+     *     @type string $file        Batch file path.
      *     @type int    $offset      Byte offset where the batch began.
      *     @type int    $next_offset Byte offset for the next batch.
      *     @type int    $entries     Number of entries in the batch.
@@ -9938,19 +9953,17 @@ class ImportClient
             fseek($handle, $offset);
         }
 
-        // The output is a temp file containing a JSON array of base64 path
+        // The output is pull/fetch-batch.json, a JSON array of base64 path
         // records. Paths are arbitrary bytes and cannot appear directly in JSON.
         // This file gets uploaded as the request body for the file_fetch endpoint.
-        $tmp = tempnam(sys_get_temp_dir(), "file-fetch-");
-        if ($tmp === false) {
-            fclose($handle);
-            throw new RuntimeException("Failed to create fetch batch file");
-        }
-        $out = fopen($tmp, "w");
+        // Remove the previous batch and create a new file rather than writing
+        // through whatever already sits at that path.
+        $batch_file = $this->fetch_batch_file;
+        @unlink($batch_file);
+        $out = fopen($batch_file, "x");
         if (!$out) {
             fclose($handle);
-            @unlink($tmp);
-            throw new RuntimeException("Failed to open fetch batch file");
+            throw new RuntimeException("Failed to create fetch batch file");
         }
 
         // Read lines from the fetch list (one JSON entry per line) and
@@ -10024,12 +10037,12 @@ class ImportClient
 
         // An empty batch (just "[]") means we've exhausted the fetch list.
         if ($bytes <= 2) {
-            @unlink($tmp);
+            @unlink($batch_file);
             return null;
         }
 
         return [
-            "file" => $tmp,
+            "file" => $batch_file,
             "offset" => $offset,
             "next_offset" => $next_offset,
             "entries" => $entries,

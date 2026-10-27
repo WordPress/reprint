@@ -17,11 +17,12 @@ function remote_upload_proxy_code(): string
  */
 (function() {
 	if (!defined('REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL')) return;
-	if (!defined('REPRINT_PULL_STATE_FILE')) return;
 	if (!function_exists('curl_init')) return;
 
-	$proxy_enabled = false;
-	$pull_state_file = REPRINT_PULL_STATE_FILE;
+	// Playground runtimes get no state file: its mounts would be writable by
+	// the imported site. There the proxy stays enabled as apply-runtime decided.
+	$proxy_enabled = !defined('REPRINT_PULL_STATE_FILE');
+	$pull_state_file = $proxy_enabled ? null : REPRINT_PULL_STATE_FILE;
 	if (
 		is_string($pull_state_file) &&
 		$pull_state_file !== '' &&

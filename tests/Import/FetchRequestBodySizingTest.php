@@ -140,7 +140,7 @@ class FetchRequestBodySizingTest extends TestCase
 
     private function writeBatchFile(int $bytes): string
     {
-        $path = $this->tempDir . '/batch-' . uniqid() . '.json';
+        $path = $this->pullStateDirectory . '/fetch-batch.json';
         file_put_contents($path, '[' . str_repeat('x', max(0, $bytes - 2)) . ']');
 
         return $path;
@@ -187,7 +187,7 @@ class FetchRequestBodySizingTest extends TestCase
         $reflection->getMethod('fetch_files_from_list')
             ->invoke($client, $this->fetchListFile);
 
-        $this->assertFileDoesNotExist($stale);
+        $this->assertSame($stale, $client->sentBatchFile);
         $this->assertLessThanOrEqual(64 * 1024, $client->sentBatchBytes);
         $this->assertSame($offsetOfLine100, $state->fetch->offset);
 
@@ -196,6 +196,41 @@ class FetchRequestBodySizingTest extends TestCase
 
         // Left set, fetch_file_batch() reopens that path in append mode and
         // resumes writing into it for a batch that no longer contains it.
+        $this->assertNull($client->currentFileAtSend);
+    }
+
+    public function testABatchFileThisClientDidNotWriteIsNeitherUploadedNorRemoved(): void
+    {
+        // pull/state.json is the only record of which batch file to upload.
+        // A state that names some other file must not turn the next request
+        // into an upload of that file, or the completed batch into its removal.
+        $lines = file($this->fetchListFile);
+        $offsetOfLine100 = strlen(implode('', array_slice($lines, 0, 100)));
+        $expectedFirstPath = json_decode($lines[100], true)['path'];
+
+        $unrelatedFile = $this->tempDir . '/id_rsa';
+        file_put_contents($unrelatedFile, 'private key');
+        [$client, $reflection] = $this->prepareClient(64 * 1024, [
+            'offset' => $offsetOfLine100,
+            'batch_file' => $unrelatedFile,
+            'batch_entries' => 3900,
+            'next_offset' => filesize($this->fetchListFile),
+            'cursor' => 'cursor-from-a-completed-part',
+        ]);
+        $state = $reflection->getMethod('get_state')->invoke($client);
+        $state->current_file = $this->filesystemRoot . '/partly-written.bin';
+        $state->current_file_bytes = 4096;
+
+        $reflection->getMethod('fetch_files_from_list')
+            ->invoke($client, $this->fetchListFile);
+
+        $this->assertSame($this->pullStateDirectory . '/fetch-batch.json', $client->sentBatchFile);
+        $this->assertSame($client->sentBatchFile, $state->fetch->batch_file);
+        $this->assertSame('private key', file_get_contents($unrelatedFile));
+        $this->assertSame($offsetOfLine100, $state->fetch->offset);
+
+        $rebuilt = json_decode(file_get_contents($client->sentBatchFile), true);
+        $this->assertSame($expectedFirstPath, $rebuilt[0]['path']);
         $this->assertNull($client->currentFileAtSend);
     }
 
