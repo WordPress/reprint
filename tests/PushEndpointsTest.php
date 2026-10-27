@@ -1240,7 +1240,7 @@ final class PushEndpointsTest extends TestCase {
 
         $this->assertSame('failed', $response['status']);
         $this->assertSame('invalid_request', $response['reason']);
-        $this->assertSame('Cursor must be base64-encoded. Received invalid base64: not-base64', $response['detail']);
+        $this->assertSame('Cursor must be base64-encoded or rp.-prefixed ROT13-base64. Received invalid base64: not-base64', $response['detail']);
         $this->assertSame(400, $response['response']['http_code']);
         $this->assertArrayNotHasKey('trace', $response['response']);
     }
