@@ -941,10 +941,54 @@ class StructuredDataUrlRewriter
 
                     $this->rewrite_json_script_body($p);
 
+                    $has_block_attribute_update = false;
                     while ( $p->next_raw_url_in_current_token() ) {
                         $rewritten = $this->rewrite_url_field($p->get_raw_url(), $p->get_url_base());
                         if ($rewritten !== false) {
                             $p->set_url($rewritten['raw_url'], $rewritten['parsed_url']);
+                            $has_block_attribute_update = '#block-comment' === $p->get_token_type();
+                        }
+                    }
+                    if ( $has_block_attribute_update && ! $parsed_nested_block_attributes ) {
+                        $block_attributes = $p->get_block_attributes();
+                        if ( is_array( $block_attributes ) ) {
+                            // A Safe SVG block can have attributes like these:
+                            // {
+                            //   "svgURL": "https://source.test/icon.svg",
+                            //   "imageSizes": {
+                            //     "full": {
+                            //       "source_url": "https://source.test/icon.svg"
+                            //     }
+                            //   }
+                            // }
+                            //
+                            // For a https://source.test -> https://target.test rewrite,
+                            // set_url() above changes svgURL in the parsed array of block
+                            // attributes. It does not visit source_url inside imageSizes -> full,
+                            // so that URL still points at https://source.test.
+                            //
+                            // Without this branch, the raw-text rewrite below would:
+                            // 1. Call get_updated_html(), writing the updated array into the comment.
+                            // 2. Queue an edit of the whole comment to change the remaining URL.
+                            //
+                            // get_updated_html() leaves the array marked as changed. When
+                            // next_token() runs, the toolkit queues another edit of the text
+                            // inside that same comment, using the parsed attributes where
+                            // source_url still points at https://source.test.
+                            //
+                            // The toolkit builds a new output string by copying unchanged input
+                            // and adding each edit's replacement text. It expects the edits to
+                            // cover separate parts of the input.
+                            //
+                            // For one block, it adds the whole rewritten comment to the output,
+                            // then adds the inner-text replacement after that comment. Finally,
+                            // it copies input after the inner range, including the original -->:
+                            //   expected: <!-- wp:safe-svg/svg-icon {JSON} /-->
+                            //   actual:   <!-- wp:safe-svg/svg-icon {JSON} /--> wp:safe-svg/svg-icon {JSON} /-->
+                            // {JSON} stands for the block attributes above. The second block
+                            // name and JSON have no opening <!--, so they become ordinary post text.
+                            $p->set_block_attributes( $this->rewrite_inferred_block_attribute_values( $block_attributes ) );
+                            $parsed_nested_block_attributes = true;
                         }
                     }
                     if ( ! $parsed_nested_block_attributes ) {
