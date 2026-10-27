@@ -13619,9 +13619,21 @@ class ImportClient
      * @param string|null $request_url  Full URL of the diagnosed request, endpoint included. A
      *                                  signature mismatch names its signed target. Without it
      *                                  the message names the API URL.
+     * @param string|null $cf_mitigated Value of the final response's cf-mitigated header.
      */
-    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null, ?string $request_url = null): array
+    private function diagnose_http_error(int $http_code, ?string $body, ?string $redirect_url = null, ?string $request_url = null, ?string $cf_mitigated = null): array
     {
+        if ($cf_mitigated === 'challenge') {
+            return [
+                'code' => 'CLOUDFLARE_CHALLENGE',
+                'message' =>
+                    "Cloudflare blocked the request with a browser challenge (HTTP {$http_code}). " .
+                    "Reprint cannot complete browser challenges.\n\n" .
+                    "Ask the site administrator to disable the challenge for POST requests to the " .
+                    "Reprint API URL or allowlist this machine's IP address, then try again.",
+            ];
+        }
+
         $body = ($body !== null && $body !== false) ? $body : '';
         $signed_request_target = Site_Export_HMAC_Client::request_target($request_url ?? $this->remote_reprint_api_url);
 
@@ -14000,6 +14012,7 @@ class ImportClient
             ...$this->get_base_headers("application/json"),
             ...($this->get_auth_headers('POST', $url)),
         ];
+        $cf_mitigated = null;
 
         curl_setopt_array($ch, [
             CURLOPT_POST => true,
@@ -14014,6 +14027,14 @@ class ImportClient
             CURLOPT_TIMEOUT => 30,
             CURLOPT_ENCODING => "gzip, deflate",
             CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_HEADERFUNCTION => static function ($ch, $header_line) use (&$cf_mitigated) {
+                if (strncmp($header_line, 'HTTP/', 5) === 0) {
+                    $cf_mitigated = null;
+                } elseif (stripos($header_line, 'cf-mitigated:') === 0) {
+                    $cf_mitigated = trim(substr($header_line, strlen('cf-mitigated:')));
+                }
+                return strlen($header_line);
+            },
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_NOPROGRESS => false,
             CURLOPT_PROGRESSFUNCTION =>
@@ -14046,8 +14067,8 @@ class ImportClient
         $http_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $redirect_url = curl_getinfo($ch, CURLINFO_REDIRECT_URL) ?: null;
 
-        if ($http_code !== 200) {
-            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url, $url);
+        if ($http_code !== 200 || $cf_mitigated === 'challenge') {
+            $diagnosis = $this->diagnose_http_error($http_code, $body, $redirect_url, $url, $cf_mitigated);
             return [
                 "ok" => false,
                 "http_code" => $http_code,
@@ -14136,6 +14157,7 @@ class ImportClient
         $last_bytes_received = 0;
         $error_body = "";
         $response_headers = "";
+        $cf_mitigated = null;
 
         // Build headers to look like a real browser
         $headers = [
@@ -14208,14 +14230,18 @@ class ImportClient
                 &$parser,
                 $context,
                 &$current_chunk,
-                &$response_headers
+                &$response_headers,
+                &$cf_mitigated
             ) {
                 $len = strlen($header_line);
 
                 if (strncmp($header_line, 'HTTP/', 5) === 0) {
                     $this->last_retry_after = null;
+                    $cf_mitigated = null;
                 } elseif (stripos($header_line, 'Retry-After:') === 0) {
                     $this->last_retry_after = trim(substr($header_line, strlen('Retry-After:')));
+                } elseif (stripos($header_line, 'cf-mitigated:') === 0) {
+                    $cf_mitigated = trim(substr($header_line, strlen('cf-mitigated:')));
                 }
 
                 $audit_header_line = rtrim($header_line, "\r\n");
@@ -14436,7 +14462,7 @@ class ImportClient
         $context->response_stats["ttfb"] = $ttfb;
         $context->response_stats["total_time"] = $total_time;
 
-        if ($http_code !== 200) {
+        if ($http_code !== 200 || $cf_mitigated === 'challenge') {
             $this->last_http_code = (int) $http_code;
             if ($endpoint !== null) {
                 $this->handle_tuner_error($endpoint, [
@@ -14460,7 +14486,7 @@ class ImportClient
                 true,
             );
 
-            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url, $url);
+            $diagnosis = $this->diagnose_http_error($http_code, $error_body, $redirect_url, $url, $cf_mitigated);
             $error_msg = $this->format_diagnosed_error($diagnosis);
 
             // Append stack trace from the server if available.

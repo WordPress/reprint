@@ -13,6 +13,9 @@ if (is_file('response.json')) {
         return;
     }
     http_response_code($reprint_response['http_code']);
+    foreach ($reprint_response['headers'] ?? [] as $reprint_header_name => $reprint_header_value) {
+        header($reprint_header_name . ': ' . $reprint_header_value);
+    }
     if ($reprint_response['http_code'] === 302) {
         header('Location: https://example.test/reprint-api');
     }

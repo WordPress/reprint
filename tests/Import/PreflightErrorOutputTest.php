@@ -51,16 +51,21 @@ final class PreflightErrorOutputTest extends TestCase {
         $this->remove_directory($this->root);
     }
 
-    /** @dataProvider failed_responses */
+    /**
+     * @param array<string, string> $response_headers HTTP response headers.
+     * @dataProvider failed_responses
+     */
     public function testFailureSurvivesStandalonePreflightAndSavedAssertion(
         int $http_code,
         string $body,
         string $error_code,
-        string $detail
+        string $detail,
+        array $response_headers = []
     ): void {
         file_put_contents($this->root . '/response.json', json_encode([
             'http_code' => $http_code,
             'body' => $body,
+            'headers' => $response_headers,
         ]));
         $preflight = $this->run_command('preflight', 1);
         $this->assertSame($http_code, $preflight['http_code']);
@@ -87,6 +92,13 @@ final class PreflightErrorOutputTest extends TestCase {
         return [
             'gateway error' => [520, '<html>Unknown error</html>', 'SERVER_ERROR', 'HTTP 520'],
             'authentication' => [401, '{"error":"Invalid signature"}', 'AUTH_FAILED', 'Invalid signature'],
+            'Cloudflare challenge' => [403, '<html>Just a moment...</html>', 'CLOUDFLARE_CHALLENGE', 'allowlist', ['cf-mitigated' => 'challenge']],
+            'Cloudflare challenge with mixed-case header name' => [503, '', 'CLOUDFLARE_CHALLENGE', 'Cloudflare', ['Cf-Mitigated' => 'challenge']],
+            'Cloudflare challenge with header whitespace' => [403, '', 'CLOUDFLARE_CHALLENGE', 'Cloudflare', ['cf-mitigated' => " \tchallenge \t"]],
+            'Cloudflare challenge on HTTP 200' => [200, '<html>Just a moment...</html>', 'CLOUDFLARE_CHALLENGE', 'disable the challenge', ['CF-MITIGATED' => 'challenge']],
+            'Cloudflare challenge with empty body on HTTP 200' => [200, '', 'CLOUDFLARE_CHALLENGE', 'browser challenge', ['cf-mitigated' => 'challenge']],
+            'Cloudflare header with another value' => [403, '<html>Forbidden</html>', 'AUTH_FAILED', 'HTTP 403', ['cf-mitigated' => 'other']],
+            'Cloudflare server without challenge header' => [403, '<html>Just a moment...</html>', 'AUTH_FAILED', 'HTTP 403', ['Server' => 'cloudflare']],
             'redirect' => [302, '', 'REDIRECT', 'https://example.test/reprint-api'],
             'HTML instead of JSON' => [200, '<html>Sign in</html>', 'HTML_RESPONSE', 'HTML page'],
             'malformed JSON' => [200, '{', 'INVALID_JSON', 'Invalid JSON'],
@@ -244,6 +256,49 @@ final class PreflightErrorOutputTest extends TestCase {
         ];
     }
 
+    /** @dataProvider cloudflare_download_commands */
+    public function testCloudflareChallengeDuringDownloadReachesTheCaller(string $command, int $http_code): void
+    {
+        $preflight_body = json_encode([
+            'ok' => true,
+            'protocol_version' => PULL_PROTOCOL_VERSION,
+            'filesystem' => ['ok' => true],
+            'database' => ['connected' => true],
+            'wp_detect' => ['roots' => [['path' => '/site']]],
+        ]);
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => 200,
+            'body' => $preflight_body,
+        ]));
+        $this->run_command('preflight', 0);
+        file_put_contents($this->root . '/response.json', json_encode([
+            'http_code' => $http_code,
+            'body' => '<html>Just a moment...</html>',
+            'headers' => ['Cf-Mitigated' => 'challenge'],
+            'preflight_body' => $preflight_body,
+        ]));
+
+        $download = $this->run_command($command, $http_code === 200 ? 1 : 3);
+        $this->assertSame('CLOUDFLARE_CHALLENGE', $download['error_code']);
+        $this->assertStringContainsString('Cloudflare', $download['error']);
+        $this->assertStringContainsString('HTTP ' . $http_code, $download['error']);
+        $this->assertStringContainsString('Reprint cannot complete browser challenges', $download['error']);
+        $this->assertStringContainsString('disable the challenge', $download['error']);
+        $this->assertStringContainsString('allowlist', $download['error']);
+        $this->assert_error_output($download);
+    }
+
+    public static function cloudflare_download_commands(): array
+    {
+        $cases = [];
+        foreach (['files-pull', 'db-pull', 'pull-files', 'pull-db'] as $command) {
+            foreach ([403, 200] as $http_code) {
+                $cases[$command . ' HTTP ' . $http_code] = [$command, $http_code];
+            }
+        }
+        return $cases;
+    }
+
     public function testRealEndpointFailureReportsItsReason(): void
     {
         $preflight = $this->run_command('preflight', 1);
@@ -383,6 +438,7 @@ final class PreflightErrorOutputTest extends TestCase {
         $records = array_map(static function (string $line): array {
             return json_decode($line, true, 512, JSON_THROW_ON_ERROR);
         }, array_filter(explode("\n", trim($stdout))));
+        $report = end($records);
         $records = array_values(array_filter($records, static function (array $record): bool {
             return ( $record['type'] ?? null ) !== 'reprint_report';
         }));
@@ -390,7 +446,12 @@ final class PreflightErrorOutputTest extends TestCase {
             return json_decode(trim($stderr), true, 512, JSON_THROW_ON_ERROR);
         }
         $this->assertNotEmpty($records, $stderr);
-        return end($records);
+        $result = end($records);
+        $this->assertSame('reprint_report', $report['type'] ?? null);
+        $this->assertSame($actual_exit_code, $report['exit_code']);
+        $this->assertSame($result['error'] ?? null, $report['error']);
+        $this->assertSame($result['error_code'] ?? null, $report['error_code']);
+        return $result;
     }
 
     private function remove_directory(string $directory): void
