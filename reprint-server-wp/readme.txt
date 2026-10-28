@@ -75,6 +75,10 @@ Deactivation keeps the settings. Deleting the plugin through WordPress removes i
 
 Use the [Reprint issue tracker](https://github.com/WordPress/reprint/issues) for reproducible bugs and feature requests. Do not include private keys, connection tokens, private site data, or database credentials in a public report. Do not post security vulnerability details in a public issue.
 
+== Screenshots ==
+
+1. Authorize a tool to copy your site using a Migration Token.
+
 == Changelog ==
 
 See the [GitHub release notes](https://github.com/WordPress/reprint/releases) for the changes in each release.

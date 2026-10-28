@@ -281,6 +281,14 @@ To publish an existing GitHub release or retry only the SVN deployment, run
 The deployment uses that release's ZIP without rebuilding it. The SVN action
 leaves an already-published version unchanged.
 
+To update the directory screenshots without releasing plugin code, run
+**Update WordPress.org screenshots** on `trunk`. Only `adamziel` can run it.
+It uses the same `svn` environment and deployment queue as releases. Images
+come from `.wordpress-org/`; captions come from the `Screenshots` section of
+the plugin readme. The job copies only that section into the published
+version's readme, leaving its version, requirements, and other text unchanged.
+The SVN update changes only readmes and assets, not plugin PHP files.
+
 ---
 
 ## Integrating with a hosting platform
