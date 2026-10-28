@@ -88,7 +88,10 @@ final class RuntimeFilesRootPathTest extends TestCase
         $this->assertSame(['/'], $request['directory']);
     }
 
-    /** @dataProvider invalid_runtime_paths */
+    /**
+     * @group received-paths
+     * @dataProvider invalid_runtime_paths
+     */
     public function testPreflightStopsOnInvalidRuntimePaths(
         string $returned_path,
         string $requested_path,
@@ -142,6 +145,8 @@ final class RuntimeFilesRootPathTest extends TestCase
             'traversal also listed in preflight' => ['/../../outside.txt', '/../../outside.txt', 'must not contain dot-segments'],
             'dot segment also listed in preflight' => ['/./runtime.php', '/./runtime.php', 'must not contain dot-segments'],
             'relative filename' => ['relative.php', '/runtime.php', 'must be an absolute path'],
+            'backslash-rooted Unix name' => ['\\runtime.php', '/runtime.php', 'must be an absolute path'],
+            'UNC-looking Unix name' => ['\\\\server\\share\\runtime.php', '/runtime.php', 'must be an absolute path'],
             'NUL byte' => ["/runtime.php\0suffix", '/runtime.php', 'must not contain NUL bytes'],
         ];
     }
