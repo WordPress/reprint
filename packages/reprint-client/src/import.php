@@ -10223,6 +10223,8 @@ class ImportClient
     private function remove_local_absolute_path_without_following_symlinks(
         string $local_absolute_path
     ): bool {
+        // A trailing slash makes is_link() inspect a directory link's target.
+        $local_absolute_path = Utils::trim_right_slash($local_absolute_path, Utils::native_path_format());
         if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
             return true;
         }
@@ -10232,6 +10234,7 @@ class ImportClient
         }
 
         if (is_dir($local_absolute_path)) {
+            $this->assert_local_path_within_root($local_absolute_path);
             $entries = @scandir($local_absolute_path);
             if ($entries === false) {
                 return false;
@@ -12069,6 +12072,18 @@ class ImportClient
         if ($is_first) {
             // Reset skip flag for each new file
             $context->skip_current_file = false;
+
+            // Regular files selected by the diff may be delta updates. Links,
+            // directories, and symlinked parents still belong to the local layout.
+            if ($this->fs_root_nonempty_behavior === 'preserve-local'
+                && ( !is_file($local_absolute_path) || is_link($local_absolute_path)
+                    || $this->path_traverses_symlink(dirname($local_absolute_path)) )) {
+                $skip_reason = $this->should_skip_for_preserve_local($path);
+                if ($skip_reason !== null) {
+                    $this->skip_file_chunk($context, $path, $is_last, $skip_reason);
+                    return;
+                }
+            }
 
             if (
                 (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
