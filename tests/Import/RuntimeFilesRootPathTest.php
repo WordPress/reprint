@@ -216,6 +216,30 @@ final class RuntimeFilesRootPathTest extends TestCase
         $this->assertFileDoesNotExist($this->root . '/outside.txt');
     }
 
+    public function testPreflightDownloadsRuntimeFilesWithARelativeStateDirectory(): void
+    {
+        $previous_working_directory = getcwd();
+        chdir($this->root);
+        try {
+            $client = new \ImportClient(
+                $this->target_url . '&' . http_build_query([
+                    'requested_path' => base64_encode('/runtime.php'),
+                ]),
+                'state',
+                $this->filesystem_root,
+                ['allow_http' => true],
+            );
+            $client->run_preflight();
+        } finally {
+            chdir($previous_working_directory);
+        }
+
+        $this->assertSame(
+            'runtime file at root',
+            file_get_contents($this->state_directory . '/runtime_files/runtime.php'),
+        );
+    }
+
     public function testPreflightKeepsDownloadingAfterAnUnrequestedFile(): void
     {
         $client = new \ImportClient(
