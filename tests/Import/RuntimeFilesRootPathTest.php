@@ -146,6 +146,76 @@ final class RuntimeFilesRootPathTest extends TestCase
         ];
     }
 
+    /** @dataProvider windows_runtime_traversal_paths */
+    public function testWindowsPreflightRejectsRuntimePathsOutsideTheDownloadDirectory(string $remote_path): void
+    {
+        if (DIRECTORY_SEPARATOR !== '\\') {
+            $this->markTestSkipped('This regression requires native Windows path handling.');
+        }
+
+        file_put_contents($this->root . '/outside.txt', 'keep this local file');
+        $client = new \ImportClient(
+            $this->target_url . '&' . http_build_query([
+                'returned_path' => base64_encode($remote_path),
+                'requested_path' => base64_encode($remote_path),
+            ]),
+            $this->state_directory,
+            $this->filesystem_root,
+            ['allow_http' => true],
+        );
+
+        $failure = null;
+        try {
+            $client->run_preflight();
+        } catch (\InvalidArgumentException $exception) {
+            $failure = $exception;
+        }
+
+        $this->assertSame('keep this local file', file_get_contents($this->root . '/outside.txt'));
+        $this->assertDirectoryDoesNotExist($this->state_directory . '/runtime_files-sibling');
+        $this->assertSame(['.', '..'], scandir($this->state_directory . '/runtime_files'));
+        $this->assertNotNull($failure, 'A runtime path outside the download directory must stop preflight.');
+        $this->assertStringContainsString('outside filesystem root', $failure->getMessage());
+        $this->assertStringContainsString('runtime_files', $failure->getMessage());
+        $this->assertCount(2, file($this->request_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+    }
+
+    /** @return array<string,array{string}> Unix source paths which escape on Windows. */
+    public static function windows_runtime_traversal_paths(): array
+    {
+        return [
+            'backslash parent segments' => ['/a\\..\\..\\..\\outside.txt'],
+            'mixed separators' => ['/a\\../..\\../outside.txt'],
+            'sibling with matching prefix' => ['/a\\..\\..\\runtime_files-sibling\\outside.txt'],
+        ];
+    }
+
+    public function testUnixRuntimePathsKeepBackslashesAsFilenameBytes(): void
+    {
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('Backslashes are filename bytes only on Unix clients.');
+        }
+
+        $remote_path = '/a\\..\\..\\..\\outside.txt';
+        $client = new \ImportClient(
+            $this->target_url . '&' . http_build_query([
+                'returned_path' => base64_encode($remote_path),
+                'requested_path' => base64_encode($remote_path),
+            ]),
+            $this->state_directory,
+            $this->filesystem_root,
+            ['allow_http' => true],
+        );
+
+        $client->run_preflight();
+
+        $this->assertSame(
+            'runtime file at root',
+            file_get_contents($this->state_directory . '/runtime_files' . $remote_path),
+        );
+        $this->assertFileDoesNotExist($this->root . '/outside.txt');
+    }
+
     public function testPreflightKeepsDownloadingAfterAnUnrequestedFile(): void
     {
         $client = new \ImportClient(
