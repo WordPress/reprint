@@ -9375,11 +9375,6 @@ class ImportClient
                             "Invalid index batch item: path base64 decode failed",
                         );
                     }
-                    Utils::assert_valid_path(
-                        $path,
-                        $this->get_state()->remote_path_format(),
-                        "index batch path",
-                    );
                     foreach ($this->excluded_plugins as $excluded_plugin) {
                         $excluded_source_path = $excluded_plugin['source_path'];
                         if (
@@ -13319,7 +13314,11 @@ class ImportClient
                         $current_chunk = [
                             "headers" => $headers,
                             "index_parser" => new \Reprint\Importer\Protocol\JsonArrayStreamParser(
-                                static function ($entry) use ($context, $headers): void {
+                                function ($entry) use ($context, $headers): void {
+                                    // Check batch paths even when this caller ignores index entries.
+                                    if (is_array($entry) && isset($entry["path"]) && $entry["path"] !== "") {
+                                        $this->assert_valid_received_path($entry["path"], "index batch path");
+                                    }
                                     if ($context->on_chunk) {
                                         ( $context->on_chunk )([
                                             "headers" => $headers,
@@ -13429,7 +13428,7 @@ class ImportClient
     }
 
     /**
-     * Validate one base64-encoded entry path before dispatching its part.
+     * Validate one base64-encoded entry path under source and client separators before dispatch.
      *
      * @param mixed  $encoded_path Path field received in a header or JSON body.
      * @param string $label        Name of the received path field.
@@ -13443,7 +13442,13 @@ class ImportClient
         }
         // Runtime-file requests also come from the source's preflight response,
         // so matching a request does not replace path validation.
-        Utils::assert_valid_path($path, $this->get_state()->remote_path_format(), $label);
+        $remote_path_format = $this->get_state()->remote_path_format();
+        Utils::assert_valid_path($path, $remote_path_format, $label);
+        // Backslashes in Unix names become separators on Windows clients.
+        // Check those components too, without changing the received name.
+        if ($remote_path_format === 'unix' && Utils::native_path_format() === 'windows') {
+            Utils::assert_valid_path(str_replace('\\', '/', $path), 'unix', "{$label} on this client");
+        }
     }
 
     /**
