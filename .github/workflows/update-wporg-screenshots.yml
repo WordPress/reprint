@@ -1,0 +1,71 @@
+name: Update WordPress.org screenshots
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release-wporg
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  screenshots:
+    name: Publish screenshots and captions
+    if: github.repository == 'WordPress/reprint' && github.triggering_actor == 'adamziel' && github.ref == 'refs/heads/trunk'
+    runs-on: ubuntu-latest
+    environment: svn
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout screenshots and captions
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /.wordpress-org/
+            /reprint-server-wp/readme.txt
+          sparse-checkout-cone-mode: false
+
+      - name: Download the published readme
+        run: |
+          curl -fsSL https://plugins.svn.wordpress.org/reprint/trunk/readme.txt -o readme.txt
+          STABLE_TAG="$(sed -n 's/^Stable tag: //p' readme.txt | tr -d '\r')"
+          if ! [[ "$STABLE_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The published readme must name a stable version; observed '$STABLE_TAG'."
+            exit 1
+          fi
+          curl -fsSL "https://plugins.svn.wordpress.org/reprint/tags/$STABLE_TAG/readme.txt" -o readme.txt
+
+      - name: Update screenshot captions
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          pattern = r'(?ms)^== Screenshots ==\n.*?(?=^== |\Z)'
+          maintained = Path('reprint-server-wp/readme.txt').read_text()
+          screenshots = re.search(pattern, maintained)
+          if screenshots is None:
+              raise SystemExit('The maintained readme has no Screenshots section.')
+          section = screenshots.group().rstrip() + '\n\n'
+          published_path = Path('readme.txt')
+          published = published_path.read_text()
+          # Keep the live version, requirements, and all other sections unchanged.
+          if re.search(pattern, published):
+              updated = re.sub(pattern, lambda match: section, published)
+          else:
+              updated = published.rstrip() + '\n\n' + section
+          published_path.write_text(updated)
+          PY
+
+      - name: Publish screenshots and captions
+        uses: 10up/action-wordpress-plugin-asset-update@2480306f6f693672726d08b5917ea114cb2825f7 # 2.2.0
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          SLUG: reprint
+          ASSETS_DIR: .wordpress-org
+          IGNORE_OTHER_FILES: 'true'

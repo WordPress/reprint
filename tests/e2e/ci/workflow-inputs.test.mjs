@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -125,6 +125,59 @@ test('WordPress.org accepts only stable version tags', async () => {
     } finally {
         await rm(directory, { recursive: true, force: true });
     }
+});
+
+test('WordPress.org screenshot updates use the release queue and cannot publish plugin code', async () => {
+    const source = await readFile(new URL('update-wporg-screenshots.yml', workflows), 'utf8');
+    const release = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
+    assert.match(source, /^  workflow_dispatch:$/m);
+    assert.doesNotMatch(source, /^  (push|pull_request|workflow_call):/m);
+    assert.match(source, /github\.repository == 'WordPress\/reprint' && github\.triggering_actor == 'adamziel' && github\.ref == 'refs\/heads\/trunk'/);
+    assert.match(source, /^    environment: svn$/m);
+    assert.equal(source.match(/^  group: (.+)$/m)[1], release.match(/^  group: (.+)$/m)[1]);
+    assert.match(source, /cancel-in-progress: false/);
+    assert.match(source, /persist-credentials: false/);
+    assert.match(source, /IGNORE_OTHER_FILES: 'true'/);
+    assert.match(source, /ASSETS_DIR: \.wordpress-org/);
+    assert.match(source, /SVN_USERNAME: \$\{\{ secrets\.SVN_USERNAME \}\}/);
+    assert.match(source, /SVN_PASSWORD: \$\{\{ secrets\.SVN_PASSWORD \}\}/);
+});
+
+test('WordPress.org screenshot captions preserve the published readme and replace earlier captions', async () => {
+    const source = await readFile(new URL('update-wporg-screenshots.yml', workflows), 'utf8');
+    const step = source.split(/(?=^      - )/m).find((part) => part.includes('name: Update screenshot captions'));
+    const command = step.split('        run: |\n')[1].replace(/^ {10}/gm, '');
+    const directory = await mkdtemp(join(tmpdir(), 'reprint-screenshot-readme-'));
+    const published = '=== Reprint ===\nStable tag: 0.11.3\nRequires PHP: 7.2\n\n== Description ==\nPublished description.\n\n== Changelog ==\nPublished changelog.\n';
+    const screenshots = '== Screenshots ==\n\n1. Authorize a tool to copy your site using a Migration Token.\n';
+    try {
+        await mkdir(join(directory, 'reprint-server-wp'));
+        await writeFile(join(directory, 'reprint-server-wp/readme.txt'), 'Stable tag: 0.11.4-dev\n\n== Description ==\nUnreleased description.\n\n' + screenshots + '\n== Changelog ==\nUnreleased changelog.\n');
+        const output = join(directory, 'readme.txt');
+        for (const input of [published, published + '\n== Screenshots ==\n\n1. Old caption.\n', published.replace('== Changelog ==', '== Screenshots ==\n\n1. Old caption.\n\n== Changelog ==')]) {
+            await writeFile(output, input);
+            await run('bash', ['-e', '-o', 'pipefail', '-c', command], { cwd: directory });
+            const updated = await readFile(output, 'utf8');
+            assert.ok(updated.includes(screenshots));
+            assert.equal(updated.replace(/^== Screenshots ==\n(?:(?!^== ).)*/ms, '').trim(), published.trim());
+            await run('bash', ['-e', '-o', 'pipefail', '-c', command], { cwd: directory });
+            assert.equal(await readFile(output, 'utf8'), updated);
+        }
+        const before = await readFile(output, 'utf8');
+        await writeFile(join(directory, 'reprint-server-wp/readme.txt'), '== Description ==\nNo screenshot captions.\n');
+        await assert.rejects(run('bash', ['-e', '-o', 'pipefail', '-c', command], { cwd: directory }), /no Screenshots section/);
+        assert.equal(await readFile(output, 'utf8'), before);
+    } finally {
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+test('the first WordPress.org screenshot has a matching caption and is a PNG', async () => {
+    const readme = await readFile(new URL('../../../reprint-server-wp/readme.txt', import.meta.url), 'utf8');
+    assert.match(readme, /== Screenshots ==\n\n1\. Authorize a tool to copy your site using a Migration Token\./);
+    const image = await readFile(new URL('../../../.wordpress-org/screenshot-1.png', import.meta.url));
+    assert.equal(image.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert.ok(image.length < 10 * 1024 * 1024);
 });
 
 test('dependency updates enable auto-merge for the generated PR and commit', async () => {
