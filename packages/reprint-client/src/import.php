@@ -37,6 +37,7 @@ use Reprint\Importer\StreamingContext;
 use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 
+use WordPress\Reprint\Server\DatabasePush;
 use WordPress\Reprint\Server\FileIndexProcessor;
 use WordPress\Reprint\Server\Utils;
 
@@ -8284,7 +8285,7 @@ class ImportClient
             }
             $tables->closeCursor();
             if ($options_table_exists) {
-                $options_table = '`' . str_replace('`', '``', $options_table_name) . '`';
+                $options_table = DatabasePush::identifier($options_table_name);
                 if (!$connection->inTransaction()) {
                     $connection->beginTransaction();
                 }
