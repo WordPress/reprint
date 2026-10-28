@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { cpSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { createMysqlConnection, createTempDir, getHarnessKey, runImporter } from '../lib/test-helpers.js';
 import { ensureWpTemplate } from '../lib/site-setup.js';
@@ -181,9 +182,14 @@ async function createTarget(engine, directory = null, sourceDirectory = sourceRo
     return { ...target, directory };
 }
 
-/** Wait for PHP to report the actual OS-assigned port instead of sleeping or reserving one. */
+/** PHP 7.4 rejects port zero. Choose a free port, then wait for PHP's startup message. */
 async function startServer(directory, router) {
-    const child = spawn(nativePhp, ['-S', '127.0.0.1:0', '-t', directory, router], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const listener = createServer();
+    listener.listen(0, '127.0.0.1');
+    await once(listener, 'listening');
+    const port = listener.address().port;
+    await new Promise((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
+    const child = spawn(nativePhp, ['-S', `127.0.0.1:${port}`, '-t', directory, router], { stdio: ['ignore', 'ignore', 'pipe'] });
     servers.push(child);
     let log = '';
     const url = await new Promise((resolve, reject) => {
