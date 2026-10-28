@@ -41,6 +41,19 @@ class PlaygroundCliApplier implements RuntimeApplier
      */
     private const VFS_ROOT = '/wordpress';
 
+    /**
+     * Generate a Playground preview from downloaded site files only.
+     *
+     * @param RuntimeManifest $manifest        Source runtime settings.
+     * @param string          $filesystem_root Downloaded WordPress files.
+     * @param string          $output_dir      Generated runtime directory.
+     * @param array           $options { Playground settings.
+     *
+     *     @type int    $port                Local server port. Default 9400.
+     *     @type string $wordpress_index_php Downloaded WordPress index.php path.
+     * }
+     * @return string[] Runtime generation summary.
+     */
     public function apply(RuntimeManifest $manifest, string $filesystem_root, string $output_dir, array $options = []): array
     {
         $port = (int) ($options['port'] ?? 9400);
@@ -55,10 +68,15 @@ class PlaygroundCliApplier implements RuntimeApplier
         $saved_sqlite = $manifest->sqlite;
         $manifest->sqlite = null;
 
-        // Route handlers that need importer state must use VFS paths inside
-        // Playground. Rewrite those constants and mount the underlying host
-        // files into the VM before we generate runtime.php/start.sh.
-        $extra_mounts = $this->prepare_extra_mounts($manifest);
+        // Playground previews use downloaded files only; do not mount pull state.
+        // TODO: Restore the missing-upload proxy without exposing command state.
+        // Essential-files and incomplete pulls can leave images unavailable until
+        // downloaded. This needs a separate runtime-only status file, updated by
+        // the host as the pull progresses, before the proxy can be enabled again.
+        unset($manifest->constants['REPRINT_PULL_STATE_FILE'], $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL']);
+        $manifest->routes = array_values(array_filter($manifest->routes, static function (array $route): bool {
+            return $route['handler'] !== 'remote-upload-proxy';
+        }));
 
         // 1. Write runtime.php using the VFS path (/wordpress) as fs-root.
         //    Inside Playground, the host's fs-root is mounted at /wordpress,
@@ -98,7 +116,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             $runtime_path,
             $port,
             $options,
-            $extra_mounts,
         );
         write_runtime_file($start_path, $start_script);
         chmod($start_path, 0755);
@@ -114,7 +131,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             $runtime_path,
             $port,
             $options,
-            $extra_mounts,
         );
         write_runtime_file($config_path, json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
         $summary[] = "Wrote {$config_path}";
@@ -141,39 +157,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             '$schema' => 'https://playground.wordpress.net/blueprint-schema.json',
             'landingPage' => '/',
         ];
-    }
-
-    /**
-     * Rewrite host-side runtime helper files to VFS paths and return the
-     * corresponding Playground mounts.
-     *
-     * Some route handlers need files produced outside the mounted WordPress
-     * tree. Playground can only see files that are mounted explicitly, so we
-     * map those constants to /tmp paths in the VM.
-     *
-     * @return string[]
-     */
-    private function prepare_extra_mounts(RuntimeManifest $manifest): array
-    {
-        $mounts = [];
-        $runtime_file_mounts = [
-            'REPRINT_PULL_STATE_FILE'
-                => '/tmp/reprint/state.json',
-        ];
-
-        foreach ($runtime_file_mounts as $constant_name => $vfs_path) {
-            $host_path = $manifest->constants[$constant_name] ?? null;
-            if (!is_string($host_path) || $host_path === '') {
-                continue;
-            }
-
-            $manifest->constants[$constant_name] = $vfs_path;
-            if (file_exists($host_path)) {
-                $mounts[] = $host_path . ':' . $vfs_path;
-            }
-        }
-
-        return $mounts;
     }
 
     /**
@@ -248,8 +231,7 @@ class PlaygroundCliApplier implements RuntimeApplier
         string $output_dir,
         string $runtime_path,
         int $port,
-        array $options,
-        array $extra_mounts = []
+        array $options
     ): array {
         $config = [
             'document_root' => self::VFS_ROOT,
@@ -279,16 +261,6 @@ class PlaygroundCliApplier implements RuntimeApplier
             'target' => self::VFS_ROOT . '/wp-content/mu-plugins/0-playground-runtime.php',
         ];
 
-        // Additional runtime helper files (e.g. state files for the
-        // remote upload proxy).
-        foreach ($extra_mounts as $mount) {
-            [$source, $target] = explode(':', $mount, 2);
-            $config['mounts'][] = [
-                'source' => $source,
-                'target' => $target,
-            ];
-        }
-
         return $config;
     }
 
@@ -305,10 +277,9 @@ class PlaygroundCliApplier implements RuntimeApplier
         string $output_dir,
         string $runtime_path,
         int $port,
-        array $options,
-        array $extra_mounts = []
+        array $options
     ): string {
-        $config = $this->generate_start_config($filesystem_root, $output_dir, $runtime_path, $port, $options, $extra_mounts);
+        $config = $this->generate_start_config($filesystem_root, $output_dir, $runtime_path, $port, $options);
 
         $lines = [];
         $lines[] = '#!/usr/bin/env bash';
@@ -330,9 +301,7 @@ class PlaygroundCliApplier implements RuntimeApplier
             $args[] = '--mount-before-install=' . escapeshellarg($mount['source'] . ':' . $mount['target']);
         }
 
-        // Mount runtime.php as a mu-plugin (0- prefix ensures it loads
-        // first) and any additional runtime helper files (e.g. state
-        // files for the remote upload proxy).
+        // Mount runtime.php as a mu-plugin (0- prefix ensures it loads first).
         foreach ($config['mounts'] as $mount) {
             $args[] = '--mount=' . escapeshellarg($mount['source'] . ':' . $mount['target']);
         }

@@ -62,7 +62,7 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         rmdir($dir);
     }
 
-    public function testPlaygroundMountsProxyStateFileIntoVfs(): void
+    public function testPlaygroundUsesDownloadedFilesWithoutMountingPullState(): void
     {
         $manifest = new \RuntimeManifest('other');
         $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL'] =
@@ -75,6 +75,12 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
             'condition' => 'file_not_found',
             'description' => 'Proxy missing uploads',
         ];
+        $manifest->routes[] = [
+            'handler' => 'wpcloud-thumbnail-generator',
+            'path_pattern' => '/wp-content/uploads/.*',
+            'condition' => 'file_not_found',
+            'description' => 'Generate missing thumbnails',
+        ];
 
         $applier = new \PlaygroundCliApplier();
         $applier->apply($manifest, $this->fsRoot, $this->outputDir, [
@@ -85,23 +91,21 @@ class PlaygroundRemoteUploadProxyRuntimeTest extends TestCase
         $runtime = file_get_contents($this->outputDir . '/runtime.php');
         $startSh = file_get_contents($this->outputDir . '/start.sh');
 
-        $this->assertStringContainsString(
-            "/tmp/reprint/state.json",
-            $runtime,
-        );
+        $this->assertStringNotContainsString('REPRINT_PULL_STATE_FILE', $runtime);
+        $this->assertStringNotContainsString('REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL', $runtime);
+        $this->assertStringNotContainsString('Remote upload proxy failed.', $runtime);
+        $this->assertStringContainsString('On-the-fly thumbnail generation', $runtime);
         $this->assertStringNotContainsString($this->pullStateFile, $runtime);
-        $this->assertStringContainsString(
-            "--mount='" . $this->pullStateFile . ":/tmp/reprint/state.json'",
-            $startSh,
-        );
-        // start.json should contain the same mount as structured data.
+        $this->assertStringNotContainsString($this->pullStateFile, $startSh);
+        $this->assertStringNotContainsString('/tmp/reprint/state.json', $startSh);
+        // start.json should contain the same mounts as structured data.
         $startJson = json_decode(file_get_contents($this->outputDir . '/start.json'), true);
         $this->assertNotNull($startJson, 'start.json should be valid JSON');
 
         $mount_sources = array_column($startJson['mounts'], 'source');
         $mount_targets = array_column($startJson['mounts'], 'target');
-        $this->assertContains($this->pullStateFile, $mount_sources);
-        $this->assertContains('/tmp/reprint/state.json', $mount_targets);
+        $this->assertSame([$this->outputDir . '/runtime.php'], $mount_sources);
+        $this->assertSame(['/wordpress/wp-content/mu-plugins/0-playground-runtime.php'], $mount_targets);
     }
 
     public function testPlaygroundConfigNormalizesATrailingOutputDirectorySlash(): void
