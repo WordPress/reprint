@@ -66,6 +66,46 @@ test('WordPress.org excludes push while the GitHub package retains it', async ()
     }
 });
 
+test('WordPress.org deploy rebuilds rather than publishing a tampered release ZIP', async () => {
+    const workflow = await readFile(join(project, '.github/workflows/release-wporg.yml'), 'utf8');
+    const steps = workflow.split(/(?=^      - )/m);
+    const build = steps.find(step => step.includes('name: Build WordPress.org plugin from tag'));
+    assert.ok(build, 'Deployment must build the plugin from the checked-out tag, not a release asset.');
+    const command = build.split('        run: |\n')[1].replace(/^ {10}/gm, '');
+    const stamp = steps.find(step => step.includes('name: Stamp plugin version from git tag'));
+    const stampCommand = stamp.match(/run: (.+)/)[1];
+    const root = await mkdtemp(join(tmpdir(), 'reprint-deploy-build-'));
+    try {
+        // Use a separate checkout tree so version stamping cannot change maintained source.
+        for (const path of ['bin', 'packages/reprint-server', 'reprint-server-wp', 'LICENSE']) {
+            await cp(join(project, path), join(root, path), {
+                recursive: true,
+                filter: source => !source.includes('/vendor'),
+            });
+        }
+        await mkdir(join(root, 'tests'));
+        await cp(join(project, 'tests/server-plugin-package.php'), join(root, 'tests/server-plugin-package.php'));
+        const env = { ...process.env, VERSION: '0.12.0' };
+        await run('bash', ['-e', '-o', 'pipefail', '-c', stampCommand], { cwd: root, env });
+        await run('bash', ['-e', '-o', 'pipefail', '-c', command], { cwd: root, env });
+        const pluginLibrary = join(root, 'reprint/lib.php');
+        const taggedLibrary = await readFile(pluginLibrary, 'utf8');
+        const tamperedLibrary = taggedLibrary + "\ndefine('REPRINT_TAMPERED_RELEASE_ASSET', true);\n";
+        await writeFile(pluginLibrary, tamperedLibrary);
+        // Release assets can be replaced without changing their version or layout.
+        await run('zip', ['-q', 'reprint-wordpress-org.zip', 'reprint/lib.php'], { cwd: root });
+        const asset = await run('unzip', ['-p', 'reprint-wordpress-org.zip', 'reprint/lib.php'], { cwd: root });
+        assert.equal(asset.stdout, tamperedLibrary);
+        await run('php', ['tests/server-plugin-package.php', 'reprint', env.VERSION, 'wordpress-org'], { cwd: root });
+        await rm(join(root, 'reprint'), { recursive: true });
+        await run('bash', ['-e', '-o', 'pipefail', '-c', command], { cwd: root, env });
+        assert.equal(await readFile(pluginLibrary, 'utf8'), taggedLibrary);
+        await run('php', ['tests/server-plugin-package.php', 'reprint', env.VERSION, 'wordpress-org'], { cwd: root });
+    } finally {
+        await rm(root, { recursive: true, force: true });
+    }
+});
+
 test('WordPress.org preparation keeps shared PHP files unchanged', async () => {
     const root = await mkdtemp(join(tmpdir(), 'reprint-build-features-'));
     try {

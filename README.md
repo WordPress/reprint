@@ -257,9 +257,9 @@ bumps `trunk` to the next `-dev` version. Pushing the tag automatically triggers
 the build, which publishes the GitHub Release (`reprint.phar`,
 `reprint-exporter-wp.zip`, and `reprint-wordpress-org.zip`) and the Composer
 packages to Packagist. After the GitHub release is published, **Deploy to
-WordPress.org** downloads and checks the downloads-only
-`reprint-wordpress-org.zip`, then publishes it to the `reprint` SVN repository.
-Draft releases and prereleases are rejected.
+WordPress.org** builds the downloads-only plugin from the release tag, checks
+it, then publishes it to the `reprint` SVN repository. It does not use the ZIP
+attached to the GitHub release. Draft releases and prereleases are rejected.
 
 The deployment job uses the GitHub Actions environment `svn` in
 `WordPress/reprint`. Store its secrets there: `SVN_USERNAME` set to `zieladam`
@@ -278,8 +278,9 @@ reviewers on `svn` if approval must be enforced separately from workflow code.
 
 To publish an existing GitHub release or retry only the SVN deployment, run
 **Deploy to WordPress.org** manually and enter its tag, such as `v0.11.3`.
-The deployment uses that release's ZIP without rebuilding it. The SVN action
-leaves an already-published version unchanged.
+The deployment rebuilds from that tag, so replacing a GitHub release asset
+does not change what it publishes. The SVN action leaves an already-published
+version unchanged.
 
 To update the directory screenshots without releasing plugin code, run
 **Update WordPress.org screenshots** on `trunk`. Only `adamziel` can run it.
