@@ -45,6 +45,10 @@ class ReprintServerPluginPackageTest extends TestCase {
         $this->assertStringContainsString(' * Version: ' . $version . "\n", file_get_contents($plugin_directory . 'index.php'));
         $this->assertStringContainsString("define(__NAMESPACE__ . '\\\\VERSION', '" . $version . "');", file_get_contents($plugin_directory . 'lib.php'));
         $this->assertStringContainsString('Stable tag: ' . $version . "\n", file_get_contents($plugin_directory . 'readme.txt'));
+        $this->assertSame(2, substr_count(
+            file_get_contents($plugin_directory . 'readme.txt'),
+            '[Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/' . $version . '/reprint.phar)'
+        ));
     }
 
     public static function versionProvider(): array {
