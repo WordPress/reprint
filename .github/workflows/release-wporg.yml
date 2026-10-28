@@ -1,0 +1,114 @@
+name: Deploy to WordPress.org
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+    secrets:
+      SVN_USERNAME:
+        required: true
+      SVN_PASSWORD:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to deploy (for example: v0.11.3)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-wporg
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: Deploy plugin to WordPress.org
+    if: github.repository == 'WordPress/reprint'
+    runs-on: ubuntu-latest
+    environment: svn
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check publishing user
+        env:
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          UPSTREAM_TRIGGERING_ACTOR: ${{ github.event.workflow_run.triggering_actor.login }}
+        run: |
+          # Check reruns of both this workflow and the Tag Release workflow.
+          for ACTOR in "$TRIGGERING_ACTOR" "${UPSTREAM_TRIGGERING_ACTOR:-$TRIGGERING_ACTOR}"; do
+            case "$ACTOR" in
+              adamziel) ;;
+              *)
+                echo "::error::Account '$ACTOR' is not allowed to publish Reprint."
+                exit 1
+                ;;
+            esac
+          done
+
+      - name: Resolve release tag
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${RELEASE_TAG#v}"
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release tag '$RELEASE_TAG' must be a stable version such as v0.11.3."
+            exit 1
+          fi
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout release package checks
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
+          persist-credentials: false
+          sparse-checkout: |
+            /LICENSE
+            /packages/reprint-server/src/
+            /reprint-server-wp/
+            /tests/server-plugin-package.php
+          sparse-checkout-cone-mode: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: none
+
+      - name: Download plugin ZIP from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          IS_DRAFT_OR_PRERELEASE="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')"
+          if [ "$IS_DRAFT_OR_PRERELEASE" != false ]; then
+            echo "::error::Release $RELEASE_TAG is a draft or prerelease; only stable releases can be deployed."
+            exit 1
+          fi
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern reprint-wordpress-org.zip \
+            --dir .
+          unzip -q reprint-wordpress-org.zip
+
+      - name: Verify release package
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: php tests/server-plugin-package.php reprint "$VERSION" wordpress-org
+
+      - name: Deploy to WordPress.org
+        uses: 10up/action-wordpress-plugin-deploy@54bd289b8525fd23a5c365ec369185f2966529c2 # 2.3.0
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          SLUG: reprint
+          BUILD_DIR: reprint
