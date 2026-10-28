@@ -8265,6 +8265,40 @@ class ImportClient
             $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
         }
 
+        // Theme roots describe the source filesystem. Remove the saved paths
+        // so WordPress can discover them from the final local layout, without
+        // changing the selected stylesheet, template, or theme settings.
+        // Use the reported prefix rather than guessing wp_ for a non-WordPress dump.
+        $table_prefix = $this->get_state()->preflight_record()['data']['database']['wp']['table_prefix'] ?? null;
+        if (is_string($table_prefix) && $table_prefix !== '') {
+            $options_table_name = $table_prefix . 'options';
+            $options_table_exists = false;
+            $tables = $connection->query('SHOW TABLES');
+            $table_name = $tables->fetchColumn();
+            while ($table_name !== false) {
+                if ($table_name === $options_table_name) {
+                    $options_table_exists = true;
+                    break;
+                }
+                $table_name = $tables->fetchColumn();
+            }
+            $tables->closeCursor();
+            if ($options_table_exists) {
+                $options_table = '`' . str_replace('`', '``', $options_table_name) . '`';
+                if (!$connection->inTransaction()) {
+                    $connection->beginTransaction();
+                }
+                $connection->exec(
+                    "DELETE FROM {$options_table} WHERE option_name IN ("
+                    . "'stylesheet_root', 'template_root', "
+                    . "'_site_transient_theme_roots', '_site_transient_timeout_theme_roots')"
+                );
+                // MySQL dump setup disables autocommit. Persist cleanup before
+                // marking db-apply complete; the DELETE is safe to repeat.
+                $connection->commit();
+            }
+        }
+
         $this->remove_database_import_position_table($connection);
 
         $statements_executed = $this->get_state()->apply->statements_executed;
