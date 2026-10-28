@@ -606,7 +606,7 @@ export function getDbName(siteName) {
 }
 
 /**
- * Compare two databases (table list and row counts).
+ * Compare site-data table lists and row counts, excluding rebuilt WordPress caches.
  */
 export async function compareDatabases(sourceDb, importDb) {
     const sourceConn = await createMysqlConnection(sourceDb);
@@ -631,8 +631,9 @@ export async function compareDatabases(sourceDb, importDb) {
         const rowCounts = {};
         for (const table of sourceNames) {
             if (importNames.includes(table)) {
-                const [[srcRow]] = await sourceConn.query(`SELECT COUNT(*) as cnt FROM \`${table}\``);
-                const [[impRow]] = await importConn.query(`SELECT COUNT(*) as cnt FROM \`${table}\``);
+                const filter = rebuiltWordPressCacheFilter(table);
+                const [[srcRow]] = await sourceConn.query(`SELECT COUNT(*) as cnt FROM \`${table}\`${filter}`);
+                const [[impRow]] = await importConn.query(`SELECT COUNT(*) as cnt FROM \`${table}\`${filter}`);
                 rowCounts[table] = {
                     source: Number(srcRow.cnt),
                     imported: Number(impRow.cnt),
@@ -653,6 +654,22 @@ export async function compareDatabases(sourceDb, importDb) {
         await sourceConn.end();
         await importConn.end();
     }
+}
+
+/**
+ * Exclude only the derived options db-apply rebuilds from site-data comparisons.
+ * Keep full rows in checks that require staging to leave a database untouched.
+ */
+export function rebuiltWordPressCacheFilter(table) {
+    if (table !== 'wp_options') return '';
+    return ` WHERE option_name NOT IN (
+        'stylesheet_root', 'template_root', 'rewrite_rules',
+        '_site_transient_theme_roots', '_site_transient_timeout_theme_roots',
+        '_site_transient_update_core', '_site_transient_timeout_update_core',
+        '_site_transient_update_plugins', '_site_transient_timeout_update_plugins',
+        '_site_transient_update_themes', '_site_transient_timeout_update_themes',
+        '_transient_dirsize_cache', '_transient_timeout_dirsize_cache'
+    )`;
 }
 
 /**

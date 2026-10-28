@@ -49,7 +49,7 @@ const MARKER = '.e2e-provisioned';
  * Download and extract WordPress once, caching at /tmp/wordpress-template.
  * Uses a lock file to prevent races when Node runs test files in parallel.
  */
-async function ensureWpTemplate() {
+export async function ensureWpTemplate() {
     if (existsSync(WP_READY) && readFileSync(WP_READY, 'utf8') === WP_READY_CONTENTS) {
         return;
     }
