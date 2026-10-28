@@ -68,8 +68,11 @@ class PlaygroundCliApplier implements RuntimeApplier
         $saved_sqlite = $manifest->sqlite;
         $manifest->sqlite = null;
 
-        // The upload proxy needs live pull state. Playground previews use
-        // downloaded files only, so neither the proxy nor its state is mounted.
+        // Playground previews use downloaded files only; do not mount pull state.
+        // TODO: Restore the missing-upload proxy without exposing command state.
+        // Essential-files and incomplete pulls can leave images unavailable until
+        // downloaded. This needs a separate runtime-only status file, updated by
+        // the host as the pull progresses, before the proxy can be enabled again.
         unset($manifest->constants['REPRINT_PULL_STATE_FILE'], $manifest->constants['REPRINT_REMOTE_UPLOAD_PROXY_BASE_URL']);
         $manifest->routes = array_values(array_filter($manifest->routes, static function (array $route): bool {
             return $route['handler'] !== 'remote-upload-proxy';
