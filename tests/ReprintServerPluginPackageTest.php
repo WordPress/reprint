@@ -38,19 +38,27 @@ class ReprintServerPluginPackageTest extends TestCase {
     }
 
     /** @dataProvider versionProvider */
-    public function testStampKeepsTheHeaderRuntimeAndReadmeVersionsTogether(string $version): void {
-        exec('bash ' . escapeshellarg($this->project_directory . '/bin/stamp-plugin-version.sh') . ' ' . escapeshellarg($version) . ' 2>&1', $output, $exit_code);
-        $this->assertSame(0, $exit_code, implode("\n", $output));
-        $plugin_directory = $this->project_directory . '/reprint-server-wp/';
-        $this->assertStringContainsString(' * Version: ' . $version . "\n", file_get_contents($plugin_directory . 'index.php'));
-        $this->assertStringContainsString("define(__NAMESPACE__ . '\\\\VERSION', '" . $version . "');", file_get_contents($plugin_directory . 'lib.php'));
-        $this->assertStringContainsString('Stable tag: ' . $version . "\n", file_get_contents($plugin_directory . 'readme.txt'));
+    public function testStampKeepsTheHeaderRuntimeAndReadmeVersionsTogether(string ...$versions): void {
+        foreach ($versions as $version) {
+            $output = [];
+            exec('bash ' . escapeshellarg($this->project_directory . '/bin/stamp-plugin-version.sh') . ' ' . escapeshellarg($version) . ' 2>&1', $output, $exit_code);
+            $this->assertSame(0, $exit_code, implode("\n", $output));
+            $plugin_directory = $this->project_directory . '/reprint-server-wp/';
+            $this->assertStringContainsString(' * Version: ' . $version . "\n", file_get_contents($plugin_directory . 'index.php'));
+            $this->assertStringContainsString("define(__NAMESPACE__ . '\\\\VERSION', '" . $version . "');", file_get_contents($plugin_directory . 'lib.php'));
+            $this->assertStringContainsString('Stable tag: ' . $version . "\n", file_get_contents($plugin_directory . 'readme.txt'));
+            $this->assertSame(2, substr_count(
+                file_get_contents($plugin_directory . 'readme.txt'),
+                '[Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/' . $version . '/reprint.phar)'
+            ));
+        }
     }
 
     public static function versionProvider(): array {
         return [
             'stable release' => ['1.2.3'],
             'development bump' => ['1.2.4-dev'],
+            'successive patch minor and major releases' => ['1.2.3', '1.2.4-dev', '1.2.4', '1.2.4', '1.3.0-dev', '1.3.0', '2.0.0-dev', '2.0.0'],
         ];
     }
 }

@@ -257,9 +257,17 @@ bumps `trunk` to the next `-dev` version. Pushing the tag automatically triggers
 the build, which publishes the GitHub Release (`reprint.phar`,
 `reprint-exporter-wp.zip`, and `reprint-wordpress-org.zip`) and the Composer
 packages to Packagist. After the GitHub release is published, **Deploy to
-WordPress.org** builds the downloads-only plugin from the release tag, checks
-it, then publishes it to the `reprint` SVN repository. It does not use the ZIP
-attached to the GitHub release. Draft releases and prereleases are rejected.
+WordPress.org** builds the client and downloads-only plugin from the release
+tag, checks them, then publishes them to the `reprint` SVN repository. It does
+not use attachments from the GitHub release. Draft releases and prereleases
+are rejected.
+
+The client goes in `downloads/VERSION/reprint.phar`, outside the plugin's
+`trunk` and `tags` folders, so it is not included in plugin installations.
+The plugin page links directly to that release's client on WordPress.org,
+with GitHub as a fallback. The version-stamping script updates the client
+link along with the plugin version. The PHAR is uploaded before the plugin,
+so the download exists before the new readme links to it.
 
 The deployment job uses the GitHub Actions environment `svn` in
 `WordPress/reprint`. Store its secrets there: `SVN_USERNAME` set to `zieladam`
@@ -279,8 +287,8 @@ reviewers on `svn` if approval must be enforced separately from workflow code.
 To publish an existing GitHub release or retry only the SVN deployment, run
 **Deploy to WordPress.org** manually and enter its tag, such as `v0.11.3`.
 The deployment rebuilds from that tag, so replacing a GitHub release asset
-does not change what it publishes. The SVN action leaves an already-published
-version unchanged.
+does not change what it publishes. The client upload can be rerun; the plugin
+deployment action leaves an already-published plugin version unchanged.
 
 To update the directory screenshots without releasing plugin code, run
 **Update WordPress.org screenshots** on `trunk`. Only `adamziel` can run it.

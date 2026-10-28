@@ -80,13 +80,31 @@ jobs:
         with:
           ref: refs/tags/${{ steps.resolve.outputs.tag }}
           persist-credentials: false
+          submodules: true
 
       - name: Set up PHP
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.2'
           coverage: none
+          ini-values: phar.readonly=0
           tools: composer:2.9.7
+
+      - name: Install client dependencies
+        run: composer install --no-dev --no-interaction --prefer-dist
+
+      - name: Build reprint.phar from tag
+        run: ./bin/build-reprint-phar.sh
+
+      - name: Verify release client
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          CLIENT_VERSION="$(php reprint.phar --version)"
+          if [ "$CLIENT_VERSION" != "$RELEASE_TAG" ]; then
+            echo "::error::Client version '$CLIENT_VERSION' does not match release tag '$RELEASE_TAG'."
+            exit 1
+          fi
 
       - name: Stamp plugin version from git tag
         env:
@@ -104,6 +122,41 @@ jobs:
         env:
           VERSION: ${{ steps.resolve.outputs.version }}
         run: php tests/server-plugin-package.php reprint "$VERSION" wordpress-org
+
+      - name: Install SVN
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y subversion
+
+      # Publish the download before the plugin readme can link to it. Keep it
+      # outside trunk and tags so WordPress installations do not receive it.
+      - name: Publish client to SVN
+        env:
+          SVN_USERNAME: ${{ secrets.SVN_USERNAME }}
+          SVN_PASSWORD: ${{ secrets.SVN_PASSWORD }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          svn checkout --depth immediates https://plugins.svn.wordpress.org/reprint "$RUNNER_TEMP/reprint-client-svn"
+          cd "$RUNNER_TEMP/reprint-client-svn"
+          if [ -d downloads ]; then
+            svn update --set-depth immediates downloads
+          else
+            mkdir downloads
+            svn add downloads
+          fi
+          if [ -d "downloads/$VERSION" ]; then
+            svn update --set-depth infinity "downloads/$VERSION"
+          else
+            mkdir "downloads/$VERSION"
+            svn add "downloads/$VERSION"
+          fi
+          cp "$GITHUB_WORKSPACE/reprint.phar" "downloads/$VERSION/reprint.phar"
+          svn add --force "downloads/$VERSION/reprint.phar"
+          svn propset svn:mime-type application/octet-stream "downloads/$VERSION/reprint.phar"
+          if [ -n "$(svn status downloads)" ]; then
+            svn commit downloads -m "Publish Reprint client $VERSION" \
+              --no-auth-cache --non-interactive --username "$SVN_USERNAME" --password "$SVN_PASSWORD"
+          fi
 
       - name: Deploy to WordPress.org
         uses: 10up/action-wordpress-plugin-deploy@54bd289b8525fd23a5c365ec369185f2966529c2 # 2.3.0

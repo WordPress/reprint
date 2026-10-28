@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { test } from 'node:test';
 
@@ -108,6 +109,81 @@ test('WordPress.org permits only adamziel for publishing and upstream reruns bef
         } else {
             await assert.rejects(check, /is not allowed to publish Reprint/);
         }
+    }
+});
+
+test('WordPress.org builds and checks the tagged client before publishing the plugin', async () => {
+    const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
+    assert.match(source, /submodules: true/);
+    assert.match(source, /ini-values: phar\.readonly=0/);
+    const install = source.indexOf('run: composer install --no-dev --no-interaction --prefer-dist');
+    const build = source.indexOf('run: ./bin/build-reprint-phar.sh');
+    const verify = source.indexOf('name: Verify release client');
+    const upload = source.indexOf('name: Publish client to SVN');
+    const deploy = source.indexOf('uses: 10up/action-wordpress-plugin-deploy@');
+    assert.ok(install > 0 && install < build && build < verify && verify < upload && upload < deploy);
+    const step = source.split(/(?=^      - )/m).find(part => part.includes('name: Verify release client'));
+    const command = step.split('        run: |\n')[1].replace(/^ {10}/gm, '');
+    const directory = await mkdtemp(join(tmpdir(), 'reprint-client-version-'));
+    try {
+        for (const version of ['v1.2.3', 'v1.2.2', 'v1.2.3-trunk']) {
+            await writeFile(join(directory, 'reprint.phar'), `<?php echo "${version}\\n";`);
+            const check = run('bash', ['-e', '-o', 'pipefail', '-c', command], {
+                cwd: directory,
+                env: { ...process.env, RELEASE_TAG: 'v1.2.3' },
+            });
+            if (version === 'v1.2.3') {
+                await check;
+            } else {
+                await assert.rejects(check, /does not match release tag/);
+            }
+        }
+    } finally {
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
+test('WordPress.org client uploads stay outside plugin folders and preserve earlier versions', async () => {
+    const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
+    const step = source.split(/(?=^      - )/m).find(part => part.includes('name: Publish client to SVN'));
+    assert.ok(step, 'The release must upload the client to SVN.');
+    const command = step.split('        run: |\n')[1].replace(/^ {10}/gm, '');
+    const directory = await mkdtemp(join(tmpdir(), 'reprint-client-svn-'));
+    try {
+        const repository = join(directory, 'repository');
+        const url = pathToFileURL(repository).href;
+        await run('svnadmin', ['create', repository]);
+        await run('svn', ['mkdir', `${url}/assets`, `${url}/tags`, `${url}/trunk`, '-m', 'Initialize plugin folders']);
+        const environment = {
+            ...process.env,
+            GITHUB_WORKSPACE: directory,
+            RUNNER_TEMP: directory,
+            SVN_USERNAME: 'test-publisher',
+            SVN_PASSWORD: 'test-password',
+        };
+        const upload = command.replace('https://plugins.svn.wordpress.org/reprint', url);
+        assert.notEqual(upload, command, 'The local test must not contact WordPress.org.');
+        for (const version of ['1.2.3', '1.2.3', '1.2.4']) {
+            const before = (await run('svnlook', ['youngest', repository])).stdout.trim();
+            const contents = Buffer.from(`Reprint ${version}\0\xff`, 'latin1');
+            await writeFile(join(directory, 'reprint.phar'), contents);
+            await rm(join(directory, 'reprint-client-svn'), { recursive: true, force: true });
+            await run('bash', ['-e', '-o', 'pipefail', '-c', upload], {
+                cwd: directory,
+                env: { ...environment, VERSION: version },
+            });
+            const client = `${url}/downloads/${version}/reprint.phar`;
+            assert.deepEqual((await run('svn', ['cat', client], { encoding: 'buffer' })).stdout, contents);
+            assert.equal((await run('svn', ['propget', 'svn:mime-type', client])).stdout.trim(), 'application/octet-stream');
+            const after = (await run('svnlook', ['youngest', repository])).stdout.trim();
+            if (version === '1.2.3' && before !== '1') assert.equal(after, before, 'An unchanged rerun must not commit.');
+        }
+        assert.equal((await run('svn', ['cat', `${url}/downloads/1.2.3/reprint.phar`], { encoding: 'buffer' })).stdout.toString('latin1'), 'Reprint 1.2.3\0\xff');
+        for (const folder of ['assets', 'tags', 'trunk']) {
+            assert.equal((await run('svn', ['list', `${url}/${folder}`])).stdout, '', `${folder} must stay unchanged.`);
+        }
+    } finally {
+        await rm(directory, { recursive: true, force: true });
     }
 });
 

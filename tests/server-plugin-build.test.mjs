@@ -85,9 +85,12 @@ test('WordPress.org deploy rebuilds rather than publishing a tampered release ZI
         }
         await mkdir(join(root, 'tests'));
         await cp(join(project, 'tests/server-plugin-package.php'), join(root, 'tests/server-plugin-package.php'));
+        await writeFile(join(root, 'reprint.phar'), 'The client is a separate download, not part of the plugin.');
         const env = { ...process.env, VERSION: '0.12.0' };
         await run('bash', ['-e', '-o', 'pipefail', '-c', stampCommand], { cwd: root, env });
         await run('bash', ['-e', '-o', 'pipefail', '-c', command], { cwd: root, env });
+        assert.doesNotMatch((await run('unzip', ['-Z1', 'reprint-wordpress-org.zip'], { cwd: root })).stdout, /\.phar$/m);
+        assert.ok((await readFile(join(root, 'reprint/readme.txt'), 'utf8')).includes('https://plugins.svn.wordpress.org/reprint/downloads/0.12.0/reprint.phar'));
         const pluginLibrary = join(root, 'reprint/lib.php');
         const taggedLibrary = await readFile(pluginLibrary, 'utf8');
         const tamperedLibrary = taggedLibrary + "\ndefine('REPRINT_TAMPERED_RELEASE_ASSET', true);\n";
