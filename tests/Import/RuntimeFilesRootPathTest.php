@@ -146,6 +146,139 @@ final class RuntimeFilesRootPathTest extends TestCase
         ];
     }
 
+    /**
+     * @group received-paths
+     * @dataProvider received_dot_segment_paths
+     */
+    public function testPreflightRejectsDotSegmentsInReceivedEntries(
+        string $remote_path,
+        string $chunk_type,
+        string $path_header,
+        bool $windows_only
+    ): void {
+        if ($windows_only && DIRECTORY_SEPARATOR !== '\\') {
+            $this->markTestSkipped('Backslash separators require a native Windows client.');
+        }
+
+        $client = new \ImportClient(
+            $this->target_url . '&' . http_build_query([
+                'returned_path' => base64_encode($remote_path),
+                'requested_path' => base64_encode($remote_path),
+                'chunk_type' => $chunk_type,
+                'path_header' => $path_header,
+            ]),
+            $this->state_directory,
+            $this->filesystem_root,
+            ['allow_http' => true],
+        );
+
+        try {
+            $client->run_preflight();
+            $this->fail('A received dot-segment must stop preflight even when it stays inside runtime_files.');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('must not contain dot-segments', $exception->getMessage());
+        }
+
+        $this->assertSame(['.', '..'], scandir($this->state_directory . '/runtime_files'));
+        $this->assertCount(2, file($this->request_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+    }
+
+    /** @return array<string,array> Source path, part type, path header, and Windows-only flag. */
+    public static function received_dot_segment_paths(): array
+    {
+        $cases = [];
+        $paths = [
+            'source parent segment' => ['/a/../runtime.php', false],
+            'source current segment' => ['/a/./runtime.php', false],
+            'client parent segment inside root' => ['/a\\..\\runtime.php', true],
+            'client current segment' => ['/a\\.\\runtime.php', true],
+            'client terminal parent segment' => ['/a\\..', true],
+            'client terminal current segment' => ['/a\\.', true],
+            'client mixed separators' => ['/a\\../b\\runtime.php', true],
+            'client parent segments outside root' => ['/a\\..\\..\\..\\outside.txt', true],
+        ];
+        $fields = [
+            'file' => 'X-File-Path',
+            'directory' => 'X-Directory-Path',
+            'symlink' => 'X-Symlink-Path',
+            'index' => 'X-Index-Path',
+            'missing' => 'X-File-Path',
+            'metadata' => 'X-Filesystem-Root',
+            'index_batch' => '',
+        ];
+        foreach ($paths as $name => [$path, $windows_only]) {
+            foreach ($fields as $chunk_type => $path_header) {
+                $cases[$name . ' in ' . $chunk_type] = [$path, $chunk_type, $path_header, $windows_only];
+            }
+        }
+        return $cases;
+    }
+
+    /**
+     * @group received-paths
+     * @dataProvider literal_dot_paths
+     */
+    public function testReceivedPathValidationKeepsLiteralDotBytes(
+        string $remote_path,
+        string $source_path_format,
+        bool $unix_only
+    ): void {
+        if ($unix_only && DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('These backslashes are filename bytes only on Unix clients.');
+        }
+
+        $client = new \ImportClient(
+            $this->target_url,
+            $this->state_directory,
+            $this->filesystem_root,
+            ['allow_http' => true],
+        );
+        $client->get_state()->set_preflight_record(['data' => ['path_format' => $source_path_format]]);
+
+        $assert_valid_received_path = new \ReflectionMethod($client, 'assert_valid_received_path');
+        $this->assertNull($assert_valid_received_path->invoke(
+            $client,
+            base64_encode($remote_path),
+            'received entry path',
+        ));
+    }
+
+    /** @return array<string,array> Source path, source format, and Unix-only flag. */
+    public static function literal_dot_paths(): array
+    {
+        return [
+            'dots within a filename' => ['/scripts/runtime..php', 'unix', false],
+            'dotfile' => ['/scripts/.runtime.php', 'unix', false],
+            'dots within a directory name' => ['/scripts/a..b/runtime.php', 'unix', false],
+            'Unix double-leading slash' => ['//scripts/runtime.php', 'unix', false],
+            'Windows drive root' => ['D:\\scripts\\runtime..php', 'windows', false],
+            'Windows share root' => ['\\\\server\\share\\scripts\\.runtime.php', 'windows', false],
+            'Unix backslash parent bytes' => ['/a\\..\\runtime.php', 'unix', true],
+            'Unix backslash current bytes' => ['/a\\.\\runtime.php', 'unix', true],
+        ];
+    }
+
+    /** @group received-paths */
+    public function testRelativeSymlinkTargetsMayKeepDotSegments(): void
+    {
+        $client = new \ImportClient(
+            $this->target_url . '&' . http_build_query([
+                'returned_path' => base64_encode('/runtime.php'),
+                'requested_path' => base64_encode('/runtime.php'),
+                'chunk_type' => 'symlink',
+                'path_header' => 'X-Symlink-Path',
+                'symlink_target' => base64_encode('../shared/runtime.php'),
+            ]),
+            $this->state_directory,
+            $this->filesystem_root,
+            ['allow_http' => true],
+        );
+
+        $client->run_preflight();
+
+        $this->assertCount(3, file($this->request_log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES));
+    }
+
     public function testPreflightKeepsDownloadingAfterAnUnrequestedFile(): void
     {
         $client = new \ImportClient(
@@ -292,13 +425,18 @@ $write_part = static function (array $headers, string $body = '') use ($boundary
 };
 
 header('Content-Type: multipart/mixed; boundary=' . $boundary);
-if (isset($_GET['chunk_type'])) {
+if (isset($_GET['chunk_type']) && $_GET['chunk_type'] !== 'file') {
     $headers = array('X-Chunk-Type' => $_GET['chunk_type']);
     $body = '';
     if ($_GET['chunk_type'] === 'error') {
         $body = json_encode(array('path' => $returned_path, 'error_type' => 'file_missing'));
+    } elseif ($_GET['chunk_type'] === 'index_batch') {
+        $body = json_encode(array(array('path' => $returned_path, 'ctime' => 1, 'size' => 0, 'type' => 'file')));
     } else {
         $headers[$_GET['path_header']] = $returned_path;
+        if (isset($_GET['symlink_target'])) {
+            $headers['X-Symlink-Target'] = $_GET['symlink_target'];
+        }
     }
     $write_part($headers, $body);
     $write_part(array('X-Chunk-Type' => 'completion', 'X-Status' => 'complete'));
