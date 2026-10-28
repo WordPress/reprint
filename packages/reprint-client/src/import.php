@@ -8266,9 +8266,10 @@ class ImportClient
             $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
         }
 
-        // Theme roots describe the source filesystem. Remove the saved paths
-        // so WordPress can discover them from the final local layout, without
-        // changing the selected stylesheet, template, or theme settings.
+        // Theme roots and directory sizes describe the source filesystem;
+        // URL routes and update checks may describe code omitted locally.
+        // Let WordPress rebuild them without changing the selected stylesheet,
+        // template, permalink structure, or other site settings.
         // Use the reported prefix rather than guessing wp_ for a non-WordPress dump.
         $table_prefix = $this->get_state()->preflight_record()['data']['database']['wp']['table_prefix'] ?? null;
         if (is_string($table_prefix) && $table_prefix !== '') {
@@ -8291,8 +8292,12 @@ class ImportClient
                 }
                 $connection->exec(
                     "DELETE FROM {$options_table} WHERE option_name IN ("
-                    . "'stylesheet_root', 'template_root', "
-                    . "'_site_transient_theme_roots', '_site_transient_timeout_theme_roots')"
+                    . "'stylesheet_root', 'template_root', 'rewrite_rules', "
+                    . "'_site_transient_theme_roots', '_site_transient_timeout_theme_roots', "
+                    . "'_site_transient_update_core', '_site_transient_timeout_update_core', "
+                    . "'_site_transient_update_plugins', '_site_transient_timeout_update_plugins', "
+                    . "'_site_transient_update_themes', '_site_transient_timeout_update_themes', "
+                    . "'_transient_dirsize_cache', '_transient_timeout_dirsize_cache')"
                 );
                 // MySQL dump setup disables autocommit. Persist cleanup before
                 // marking db-apply complete; the DELETE is safe to repeat.

@@ -8,7 +8,7 @@ use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
-class DatabaseThemeRootsCleanupTest extends TestCase {
+class DatabaseCacheCleanupTest extends TestCase {
 
     private string $temp_dir;
     private ?PDO $mysql_root = null;
@@ -51,7 +51,7 @@ class DatabaseThemeRootsCleanupTest extends TestCase {
     /**
      * @dataProvider cleanupProvider
      */
-    public function testClearsImportedRootsWithoutChangingTheSelectedTheme(
+    public function testClearsImportedCachesWithoutChangingSiteSettings(
         string $engine,
         string $prefix,
         ?string $interrupt_at
@@ -71,7 +71,7 @@ class DatabaseThemeRootsCleanupTest extends TestCase {
             $this->assertSame('database-cleanup', $state['active_resumable_command']['current_stage']);
             $database = $this->open_database($options);
             if ($interrupt_at === 'after') {
-                $this->assert_theme_options($database, $prefix);
+                $this->assert_site_options($database, $prefix);
             } else {
                 $this->assertSame('/srv/shared-themes', $database->query(
                     "SELECT option_value FROM `{$prefix}options` WHERE option_name = 'stylesheet_root'"
@@ -90,7 +90,7 @@ class DatabaseThemeRootsCleanupTest extends TestCase {
         $client->run($options);
 
         $database = $this->open_database($options);
-        $this->assert_theme_options($database, $prefix);
+        $this->assert_site_options($database, $prefix);
         $this->assertSame(1, (int) $database->query('SELECT COUNT(*) FROM cleanup_probe')->fetchColumn());
         $this->assertSame(
             '/srv/another-site/themes',
@@ -131,7 +131,9 @@ class DatabaseThemeRootsCleanupTest extends TestCase {
         $client->run($options);
 
         $database = $this->open_database($options);
-        $this->assertSame(8, (int) $database->query('SELECT COUNT(*) FROM wp_options')->fetchColumn());
+        $this->assertSame('/srv/shared-themes', $database->query(
+            "SELECT option_value FROM wp_options WHERE option_name = 'stylesheet_root'"
+        )->fetchColumn());
     }
 
     private function new_client(?string $prefix): \ImportClient
@@ -234,24 +236,61 @@ class DatabaseThemeRootsCleanupTest extends TestCase {
                 . "('template_root', '/srv/parent-themes'),\n"
                 . "('_site_transient_theme_roots', 'a:0:{}'),\n"
                 . "('_site_transient_timeout_theme_roots', '9999999999'),\n"
+                . "('rewrite_rules', 'a:1:{s:6:\"^old/$\";s:18:\"index.php?old=true\";}'),\n"
+                . "('_site_transient_update_core', 'O:8:\"stdClass\":0:{}'),\n"
+                . "('_site_transient_timeout_update_core', '9999999999'),\n"
+                . "('_site_transient_update_plugins', 'O:8:\"stdClass\":0:{}'),\n"
+                . "('_site_transient_timeout_update_plugins', '9999999999'),\n"
+                . "('_site_transient_update_themes', 'O:8:\"stdClass\":0:{}'),\n"
+                . "('_site_transient_timeout_update_themes', '9999999999'),\n"
+                . "('_transient_dirsize_cache', 'a:1:{s:17:\"/srv/site/uploads\";i:4096;}'),\n"
+                . "('_transient_timeout_dirsize_cache', '9999999999'),\n"
                 . "('stylesheet', 'shop-child'),\n"
                 . "('template', 'shop-parent'),\n"
                 . "('theme_mods_shop-child', 'a:1:{s:5:\"color\";s:4:\"blue\";}'),\n"
-                . "('_site_transient_update_themes', 'a:0:{}');\n";
+                . "('permalink_structure', '/%postname%/'),\n"
+                . "('upload_path', '/srv/custom-media'),\n"
+                . "('upload_url_path', 'https://media.example/uploads'),\n"
+                . "('cron', 'a:1:{s:7:\"version\";i:2;}'),\n"
+                . "('core_updater.lock', '1234567890'),\n"
+                . "('auto_updater.lock', '1234567890'),\n"
+                . "('_transient_doing_cron', '1234567890'),\n"
+                . "('_transient_timeout_doing_cron', '9999999999'),\n"
+                . "('auto_update_plugins', 'a:1:{i:0;s:19:\"akismet/akismet.php\";}'),\n"
+                . "('auto_update_themes', 'a:1:{i:0;s:11:\"shop-parent\";}'),\n"
+                . "('_transient_plugin_cache', 'keep-me'),\n"
+                . "('_transient_timeout_plugin_cache', '9999999999'),\n"
+                . "('_site_transient_plugin_cache', 'keep-me-too'),\n"
+                . "('_site_transient_timeout_plugin_cache', '9999999999');\n";
         }
         $sql .= '-- REPRINT SQL GROUP 82d10e87-ec1b-4aa2-a522-963dc82b6bb1 '
             . base64_encode(json_encode(['current_table' => null])) . "\n";
         file_put_contents($this->temp_dir . '/db.sql', $sql);
     }
 
-    private function assert_theme_options(PDO $database, string $prefix): void
+    private function assert_site_options(PDO $database, string $prefix): void
     {
+        $options = $database->query("SELECT option_name, option_value FROM `{$prefix}options`")
+            ->fetchAll(PDO::FETCH_KEY_PAIR);
+        ksort($options);
         $this->assertSame([
-            '_site_transient_update_themes' => 'a:0:{}',
+            '_site_transient_plugin_cache' => 'keep-me-too',
+            '_site_transient_timeout_plugin_cache' => '9999999999',
+            '_transient_doing_cron' => '1234567890',
+            '_transient_plugin_cache' => 'keep-me',
+            '_transient_timeout_doing_cron' => '9999999999',
+            '_transient_timeout_plugin_cache' => '9999999999',
+            'auto_update_plugins' => 'a:1:{i:0;s:19:"akismet/akismet.php";}',
+            'auto_update_themes' => 'a:1:{i:0;s:11:"shop-parent";}',
+            'auto_updater.lock' => '1234567890',
+            'core_updater.lock' => '1234567890',
+            'cron' => 'a:1:{s:7:"version";i:2;}',
+            'permalink_structure' => '/%postname%/',
             'stylesheet' => 'shop-child',
             'template' => 'shop-parent',
             'theme_mods_shop-child' => 'a:1:{s:5:"color";s:4:"blue";}',
-        ], $database->query("SELECT option_name, option_value FROM `{$prefix}options` ORDER BY option_name")
-            ->fetchAll(PDO::FETCH_KEY_PAIR));
+            'upload_path' => '/srv/custom-media',
+            'upload_url_path' => 'https://media.example/uploads',
+        ], $options);
     }
 }
