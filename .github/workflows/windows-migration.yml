@@ -31,6 +31,23 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $true
           ./tests/e2e/windows/prepare-path-namespaces.ps1 "$env:GITHUB_WORKSPACE/namespace-cases.json"
           php tests/e2e/windows/verify-source-reader.php
+  runtime-downloads:
+    name: Keep runtime downloads inside their directory
+    runs-on: windows-2025
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, curl, mbstring
+          coverage: none
+      - run: composer install --no-interaction --prefer-dist
+      - name: Check runtime-file paths on a native Windows client
+        working-directory: tests
+        run: php ../vendor/bin/phpunit Import/RuntimeFilesRootPathTest.php
   windows-to-linux:
     needs: php-reader
     name: Pull Windows WordPress into Linux (${{ matrix.source }})
@@ -107,7 +124,7 @@ jobs:
 
   ci-result:
     name: Windows migration result
-    needs: [php-reader, windows-to-linux]
+    needs: [php-reader, runtime-downloads, windows-to-linux]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:

@@ -3520,12 +3520,17 @@ class ImportClient
                 implode(", ", $files),
         );
 
-        $downloaded = $this->fetch_files_into($runtime_dir, $files);
+        $resolved_runtime_directory = realpath($runtime_dir);
+        if ($resolved_runtime_directory === false) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local filesystem path shown as CLI text.
+            throw new RuntimeException("Failed to resolve runtime files directory: {$runtime_dir}");
+        }
+        $downloaded = $this->fetch_files_into($resolved_runtime_directory, $files);
         $this->audit_log("RUNTIME FILES | downloaded {$downloaded}/" . count($files) . " script(s)");
     }
 
     /**
-     * Download a list of remote absolute paths into $path,
+     * Download a list of remote absolute paths into local absolute $path,
      * preserving their directory structure.
      *
      * Issues one file_fetch request per parent directory so that an
@@ -3537,10 +3542,14 @@ class ImportClient
     private function fetch_files_into(string $path, array $files): int
     {
         $by_dir = [];
-        foreach ($files as $f) {
-            $parent = dirname($f);
-            if ($parent !== "" && $parent !== ".") {
-                $by_dir[Utils::trim_right_slash($parent, $this->get_state()->remote_path_format())][] = $f;
+        $remote_path_format = $this->get_state()->remote_path_format();
+        foreach ($files as $remote_absolute_path) {
+            // dirname() uses the client's separators, not the source's.
+            $normalized_remote_path = Utils::normalize_path_separators($remote_absolute_path, $remote_path_format);
+            $last_separator = strrpos($normalized_remote_path, '/');
+            if ($last_separator !== false) {
+                $parent = substr($normalized_remote_path, 0, $last_separator + 1);
+                $by_dir[Utils::trim_right_slash($parent, $remote_path_format)][] = $remote_absolute_path;
             }
         }
 
@@ -3591,6 +3600,13 @@ class ImportClient
                     $is_first = ($chunk["headers"]["x-first-chunk"] ?? "0") === "1";
                     $is_last = ($chunk["headers"]["x-last-chunk"] ?? "0") === "1";
                     $local_absolute_path = wp_join_unix_paths($path, $remote_absolute_path);
+                    try {
+                        $this->assert_local_path_within_root($local_absolute_path, $path);
+                    } catch (\RuntimeException $exception) {
+                        // Invalid source paths must stop preflight, unlike inaccessible files.
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Path validation failure rendered as CLI text.
+                        throw new \InvalidArgumentException($exception->getMessage(), 0, $exception);
+                    }
 
                     if ($is_first) {
                         if ($context->file_handle) {
@@ -12815,22 +12831,25 @@ class ImportClient
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path errors are CLI text, not HTML.
     /**
-     * Refuses a local path which resolves outside the filesystem root.
+     * Refuses a local path which resolves outside the given root.
      *
      * Check parents before replacements and the complete retained path before
      * timestamp changes. Earlier source parts may have changed either path.
      *
-     * @param string $local_absolute_path Local path or parent about to be used.
+     * @param string      $local_absolute_path Local path or parent about to be used.
+     * @param string|null $root                Allowed absolute directory; defaults to the filesystem root.
      * @throws RuntimeException When resolution fails or the path is outside the root.
      */
-    private function assert_local_path_within_root(string $local_absolute_path): void
+    private function assert_local_path_within_root(string $local_absolute_path, ?string $root = null): void
     {
         $resolved_path = $this->resolve_local_path_with_missing_tail($local_absolute_path);
-        $root = Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format());
+        $root = $root === null
+            ? Utils::normalize_path_separators($this->filesystem_root, Utils::native_path_format())
+            : $this->resolve_local_path_with_missing_tail($root);
         if (!Utils::path_is_same_as_or_descendant_of($resolved_path, $root)) {
             throw new RuntimeException(
                 "Refusing to change path outside filesystem root: {$local_absolute_path} " .
-                "(resolves to {$resolved_path})"
+                "(resolves to {$resolved_path}; allowed root: {$root})"
             );
         }
     }
