@@ -64,26 +64,7 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout release package checks
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ steps.resolve.outputs.tag }}
-          persist-credentials: false
-          sparse-checkout: |
-            /LICENSE
-            /packages/reprint-server/src/
-            /reprint-server-wp/
-            /tests/server-plugin-package.php
-          sparse-checkout-cone-mode: false
-
-      - name: Set up PHP
-        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
-        with:
-          php-version: '8.2'
-          coverage: none
-          tools: none
-
-      - name: Download plugin ZIP from release
+      - name: Check published release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
@@ -93,10 +74,30 @@ jobs:
             echo "::error::Release $RELEASE_TAG is a draft or prerelease; only stable releases can be deployed."
             exit 1
           fi
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern reprint-wordpress-org.zip \
-            --dir .
+
+      - name: Checkout release tag
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: refs/tags/${{ steps.resolve.outputs.tag }}
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.2'
+          coverage: none
+          tools: composer:2.9.7
+
+      - name: Stamp plugin version from git tag
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: ./bin/stamp-plugin-version.sh "$VERSION"
+
+      # Release attachments can change without changing the tag. Build from
+      # source so replacing an attachment cannot change the SVN package.
+      - name: Build WordPress.org plugin from tag
+        run: |
+          ./bin/build-server-plugin.sh reprint-wordpress-org.zip wordpress-org
           unzip -q reprint-wordpress-org.zip
 
       - name: Verify release package

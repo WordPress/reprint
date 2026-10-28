@@ -45,7 +45,7 @@ test('build and benchmark jobs leave publishing to separate jobs', async () => {
     }
 });
 
-test('WordPress.org deploys the checked downloads-only ZIP after GitHub publishing', async () => {
+test('WordPress.org rebuilds the tagged downloads-only plugin after GitHub publishing', async () => {
     const release = await readFile(new URL('release.yml', workflows), 'utf8');
     const deploy = release.slice(release.indexOf('\n  deploy-wporg:'));
     assert.match(deploy, /needs: \[release, publish\]/);
@@ -60,10 +60,17 @@ test('WordPress.org deploys the checked downloads-only ZIP after GitHub publishi
         assert.ok(deploy.includes(name + ': ${{ secrets.' + name + ' }}'));
     }
     assert.match(source, /group: release-wporg\n  cancel-in-progress: false/);
-    assert.match(source, /ref: \$\{\{ steps\.resolve\.outputs\.tag \}\}/);
+    assert.match(source, /ref: refs\/tags\/\$\{\{ steps\.resolve\.outputs\.tag \}\}/);
     assert.match(source, /persist-credentials: false/);
     assert.match(source, /--json isDraft,isPrerelease/);
-    assert.match(source, /--pattern reprint-wordpress-org\.zip/);
+    assert.doesNotMatch(source, /gh release download|browser_download_url|sparse-checkout/);
+    assert.match(source, /tools: composer:2\.9\.7/);
+    const stamp = source.indexOf('run: ./bin/stamp-plugin-version.sh "$VERSION"');
+    const build = source.indexOf('./bin/build-server-plugin.sh reprint-wordpress-org.zip wordpress-org');
+    const extract = source.indexOf('unzip -q reprint-wordpress-org.zip');
+    const verify = source.indexOf('run: php tests/server-plugin-package.php');
+    const publish = source.indexOf('uses: 10up/action-wordpress-plugin-deploy@');
+    assert.ok(stamp > 0 && stamp < build && build < extract && extract < verify && verify < publish);
     assert.doesNotMatch(source, /reprint-exporter-wp\.zip/);
     assert.match(source, /php tests\/server-plugin-package\.php reprint "\$VERSION" wordpress-org/);
     assert.match(source, /SLUG: reprint\n          BUILD_DIR: reprint/);
