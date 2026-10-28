@@ -144,8 +144,11 @@ require __DIR__ . '/wp-load.php';
 header('Content-Type: application/json');
 $table_rows = [];
 foreach ($wpdb->tables() as $table) {
-    // Loading WordPress may create or expire caches on either host.
-    $where = $table === $wpdb->options ? " WHERE option_name NOT REGEXP '^_(site_)?transient_'" : '';
+    // WordPress creates or expires transients on either host. db-apply also
+    // invalidates cached theme roots and URL routes before the target boots.
+    $where = $table === $wpdb->options
+        ? " WHERE option_name NOT REGEXP '^_(site_)?transient_' AND option_name NOT IN ('stylesheet_root', 'template_root', 'rewrite_rules')"
+        : '';
     $table_rows[$table] = (int) $wpdb->get_var("SELECT COUNT(*) FROM `$table`$where");
 }
 echo json_encode([
