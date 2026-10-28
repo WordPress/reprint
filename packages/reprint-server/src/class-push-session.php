@@ -1480,6 +1480,7 @@ final class PushSession {
         if ($identity['dev'] !== $parent_device) {
             $this->throw_same_device('delete', $relative_path, $this->work_device(), $identity['dev']);
         }
+        $this->assert_docroot_identity_is_not_excluded('delete', $requested_path, $relative_path, $identity, true);
         if ($identity['type'] === 'file' || $identity['type'] === 'symlink') {
             if (!@unlink($absolute_path)) {
                 throw new PushException(self::ERROR_FILESYSTEM, 'Could not remove document-root ' . $identity['type'] . ' ' . base64_encode($relative_path) . '.');
@@ -1722,6 +1723,9 @@ final class PushSession {
         if (!in_array($observed_type, $expected_docroot_types, true)) {
             $this->throw_unexpected_docroot_mutation('install', $path, $path, $expected_type, $expected_docroot_types, $docroot_identity);
         }
+        if ($docroot_identity !== null) {
+            $this->assert_docroot_identity_is_not_excluded('install', $path, $path, $docroot_identity, true);
+        }
         if ($expected_type === 'directory' && $observed_type === 'directory' && $this->first_directory_entry($docroot_value_path) !== null) {
             $this->throw_unexpected_docroot_mutation('install', $path, $path, $expected_type, ['absent'], $docroot_identity);
         }
@@ -1790,9 +1794,48 @@ final class PushSession {
             if ($identity['dev'] !== $device) {
                 $this->throw_same_device($operation, $relative, $work_device, $identity['dev']);
             }
+            $this->assert_docroot_identity_is_not_excluded($operation, $path, $relative, $identity, false);
             $device = $identity['dev'];
         }
         return $device;
+    }
+
+    /**
+     * Rejects a document-root entry which the filesystem resolves to an excluded path.
+     *
+     * The excluded-path assertions compare raw path bytes, but a case-insensitive
+     * or normalizing filesystem can resolve a differently spelled path to the
+     * same entry. Commit therefore also compares the device and inode of each
+     * document-root entry it traverses or changes with each existing excluded
+     * path. A requested value or delete entry also may not be an ancestor of an
+     * excluded path, matching assert_path_does_not_overlap_excluded_paths().
+     *
+     * @param string $operation Install or delete operation being checked.
+     * @param string $path Requested document-root-relative path.
+     * @param string $conflict_path Document-root-relative path of $identity.
+     * @param array $identity Observed lstat identity of $conflict_path.
+     * @phpstan-param array{type:string,dev:int,ino:int,size:int,ctime:int} $identity
+     * @param bool $reject_excluded_ancestors Whether an ancestor of an excluded path also conflicts.
+     */
+    private function assert_docroot_identity_is_not_excluded(string $operation, string $path, string $conflict_path, array $identity, bool $reject_excluded_ancestors): void {
+        foreach ($this->excluded_paths as $excluded_path) {
+            $segments = explode('/', $excluded_path);
+            $last_segment_index = count($segments) - 1;
+            $excluded_relative = '';
+            foreach ($segments as $segment_index => $segment) {
+                $excluded_relative = Utils::wp_join_unix_paths($excluded_relative, $segment);
+                if (!$reject_excluded_ancestors && $segment_index < $last_segment_index) {
+                    continue;
+                }
+                $excluded_identity = $this->lstat_path($this->docroot_path($excluded_relative));
+                if ($excluded_identity === null) {
+                    break;
+                }
+                if ($excluded_identity['dev'] === $identity['dev'] && $excluded_identity['ino'] === $identity['ino']) {
+                    $this->throw_unexpected_docroot_mutation($operation, $path, $conflict_path, null, [], $identity);
+                }
+            }
+        }
     }
 
     /**

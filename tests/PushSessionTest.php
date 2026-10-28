@@ -335,6 +335,66 @@ final class PushSessionTest extends TestCase {
         $this->assertSame('preserved', file_get_contents($excluded_directory . '/sentinel.php'));
     }
 
+    public function testCommitRejectsAnInstallBelowAnExcludedPathSpelledDifferently(): void {
+        $excluded_directory = $this->excluded_directory_with_a_second_spelling();
+        $push_session = $this->push_session('2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a');
+
+        $this->push_file($push_session, 'WP-CONTENT/plugins/reprint/public-keys.php', 'replaced');
+        try {
+            $this->commit_all($push_session);
+            $this->fail('A differently spelled excluded path was changed.');
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
+            $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
+            $this->assertSame(base64_encode('WP-CONTENT/plugins/reprint'), $exception->get_context()['conflict_path_b64']);
+        }
+        $this->assertSame('preserved', file_get_contents($excluded_directory . '/public-keys.php'));
+    }
+
+    /** @dataProvider differentlySpelledExcludedPathOrAncestorProvider */
+    public function testCommitRejectsDeletingAnExcludedPathOrItsAncestorSpelledDifferently(string $path): void {
+        $excluded_directory = $this->excluded_directory_with_a_second_spelling();
+        $push_session = $this->push_session('2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b');
+        $this->push_parts($push_session, [[
+            'headers' => [
+                'X-Chunk-Type' => 'delete-list',
+                'X-Delete-Offset' => '0',
+                'X-Delete-Complete' => '1',
+            ],
+            'body' => $path . "\0",
+        ]]);
+        try {
+            $this->commit_all($push_session);
+            $this->fail('A differently spelled excluded path was deleted.');
+        } catch (\WordPress\Reprint\Server\PushException $exception) {
+            $this->assertSame('unexpected_docroot_mutation', $exception->get_error_code());
+            $this->assertSame(base64_encode($path), $exception->get_context()['conflict_path_b64']);
+        }
+        $this->assertSame('preserved', file_get_contents($excluded_directory . '/public-keys.php'));
+        $this->assertFileExists($this->docroot . '/WP-CONTENT/plugins/other/file.php');
+    }
+
+    /** @return array<string,array{string}> */
+    public static function differentlySpelledExcludedPathOrAncestorProvider(): array {
+        return [
+            'excluded path' => ['WP-CONTENT/plugins/reprint'],
+            'ancestor of an excluded path' => ['WP-CONTENT/plugins'],
+        ];
+    }
+
+    /**
+     * Gives the excluded wp-content/plugins/reprint a second spelling, as a
+     * case-insensitive filesystem does for WP-CONTENT/plugins/reprint.
+     */
+    private function excluded_directory_with_a_second_spelling(): string {
+        $excluded_directory = $this->docroot . '/WP-CONTENT/plugins/reprint';
+        mkdir($excluded_directory, 0700, true);
+        mkdir($this->docroot . '/WP-CONTENT/plugins/other', 0700);
+        file_put_contents($excluded_directory . '/public-keys.php', 'preserved');
+        file_put_contents($this->docroot . '/WP-CONTENT/plugins/other/file.php', 'preserved');
+        symlink('WP-CONTENT', $this->docroot . '/wp-content');
+        return $excluded_directory;
+    }
+
     public function testReprintDirectoryBelowDocumentRootIsExcludedAndRootCanBeReopened(): void {
         $reprint_directory = $this->docroot . '/private-work';
         $push_session = \WordPress\Reprint\Server\PushSession::create($reprint_directory, $this->docroot, [], str_repeat('a', 32));
