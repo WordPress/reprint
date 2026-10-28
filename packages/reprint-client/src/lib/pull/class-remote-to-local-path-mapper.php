@@ -76,7 +76,8 @@ final class RemoteToLocalPathMapper
      * Maps one remote absolute path to its local absolute path.
      *
      * @param string $remote_absolute_path Remote absolute path.
-     * @return string Local absolute path under the filesystem root.
+     * @return string Local absolute path under the filesystem root, without
+     *                trailing separators except at a filesystem root.
      */
     public function remote_path_to_local_path(string $remote_absolute_path): string
     {
@@ -101,7 +102,7 @@ final class RemoteToLocalPathMapper
             }
         }
         if ($local_absolute_path !== null) {
-            return $local_absolute_path;
+            return Utils::trim_right_slash($local_absolute_path, Utils::native_path_format());
         }
 
         $local_relative_path = $remote_absolute_path;
@@ -116,13 +117,16 @@ final class RemoteToLocalPathMapper
                 $this->original_remote_absolute_path_roots
             )
         ) {
-            return wp_join_unix_paths(
-                $this->local_followed_symlinks_root,
-                $local_relative_path
+            return Utils::trim_right_slash(
+                wp_join_unix_paths($this->local_followed_symlinks_root, $local_relative_path),
+                Utils::native_path_format()
             );
         }
 
-        return wp_join_unix_paths($this->filesystem_root, $local_relative_path);
+        return Utils::trim_right_slash(
+            wp_join_unix_paths($this->filesystem_root, $local_relative_path),
+            Utils::native_path_format()
+        );
     }
 
     /** Returns the source format required to validate entries before mapping them. */

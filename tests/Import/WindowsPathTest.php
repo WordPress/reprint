@@ -53,6 +53,42 @@ class WindowsPathTest extends TestCase
         ];
     }
 
+    /**
+     * All placement branches must return a leaf path, not a request to follow a link.
+     *
+     * @dataProvider trailing_slash_paths
+     * @param string $remote_path Remote path with trailing separators.
+     * @param string $path_format Source path format.
+     * @param string $expected_path Expected path below the local root.
+     */
+    public function testMappedPathsDropTrailingSeparators(string $remote_path, string $path_format, string $expected_path): void
+    {
+        foreach (['default', 'remapped', 'followed'] as $placement) {
+            $mapper = new RemoteToLocalPathMapper('/local', $path_format, [],
+                $placement === 'remapped' ? [Utils::trim_right_slash($remote_path, $path_format) => '/local/placed/'] : [],
+                $placement === 'followed' ? '/local/followed' : null);
+            $expected = $placement === 'remapped' ? '/local/placed' : '/local' . ( $placement === 'followed' ? '/followed' : '' ) . $expected_path;
+            $this->assertSame($expected, $mapper->remote_path_to_local_path($remote_path), $placement);
+        }
+        $root_mapper = new RemoteToLocalPathMapper('/', $path_format, [], [Utils::trim_right_slash($remote_path, $path_format) => '/']);
+        $this->assertSame('/', $root_mapper->remote_path_to_local_path($remote_path));
+    }
+
+    /** @return array<string,array{string,string,string}> Remote path, source format, and local relative spelling. */
+    public static function trailing_slash_paths(): array
+    {
+        return [
+            'Unix' => ['/site/plugins/', 'unix', '/site/plugins'],
+            'repeated Unix slashes' => ['/site/plugins///', 'unix', '/site/plugins'],
+            'Unix backslash is a name byte' => ['/site/plugin\\/', 'unix', '/site/plugin\\'],
+            'Unix root' => ['/', 'unix', ''],
+            'Windows drive' => ['D:\\site\\plugins\\', 'windows', '/D:/site/plugins'],
+            'Windows drive root' => ['D:\\', 'windows', '/D:'],
+            'Windows share' => ['\\\\server\\share\\plugins\\', 'windows', '/UNC/SERVER/SHARE/plugins'],
+            'Windows share root' => ['\\\\server\\share\\', 'windows', '/UNC/SERVER/SHARE'],
+        ];
+    }
+
     /** Both spellings must describe the same selected Windows subtree. */
     public function test_compares_windows_paths_at_component_boundaries(): void
     {

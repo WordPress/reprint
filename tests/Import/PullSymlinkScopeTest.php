@@ -387,16 +387,151 @@ final class PullSymlinkScopeTest extends TestCase
         $this->assertSame('keep', file_get_contents($this->root . '/outside/parent/child/keep.txt'));
     }
 
-    public function testRemoteDeletionCanUnlinkAnExternalLeafWithoutFollowingIt(): void
+    /** @dataProvider deletion_path_suffixes */
+    public function testRemoteDeletionCanUnlinkAnExternalLeafWithoutFollowingIt(string $suffix): void
     {
         file_put_contents($this->root . '/outside/keep.txt', 'keep');
         symlink($this->root . '/outside', $this->root . '/files/alias');
         $client = $this->receive([]);
-        $removed = ( new \ReflectionMethod($client, 'remove_remote_path_locally') )->invoke($client, '/alias');
+        $removed = ( new \ReflectionMethod($client, 'remove_remote_path_locally') )->invoke($client, '/alias' . $suffix);
 
+        $this->assertFileExists($this->root . '/outside/keep.txt');
+        $this->assertSame('keep', file_get_contents($this->root . '/outside/keep.txt'));
         $this->assertSame($this->root . '/files/alias', $removed);
         $this->assertFalse(is_link($removed));
+    }
+
+    /** @dataProvider deletion_path_suffixes */
+    public function testLocalRemovalInspectsTheLinkWithoutTrailingSlashes(string $suffix): void
+    {
+        file_put_contents($this->root . '/outside/keep.txt', 'keep');
+        symlink($this->root . '/outside', $this->root . '/files/alias');
+        $client = $this->receive([]);
+        $removed = ( new \ReflectionMethod($client, 'remove_local_absolute_path_without_following_symlinks') )
+            ->invoke($client, $this->root . '/files/alias' . $suffix);
+
+        $this->assertTrue($removed);
+        $this->assertFileExists($this->root . '/outside/keep.txt');
         $this->assertSame('keep', file_get_contents($this->root . '/outside/keep.txt'));
+        $this->assertFalse(is_link($this->root . '/files/alias'));
+    }
+
+    /** @return array<string,list<string>> Ordinary and trailing-slash deletion paths. */
+    public static function deletion_path_suffixes(): array
+    {
+        return ['plain' => [''], 'trailing slash' => ['/'], 'repeated slashes' => ['///']];
+    }
+
+    /**
+     * A source entry may spell a pre-existing directory link with trailing slashes.
+     *
+     * @dataProvider trailing_slash_replacements
+     * @param string $type Received replacement type.
+     * @param bool $external Whether the existing link points outside the local root.
+     * @param string $suffix Trailing separators supplied by the source.
+     */
+    public function testTrailingSlashesReplaceTheLinkRatherThanItsTarget(string $type, bool $external, string $suffix): void
+    {
+        $target = $this->root . ( $external ? '/outside' : '/files/target' );
+        mkdir($target . '/nested', 0700, true);
+        file_put_contents($target . '/keep.txt', 'keep');
+        file_put_contents($target . '/nested/keep.txt', 'nested keep');
+        symlink($target, $this->root . '/files/alias');
+        file_put_contents($this->root . '/files/replacement', 'new target');
+        $headers = ['X-Chunk-Type' => $type, 'X-' . ucfirst($type) . '-Path' => base64_encode('/alias' . $suffix)];
+        $body = '';
+        if ($type === 'file') {
+            $body = str_repeat('replacement', 10000);
+            $headers += ['X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => (string) strlen($body)];
+        } elseif ($type === 'symlink') {
+            $headers['X-Symlink-Target'] = base64_encode('replacement');
+        }
+        $failure = null;
+        try {
+            $this->receive([['headers' => $headers, 'body' => $body]]);
+        } catch (\Throwable $error) {
+            $failure = $error;
+        }
+
+        $this->assertFileExists($target . '/keep.txt', 'Replacing a link must not remove its target contents.');
+        $this->assertSame('keep', file_get_contents($target . '/keep.txt'));
+        $this->assertSame('nested keep', file_get_contents($target . '/nested/keep.txt'));
+        $this->assertNull($failure, $failure ? $failure->getMessage() : '');
+        $local_path = $this->root . '/files/alias';
+        $this->assertSame($type === 'symlink', is_link($local_path));
+        if ($type === 'directory') {
+            $this->assertDirectoryExists($local_path);
+            $this->assertFileDoesNotExist($local_path . '/keep.txt');
+        } else {
+            $this->assertSame($type === 'file' ? $body : 'new target', file_get_contents($local_path));
+        }
+    }
+
+    /** @return array<string,array{string,bool,string}> Replacement type, target location, and path suffix. */
+    public static function trailing_slash_replacements(): array
+    {
+        $cases = [];
+        foreach (['file', 'directory', 'symlink'] as $type) {
+            foreach ([false, true] as $external) {
+                foreach (['/', '///'] as $suffix) {
+                    $cases[$type . ( $external ? ' external ' : ' internal ' ) . $suffix] = [$type, $external, $suffix];
+                }
+            }
+        }
+        return $cases;
+    }
+
+    /**
+     * Preserve-local must protect links even when the source sends an unrequested file.
+     *
+     * @dataProvider preserved_link_paths
+     * @param string $type Existing local path type.
+     * @param string $suffix Source spelling of the file path.
+     */
+    public function testPreserveLocalSkipsFilePartsForLinksAndDirectories(string $type, string $suffix): void
+    {
+        $target = $this->root . ( $type === 'external link' ? '/outside' : '/files/target' );
+        mkdir($target . '/nested', 0700, true);
+        file_put_contents($target . '/nested/keep.txt', 'keep');
+        $remote_path = '/alias' . $suffix;
+        $local_path = $this->root . '/files/alias';
+        if ($type === 'directory') {
+            rename($target, $local_path);
+            $target = $local_path;
+        } elseif ($type === 'parent link') {
+            symlink('target', $local_path);
+            $remote_path = '/alias/new.txt' . $suffix;
+        } else {
+            symlink($type === 'dangling link' ? 'missing' : $target, $local_path);
+        }
+        $body = str_repeat('ignored', 20000);
+        $client = $this->receive([
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode($remote_path),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '0', 'X-File-Size' => (string) ( strlen($body) + 4 )], 'body' => $body],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode($remote_path),
+                'X-First-Chunk' => '0', 'X-Last-Chunk' => '1', 'X-File-Size' => (string) ( strlen($body) + 4 )], 'body' => 'tail'],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/safe.txt'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '4', 'X-File-Ctime' => '1234567890'], 'body' => 'safe'],
+        ], true);
+
+        $this->assertSame($type !== 'directory', is_link($local_path));
+        $this->assertSame('keep', file_get_contents($target . '/nested/keep.txt'));
+        $this->assertFileDoesNotExist($target . '/new.txt');
+        $this->assertSame('safe', file_get_contents($this->root . '/files/safe.txt'));
+        $this->assertSame(4, $client->get_state()->fetch->file_bytes_in_batch);
+        $this->assertStringContainsString('PRESERVE-LOCAL', file_get_contents($this->root . '/state/audit.log'));
+    }
+
+    /** @return array<string,array{string,string}> Existing path type and trailing separators. */
+    public static function preserved_link_paths(): array
+    {
+        $cases = [];
+        foreach (['external link', 'internal link', 'dangling link', 'directory', 'parent link'] as $type) {
+            foreach (['', '/', '///'] as $suffix) {
+                $cases[$type . ' ' . $suffix] = [$type, $suffix];
+            }
+        }
+        return $cases;
     }
 
     /**
@@ -407,15 +542,19 @@ final class PullSymlinkScopeTest extends TestCase
      *     @type array $headers Protocol header strings for each part.
      *     @type string $body Optional part bytes.
      * }
+     * @param bool $preserve Whether this pull keeps existing hosting paths.
      * @return \ImportClient Client retaining the saved file-fetch state.
      * @phpstan-param list<array{headers:array<string,string>,body?:string}> $parts
      */
-    private function receive(array $parts): \ImportClient
+    private function receive(array $parts, bool $preserve = false): \ImportClient
     {
         $parts[] = ['headers' => ['X-Chunk-Type' => 'completion', 'X-Status' => 'complete']];
         file_put_contents($this->root . '/parts.json', json_encode($parts));
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         ( new \ReflectionMethod($client, 'initialize_credential') )->invoke($client, true, ['secret' => 'test-secret']);
+        if ($preserve) {
+            ( new \ReflectionProperty($client, 'fs_root_nonempty_behavior') )->setValue($client, 'preserve-local');
+        }
         ( new \ReflectionMethod($client, 'fetch_file_batch') )->invoke($client, [], null);
         return $client;
     }
