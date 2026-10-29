@@ -2,6 +2,12 @@
 
 Clone any WordPress site over HTTP. One command pulls the files, database, and server config, then starts a local copy you can open in your browser.
 
+## Documentation
+
+Start with the [Reprint handbook](docs/handbook/) for a first local copy,
+authorizing another tool, requirements, and troubleshooting. The integration
+and implementation details below remain available for existing users.
+
 ## Quick start
 
 ### 1. Install the Reprint Server plugin on the source site
