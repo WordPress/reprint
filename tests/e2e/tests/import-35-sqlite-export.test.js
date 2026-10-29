@@ -80,6 +80,9 @@ async function ensureSqliteSite(site, pluginVersion, multisite = false) {
                 "define('DB_USER', 'unused');",
                 "define('DB_PASSWORD', 'unused');",
                 "define('DB_CHARSET', 'utf8mb4');",
+                // WP-CLI can spawn HTTP cron requests before multisite conversion
+                // and SQLite permissions are ready. Keep this source stable.
+                "define('DISABLE_WP_CRON', true);",
                 // The multisite matrix also imports into MariaDB, which does
                 // not support MySQL 8's default utf8mb4_0900_ai_ci collation.
                 `define('DB_COLLATE', '${multisite ? 'utf8mb4_unicode_ci' : ''}');`,
@@ -177,6 +180,12 @@ describe('Import: SQLite Export', () => {
     function importUrl(siteName = site) {
         return `${getSiteUrl(siteName)}&directory=${getSiteDir(siteName)}`;
     }
+
+    it.each([site, legacySite])('keeps background cron disabled on %s', (siteName) => {
+        const result = runWp(getSiteDir(siteName), ['eval',
+            'echo defined("DISABLE_WP_CRON") && DISABLE_WP_CRON ? "disabled" : "enabled";']);
+        assert.equal(result, 'disabled');
+    });
 
     it('preflight reports SQLite engine', async () => {
         const response = await apiRequest(site, 'preflight');
