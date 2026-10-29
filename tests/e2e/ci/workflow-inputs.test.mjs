@@ -278,6 +278,25 @@ test('dependency updates enable auto-merge for the generated PR and commit', asy
     }
 });
 
+test('release version bumps start normal PR checks and wait for auto-merge without retriggering the tag', async () => {
+    const source = await readFile(new URL('tag-release.yml', workflows), 'utf8');
+    const steps = source.split(/(?=^      - )/m);
+    const checkout = steps.find(part => part.includes('uses: actions/checkout@'));
+    assert.doesNotMatch(checkout, /token:/, 'The tag push must keep GITHUB_TOKEN to avoid a second release run.');
+    const tag = steps.findIndex(part => part.includes('name: Create and push tag'));
+    const bump = steps.findIndex(part => part.includes('name: Bump trunk to next dev version'));
+    assert.ok(tag >= 0 && bump > tag);
+    const step = steps[bump];
+    assert.match(step, /continue-on-error: true/);
+    assert.match(step, /GH_TOKEN: \$\{\{ secrets\.GH_TOKEN \}\}/);
+    assert.match(step, /\.\/bin\/stamp-plugin-version\.sh "\$NEXT_DEV"/);
+    assert.match(step, /gh pr create/);
+    assert.match(step, /--base trunk/);
+    assert.match(step, /--head "\$BRANCH"/);
+    assert.match(step, /gh pr merge --squash --auto --delete-branch --match-head-commit "\$\(git rev-parse HEAD\)" "\$BRANCH"/);
+    assert.doesNotMatch(step, /--admin|sleep|for attempt/);
+});
+
 test('every PR workflow reports a final result covering all of its PR jobs', async () => {
     for (const filename of await readdir(workflows)) {
         if (!filename.endsWith('.yml')) continue;

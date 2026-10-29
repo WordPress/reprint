@@ -253,8 +253,11 @@ PHP file in that generated artifact with PHP 5.6.
 To cut a release, run the **Tag Release** workflow from the GitHub Actions tab
 (`.github/workflows/tag-release.yml`) and pick a bump type (`patch`, `minor`,
 `major`, or `custom`). It creates and pushes the `vMAJOR.MINOR.PATCH` tag, then
-bumps `trunk` to the next `-dev` version. Pushing the tag automatically triggers
-the build, which publishes the GitHub Release (`reprint.phar`,
+opens a PR for the next `-dev` version using the repository's `GH_TOKEN` secret.
+That starts normal PR checks; auto-merge updates `trunk` after they pass.
+A failed version-bump check leaves the PR open without blocking the release.
+Completing **Tag Release** starts the build, which publishes the GitHub
+Release (`reprint.phar`,
 `reprint-exporter-wp.zip`, and `reprint-wordpress-org.zip`) and the Composer
 packages to Packagist. After the GitHub release is published, **Deploy to
 WordPress.org** builds the client and downloads-only plugin from the release

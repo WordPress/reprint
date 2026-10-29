@@ -96,15 +96,14 @@ jobs:
       # workflow: the Release and Publish workflows trigger on this one concluding
       # success, and a red run here skips both of them.
       #
-      # Trunk rejects direct pushes ("Changes must be made through a pull
-      # request"), so the stamp lands as a pull request. The trunk ruleset
-      # requires no approving reviews and no status checks, so the same run
-      # merges it immediately. GitHub computes mergeability asynchronously and
-      # reports UNKNOWN for the first moment after creation, hence the retry.
+      # Trunk rejects direct pushes, so the stamp lands as a pull request.
+      # Open it with the repository token so CI runs without an approval prompt,
+      # then let auto-merge wait for the required checks. The tag push above
+      # keeps GITHUB_TOKEN so Release and Publish run only through workflow_run.
       - name: Bump trunk to next dev version
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -127,13 +126,4 @@ jobs:
             --title "Bump plugin version to $NEXT_DEV after v$VERSION release" \
             --body "Stamps the next development version into reprint-server-wp/ after the v$VERSION tag. Opened by the Tag Release workflow."
 
-          for attempt in 1 2 3 4 5; do
-            if gh pr merge "$BRANCH" --squash --delete-branch; then
-              exit 0
-            fi
-            echo "Merge attempt $attempt failed; retrying in 10s"
-            sleep 10
-          done
-
-          echo "::error::Could not merge $BRANCH. Merge it by hand to stamp $NEXT_DEV on trunk."
-          exit 1
+          gh pr merge --squash --auto --delete-branch --match-head-commit "$(git rev-parse HEAD)" "$BRANCH"
