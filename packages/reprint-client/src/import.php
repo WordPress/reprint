@@ -37,6 +37,7 @@ use Reprint\Importer\StreamingContext;
 use Reprint\Importer\TransientInterruptionException;
 use Reprint\Importer\Tuning\AdaptiveTuner;
 
+use WordPress\Reprint\Server\DatabasePush;
 use WordPress\Reprint\Server\FileIndexProcessor;
 use WordPress\Reprint\Server\Utils;
 
@@ -8263,6 +8264,45 @@ class ImportClient
         );
         foreach ($deactivated as $basename) {
             $this->audit_log("DB-APPLY | deactivated plugin {$basename} (path-incompatible siteurl)");
+        }
+
+        // Theme roots and directory sizes describe the source filesystem;
+        // URL routes and update checks may describe code omitted locally.
+        // Let WordPress rebuild them without changing the selected stylesheet,
+        // template, permalink structure, or other site settings.
+        // Use the reported prefix rather than guessing wp_ for a non-WordPress dump.
+        $table_prefix = $this->get_state()->preflight_record()['data']['database']['wp']['table_prefix'] ?? null;
+        if (is_string($table_prefix) && $table_prefix !== '') {
+            $options_table_name = $table_prefix . 'options';
+            $options_table_exists = false;
+            $tables = $connection->query('SHOW TABLES');
+            $table_name = $tables->fetchColumn();
+            while ($table_name !== false) {
+                if ($table_name === $options_table_name) {
+                    $options_table_exists = true;
+                    break;
+                }
+                $table_name = $tables->fetchColumn();
+            }
+            $tables->closeCursor();
+            if ($options_table_exists) {
+                $options_table = DatabasePush::identifier($options_table_name);
+                if (!$connection->inTransaction()) {
+                    $connection->beginTransaction();
+                }
+                $connection->exec(
+                    "DELETE FROM {$options_table} WHERE option_name IN ("
+                    . "'stylesheet_root', 'template_root', 'rewrite_rules', "
+                    . "'_site_transient_theme_roots', '_site_transient_timeout_theme_roots', "
+                    . "'_site_transient_update_core', '_site_transient_timeout_update_core', "
+                    . "'_site_transient_update_plugins', '_site_transient_timeout_update_plugins', "
+                    . "'_site_transient_update_themes', '_site_transient_timeout_update_themes', "
+                    . "'_transient_dirsize_cache', '_transient_timeout_dirsize_cache')"
+                );
+                // MySQL dump setup disables autocommit. Persist cleanup before
+                // marking db-apply complete; the DELETE is safe to repeat.
+                $connection->commit();
+            }
         }
 
         $this->remove_database_import_position_table($connection);

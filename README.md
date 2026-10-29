@@ -953,6 +953,15 @@ are recalculated, JSON is re-encoded, and block comment attributes are updated.
 Rewriting allows at most 16 active calls through nested encoded strings. Values
 below that depth stay unchanged; shallower sibling values are still rewritten.
 
+After applying the dump, `db-apply` removes `stylesheet_root`, `template_root`,
+`rewrite_rules`, the database-backed site transients `theme_roots`, `update_core`,
+`update_plugins`, and `update_themes`, and the `dirsize_cache` transient from the
+imported WordPress options table. Transient timeout records are removed too.
+WordPress can rebuild these caches for the local files and plugins; later update
+checks may make network requests. The selected theme, theme settings, permalink
+structure, custom upload paths, scheduled jobs, and locks stay unchanged. This
+cleanup does not load WordPress or flush an external object cache.
+
 For MySQL and MariaDB targets, `db-apply` and `db-pull --sql-output=mysql`
 check named full-text parsers in exported `CREATE TABLE` statements against
 the target's active full-text parser plugins. If a parser is unavailable,

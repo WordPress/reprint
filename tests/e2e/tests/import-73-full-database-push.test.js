@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
     createMysqlConnection, createTempDir, getDbName,
-    getHarnessKey, getSiteDir, getSiteUrl, getSiteSecret, runImporter,
+    getHarnessKey, getSiteDir, getSiteUrl, getSiteSecret, runImporter, rebuiltWordPressCacheFilter,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { createSqlFidelityData } from '../lib/sql-fidelity-data.js';
@@ -223,10 +223,12 @@ async function exercisePush(createData, { builder = false } = {}) {
     const committed = push(stateDirectory, [`--commit=${ready.review}`, '--writers-stopped']);
     assert.equal(committed.status, 0, committed.stderr + committed.stdout);
     assert.equal(resultJson(committed).phase, 'committed');
-    const expected = await snapshot(referenceDatabase);
-    const actual = await snapshot(targetDatabase);
+    // db-apply deliberately discards source caches; push leaves cache clearing
+    // to its caller. Compare every application row without requiring old caches.
+    const expected = await snapshot(referenceDatabase, true);
+    const actual = await snapshot(targetDatabase, true);
     delete actual.unrelated_records;
-    assert.deepEqual(actual, expected, 'Every site schema and row must match the pull/apply result');
+    assert.deepEqual(actual, expected, 'Every site schema and application row must match the pull/apply result');
     assert.deepEqual(await snapshot(sourceDatabase), sourceBefore, 'Commit must not change the local source');
     const retained = resultJson(committed).old_tables;
     assert.ok(retained.length > 0, 'Old tables must remain until explicit cleanup');
@@ -287,7 +289,8 @@ function resultJson(result) {
     return result_;
 }
 
-async function snapshot(database) {
+/** Hash complete rows; omit rebuilt caches only for the pull-versus-push comparison. */
+async function snapshot(database, omitRebuiltCaches = false) {
     const connection = await createMysqlConnection(database);
     try {
         await connection.query("SET time_zone='+00:00'");
@@ -301,7 +304,8 @@ async function snapshot(database) {
             // Hash every complete row, including NULL markers and duplicate
             // multiplicity. No row-count-only or sampled data comparison.
             const fields = columns.map(column => `HEX(CAST(\`${column.Field}\` AS BINARY))`).join(',');
-            const [hashes] = await connection.query(`SELECT SHA2(JSON_ARRAY(${fields}),256) AS digest FROM \`${table}\` ORDER BY digest`);
+            const filter = omitRebuiltCaches ? rebuiltWordPressCacheFilter(table) : '';
+            const [hashes] = await connection.query(`SELECT SHA2(JSON_ARRAY(${fields}),256) AS digest FROM \`${table}\`${filter} ORDER BY digest`);
             result[table] = { schema: schema['Create Table'], rows: hashes.map(row_ => row_.digest) };
         }
         return result;
