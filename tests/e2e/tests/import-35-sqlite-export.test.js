@@ -100,6 +100,10 @@ async function ensureSqliteSite(site, pluginVersion, multisite = false) {
                 '',
             ].join('\n'));
 
+            // The installer's permalink probe reaches FPM before wp-config.php
+            // becomes a multisite config. Do not retain that intermediate code.
+            writeFileSync(join(siteDir, '.user.ini'), 'opcache.enable=0\n');
+
             // Install WordPress into the SQLite database.
             // With the db.php drop-in in place, wp core install creates
             // all standard WP tables in the .ht.sqlite file rather than MySQL.
@@ -185,6 +189,13 @@ describe('Import: SQLite Export', () => {
         const result = runWp(getSiteDir(siteName), ['eval',
             'echo defined("DISABLE_WP_CRON") && DISABLE_WP_CRON ? "disabled" : "enabled";']);
         assert.equal(result, 'disabled');
+    });
+
+    it.each([site, legacySite])('does not keep cached fixture PHP on %s', async (siteName) => {
+        const response = await apiRequest(siteName, 'preflight');
+        assert.equal(response.status, 200);
+        assert.ok([undefined, '', '0', false].includes(response.json.runtime.ini_get_all['opcache.enable']),
+            'SQLite fixture PHP must not remain cached across config changes.');
     });
 
     it('preflight reports SQLite engine', async () => {
