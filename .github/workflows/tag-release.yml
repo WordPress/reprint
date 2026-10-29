@@ -97,9 +97,10 @@ jobs:
       # success, and a red run here skips both of them.
       #
       # Trunk rejects direct pushes, so the stamp lands as a pull request.
-      # Open it with the repository token so CI runs without an approval prompt,
-      # then let auto-merge wait for the required checks. The tag push above
-      # keeps GITHUB_TOKEN so Release and Publish run only through workflow_run.
+      # Verify the exact version-only diff before using the repository token's
+      # admin bypass. Full-suite failures must not hold up a mechanical stamp.
+      # The tag push above keeps GITHUB_TOKEN so Release and Publish run only
+      # through workflow_run.
       - name: Bump trunk to next dev version
         continue-on-error: true
         env:
@@ -118,6 +119,42 @@ jobs:
 
           git add reprint-server-wp/index.php reprint-server-wp/lib.php reprint-server-wp/readme.txt
           git commit -m "Bump plugin version to $NEXT_DEV after v$VERSION release"
+
+          python3 - "$NEXT_DEV" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          version_fields = {
+              'reprint-server-wp/index.php': [(b' * Version: ', b'\n')],
+              'reprint-server-wp/lib.php': [(br"define(__NAMESPACE__ . '\\VERSION', '", b"');")],
+              'reprint-server-wp/readme.txt': [
+                  (b'Stable tag: ', b'\n'),
+                  (b'https://plugins.svn.wordpress.org/reprint/downloads/', b'/reprint.phar'),
+              ],
+          }
+          changed_paths = subprocess.check_output(['git', 'diff', '--name-only', 'HEAD^', 'HEAD']).decode().splitlines()
+          if sorted(changed_paths) != sorted(version_fields):
+              sys.exit(f'Version bump must change only the three version files; observed {changed_paths}.')
+          summary = subprocess.check_output(['git', 'diff', '--summary', 'HEAD^', 'HEAD']).decode().strip()
+          if summary:
+              sys.exit(f'Version bump must not change file types or permissions; observed {summary}.')
+          readme = subprocess.check_output(['git', 'show', 'HEAD^:reprint-server-wp/readme.txt'])
+          stable_tag = re.search(rb'^Stable tag: ([^\r\n]+)', readme, re.M)
+          if stable_tag is None:
+              sys.exit('Version bump cannot be verified because the previous readme has no Stable tag.')
+          old_version = stable_tag.group(1)
+          new_version = sys.argv[1].encode()
+          for path, replacements in version_fields.items():
+              expected = subprocess.check_output(['git', 'show', f'HEAD^:{path}'])
+              for prefix, suffix in replacements:
+                  expected = expected.replace(prefix + old_version + suffix, prefix + new_version + suffix)
+              after = subprocess.check_output(['git', 'show', f'HEAD:{path}'])
+              if after != expected:
+                  sys.exit(f'Version bump changes more than the expected version strings in {path}.')
+          print(f'Verified version-only bump to {sys.argv[1]}.')
+          PY
+
           git push origin "$BRANCH"
 
           gh pr create \
@@ -126,4 +163,4 @@ jobs:
             --title "Bump plugin version to $NEXT_DEV after v$VERSION release" \
             --body "Stamps the next development version into reprint-server-wp/ after the v$VERSION tag. Opened by the Tag Release workflow."
 
-          gh pr merge --squash --auto --delete-branch --match-head-commit "$(git rev-parse HEAD)" "$BRANCH"
+          gh pr merge --squash --admin --delete-branch --match-head-commit "$(git rev-parse HEAD)" "$BRANCH"

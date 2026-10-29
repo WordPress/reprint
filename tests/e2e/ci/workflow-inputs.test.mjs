@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { chmod, cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -278,7 +278,7 @@ test('dependency updates enable auto-merge for the generated PR and commit', asy
     }
 });
 
-test('release version bumps start normal PR checks and wait for auto-merge without retriggering the tag', async () => {
+test('release version bumps validate their diff before an admin merge without retriggering the tag', async () => {
     const source = await readFile(new URL('tag-release.yml', workflows), 'utf8');
     const steps = source.split(/(?=^      - )/m);
     const checkout = steps.find(part => part.includes('uses: actions/checkout@'));
@@ -293,8 +293,57 @@ test('release version bumps start normal PR checks and wait for auto-merge witho
     assert.match(step, /gh pr create/);
     assert.match(step, /--base trunk/);
     assert.match(step, /--head "\$BRANCH"/);
-    assert.match(step, /gh pr merge --squash --auto --delete-branch --match-head-commit "\$\(git rev-parse HEAD\)" "\$BRANCH"/);
-    assert.doesNotMatch(step, /--admin|sleep|for attempt/);
+    const validation = step.indexOf('python3 - "$NEXT_DEV"');
+    const merge = step.indexOf('gh pr merge --squash --admin --delete-branch --match-head-commit "$(git rev-parse HEAD)" "$BRANCH"');
+    assert.ok(validation >= 0 && merge > validation);
+    assert.doesNotMatch(step, /--auto|sleep|for attempt/);
+});
+
+test('only an exact version stamp can use the release bump CI exception', async () => {
+    const source = await readFile(new URL('tag-release.yml', workflows), 'utf8');
+    const validation = source.match(/python3 - "\$NEXT_DEV" <<'PY'\n([\s\S]*?)^          PY$/m);
+    assert.ok(validation, 'The admin merge must have a version-only diff check.');
+    const command = validation[1].replace(/^ {10}/gm, '');
+    const directory = await mkdtemp(join(tmpdir(), 'reprint-version-only-'));
+    const pluginFiles = ['index.php', 'lib.php', 'readme.txt'];
+    try {
+        await mkdir(join(directory, 'reprint-server-wp'));
+        await mkdir(join(directory, 'bin'));
+        for (const filename of pluginFiles) {
+            await cp(new URL('../../../reprint-server-wp/' + filename, import.meta.url), join(directory, 'reprint-server-wp', filename));
+        }
+        await cp(new URL('../../../bin/stamp-plugin-version.sh', import.meta.url), join(directory, 'bin/stamp-plugin-version.sh'));
+        await run('git', ['init', '-b', 'trunk'], { cwd: directory });
+        await run('git', ['config', 'user.name', 'Release Test'], { cwd: directory });
+        await run('git', ['config', 'user.email', 'release-test@example.com'], { cwd: directory });
+        await run('bash', ['bin/stamp-plugin-version.sh', '1.2.3-dev'], { cwd: directory });
+        const readme = join(directory, 'reprint-server-wp/readme.txt');
+        await writeFile(readme, (await readFile(readme, 'utf8')) + '\nHistorical build: 1.2.3-dev\n');
+        await run('git', ['add', '.'], { cwd: directory });
+        await run('git', ['commit', '-m', 'Initial version'], { cwd: directory });
+        const base = (await run('git', ['rev-parse', 'HEAD'], { cwd: directory })).stdout.trim();
+        for (const change of ['version only', 'code', 'extra file', 'file mode', 'wrong version']) {
+            await run('git', ['checkout', '--detach', base], { cwd: directory });
+            await run('bash', ['bin/stamp-plugin-version.sh', '1.2.4-dev'], { cwd: directory });
+            if (change === 'code') {
+                const file = join(directory, 'reprint-server-wp/lib.php');
+                await writeFile(file, (await readFile(file, 'utf8')) + '\n$unrelated_change = true;\n');
+            }
+            if (change === 'extra file') await writeFile(join(directory, 'extra.php'), '<?php echo "extra code";');
+            if (change === 'file mode') await chmod(join(directory, 'reprint-server-wp/lib.php'), 0o755);
+            await run('git', ['add', '.'], { cwd: directory });
+            await run('git', ['commit', '-m', change], { cwd: directory });
+            const version = change === 'wrong version' ? '1.2.5-dev' : '1.2.4-dev';
+            const check = run('python3', ['-c', command, version], { cwd: directory });
+            if (change === 'version only') {
+                await check;
+            } else {
+                await assert.rejects(check, /Version bump/);
+            }
+        }
+    } finally {
+        await rm(directory, { recursive: true, force: true });
+    }
 });
 
 test('every PR workflow reports a final result covering all of its PR jobs', async () => {

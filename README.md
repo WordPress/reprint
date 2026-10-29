@@ -254,8 +254,12 @@ To cut a release, run the **Tag Release** workflow from the GitHub Actions tab
 (`.github/workflows/tag-release.yml`) and pick a bump type (`patch`, `minor`,
 `major`, or `custom`). It creates and pushes the `vMAJOR.MINOR.PATCH` tag, then
 opens a PR for the next `-dev` version using the repository's `GH_TOKEN` secret.
-That starts normal PR checks; auto-merge updates `trunk` after they pass.
-A failed version-bump check leaves the PR open without blocking the release.
+The workflow verifies that the commit changes only the version strings and
+PHAR links in the three plugin version files, then merges that exact commit
+with the token's admin bypass. Full-suite failures do not block this mechanical
+bump. `GH_TOKEN` must belong to an account allowed to bypass the `trunk` ruleset.
+Other PRs still require normal CI. A failed version-only check stops the bump
+without blocking the release.
 Completing **Tag Release** starts the build, which publishes the GitHub
 Release (`reprint.phar`,
 `reprint-exporter-wp.zip`, and `reprint-wordpress-org.zip`) and the Composer
