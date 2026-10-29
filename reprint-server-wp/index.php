@@ -3,7 +3,7 @@
  * Plugin Name: Reprint
  * Plugin URI: https://github.com/WordPress/reprint
  * Description: Exposes the Reprint API with signed endpoints for database and file synchronization.
- * Version: 0.11.4-dev
+ * Version: 0.11.5-dev
  * Requires at least: 4.7
  * Requires PHP: 7.2
  * Text Domain: reprint
