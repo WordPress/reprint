@@ -3385,6 +3385,22 @@ class ImportClient
             false,
         );
 
+        foreach ($payload["wp_content"]["unavailable_paths_b64"] ?? [] as $encoded_path) {
+            $path = is_string($encoded_path) ? base64_decode($encoded_path, true) : false;
+            if ($path === false || $path === "") {
+                continue;
+            }
+            $message = "The remote server could not inspect {$path}. Its contents may be missing from the pull.";
+            $this->audit_log("PREFLIGHT WARNING | {$message}", true);
+            $this->progress->print_line("Warning: {$message}\n");
+            $this->output_progress([
+                "type" => "warning",
+                "phase" => "preflight",
+                "path" => $path,
+                "message" => $message,
+            ], true);
+        }
+
         // Log non-standard WordPress directory layouts for awareness
         $paths = $payload["database"]["wp"]["paths_urls"] ?? null;
         if (is_array($paths)) {
