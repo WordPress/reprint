@@ -271,6 +271,10 @@ are rejected.
 
 The client goes in `downloads/VERSION/reprint.phar`, outside the plugin's
 `trunk` and `tags` folders, so it is not included in plugin installations.
+The same upload publishes the highest stable version in `downloads/` at
+`https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar`.
+Rerunning an older release keeps this URL on the newest published client,
+including when the unversioned download is being created for the first time.
 The plugin page links directly to that release's client on WordPress.org,
 with GitHub as a fallback. The version-stamping script updates the client
 link along with the plugin version. The PHAR is uploaded before the plugin,

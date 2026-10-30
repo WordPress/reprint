@@ -153,6 +153,14 @@ jobs:
           cp "$GITHUB_WORKSPACE/reprint.phar" "downloads/$VERSION/reprint.phar"
           svn add --force "downloads/$VERSION/reprint.phar"
           svn propset svn:mime-type application/octet-stream "downloads/$VERSION/reprint.phar"
+          # Rerunning an older release must not downgrade the stable download.
+          LATEST_VERSION="$(printf '%s\n' downloads/*/ | sed -nE 's#^downloads/([0-9]+\.[0-9]+\.[0-9]+)/$#\1#p' | sort -V | tail -n 1)"
+          if [ "$LATEST_VERSION" != "$VERSION" ]; then
+            svn update --set-depth infinity "downloads/$LATEST_VERSION"
+          fi
+          cp "downloads/$LATEST_VERSION/reprint.phar" downloads/reprint.phar
+          svn add --force downloads/reprint.phar
+          svn propset svn:mime-type application/octet-stream downloads/reprint.phar
           if [ -n "$(svn status downloads)" ]; then
             svn commit downloads -m "Publish Reprint client $VERSION" \
               --no-auth-cache --non-interactive --username "$SVN_USERNAME" --password "$SVN_PASSWORD"
