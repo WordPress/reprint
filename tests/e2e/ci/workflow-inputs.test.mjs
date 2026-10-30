@@ -143,7 +143,7 @@ test('WordPress.org builds and checks the tagged client before publishing the pl
     }
 });
 
-test('WordPress.org client uploads stay outside plugin folders and preserve earlier versions', async () => {
+test('WordPress.org client uploads preserve releases and keep the latest stable download', async () => {
     const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
     const step = source.split(/(?=^      - )/m).find(part => part.includes('name: Publish client to SVN'));
     assert.ok(step, 'The release must upload the client to SVN.');
@@ -163,7 +163,16 @@ test('WordPress.org client uploads stay outside plugin folders and preserve earl
         };
         const upload = command.replace('https://plugins.svn.wordpress.org/reprint', url);
         assert.notEqual(upload, command, 'The local test must not contact WordPress.org.');
-        for (const version of ['1.2.3', '1.2.3', '1.2.4']) {
+        const publishedVersions = new Set();
+        for (const [version, latestVersion] of [
+            ['1.2.3', '1.2.3'],
+            ['1.2.3', '1.2.3'],
+            ['1.2.4', '1.2.4'],
+            ['1.2.3', '1.2.4'],
+            ['1.2.2', '1.2.4'],
+            ['1.10.0', '1.10.0'],
+            ['1.9.9', '1.10.0'],
+        ]) {
             const before = (await run('svnlook', ['youngest', repository])).stdout.trim();
             const contents = Buffer.from(`Reprint ${version}\0\xff`, 'latin1');
             await writeFile(join(directory, 'reprint.phar'), contents);
@@ -175,9 +184,28 @@ test('WordPress.org client uploads stay outside plugin folders and preserve earl
             const client = `${url}/downloads/${version}/reprint.phar`;
             assert.deepEqual((await run('svn', ['cat', client], { encoding: 'buffer' })).stdout, contents);
             assert.equal((await run('svn', ['propget', 'svn:mime-type', client])).stdout.trim(), 'application/octet-stream');
+            const latest = `${url}/downloads/reprint.phar`;
+            assert.deepEqual(
+                (await run('svn', ['cat', latest], { encoding: 'buffer' })).stdout,
+                Buffer.from(`Reprint ${latestVersion}\0\xff`, 'latin1'),
+                `Publishing ${version} must leave the stable download at ${latestVersion}.`,
+            );
+            assert.equal((await run('svn', ['propget', 'svn:mime-type', latest])).stdout.trim(), 'application/octet-stream');
             const after = (await run('svnlook', ['youngest', repository])).stdout.trim();
-            if (version === '1.2.3' && before !== '1') assert.equal(after, before, 'An unchanged rerun must not commit.');
+            assert.equal(Number(after) - Number(before), publishedVersions.has(version) ? 0 : 1,
+                'Publish both downloads in one commit; unchanged reruns must not commit.');
+            publishedVersions.add(version);
         }
+        // Existing versioned releases predate the stable download URL.
+        await run('svn', ['delete', `${url}/downloads/reprint.phar`, '-m', 'Prepare versioned-only downloads']);
+        await writeFile(join(directory, 'reprint.phar'), Buffer.from('Reprint 1.2.3\0\xff', 'latin1'));
+        await rm(join(directory, 'reprint-client-svn'), { recursive: true, force: true });
+        await run('bash', ['-e', '-o', 'pipefail', '-c', upload], {
+            cwd: directory,
+            env: { ...environment, VERSION: '1.2.3' },
+        });
+        assert.equal((await run('svn', ['cat', `${url}/downloads/reprint.phar`], { encoding: 'buffer' })).stdout.toString('latin1'),
+            'Reprint 1.10.0\0\xff', 'An older rerun must create a missing stable download from the newest published release.');
         assert.equal((await run('svn', ['cat', `${url}/downloads/1.2.3/reprint.phar`], { encoding: 'buffer' })).stdout.toString('latin1'), 'Reprint 1.2.3\0\xff');
         for (const folder of ['assets', 'tags', 'trunk']) {
             assert.equal((await run('svn', ['list', `${url}/${folder}`])).stdout, '', `${folder} must stay unchanged.`);

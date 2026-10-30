@@ -277,6 +277,10 @@ are rejected.
 
 The client goes in `downloads/VERSION/reprint.phar`, outside the plugin's
 `trunk` and `tags` folders, so it is not included in plugin installations.
+The same upload publishes the highest stable version in `downloads/` at
+`https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar`.
+Rerunning an older release keeps this URL on the newest published client,
+including when the unversioned download is being created for the first time.
 The plugin page links directly to that release's client on WordPress.org,
 with GitHub as a fallback. The version-stamping script updates the client
 link along with the plugin version. The PHAR is uploaded before the plugin,
@@ -404,6 +408,15 @@ php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" 
 ```
 
 The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
+
+Some hosts link plugins or themes to shared files outside PHP's `open_basedir`
+allowed paths. Preflight keeps those plugin names with type `unknown`, omits
+uninspectable themes from the theme list, and records their base64 paths in
+`wp_content.unavailable_paths_b64`. The client prints a warning for each path
+and saves it in `audit.log`. These blocked entries do not stop the pull.
+PHP still cannot read the blocked files; the pull may omit them. If the site
+needs those files to run, ask the host to grant access or supply a replacement
+before treating the copy as ready to use.
 
 Remote Reprint API URLs must start with `https://` or `http://`; URLs without a scheme and other schemes are rejected. Reprint rejects HTTP remote Reprint API URLs before selecting remote state or making requests unless `--insecure` explicitly allows an unencrypted connection. This applies to every remote command, including local-only commands and local hosts. The supplied URL's scheme is never changed.
 

@@ -34,7 +34,7 @@ class ReprintServerPluginPackageTest extends TestCase {
     /** Use the case-sensitive WordPress.org account name supplied in directory review. */
     public function testReadmeListsTheWordPressOrgContributor(): void {
         $readme = file_get_contents($this->project_directory . '/reprint-server-wp/readme.txt');
-        $this->assertMatchesRegularExpression('/^Contributors: zieladam$/m', $readme);
+        $this->assertMatchesRegularExpression('/^Contributors: zieladam, wordpressdotorg$/m', $readme);
     }
 
     /** @dataProvider versionProvider */
