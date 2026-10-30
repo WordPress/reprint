@@ -2460,6 +2460,7 @@ function endpoint_preflight(array $config): array
 
     $wp_content = [
         "roots" => [],
+        "unavailable_paths_b64" => [],
     ];
     $wp_paths_to_scan = $wp_runtime_paths !== null ? [$wp_runtime_paths] : $wp_paths;
     foreach ($wp_paths_to_scan as $paths) {
@@ -2480,7 +2481,7 @@ function endpoint_preflight(array $config): array
                 $path = Utils::wp_join_unix_paths($plugins_dir, $entry);
                 $root_entry["plugins"][] = [
                     "name" => $entry,
-                    "type" => is_dir($path) ? "dir" : "file",
+                    "type" => _site_export_preflight_content_path_type($path, $wp_content["unavailable_paths_b64"]),
                 ];
             }
             usort(
@@ -2501,7 +2502,7 @@ function endpoint_preflight(array $config): array
                 $path = Utils::wp_join_unix_paths($mu_plugins_dir, $entry);
                 $root_entry["mu_plugins"][] = [
                     "name" => $entry,
-                    "type" => is_dir($path) ? "dir" : "file",
+                    "type" => _site_export_preflight_content_path_type($path, $wp_content["unavailable_paths_b64"]),
                 ];
             }
             usort(
@@ -2520,7 +2521,7 @@ function endpoint_preflight(array $config): array
                     continue;
                 }
                 $path = Utils::wp_join_unix_paths($themes_dir, $entry);
-                if (is_dir($path)) {
+                if (_site_export_preflight_content_path_type($path, $wp_content["unavailable_paths_b64"]) === "dir") {
                     $root_entry["themes"][] = $entry;
                 }
             }
@@ -2700,6 +2701,25 @@ function endpoint_preflight(array $config): array
         "status" => $response["ok"] ? "ok" : "error",
         "stats" => $response,
     ];
+}
+
+/**
+ * Classifies a content entry without aborting preflight on a blocked symlink.
+ *
+ * @param string   $path                  Path returned by the content directory scan.
+ * @param string[] $unavailable_paths_b64 Base64 paths which PHP could not inspect.
+ * @return string Directory, file, or unknown when PHP cannot inspect the entry.
+ */
+function _site_export_preflight_content_path_type(string $path, array &$unavailable_paths_b64): string
+{
+    // stat() follows links just like is_dir(), but a denied target must not
+    // abort this optional inventory or be reported as a known regular file.
+    $stat = @stat($path);
+    if ($stat === false) {
+        $unavailable_paths_b64[] = base64_encode($path);
+        return "unknown";
+    }
+    return ( $stat["mode"] & STAT_TYPE_MASK ) === STAT_TYPE_DIR ? "dir" : "file";
 }
 
 /**
