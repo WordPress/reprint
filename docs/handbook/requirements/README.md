@@ -50,19 +50,19 @@ local development; do not expose it as a production server.
 
 ## Download the client
 
-The handbook's example setup uses Reprint **0.11.4**:
+Get the latest stable versions from WordPress.org:
 
-- [Download reprint.phar 0.11.4 from WordPress.org](https://plugins.svn.wordpress.org/reprint/downloads/0.11.4/reprint.phar).
-- [Download the matching plugin ZIP](https://downloads.wordpress.org/plugin/reprint.0.11.4.zip)
-  if you need to repeat that exact setup. Install it through
-  **Plugins → Add New Plugin → Upload Plugin**.
-- The [plugin directory](https://wordpress.org/plugins/reprint/) lists the
-  current plugin version and installation details.
+- [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar).
+  This URL stays the same when a new stable client is released.
+- [Install the Reprint plugin](https://wordpress.org/plugins/reprint/).
+  The plugin directory has the current ZIP and installation details.
 
 Save `reprint.phar` in your working folder. It is a PHP archive containing the
-client and its dependencies; you do not need Git or Composer to run it:
+client and its dependencies; you do not need Git or Composer to run it.
+To download it from your terminal and check that it runs:
 
 ```bash
+curl -fL https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar -o reprint.phar
 php reprint.phar --version
 ```
 

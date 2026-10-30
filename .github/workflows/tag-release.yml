@@ -128,10 +128,7 @@ jobs:
           version_fields = {
               'reprint-server-wp/index.php': [(b' * Version: ', b'\n')],
               'reprint-server-wp/lib.php': [(br"define(__NAMESPACE__ . '\\VERSION', '", b"');")],
-              'reprint-server-wp/readme.txt': [
-                  (b'Stable tag: ', b'\n'),
-                  (b'https://plugins.svn.wordpress.org/reprint/downloads/', b'/reprint.phar'),
-              ],
+              'reprint-server-wp/readme.txt': [(b'Stable tag: ', b'\n')],
           }
           changed_paths = subprocess.check_output(['git', 'diff', '--name-only', 'HEAD^', 'HEAD']).decode().splitlines()
           if sorted(changed_paths) != sorted(version_fields):

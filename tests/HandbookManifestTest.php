@@ -59,6 +59,9 @@ final class HandbookManifestTest extends TestCase {
                     } else {
                         $this->assertMatchesRegularExpression('/(?:^|\.)wordpress\.org$/', $url['host'], $link);
                     }
+                    if ($url['host'] === 'plugins.svn.wordpress.org') {
+                        $this->assertSame('https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar', $link);
+                    }
                     continue;
                 }
 

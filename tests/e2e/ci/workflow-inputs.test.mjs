@@ -350,9 +350,13 @@ test('only an exact version stamp can use the release bump CI exception', async 
         await run('git', ['add', '.'], { cwd: directory });
         await run('git', ['commit', '-m', 'Initial version'], { cwd: directory });
         const base = (await run('git', ['rev-parse', 'HEAD'], { cwd: directory })).stdout.trim();
-        for (const change of ['version only', 'code', 'extra file', 'file mode', 'wrong version']) {
+        for (const change of ['version only', 'client download URL', 'code', 'extra file', 'file mode', 'wrong version']) {
             await run('git', ['checkout', '--detach', base], { cwd: directory });
             await run('bash', ['bin/stamp-plugin-version.sh', '1.2.4-dev'], { cwd: directory });
+            if (change === 'client download URL') {
+                const file = join(directory, 'reprint-server-wp/readme.txt');
+                await writeFile(file, (await readFile(file, 'utf8')).replace('downloads/reprint.phar', 'downloads/1.2.4-dev/reprint.phar'));
+            }
             if (change === 'code') {
                 const file = join(directory, 'reprint-server-wp/lib.php');
                 await writeFile(file, (await readFile(file, 'utf8')) + '\n$unrelated_change = true;\n');

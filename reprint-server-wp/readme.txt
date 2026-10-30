@@ -16,7 +16,7 @@ Reprint Server connects your WordPress site to the open-source Reprint command-l
 
 Transfers stream in chunks and can resume after interruption. You do not need to create one large backup archive on your hosting account.
 
-The plugin provides the server API and its settings page. You need the separate command-line client to run transfers. [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/0.11.5-dev/reprint.phar) from WordPress.org, or use the [GitHub release mirror](https://github.com/WordPress/reprint/releases/latest). There is no hosted Reprint account or subscription requirement.
+The plugin provides the server API and its settings page. You need the separate command-line client to run transfers. [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) from WordPress.org. There is no hosted Reprint account or subscription requirement.
 
 = Authentication =
 
@@ -44,9 +44,9 @@ Build the GitHub package with bin/build-server-plugin.sh after installing the Co
 
 == Installation ==
 
-1. Install Reprint from the WordPress.org plugin directory, or download a plugin ZIP from the [GitHub releases](https://github.com/WordPress/reprint/releases/latest).
+1. Download Reprint from the [WordPress.org plugin directory](https://wordpress.org/plugins/reprint/).
 2. In WordPress, open Plugins > Add New > Upload Plugin, upload the ZIP, and activate Reprint Server. On multisite, network-activate the plugin.
-3. [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/0.11.5-dev/reprint.phar) to the machine where you will run transfers. The client requires PHP 7.4 or newer; file push from the client requires PHP 8.1 or newer.
+3. [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) to the machine where you will run transfers. The client requires PHP 7.4 or newer; file push from the client requires PHP 8.1 or newer.
 4. Run the pull command below. On a host with OpenSSL, the client prints the Migration Token to enroll and stops. Enroll it under Tools > Reprint Server, then run the same command again. On multisite, use the network settings page.
 
     php reprint.phar pull https://example.com --state-dir=./state --fs-root=./files

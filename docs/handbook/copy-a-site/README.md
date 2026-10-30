@@ -18,10 +18,11 @@ mkdir reprint-demo
 cd reprint-demo
 ```
 
-[Download the Reprint client](../requirements/) into this folder and keep
-its filename as `reprint.phar`. Check that it runs:
+[Download the latest stable Reprint client](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar)
+into this folder as `reprint.phar`, or download it from your terminal:
 
 ```bash
+curl -fL https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar -o reprint.phar
 php reprint.phar --version
 ```
 
