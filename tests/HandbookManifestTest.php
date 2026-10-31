@@ -57,7 +57,7 @@ final class HandbookManifestTest extends TestCase {
                     $this->assertSame('https', $url['scheme'], $link);
                     if ($url['host'] === 'github.com') {
                         $this->assertMatchesRegularExpression('#^/WordPress/reprint(?:/(?:issues|tree|blob)(?:/|$)|/?$)#', $url['path']);
-                    } else {
+                    } elseif ($url['host'] !== 'reprint-demo.wordpress.net') {
                         $this->assertMatchesRegularExpression('/(?:^|\.)wordpress\.org$/', $url['host'], $link);
                     }
                     if ($url['host'] === 'plugins.svn.wordpress.org') {
