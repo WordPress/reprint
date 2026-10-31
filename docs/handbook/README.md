@@ -7,6 +7,8 @@ building one large archive on the source host.
 
 ## Choose your starting point
 
+- **Explore a demo site:** visit [reprint-demo.wordpress.net](https://reprint-demo.wordpress.net/),
+  a sample WordPress journal with posts, photos, and block templates.
 - **Copy your site to your computer:** follow
   [Copy a site to your computer](copy-a-site/). This tutorial uses the Reprint
   client, SQLite, and PHP's local development server.
