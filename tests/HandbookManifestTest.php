@@ -3,7 +3,7 @@
 use PHPUnit\Framework\TestCase;
 
 final class HandbookManifestTest extends TestCase {
-    public function testEveryPageCanBeImportedAndItsLinksKeepTheSameHierarchy(): void
+    public function testEveryPageIsListedAndLinksResolveToPublishedRoutes(): void
     {
         $docs_directory = __DIR__ . '/../docs';
         $manifest_file = $docs_directory . '/manifest.json';
@@ -25,7 +25,7 @@ final class HandbookManifestTest extends TestCase {
             }
             $published_paths[$key] = ( $parent === null ? '' : $published_paths[$parent] . '/' ) . $page['slug'];
             $source = $page['markdown_source'];
-            $this->assertSame($published_paths[$key] . '/README.md', $source);
+            $this->assertSame('handbook/' . ( $parent === null ? 'README' : $page['slug'] ) . '.md', $source);
             $this->assertFileExists($docs_directory . '/' . $source);
             $this->assertArrayNotHasKey($source, $sources);
             $sources[$source] = file_get_contents($docs_directory . '/' . $source);
@@ -47,8 +47,9 @@ final class HandbookManifestTest extends TestCase {
             'Every handbook page must be listed in the import manifest.'
         );
 
-        foreach ($sources as $source => $markdown) {
-            preg_match_all('/\[[^\]]+\]\(([^\s)]+)\)/', $markdown, $links);
+        foreach ($manifest as $key => $page) {
+            $source = $page['markdown_source'];
+            preg_match_all('/\[[^\]]+\]\(([^\s)]+)\)/', $sources[$source], $links);
             foreach ($links[1] as $link) {
                 $url = parse_url($link);
                 $this->assertNotFalse($url, $source . ': ' . $link);
@@ -65,11 +66,17 @@ final class HandbookManifestTest extends TestCase {
                     continue;
                 }
 
-                $this->assertStringEndsWith('/', $url['path'], 'Use directory links that work in the repository and handbook: ' . $link);
-                $target = realpath($docs_directory . '/' . dirname($source) . '/' . $url['path'] . 'README.md');
-                $this->assertNotFalse($target, $source . ': ' . $link);
-                $target = substr($target, strlen(realpath($docs_directory)) + 1);
-                $this->assertArrayHasKey($target, $sources, $source . ': ' . $link);
+                $this->assertStringEndsWith('/', $url['path'], 'Link to published handbook pages, not Markdown files: ' . $link);
+                $this->assertNotSame('/', substr($url['path'], 0, 1), 'Keep links relative to the handbook: ' . $link);
+                $target = [];
+                foreach (explode('/', $published_paths[$key] . '/' . $url['path']) as $part) {
+                    if ($part === '..') {
+                        array_pop($target);
+                    } elseif ($part !== '' && $part !== '.') {
+                        $target[] = $part;
+                    }
+                }
+                $this->assertContains(implode('/', $target), $published_paths, $source . ': ' . $link);
             }
         }
     }
