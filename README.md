@@ -5,7 +5,7 @@ Clone any WordPress site over HTTP. One command pulls the files, database, and s
 ## Documentation
 
 Start with the [Reprint handbook](docs/handbook/) for a first local copy,
-authorizing another tool, requirements, and troubleshooting. The integration
+connecting the client, requirements, and troubleshooting. The integration
 and implementation details below remain available for existing users.
 
 ## Quick start

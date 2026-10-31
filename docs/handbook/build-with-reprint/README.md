@@ -1,8 +1,8 @@
 # Build with Reprint
 
-Use the client to add WordPress copying to a migration tool or hosting platform.
-Your tool runs the client; a site administrator installs Reprint Server and
-authorizes it on the source site.
+Use the Reprint client to add WordPress copying to your product or hosting
+platform. Your product runs the client; a site administrator installs Reprint
+Server and authorizes it on the source site.
 
 First complete [Copy a site to your computer](../copy-a-site/). It shows the
 access steps your users will also need. The WordPress.org server package
@@ -34,7 +34,7 @@ php reprint.phar pull-metadata --help
 ## Run without starting a development server
 
 To prepare the same local SQLite copy as the tutorial, but return control to
-your tool instead of starting the server:
+your product instead of starting the server:
 
 ```bash
 php reprint.phar pull https://example.com \

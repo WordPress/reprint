@@ -16,11 +16,11 @@ be enabled for the terminal's PHP, which may differ from your web server's PHP.
 ## The first command stops after printing a Migration Token
 
 This is expected. The client stops with exit code `4` so an administrator can
-[authorize it](../authorize-a-tool/). After authorization, run the same command
+[authorize it](../authorize-client/). After authorization, run the same command
 again, from the same folder and with the same `--state-dir`.
 
 If authorization still fails, check that you authorized the token printed by
-this client for this source site. Existing tokens for other tools do not grant
+this client for this source site. Existing tokens for other clients do not grant
 access to this one. If the host requires a connection token, use the alternative
 steps on the authorization page. Update old clients and plugins together if
 the error asks for an update.
@@ -77,8 +77,7 @@ Ask usage questions in the
 Report reproducible development bugs in the
 [Reprint issue tracker](https://github.com/WordPress/reprint/issues).
 
-Include the client and plugin versions, the command with secrets removed, and
-the exact error. Redact private addresses and paths where needed. Do not upload
-private keys, connection tokens, the state directory, or database dumps. Logs
-may also contain private data; review them before sharing. Do not post security
-vulnerability details in a public support topic or issue.
+Include the client and plugin versions, the command with tokens removed, and
+the exact error. Leave out private keys, connection tokens, state directories,
+and database dumps. Check logs for private site data before sharing them.
+Report security vulnerabilities privately.

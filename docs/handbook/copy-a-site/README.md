@@ -4,10 +4,10 @@ This tutorial copies one single-site WordPress installation to your computer
 and opens it at `http://localhost:8881`. It uses SQLite, so you do not need a
 local MySQL server.
 
-Start with a test site. You need permission to copy it and administrator
-access to install its plugin. The terminal examples use Bash on macOS, Linux,
-or Windows Subsystem for Linux (WSL). Check the
-[requirements and downloads](../requirements/) before continuing.
+You need administrator access to the WordPress site to install the Reprint
+plugin. The terminal examples use Bash on macOS, Linux, or Windows Subsystem
+for Linux (WSL). Check the [requirements and downloads](../requirements/)
+before continuing.
 
 ## 1. Prepare a working folder
 
@@ -36,7 +36,8 @@ Search for **Reprint**, install it, and activate it. Then open
 **Tools → Reprint Server**.
 
 Leave that screen open. The next step gives you the Migration Token to paste
-there. See [Authorize a tool](../authorize-a-tool/) for the full access steps.
+there. See [Authorize the Reprint client](../authorize-client/) for the full
+access steps.
 
 ## 3. Start the copy on your computer
 
@@ -52,14 +53,14 @@ php reprint.phar pull https://example.com \
 The first run generates a private key, prints its public Migration Token,
 and stops with exit code `4`. This is the expected authorization step.
 
-1. Copy the printed Migration Token. Do not copy the private key file.
+1. Copy the printed Migration Token.
 2. Paste it into **Tools → Reprint Server** on the source site.
 3. Choose **Authorize tool**.
 4. Run the same terminal command again.
 
 If the plugin instead shows a **Connection token** form, use the alternative
-steps in [Authorize a tool](../authorize-a-tool/), then add `--secret='TOKEN'`
-to the pull command using that connection token.
+steps in [Authorize the Reprint client](../authorize-client/), then add
+`--secret='TOKEN'` to the pull command using that connection token.
 
 The client now checks the source, downloads files and database data, imports
 the database into SQLite, rewrites the site URL, and prepares a local server.
@@ -105,4 +106,4 @@ same source address and folders. To only restart the local server, use
 changes with source data.
 
 Next: [How Reprint works](../how-it-works/), or
-[remove client access](../authorize-a-tool/) when you no longer need it.
+[remove client access](../authorize-client/) when you no longer need it.

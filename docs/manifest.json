@@ -13,10 +13,10 @@
         "parent": "handbook",
         "order": 10
     },
-    "authorize-a-tool": {
-        "title": "Authorize a tool to copy your site",
-        "slug": "authorize-a-tool",
-        "markdown_source": "handbook/authorize-a-tool/README.md",
+    "authorize-client": {
+        "title": "Authorize the Reprint client",
+        "slug": "authorize-client",
+        "markdown_source": "handbook/authorize-client/README.md",
         "parent": "handbook",
         "order": 20
     },

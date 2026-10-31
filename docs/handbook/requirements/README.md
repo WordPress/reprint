@@ -67,4 +67,4 @@ php reprint.phar --version
 ```
 
 Next: [Copy a site to your computer](../copy-a-site/), or
-[authorize another tool](../authorize-a-tool/).
+[authorize the Reprint client](../authorize-client/).
