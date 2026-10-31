@@ -49,7 +49,7 @@ class ReprintServerPluginPackageTest extends TestCase {
             $this->assertStringContainsString('Stable tag: ' . $version . "\n", file_get_contents($plugin_directory . 'readme.txt'));
             $this->assertSame(2, substr_count(
                 file_get_contents($plugin_directory . 'readme.txt'),
-                '[Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/' . $version . '/reprint.phar)'
+                '[Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar)'
             ));
         }
     }

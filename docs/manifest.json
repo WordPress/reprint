@@ -1,0 +1,51 @@
+{
+    "handbook": {
+        "title": "Reprint handbook",
+        "slug": "handbook",
+        "markdown_source": "handbook/README.md",
+        "parent": null,
+        "order": 10
+    },
+    "copy-a-site": {
+        "title": "Copy a site to your computer",
+        "slug": "copy-a-site",
+        "markdown_source": "handbook/copy-a-site.md",
+        "parent": "handbook",
+        "order": 10
+    },
+    "authorize-client": {
+        "title": "Authorize the Reprint client",
+        "slug": "authorize-client",
+        "markdown_source": "handbook/authorize-client.md",
+        "parent": "handbook",
+        "order": 20
+    },
+    "requirements": {
+        "title": "Requirements and downloads",
+        "slug": "requirements",
+        "markdown_source": "handbook/requirements.md",
+        "parent": "handbook",
+        "order": 30
+    },
+    "troubleshooting": {
+        "title": "Troubleshooting",
+        "slug": "troubleshooting",
+        "markdown_source": "handbook/troubleshooting.md",
+        "parent": "handbook",
+        "order": 40
+    },
+    "how-it-works": {
+        "title": "How Reprint works",
+        "slug": "how-it-works",
+        "markdown_source": "handbook/how-it-works.md",
+        "parent": "handbook",
+        "order": 50
+    },
+    "build-with-reprint": {
+        "title": "Build with Reprint",
+        "slug": "build-with-reprint",
+        "markdown_source": "handbook/build-with-reprint.md",
+        "parent": "handbook",
+        "order": 60
+    }
+}

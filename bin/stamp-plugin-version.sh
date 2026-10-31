@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Stamps a version string into the WordPress plugin header, the
-# namespaced Reprint Server VERSION constant, readme Stable tag, and client URL.
+# namespaced Reprint Server VERSION constant, and readme Stable tag.
 #
 # Usage:
 #   ./bin/stamp-plugin-version.sh 0.2.0        # release
@@ -28,7 +28,6 @@ sed -i.bak "s/Version: [0-9][0-9.]*\(-dev\)\{0,1\}/Version: $VERSION/" "$INDEX" 
 sed -i.bak "/define(__NAMESPACE__/s/'[0-9][0-9.]*\(-dev\)\{0,1\}'/'$VERSION'/" "$LIB" && rm -f "$LIB.bak"
 
 sed -i.bak "s/^Stable tag: .*/Stable tag: $VERSION/" "$README" && rm -f "$README.bak"
-sed -i.bak "s@https://plugins.svn.wordpress.org/reprint/downloads/[^/]*/reprint.phar@https://plugins.svn.wordpress.org/reprint/downloads/$VERSION/reprint.phar@g" "$README" && rm -f "$README.bak"
 
 # Verify the stamp took effect — fail loudly if it didn't.
 if ! grep -q "Version: $VERSION" "$INDEX"; then

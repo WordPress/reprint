@@ -2,7 +2,21 @@
 
 Clone any WordPress site over HTTP. One command pulls the files, database, and server config, then starts a local copy you can open in your browser.
 
+## Documentation
+
+Start with the [Reprint handbook](docs/handbook/) for a first local copy,
+connecting the client, requirements, and troubleshooting. The integration
+and implementation details below remain available for existing users.
+
 ## Quick start
+
+Download the [latest stable client](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar)
+and check that PHP can run it:
+
+```bash
+curl -fL https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar -o reprint.phar
+php reprint.phar --version
+```
 
 ### 1. Install the Reprint Server plugin on the source site
 
@@ -275,9 +289,8 @@ The same upload publishes the highest stable version in `downloads/` at
 `https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar`.
 Rerunning an older release keeps this URL on the newest published client,
 including when the unversioned download is being created for the first time.
-The plugin page links directly to that release's client on WordPress.org,
-with GitHub as a fallback. The version-stamping script updates the client
-link along with the plugin version. The PHAR is uploaded before the plugin,
+The plugin page links to the unversioned client on WordPress.org.
+Version bumps leave this URL unchanged. The PHAR is uploaded before the plugin,
 so the download exists before the new readme links to it.
 
 The deployment job uses the GitHub Actions environment `svn` in
@@ -317,9 +330,9 @@ The `pull` command is designed for developers cloning a site to their local mach
 
 ### Getting started
 
-Download the latest release artifacts from [GitHub Releases](../../releases):
+Download the client from WordPress.org and the server package from [GitHub Releases](../../releases):
 
-* **`reprint.phar`** — a self-contained PHP archive that runs on the **migration target** (the hosting account you are migrating to). No cloning or `composer install` needed.
+* **[`reprint.phar`](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar)** — a self-contained PHP archive that runs on the **migration target** (the hosting account you are migrating to). No cloning or `composer install` needed.
 * **`reprint-exporter-wp.zip`** — install this on the **migration source** (the remote WordPress site you want to migrate).
 
 ### Authentication
