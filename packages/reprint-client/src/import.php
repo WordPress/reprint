@@ -109,6 +109,7 @@ require_once __DIR__ . '/lib/sort-index-file.php';
 require_once __DIR__ . '/lib/local-index-update-functions.php';
 require_once __DIR__ . '/lib/index/class-file-index-diff-processor.php';
 require_once __DIR__ . '/lib/class-reprint-process-lock.php';
+require_once __DIR__ . '/lib/class-saved-remote-config.php';
 
 // Terminal progress rendering (spinner, progress lines, lifecycle messages)
 require_once __DIR__ . '/lib/terminal-progress/class-terminal-progress.php';
@@ -1212,7 +1213,7 @@ class ImportClient
         if ($signs_remote_requests && $this->credential['scheme'] === null) {
             if ($command === 'pull') {
                 $generated = self::generate_key_file(
-                    self::key_file_path($this->remote_reprint_api_url, $this->state_dir),
+                    wp_join_unix_paths($this->remote_state_directory, self::KEY_FILE_NAME),
                     false
                 );
                 $enrollment_instructions = self::format_enrollment_instructions($generated, true, true);
@@ -1237,7 +1238,7 @@ class ImportClient
             }
             throw new InvalidArgumentException(
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI guidance with local paths, never HTML.
-                self::no_credential_message($this->remote_reprint_api_url, $this->state_dir)
+                self::no_credential_message($this->remote_reprint_api_url, $this->state_dir, $this->remote_state_directory)
             );
         }
 
@@ -1713,7 +1714,8 @@ class ImportClient
             $this->remote_reprint_api_url,
             $this->state_dir,
             $this->filesystem_root,
-            'files-diff'
+            'files-diff',
+            dirname($this->pull_state_directory)
         );
         if (!is_string($push_state_directory)) {
             throw new InvalidArgumentException('files-diff requires its resolved local push state directory.');
@@ -2002,7 +2004,7 @@ class ImportClient
             $this->remote_reprint_api_url,
             $this->state_dir,
             $this->filesystem_root,
-            $options
+            $options + ['selected_remote_state_directory' => dirname($this->pull_state_directory)]
         );
         if (!is_array($context)) {
             throw new InvalidArgumentException('files-push requires its validated command context.');
@@ -2509,9 +2511,11 @@ class ImportClient
      *     Parsed files-push options.
      *
      *     @type bool   $abort      Clear local sender state without requiring a credential.
-     *     @type string $secret     HMAC connection token.
+     *     @type string $secret     HMAC connection token when token authentication is selected.
+     *     @type string $private_key_path Explicit private key file, when supplied.
      *     @type bool   $insecure   Allow HTTP and skip HTTPS certificate checks.
      *     @type bool   $allow_http Whether the operator allowed a plain-HTTP target.
+     *     @type string|null $selected_remote_state_directory Named remote state directory, or null for URL-selected state.
      * }
      * @phpstan-param array<string,mixed> $options
      * @return array {
@@ -2529,13 +2533,12 @@ class ImportClient
         string $filesystem_root,
         array $options
     ): array {
+        $remote_state_directory = $options['selected_remote_state_directory']
+            ?? self::remote_state_directory_path($remote_reprint_api_url, $state_dir);
         if (empty($options['abort'])) {
-            $credential = self::resolve_credential(
-                $options,
-                self::remote_state_directory_path($remote_reprint_api_url, $state_dir)
-            );
+            $credential = self::resolve_credential($options, $remote_state_directory);
             if ($credential['scheme'] === null) {
-                throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
+                throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir, $remote_state_directory));
             }
         }
         if (preg_match('/(?:\?|&)SECRET_KEY(?:=|&|$)/', $remote_reprint_api_url) === 1) {
@@ -2556,7 +2559,8 @@ class ImportClient
             $remote_reprint_api_url,
             $state_dir,
             $filesystem_root,
-            'files-push'
+            'files-push',
+            $options['selected_remote_state_directory'] ?? null
         );
         $masked_remote_reprint_api_url =
             self::mask_url_credentials($remote_reprint_api_url);
@@ -2587,12 +2591,14 @@ class ImportClient
      * identifies the pull source by URL but makes no network request.
      *
      * @param string $command Command name used in error messages.
+     * @param string|null $selected_remote_state_directory Named remote state directory, or null for URL-selected state.
      */
     public static function resolve_push_state_directory(
         string $remote_reprint_api_url,
         string $state_dir,
         string $filesystem_root,
-        string $command
+        string $command,
+        ?string $selected_remote_state_directory = null
     ): string {
         $masked_remote_reprint_api_url =
             self::mask_url_credentials($remote_reprint_api_url);
@@ -2619,7 +2625,7 @@ class ImportClient
         }
         $resolved_local_filesystem_root = Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format());
         // Resolve an absolute physical path even when its final components do not exist.
-        $remote_state_directory = self::remote_state_directory_path(
+        $remote_state_directory = $selected_remote_state_directory ?? self::remote_state_directory_path(
             $remote_reprint_api_url,
             $state_dir
         );
@@ -2766,7 +2772,7 @@ class ImportClient
      *   4. nothing
      *
      * @param array<string,mixed> $options                Parsed CLI options.
-     * @param string              $remote_state_directory `<state-dir>/remotes/<md5>`.
+     * @param string              $remote_state_directory Named or URL-selected remote state directory.
      * @return array{scheme:string|null,secret?:string,private_key_pem?:string,path?:string,source?:string}
      * @throws InvalidArgumentException On an empty flag value, conflicting flags, or an unusable key file.
      */
@@ -2840,9 +2846,9 @@ class ImportClient
     }
 
     /** The sentence every remote command throws when it finds no credential. */
-    private static function no_credential_message(string $remote_reprint_api_url, string $state_dir): string
+    private static function no_credential_message(string $remote_reprint_api_url, string $state_dir, string $remote_state_directory): string
     {
-        return 'No credential for this site. Run `' . self::keygen_command($remote_reprint_api_url, $state_dir) . '` '
+        return 'No credential for this site. Run `' . self::keygen_command($remote_reprint_api_url, $state_dir, $remote_state_directory) . '` '
             . 'and enroll the printed Migration Token, or pass --secret=TOKEN.';
     }
 
@@ -2851,9 +2857,14 @@ class ImportClient
      * shell: the default API URL ends in `?`, a glob character, and some carry
      * `&` in their query.
      */
-    private static function keygen_command(string $remote_reprint_api_url, string $state_dir): string
+    private static function keygen_command(string $remote_reprint_api_url, string $state_dir, string $remote_state_directory): string
     {
-        return 'reprint keygen ' . escapeshellarg($remote_reprint_api_url) . ' --state-dir=' . escapeshellarg($state_dir);
+        $command = 'reprint keygen ' . escapeshellarg($remote_reprint_api_url) . ' --state-dir=' . escapeshellarg($state_dir);
+        // An explicit URL bypasses config, so name the saved remote's key file explicitly.
+        if ($remote_state_directory !== self::remote_state_directory_path($remote_reprint_api_url, $state_dir)) {
+            $command .= ' --out=' . escapeshellarg(wp_join_unix_paths($remote_state_directory, self::KEY_FILE_NAME));
+        }
+        return $command;
     }
 
     /**
@@ -2862,7 +2873,7 @@ class ImportClient
      * @param array  $options                Parsed CLI options; reads `secret` and `private_key`.
      * @param string $remote_reprint_api_url Remote Reprint API URL, named in the no-credential message.
      * @param string $state_dir              `--state-dir`, named in the no-credential message.
-     * @param string $remote_state_directory `<state-dir>/remotes/<md5>` searched for key.pem.
+     * @param string $remote_state_directory Named or URL-selected remote state directory searched for key.pem.
      */
     private static function build_envelope_signer(
         array $options,
@@ -2877,7 +2888,7 @@ class ImportClient
         if ($credential['scheme'] === 'key') {
             return self::public_key_client_for_credential($credential);
         }
-        throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir));
+        throw new InvalidArgumentException(self::no_credential_message($remote_reprint_api_url, $state_dir, $remote_state_directory));
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
@@ -3201,6 +3212,16 @@ class ImportClient
         ["url" => $url, "params" => $post_data] = $this->build_request("preflight", null);
         $this->audit_log("PREFLIGHT REQUEST | " . self::mask_url_credentials($url), false);
 
+        // A failed report must not erase the coordinates needed to check a later address change.
+        $previous_preflight = $this->get_state()->preflight_record();
+        $successful_site_paths = $previous_preflight['successful_site_paths'] ?? null;
+        if ($successful_site_paths === null && !empty($previous_preflight['ok'])) {
+            $successful_site_paths = [
+                'url' => $previous_preflight['url'],
+                'fingerprint' => self::preflight_site_paths_fingerprint($previous_preflight['data']),
+            ];
+        }
+
         // Try each User-Agent until one gets a JSON response or Reprint
         // itself refuses the request.
         // Some WAFs block certain UAs (e.g. browser UAs with custom auth
@@ -3239,6 +3260,8 @@ class ImportClient
                     'elapsed' => $result['elapsed'],
                     'ok' => null,
                     'data' => null,
+                    // The failed report stays unusable; retain only the path check for a later address change.
+                    'successful_site_paths' => $successful_site_paths,
                     'error' => $result['error'],
                     'error_code' => $result['error_code'],
                     'response_body_preview' => substr($result['body'] ?? '', 0, 200),
@@ -3340,6 +3363,16 @@ class ImportClient
                 : null,
         ];
 
+        if (!empty($entry['ok'])) {
+            $path_fingerprint = self::preflight_site_paths_fingerprint($payload);
+            if ($successful_site_paths !== null && !in_array($successful_site_paths['url'], [$this->remote_reprint_api_url, $url], true)
+                && $successful_site_paths['fingerprint'] !== $path_fingerprint) {
+                throw new RuntimeException('The new remote Reprint API URL reports different site paths. Use a separate config instead of reusing saved sync work.');
+            }
+            $successful_site_paths = ['url' => $url, 'fingerprint' => $path_fingerprint];
+        }
+        $entry['successful_site_paths'] = $successful_site_paths;
+
         $this->get_state()->set_preflight_record($entry);
 
         // Store WordPress version at the top level for easy access
@@ -3434,6 +3467,32 @@ class ImportClient
         $this->fetch_runtime_files();
 
         $this->apply_reported_request_body_limit();
+    }
+
+    /**
+     * Compare source coordinates without retaining a second preflight payload.
+     *
+     * @param array $payload {
+     *     Raw preflight data. Missing path fields remain null in the fingerprint.
+     *     @type array $runtime  Source runtime, including document_root.
+     *     @type string $path_format Source path separator and root rules.
+     *     @type array $database WordPress paths in wp.paths_urls, including uploads.basedir.
+     * }
+     */
+    private static function preflight_site_paths_fingerprint(array $payload): string
+    {
+        $wordpress_paths = $payload['database']['wp']['paths_urls'] ?? [];
+        return hash('sha256', serialize([
+            $payload['runtime']['document_root'] ?? null,
+            $payload['path_format'] ?? null,
+            $wordpress_paths['abspath'] ?? null,
+            $wordpress_paths['content_dir'] ?? null,
+            $wordpress_paths['plugins_dir'] ?? null,
+            $wordpress_paths['mu_plugins_dir'] ?? null,
+            $wordpress_paths['wp_admin_path'] ?? null,
+            $wordpress_paths['wp_includes_path'] ?? null,
+            $wordpress_paths['uploads']['basedir'] ?? null,
+        ]));
     }
 
     /**
@@ -3668,6 +3727,11 @@ class ImportClient
     private function require_preflight(): void
     {
         $entry = $this->get_state()->preflight_record();
+        // Older reports name the base API URL; current requests include the endpoint.
+        if (isset($entry['url']) && !in_array($entry['url'], [$this->remote_reprint_api_url, Utils::endpoint_url($this->remote_reprint_api_url, 'preflight')], true)) {
+            throw new RuntimeException('The remote Reprint API URL changed. Run preflight at the saved address before transferring.');
+        }
+
         if (!is_array($entry) || empty($entry["data"])) {
             throw new RuntimeException(
                 "No preflight data found. Run 'preflight' or 'preflight-assert' first.",
@@ -7145,6 +7209,11 @@ class ImportClient
                     }
                     $response = $result['response'];
                 } while ($endpoint !== 'push_db_commit' && !in_array($response['phase'], ['complete', 'discarded'], true));
+                // Release the local session only after the target confirms cleanup or discard.
+                // Until then, remote set-url must keep this session at its original address.
+                if (in_array($response['phase'], ['complete', 'discarded'], true) && !unlink($state_dir . '/state.json')) {
+                    throw new RuntimeException('The target finished database push cleanup, but local state could not be removed: ' . $state_dir . '/state.json. Run the cleanup or abort command again.');
+                }
                 echo json_encode($response, $json_flags) . "\n";
                 return;
             }
@@ -13860,7 +13929,7 @@ class ImportClient
                     'message' =>
                         "This site's host has OpenSSL, so it accepts key authentication only; " .
                         "connection tokens are not accepted there.\n\n" .
-                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
+                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir, $this->remote_state_directory) . "` " .
                         "(or `reprint pull` with no --secret) and enroll the printed Migration Token under Tools > Reprint Server, " .
                         "then run the command again without --secret.",
                 ];
@@ -13892,7 +13961,7 @@ class ImportClient
                     $not_configured_message =
                         "This site's host requires key authentication and has no keys enrolled. " .
                         "The connection token you passed is not accepted there.\n\n" .
-                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` " .
+                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir, $this->remote_state_directory) . "` " .
                         "(or `reprint pull` with no --secret) and enroll the printed Migration Token under Tools > Reprint Server, " .
                         "then run the command again without --secret.";
                 }
@@ -13925,7 +13994,7 @@ class ImportClient
                     'code' => 'AUTH_NO_CREDENTIAL',
                     'message' =>
                         "No credential was provided and the remote site requires authentication.\n\n" .
-                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir) . "` and enroll " .
+                        "Run `" . self::keygen_command($this->remote_reprint_api_url, $this->state_dir, $this->remote_state_directory) . "` and enroll " .
                         "the printed key, or pass --secret=TOKEN with the connection token from Tools > Reprint Server.",
                 ];
             }
@@ -15511,11 +15580,15 @@ if (
     //   flag_value     What to store for flag types (default: true)
     //   valid_values   Array of allowed values (enforced at parse time)
     //   argument_labels Labels for two-argument type help, e.g. 'FROM TO'
+    //   config_scope   'local' or 'remote' for reusable settings; absent means invocation-only
+    //   config_path    Resolve a saved local path relative to the config directory
     // ================================================================
     $option_defs = [
         // ── Required options ─────────────────────────────────────
         [
             'name' => 'state-dir',
+            'config_scope' => 'local',
+            'config_path' => true,
             'type' => 'value',
             'target' => 'state_dir',
             'placeholder' => 'DIR',
@@ -15525,6 +15598,8 @@ if (
         ],
         [
             'name' => 'fs-root',
+            'config_scope' => 'local',
+            'config_path' => true,
             'type' => 'value',
             'target' => 'filesystem_root',
             'placeholder' => 'DIR',
@@ -15545,6 +15620,17 @@ if (
 
         // ── Global options ───────────────────────────────────────
         [
+            'name' => 'secret-file',
+            'config_scope' => 'remote',
+            'config_path' => true,
+            'type' => 'value',
+            'target' => 'secret_file',
+            'placeholder' => 'FILE',
+            'help' => 'Read the HMAC connection token from FILE',
+            'help_section' => 'global',
+            'commands' => array_merge(ImportClient::REMOTE_COMMANDS, ['files-push', 'db-push']),
+        ],
+        [
             'name' => 'secret',
             'type' => 'value',
             'target' => 'secret',
@@ -15563,6 +15649,8 @@ if (
         ],
         [
             'name' => 'private-key-path',
+            'config_scope' => 'remote',
+            'config_path' => true,
             'type' => 'value',
             'target' => 'private_key_path',
             'placeholder' => 'PATH',
@@ -15622,6 +15710,7 @@ if (
         ],
         [
             'name' => 'exclude-host-plugins',
+            'config_scope' => 'remote',
             'type' => 'flag',
             'target' => 'include_host_plugins',
             'flag_value' => false,
@@ -15631,6 +15720,7 @@ if (
         ],
         [
             'name' => 'include-host-plugins',
+            'config_scope' => 'remote',
             'type' => 'flag',
             'target' => 'include_host_plugins',
             'help' => 'Keep host platform plugins during pull and db-apply (default for new state; saved in state). For apply-runtime only: skip local cleanup without changing the saved pull choice',
@@ -15639,6 +15729,7 @@ if (
         ],
         [
             'name' => 'no-follow-symlinks',
+            'config_scope' => 'remote',
             'type' => 'flag',
             'target' => 'follow_symlinks',
             'flag_value' => false,
@@ -15648,6 +15739,7 @@ if (
         ],
         [
             'name' => 'follow-symlinks',
+            'config_scope' => 'remote',
             'type' => 'flag',
             'target' => 'follow_symlinks',
             'flag_value' => true,
@@ -15656,6 +15748,8 @@ if (
         ],
         [
             'name' => 'follow-symlinks',
+            'config_scope' => 'remote',
+            'config_path' => true,
             'type' => 'value',
             'target' => 'local_followed_symlinks_root',
             'placeholder' => 'DIR',
@@ -15666,6 +15760,7 @@ if (
         ],
         [
             'name' => 'mode',
+            'config_scope' => 'remote',
             'type' => 'value',
             'target' => 'files_pull_mode',
             'placeholder' => 'MODE',
@@ -15676,6 +15771,7 @@ if (
         ],
         [
             'name' => 'on-fs-root-nonempty',
+            'config_scope' => 'remote',
             'type' => 'value',
             'target' => 'fs_root_nonempty_behavior',
             'placeholder' => 'MODE',
@@ -15725,6 +15821,7 @@ if (
         // ── files-pull options ───────────────────────────────────
         [
             'name' => 'filter',
+            'config_scope' => 'remote',
             'type' => 'value',
             'target' => 'filter',
             'placeholder' => 'MODE',
@@ -15811,6 +15908,7 @@ if (
         ],
         [
             'name' => 'sql-output',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'sql_output',
             'placeholder' => 'MODE',
@@ -15819,6 +15917,7 @@ if (
         ],
         [
             'name' => 'mysql-host',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'mysql_host',
             'placeholder' => 'HOST',
@@ -15827,6 +15926,7 @@ if (
         ],
         [
             'name' => 'mysql-port',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'mysql_port',
             'placeholder' => 'PORT',
@@ -15835,6 +15935,7 @@ if (
         ],
         [
             'name' => 'mysql-user',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'mysql_user',
             'placeholder' => 'USER',
@@ -15851,6 +15952,7 @@ if (
         ],
         [
             'name' => 'mysql-database',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'mysql_database',
             'placeholder' => 'DB',
@@ -15861,6 +15963,7 @@ if (
         // ── db-apply options ─────────────────────────────────────
         [
             'name' => 'target-engine',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'target_engine',
             'placeholder' => 'ENGINE',
@@ -15869,6 +15972,7 @@ if (
         ],
         [
             'name' => 'target-host',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'target_host',
             'placeholder' => 'HOST',
@@ -15877,6 +15981,7 @@ if (
         ],
         [
             'name' => 'target-port',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'target_port',
             'placeholder' => 'PORT',
@@ -15886,6 +15991,7 @@ if (
         ],
         [
             'name' => 'target-user',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'target_user',
             'placeholder' => 'USER',
@@ -15902,6 +16008,7 @@ if (
         ],
         [
             'name' => 'target-db',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'target_db',
             'placeholder' => 'NAME',
@@ -15910,6 +16017,8 @@ if (
         ],
         [
             'name' => 'target-sqlite-path',
+            'config_scope' => 'local',
+            'config_path' => true,
             'type' => 'value',
             'target' => 'target_sqlite_path',
             'placeholder' => 'PATH',
@@ -15918,6 +16027,7 @@ if (
         ],
         [
             'name' => 'rewrite-url',
+            'config_scope' => 'remote',
             'type' => 'two-arguments',
             'target' => 'rewrite_url',
             'argument_labels' => 'FROM TO',
@@ -15942,33 +16052,36 @@ if (
         ],
         [
             'name' => 'remap',
+            'config_scope' => 'remote',
             'type' => 'two-arguments',
             'target' => 'remap',
             'argument_labels' => 'SOURCE TARGET',
             'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
-            'commands' => ['pull-files', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
         [
             'name' => 'include',
+            'config_scope' => 'remote',
             'type' => 'value-or-next',
             'target' => 'include',
             'placeholder' => 'SOURCE',
             'repeatable' => true,
             'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute ' .
                 'path to a directory or a single file); repeat for several. Default pulls everything',
-            'commands' => ['pull-files', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-pull'],
             'aliases' => ['only'],
         ],
         [
             'name' => 'exclude',
+            'config_scope' => 'remote',
             'type' => 'value-or-next',
             'target' => 'exclude',
             'placeholder' => 'SOURCE',
             'repeatable' => true,
             'help' => 'Omit SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path) from the file pull; ' .
                 'repeat for several',
-            'commands' => ['pull-files', 'files-pull'],
+            'commands' => ['pull', 'pull-files', 'files-pull'],
         ],
 
         // ── flat-docroot options ────────────────────────────────
@@ -16001,6 +16114,7 @@ if (
         // ── apply-runtime options ────────────────────────────────
         [
             'name' => 'runtime',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'runtime',
             'placeholder' => 'RUNTIME',
@@ -16010,6 +16124,7 @@ if (
         ],
         [
             'name' => 'start-runtime',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'start_runtime',
             'placeholder' => 'RUNTIME',
@@ -16019,6 +16134,8 @@ if (
         ],
         [
             'name' => 'output-dir',
+            'config_scope' => 'local',
+            'config_path' => true,
             'type' => 'value',
             'target' => 'output_dir',
             'placeholder' => 'DIR',
@@ -16036,6 +16153,7 @@ if (
         ],
         [
             'name' => 'host',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'host',
             'placeholder' => 'HOST',
@@ -16044,6 +16162,7 @@ if (
         ],
         [
             'name' => 'port',
+            'config_scope' => 'local',
             'type' => 'value',
             'target' => 'port',
             'placeholder' => 'PORT',
@@ -16084,6 +16203,12 @@ if (
     /**
      * Parse CLI options using the declarative option definitions.
      *
+     * @param string[] $argv Process arguments.
+     * @param int $argc Argument count.
+     * @param int $start First option index.
+     * @param array[] $option_defs Option definitions declared above.
+     * @param array $provided_options Output keyed by canonical option name, containing only explicitly supplied values.
+     *
      * @return array {
      *     Parsed CLI option tuple.
      *
@@ -16093,7 +16218,7 @@ if (
      * }
      * @phpstan-return array{0: ?string, 1: ?string, 2: array}
      */
-    function _cli_parse_options(array $argv, int $argc, int $start, array $option_defs): array
+    function _cli_parse_options(array $argv, int $argc, int $start, array $option_defs, array &$provided_options = []): array
     {
         $state_dir = null;
         $filesystem_root = null;
@@ -16122,6 +16247,10 @@ if (
                             $prefix = "--{$cli_name}=";
                             if (strpos($arg, $prefix) === 0) {
                                 $raw = substr($arg, strlen($prefix));
+                                if (isset($def['config_scope'], $def['cast']) && $def['cast'] === 'int' && filter_var($raw, FILTER_VALIDATE_INT) === false) {
+                                    fwrite(STDERR, "Invalid --{$def['name']} value: {$raw}. Expected an integer.\n");
+                                    exit(1);
+                                }
                                 $value = _cli_cast($raw, $def['cast'] ?? null);
                                 if (isset($def['valid_values']) && !in_array($value, $def['valid_values'], true)) {
                                     fwrite(STDERR, "Invalid --{$def['name']} value: {$raw}. Valid values: " . implode(", ", $def['valid_values']) . "\n");
@@ -16187,6 +16316,26 @@ if (
                             break;
                     }
                 }
+            }
+
+            if ($matched) {
+                $target = $def['target'];
+                if ($target === 'state_dir') {
+                    $provided_options[$def['name']] = $state_dir;
+                } elseif ($target === 'filesystem_root') {
+                    $provided_options[$def['name']] = $filesystem_root;
+                } elseif (strpos($target, 'tuning_config.') === 0) {
+                    $provided_options[$def['name']] = $options['tuning_config'][substr($target, strlen('tuning_config.'))];
+                } else {
+                    $provided_options[$def['name']] = $options[$target];
+                }
+            }
+
+            // Credential files belong only to commands that sign requests. Reject before file I/O.
+            if ($matched && $def['name'] === 'secret-file' && ($argv[1] ?? null) !== 'remote'
+                && !in_array($argv[1] ?? '', $def['commands'], true)) {
+                fwrite(STDERR, "Error: {$argv[1]} does not accept --secret-file.\n");
+                exit(1);
             }
 
             // Full overwrite must never silently ignore pull selections. Use
@@ -16258,7 +16407,8 @@ if (
         echo "Mirror any WordPress site over HTTP.\n";
         echo "Version " . get_importer_version() . "\n";
         echo "\n";
-        echo "Usage: reprint <command> <remote-reprint-api-url> [options]\n";
+        echo "Usage: reprint <command> [<remote-reprint-api-url>] [options]\n";
+        echo "Save repeated settings with reprint remote add; then select them with --remote=NAME.\n";
         echo "\n";
 
         $high = array_filter($command_info, fn($i) => ($i['level'] ?? 'low') === 'high');
@@ -16287,8 +16437,13 @@ if (
 
         echo "Shared options (see command help for availability):\n";
         $global = array_filter($option_defs, fn($d) => ($d['help_section'] ?? null) === 'global');
-        // --version/-V is handled before option parsing, so inject it manually.
-        _cli_render_option_list($global, ['--version, -V' => 'Print version and exit']);
+        // --version/-V and config selection are handled before option parsing, so inject them manually.
+        _cli_render_option_list($global, [
+            '--version, -V' => 'Print version and exit',
+            '--remote=NAME' => 'Use the named remote from the current directory config',
+            '--config=FILE' => 'Explicitly select saved settings from this config file',
+            '--no-config' => 'Use only explicit command arguments',
+        ]);
         echo "\n";
 
         echo "Exit codes:\n";
@@ -16322,6 +16477,10 @@ if (
         echo "Usage: {$usage}\n";
         echo "\n";
         echo $info["description"];
+        if (in_array($command, ImportClient::COMMANDS, true)) {
+            echo "\nWith a saved remote, use --remote=NAME instead of the URL and saved options.\n";
+            echo "Use --config=FILE to select another config, or --no-config for explicit arguments.\n";
+        }
 
         // Collect options tagged for this command. Required options are also
         // shown when the command usage names them, so command-specific help
@@ -17029,8 +17188,31 @@ if (
         ],
     ];
 
+    // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Extend the existing CLI variables.
+    $command_info['remote'] = [
+        'level' => 'high',
+        'short' => 'Save a named remote and reusable migration settings',
+        'usage' => 'reprint remote add NAME URL --fs-root=DIR [settings] | remote set-url NAME URL [--same-remote]',
+        'description' => "remote add saves one remote in .reprint/config.json without contacting it.\n" .
+            "Save paths, --secret-file, --remap, --rewrite-url, and database settings once,\n" .
+            "then run commands with --remote=NAME instead of repeating them. A second remote is rejected.\n" .
+            "remote set-url changes only the saved address. Completed sync work requires\n" .
+            "--same-remote; unfinished transfers must be completed or explicitly aborted first.\n" .
+            "Redirects are never followed or saved. Use --config=FILE for another config.\n",
+    ];
+    // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Extend the existing CLI variables.
+    $command_info['config'] = [
+        'level' => 'high',
+        'short' => 'Inspect effective saved settings without contacting the remote',
+        'usage' => 'reprint config show [--command=COMMAND] [--config=FILE] [options]',
+        'description' => "Prints resolved paths, applicable options, and their sources as JSON.\n" .
+            "Defaults to --command=pull. Does not read secret files. Passwords are redacted.\n" .
+            "Reads .reprint/config.json in the current directory, or --config=FILE. No parent or global configs.\n" .
+            "Transfers require a URL, --remote=NAME, or --config=FILE. CLI overrides are not saved.\n",
+    ];
+
     // Show main help when invoked with no arguments or just --help
-    if ($argument_count < 2 || (isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]))) {
+    if ($argument_count < 2 || ( isset($argv[1]) && in_array($argv[1], ["--help", "-h", "help"]) )) {
         _cli_render_main_help($option_defs, $command_info);
         exit(1);
     }
@@ -17061,6 +17243,23 @@ if (
     if (in_array("--help", array_slice($argv, 2)) || in_array("-h", array_slice($argv, 2))) {
         _cli_render_command_help($command, $option_defs, $command_info);
         exit(0);
+    }
+
+    $reprint_saved_remote = new \Reprint\Importer\SavedRemoteConfig();
+    try {
+        // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Extend the existing CLI variables.
+        $argv[1] = $command;
+        $reprint_configured_arguments = $reprint_saved_remote->prepare($argv, $option_defs);
+        if ($reprint_configured_arguments === null) {
+            exit(0);
+        }
+        // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Extend the existing CLI variables.
+        $argv = $reprint_configured_arguments;
+        // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Extend the existing CLI variables.
+        $argument_count = count($argv);
+    } catch (\Throwable $error) {
+        fwrite(STDERR, 'Error: ' . $error->getMessage() . "\n");
+        exit(1);
     }
 
     if ($command === 'post-process') {
@@ -17126,6 +17325,22 @@ if (
         $argv, $argument_count, $option_start_index, $option_defs
     );
     $options["command"] = $command;
+    // Local abort never signs a request; database discard still contacts the target.
+    if (isset($options['secret_file']) && ( empty($options['abort']) || $command === 'db-push' )) {
+        if ($options['secret'] !== null) {
+            fwrite(STDERR, "Error: --secret and --secret-file cannot be combined.\n");
+            exit(1);
+        }
+        $reprint_secret = @file_get_contents($options['secret_file']);
+        if ($reprint_secret === false || trim($reprint_secret) === '') {
+            fwrite(STDERR, 'Error: Cannot read a non-empty secret from ' . $options['secret_file'] . ".\n");
+            exit(1);
+        }
+        // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedVariableFound -- Extend the existing CLI variables.
+        $options['secret'] = trim($reprint_secret);
+        unset($reprint_secret);
+    }
+
 
     $reprint_files_command_arguments = array_slice($argv, $option_start_index);
     if ($command === 'files-push') {
@@ -17139,6 +17354,7 @@ if (
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
                 || strpos($reprint_files_push_command_argument, '--secret=') === 0
                 || strpos($reprint_files_push_command_argument, '--private-key-path=') === 0
+                || strpos($reprint_files_push_command_argument, '--secret-file=') === 0
                 || strpos($reprint_files_push_command_argument, '--progress=') === 0;
             if (!$reprint_files_push_option_allowed) {
                 $reprint_files_push_option_name = explode('=', $reprint_files_push_command_argument, 2)[0];
@@ -17173,7 +17389,7 @@ if (
 
     // apply-runtime accepts --flat-document-root as an alternative to --fs-root.
     $flat_document_root = $options["flat_document_root"] ?? null;
-    $reprint_selected_remote_state_directory = null;
+    $reprint_selected_remote_state_directory = $reprint_saved_remote->remote_state_directory;
     if ($command === 'db-rewrite-urls') {
         if ($filesystem_root || $flat_document_root) {
             fwrite(STDERR, "Error: db-rewrite-urls does not accept --fs-root or --flat-document-root.\n");
@@ -17250,12 +17466,16 @@ if (
             if (isset($options['out']) && $options['out'] === '') {
                 throw new InvalidArgumentException('--out was given without a value.');
             }
+            $reprint_default_key_path = wp_join_unix_paths(
+                $reprint_selected_remote_state_directory ?? ImportClient::remote_state_directory_path($remote_reprint_api_url, $state_dir),
+                ImportClient::KEY_FILE_NAME
+            );
             $reprint_key_path = isset($options['out']) && is_string($options['out'])
                 ? $options['out']
-                : ImportClient::key_file_path($remote_reprint_api_url, $state_dir);
+                : $reprint_default_key_path;
             $reprint_generated_key = ImportClient::generate_key_file($reprint_key_path, !empty($options['force']));
             $reprint_key_stored_in_state =
-                $reprint_key_path === ImportClient::key_file_path($remote_reprint_api_url, $state_dir);
+                $reprint_key_path === $reprint_default_key_path;
             $reprint_enrollment_instructions =
                 ImportClient::format_enrollment_instructions($reprint_generated_key, false, $reprint_key_stored_in_state);
             $reprint_progress_output_mode = $options['progress'] ?? 'auto';
@@ -17283,14 +17503,15 @@ if (
                 $remote_reprint_api_url,
                 $state_dir,
                 $filesystem_root,
-                $options
+                $options + ['selected_remote_state_directory' => $reprint_selected_remote_state_directory]
             );
         } elseif ($command === 'files-diff') {
             $reprint_files_diff_push_state_directory = ImportClient::resolve_push_state_directory(
                 $remote_reprint_api_url,
                 $state_dir,
                 $filesystem_root,
-                'files-diff'
+                'files-diff',
+                $reprint_selected_remote_state_directory
             );
         }
         $client = new ImportClient(
