@@ -1,3 +1,8 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/reprint-logo-dark.svg">
+  <img src="docs/assets/reprint-logo.svg" alt="Reprint" width="250" height="75">
+</picture>
+
 # Reprint — WordPress Site Migration
 
 Clone any WordPress site over HTTP. One command pulls the files, database, and server config, then starts a local copy you can open in your browser.
