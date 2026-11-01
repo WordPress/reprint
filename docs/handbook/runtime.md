@@ -1,0 +1,99 @@
+# Runtime configuration reference
+
+Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
+persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
+your shell first. Keep the state directory outside the filesystem root.
+See [authorization](../authorize-client/) before running remote commands.
+
+Use `$FLAT_DIR` for the assembled WordPress directory and `$RUNTIME_DIR` for
+generated configuration. Create the assembled layout first when using
+`--flat-document-root`:
+
+```bash
+php reprint.phar flat-docroot "$URL" --state-dir="$STATE_DIR" \
+  --fs-root="$FS_ROOT" --flatten-to="$FLAT_DIR"
+```
+
+This creates symlinks to the downloaded tree; it does not copy the files.
+Keep the download directory while using that layout.
+
+The downloaded files need server-specific configuration to actually work —
+PHP constants, INI directives, and request handlers that the source host
+relied on. `apply-runtime` reads the preflight data, detects the source
+hosting provider, and generates the configuration files your target server needs.
+
+For PHP's built-in development server:
+
+```bash
+php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
+    --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin
+bash "$RUNTIME_DIR/start.sh"
+```
+
+For nginx + PHP-FPM:
+
+```bash
+php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
+    --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=nginx-fpm
+# Include $RUNTIME_DIR/nginx.conf in your nginx configuration, then reload
+```
+
+The nginx runtime keeps document roots and host names as literal configuration
+values, including spaces and punctuation. Dollar signs and control characters
+in the document root, output path, or host are rejected before files are written.
+Its generated listener binds to `127.0.0.1`, and requests for dotfiles or paths
+inside dot-directories return 404. To accept remote clients, change the `listen`
+address in the generated `nginx.conf`. The configured SQLite database and its
+companion files also return 404, even when their names do not start with a dot.
+
+The command accepts either `--fs-root` (the raw download directory — the remote
+`document_root` path is appended automatically) or `--flat-document-root` (a
+directory created by `flat-docroot`, used as-is). These are mutually exclusive.
+
+Host and port default to the URL rewrite target from `db-apply`. Override with
+`--host` and `--port`. For nginx, the host sets `server_name`; the listener
+remains on `127.0.0.1` unless you edit the generated configuration.
+
+The database written into `runtime.php` is the one `db-apply` connected to. To
+point the runtime at a database `db-apply` did not create — a local database you
+are keeping, for instance, when you pull the files but not the database — name
+it with the same `--target-*` options `db-apply` takes:
+
+```bash
+php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
+    --flat-document-root="$FLAT_DIR" --output-dir="$RUNTIME_DIR" --runtime=php-builtin \
+    --target-engine=sqlite --target-sqlite-path="$FLAT_DIR/wp-content/database/.ht.sqlite"
+```
+
+The SQLite file itself may be missing — the `sqlite-database-integration` plugin
+creates it on the first request — but its directory must exist. The options
+apply to this run only; `apply-runtime` does not record them in state.
+
+Every field you leave out falls back to what `db-apply` recorded, as long as the
+engine matches. Name the whole connection when you point at a different MySQL
+database — otherwise you inherit `db-apply`'s host, port or password.
+
+**What gets generated:**
+
+The command produces a `runtime.php` file that sets PHP constants, server
+variables, and route handlers the source site needs. Each target runtime
+wraps it differently:
+
+| Runtime | Output files | How runtime.php loads |
+|---------|-------------|----------------------|
+| `php-builtin` | `runtime.php`, `start.sh` | Used as the router script for `php -S` |
+| `nginx-fpm` | `runtime.php`, `nginx.conf` | Loaded via `auto_prepend_file` in `fastcgi_param PHP_VALUE` |
+
+Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
+generation for missing image sizes and auto-detection of extra directories from
+`auto_prepend_file`/`auto_append_file` INI values), WP Engine, and a generic default.
+`apply-runtime` removes known host-plugin copies by default, independently of
+the saved download selection. Pass `apply-runtime --include-host-plugins` to
+skip that local cleanup. See [host platform plugins](../file-transfers/) for download selection and cleanup.
+Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
+development server, and WordPress Playground CLI.
+
+Playground previews serve downloaded files only. They do not proxy missing
+uploads from the source or add a pull-state mount. Keep `--state-dir` outside
+the site directories. Run `apply-runtime` again to refresh an existing
+runtime's generated configuration.

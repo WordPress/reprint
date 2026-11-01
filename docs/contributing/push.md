@@ -1,50 +1,17 @@
-# Push Sync
+# File push implementation
 
-The GitHub plugin distribution includes push. The WordPress.org distribution
-sets `REPRINT_PUSH_AVAILABLE` to `false` and omits the file-push and
-database-push implementation files before Composer generates its classmap.
-Shared PHP files remain intact; the flag blocks push requests and grants and
-hides push controls. Host configuration cannot turn it on.
+This reference is for contributors changing file push and hosts configuring the
+push-capable source build. The WordPress.org server package omits file and
+database push; host configuration cannot enable code absent from that package.
 
-Push local changes to a remote WordPress site: files and database, driven
-entirely from the local machine, resumable at every step, never leaving the
-remote partially committed. This document is the agreed design; the delivery plan at
-the end maps it to a PR stack.
+File push compares the current local tree with its retained local index,
+transfers selected changes into private work files, and drives a resumable
+commit on the target. A commit can span several requests. Keep the
+[terminology contract](push-terminology.md) when changing this lifecycle.
 
-## Shape of a push
-
-1. The local machine knows what changed locally since the local index for this
-   remote was advanced by completed pull mutations or replaced after a
-   target-confirmed push, and since the database rows were stored after that
-   push.
-2. It shows a summary of local uploads and deletions. The user confirms that
-   local should win for those paths and rows.
-3. It transfers everything into a private push directory on the remote — file bytes,
-   the work-delete stream, and (phase two) the database diff. The transfer is
-   resumable at byte granularity.
-4. It drives the commit step with repeated commands until done. The remote
-   moves work files into place, executes deletions, and commits the database
-   diff, and fixes symlinks — inside a maintenance window that lasts seconds,
-   not the length of the transfer.
-5. It stores the current local paths as the local index for that remote Reprint
-   API URL and stores the current rows as the previously pushed rows. The push
-   is complete only after this step. A later process resumes an interrupted
-   sender from its stored phase.
-
-Both sides act only when the local machine calls: no worker, no polling, no
-sessions. The remote is a passive authenticated API.
-
-## Peers and packages
-
-There is one package: Reprint. Every peer ships the same code with three
-capabilities:
-
-- **serve** — index and fetch endpoints (today's export surface),
-- **commit** — push session, commit engine, database batch,
-- **drive** — the CLI that runs syncs.
-
-"Reprint lite" is a serve-only build for peers that only ever get pulled
-from. The WordPress plugin ships the full package.
+Database push is a separate full-overwrite operation, described in
+[Database push implementation](database-push.md). Selective database changes
+and package unification remain future work, not behavior promised by this guide.
 
 ## Transport and authentication
 
@@ -64,7 +31,7 @@ OpenSSL rejects the token; the client never falls back to another credential.
 Every request carries a signature over newline-joined fields: the protocol
 label (plus the key id for a key), a random nonce, a timestamp, the HTTP method,
 and the URL's path and query (which name the endpoint). The label and field
-layout appear in `docs/PULL-HTTP.md`. Payloads are not signed and not hashed: TLS already
+layout appear in [Pull HTTP protocol](pull-http.md). Payloads are not signed and not hashed: TLS already
 guarantees their integrity, and signing streams was the single biggest cause of
 buffering pain. Signing cost is constant per request regardless of payload
 size. Neither the connection token nor the private key travels in a URL or body,
@@ -122,15 +89,14 @@ for streaming uploads; see [issue #327](https://github.com/WordPress/reprint/iss
 ## Change detection: local machine compared against itself
 
 ctime is machine-local, so push never compares a local timestamp to a remote
-one. It answers "what changed locally since my last target-confirmed push
-commit to this remote" by comparing the current local paths and rows against
-the local index and previously pushed rows for that remote Reprint API URL.
+one. It compares the current local paths against the local index for that
+remote Reprint API URL. Completed pull mutations advance that index; a
+target-confirmed files-push replaces it with the sender's fresh scan.
 
 The local machine keeps these files **per remote Reprint API URL**. The caller
 uses a different state directory for each filesystem root:
 
     <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/local_index.jsonl
-    <state-dir>/remotes/<md5-of-trimmed-remote-reprint-api-url>/push/previously_pushed_rows.jsonl   (phase two)
 
 The local index records local relative paths and the locally observed type,
 size, ctime, and directory emptiness. A target-confirmed files-push replaces it
@@ -168,9 +134,8 @@ directories from non-empty ones. Files and symlinks change when their `type`,
 upload.
 
 The index reader trusts the indexer's entry values. It handles only failures to
-read a line, decode its JSON, or decode its base64 path. This keeps schema
-ownership with the indexer instead of partially validating the same index entry in
-the push plan.
+read a line, decode its JSON, or decode its base64 path. The indexer validates the schema; the push plan does not partly validate
+the same index entry again.
 
 A push plan is an internal part of the sender lifecycle:
 
@@ -258,12 +223,12 @@ beyond the stored output offsets, and continues from the retained internal
 phase. An older cursor stopped during `indexing` restarts at
 `filtering_patch_base` so one traversal never mixes old and current skip rules.
 
-The first push to a site has no local index or previously pushed rows. Every
-current file, symlink, and empty directory is selected, and no local deletion
-can be detected yet.
+If there is no local index, every current file, symlink, and empty directory
+is selected, and no local deletion can be detected yet. A preceding pull can
+already have created a local index before the first push.
 
 Push is intentionally local-wins. If a developer edited the remote site
-outside Reprint, a later push of the same path or row overwrites that remote
+outside Reprint, a later push of the same path overwrites that remote
 edit. This keeps push as a simple deployment tool instead of a conflict
 manager.
 
@@ -694,9 +659,9 @@ Order:
    `commit.json` checkpoint written before each document-root mutation. The
    symlink updates follow the same bounded cursor. Database overwrite uses
    the separate workflow described below.
-4. **Maintenance off:** commit releases its `commit-state` ownership after
-   completion; the driver saves the local index and previously pushed rows for
-   that remote Reprint API URL after the target confirms commit.
+4. **Maintenance off:** commit releases its `commit-state` record after
+   completion; the driver saves the local index for that remote Reprint API URL
+   after the target confirms commit.
 
 If the driver dies mid-commit: WordPress stops honoring the `.maintenance`
 file after 10 minutes on its own, and the next commit request resumes from
@@ -748,21 +713,8 @@ unselected tables are left alone.
 This command is separate from file commit. It requires a host-configured
 standalone API route, an operator-controlled stop of all writers, and manual
 cache clearing and site inspection before reopening. The first version has
-explicit engine, schema, and row-size limits. See [Full database push](DATABASE-PUSH.md)
+explicit engine, schema, and row-size limits. See [Full database push](database-push.md)
 for setup, commands, recovery, and current restrictions.
-
-## Selective database changes (future work)
-
-This mode applies reviewed local INSERT, UPDATE, and DELETE operations rather
-than overwriting the database. The plan is tracked in [issue #827](https://github.com/WordPress/reprint/issues/827).
-
-Retain a baseline and the pull selection. Identify local changes from that
-baseline, then request only the affected production rows for conflict checks.
-A row absent because it was excluded during pull is not a local deletion.
-There is no automatic reconciliation and no automatic local-wins rule for
-conflicting rows. Users review grouped changes, choose what to push, and can
-skip, replace explicitly, or revise a conflicting group. Production values
-must be checked again when applying the approved changes.
 
 ## Accepted limitations
 
@@ -778,64 +730,6 @@ stop all writers:
   before pushing over them.
 - **Shell and cron can write during the maintenance window.** Maintenance
   blocks web requests; it cannot block SSH or system cron.
-## Delivery plan
-
-Files first, followed by full database overwrite and then selective database changes. Keep each PR focused:
-
-1. **Design doc** — this file.
-2. **Envelope auth** — headers-only RSA signatures on hosts with OpenSSL,
-   HMAC elsewhere. Both cover the method and request target instead of a body
-   hash and apply to every request. End-to-end file-push tests cover key lookup
-   in the state directory, an explicit private key path, per-key grants, and resume.
-3. **Work value store** — the store itself (PR #317, which succeeded
-   the closed #298).
-4. **Reprint-storage exclusions** — indexer and deletion-sync hard-exclude
-   the configured storage path; web guards for inside-docroot placement.
-5. **Push plan and local diff** — retained indexes in local push state, explicit start and
-   resume lifecycle, bounded local change and deletion detection, and durable
-   path lists for the sender.
-6. **Push stream endpoint** — the store's HTTP surface plus a sender that
-   sends one resumable multipart part per step; deletion work received;
-   `--insecure` with honest help text (the first
-   push networking this flag can gate). Decisions this slice locked in:
-   sending streams through libcurl's pause mechanism, which PHP's curl
-   extension supports from 8.1 — so `reprint push` requires PHP 8.1+ (pull
-   keeps 7.4+; the full story is
-   https://github.com/WordPress/reprint/issues/327) — and paths
-   travel base64-encoded in MIME headers, response cursors, and push request
-   parameters, because file paths are arbitrary bytes and JSON strings must
-   be UTF-8.
-7. **Package unification** — importer and exporter become one Reprint
-   package (lite = serve-only build). Placed here because commit is the
-   first piece that needs import-side code running on the remote.
-8. **Commit engine, files** — delete `work/deletes`, then rename values from
-   `work/files` into the document root with the whitelisted maintenance file
-   and resumable `commit.json` cursor.
-9. **Standalone escape hatch** — the no-boot endpoint and driver fallback.
-10. **Full database overwrite, then selective changes** — `db-push` first
-    streams and rewrites local rows, stages incoming tables, and
-    exchanges them only after explicit review. The client prepares table DDL,
-    row inserts for generated/spatial columns, and deferred foreign keys. The
-    opt-in server currently trusts that SQL without a parser. The later selective mode
-    retains a baseline and pull selection, requests candidate production
-    rows, and applies only approved changes with a final conflict check.
-11. **`reprint files-push`** — the low-level, files-only caller that retains
-    one sender per process, applies caller time and memory admission budgets,
-    and reports completion, continuation, restart, or failure without retrying.
-12. **`reprint files-diff`** — a local-only command that reports the paths a
-    files-push would send or delete against the local index for that remote
-    Reprint API URL, without contacting the target. Files-pull advances that
-    index only for completed local mutations through its pull index WAL.
-13. **`reprint push`** — the high-level command that adds a change summary,
-    confirmation boundary, database work, transfer, commit, and resume.
-14. **Budgets and resumable limits** — push requests stay bounded by two
-    budgets of different dimensions: the fixed chunk (the sender's in-memory
-    unit of one read) and the host-learned request body budget that
-    PushRequestSizer sizes from reported php.ini limits and 413s, plus a
-    wall-clock budget per request; any endpoint that stops after durable work
-    returns the exact committed state the driver needs to retry. The commit step
-    gets the main budgeted loop: process until a deadline or operation limit,
-    return progress, and let the driver re-enter until complete.
 
 The active local SQLite database is not part of files-diff or files-push.
 Both commands derive its path from the saved db-apply target and exclude that

@@ -27,25 +27,130 @@
         "parent": "handbook",
         "order": 30
     },
+    "copy-again": {
+        "title": "Copy again or resume",
+        "slug": "copy-again",
+        "markdown_source": "handbook/copy-again.md",
+        "parent": "handbook",
+        "order": 40
+    },
+    "copy-selected-data": {
+        "title": "Copy selected files or the database",
+        "slug": "copy-selected-data",
+        "markdown_source": "handbook/copy-selected-data.md",
+        "parent": "handbook",
+        "order": 50
+    },
+    "move-to-another-host": {
+        "title": "Move to another host",
+        "slug": "move-to-another-host",
+        "markdown_source": "handbook/move-to-another-host.md",
+        "parent": "handbook",
+        "order": 60
+    },
+    "windows-sources": {
+        "title": "Copy a Windows-hosted site",
+        "slug": "windows-sources",
+        "markdown_source": "handbook/windows-sources.md",
+        "parent": "handbook",
+        "order": 70
+    },
+    "multisite": {
+        "title": "Move one site out of a network",
+        "slug": "multisite",
+        "markdown_source": "handbook/multisite.md",
+        "parent": "handbook",
+        "order": 80
+    },
+    "rewrite-urls": {
+        "title": "Rewrite URLs in a live database",
+        "slug": "rewrite-urls",
+        "markdown_source": "handbook/rewrite-urls.md",
+        "parent": "handbook",
+        "order": 90
+    },
     "troubleshooting": {
         "title": "Troubleshooting",
         "slug": "troubleshooting",
         "markdown_source": "handbook/troubleshooting.md",
         "parent": "handbook",
-        "order": 40
-    },
-    "how-it-works": {
-        "title": "How Reprint works",
-        "slug": "how-it-works",
-        "markdown_source": "handbook/how-it-works.md",
-        "parent": "handbook",
-        "order": 50
+        "order": 100
     },
     "build-with-reprint": {
         "title": "Build with Reprint",
         "slug": "build-with-reprint",
         "markdown_source": "handbook/build-with-reprint.md",
         "parent": "handbook",
-        "order": 60
+        "order": 110
+    },
+    "integration-pipeline": {
+        "title": "Control each migration step",
+        "slug": "integration-pipeline",
+        "markdown_source": "handbook/integration-pipeline.md",
+        "parent": "handbook",
+        "order": 120
+    },
+    "hosting": {
+        "title": "Prepare a hosting destination",
+        "slug": "hosting",
+        "markdown_source": "handbook/hosting.md",
+        "parent": "handbook",
+        "order": 130
+    },
+    "commands": {
+        "title": "Command reference",
+        "slug": "commands",
+        "markdown_source": "handbook/commands.md",
+        "parent": "handbook",
+        "order": 140
+    },
+    "authentication": {
+        "title": "Authentication reference",
+        "slug": "authentication",
+        "markdown_source": "handbook/authentication.md",
+        "parent": "handbook",
+        "order": 150
+    },
+    "preflight": {
+        "title": "Preflight reference",
+        "slug": "preflight",
+        "markdown_source": "handbook/preflight.md",
+        "parent": "handbook",
+        "order": 160
+    },
+    "file-transfers": {
+        "title": "File transfer reference",
+        "slug": "file-transfers",
+        "markdown_source": "handbook/file-transfers.md",
+        "parent": "handbook",
+        "order": 170
+    },
+    "database-transfers": {
+        "title": "Database transfer reference",
+        "slug": "database-transfers",
+        "markdown_source": "handbook/database-transfers.md",
+        "parent": "handbook",
+        "order": 180
+    },
+    "runtime": {
+        "title": "Runtime configuration reference",
+        "slug": "runtime",
+        "markdown_source": "handbook/runtime.md",
+        "parent": "handbook",
+        "order": 190
+    },
+    "progress-and-results": {
+        "title": "Progress, results, and exit codes",
+        "slug": "progress-and-results",
+        "markdown_source": "handbook/progress-and-results.md",
+        "parent": "handbook",
+        "order": 200
+    },
+    "how-it-works": {
+        "title": "How Reprint works",
+        "slug": "how-it-works",
+        "markdown_source": "handbook/how-it-works.md",
+        "parent": "handbook",
+        "order": 210
     }
 }

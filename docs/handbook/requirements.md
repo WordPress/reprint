@@ -18,6 +18,10 @@ the plugin can use WordPress's database connection when they are unavailable.
 OpenSSL enables Migration Tokens; hosts without it use connection tokens.
 Use a working HTTPS address for the source site.
 
+MySQL 5.5 sources are supported. This does not imply MySQL 5.5 destination
+support: the destination must accept the exported schema and collations. See
+[Database transfer reference](../database-transfers/) for import behavior.
+
 The WordPress.org package supports downloads only. It does not include file
 push or database push. This handbook's first-copy tutorial uses that package.
 
@@ -25,7 +29,8 @@ push or database push. This handbook's first-copy tutorial uses that package.
 
 The client requires PHP 7.4 or newer. The local-copy tutorial also needs:
 
-- A Bash shell, such as macOS Terminal, a Linux terminal, or WSL on Windows.
+- A terminal on macOS or Linux, or WSL on Windows. The generated local-server
+  start script uses Bash.
 - PHP extensions `curl`, `hash`, `json`, `mbstring`, `openssl`, `PDO`,
   `pdo_sqlite`, and `zlib`. OpenSSL is needed for the tutorial's Migration
   Token steps.

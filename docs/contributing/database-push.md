@@ -1,4 +1,8 @@
-# Full database push
+# Database push implementation
+
+This is contributor and hosting implementation reference for the push-capable
+source build. The WordPress.org server package omits database push. It is not
+part of the first-copy workflow.
 
 Suppose production has `wp_options` and `wp_orders`, but the local database
 only has `wp_options`. `db-push` first loads a private incoming `wp_options`.

@@ -20,6 +20,7 @@ final class HandbookManifestTest extends TestCase {
             $this->assertGreaterThan(0, $page['order']);
 
             $parent = $page['parent'];
+            $this->assertSame($key === 'handbook' ? null : 'handbook', $parent, 'Keep the published routes flat while grouping navigation on the home page.');
             if ($parent !== null) {
                 $this->assertArrayHasKey($parent, $published_paths, 'List each parent before its children.');
             }
@@ -30,6 +31,11 @@ final class HandbookManifestTest extends TestCase {
             $this->assertArrayNotHasKey($source, $sources);
             $sources[$source] = file_get_contents($docs_directory . '/' . $source);
             $this->assertStringStartsWith('# ' . $page['title'] . "\n", $sources[$source]);
+            $this->assertDoesNotMatchRegularExpression(
+                '~(?<!`)`[^`\n]*https?://[^`\n]*`(?!`)~',
+                $sources[$source],
+                $source . ': Put example addresses in fenced code or plain text; the native Markdown parser can swallow following links after an inline-code URL.'
+            );
         }
 
         $files = [];
@@ -77,6 +83,62 @@ final class HandbookManifestTest extends TestCase {
                     }
                 }
                 $this->assertContains(implode('/', $target), $published_paths, $source . ': ' . $link);
+            }
+        }
+
+        foreach ($manifest as $key => $page) {
+            if ($key !== 'handbook') {
+                $this->assertStringContainsString('](' . $page['slug'] . '/)', $sources['handbook/README.md'], 'Every page needs an entry in the handbook navigation.');
+            }
+        }
+    }
+
+    public function testExistingPublishedSlugsRemainAvailable(): void
+    {
+        $manifest = json_decode(file_get_contents(__DIR__ . '/../docs/manifest.json'), true, 512, JSON_THROW_ON_ERROR);
+        foreach (['handbook', 'copy-a-site', 'authorize-client', 'requirements', 'troubleshooting', 'how-it-works', 'build-with-reprint'] as $slug) {
+            $this->assertArrayHasKey($slug, $manifest);
+            $this->assertSame($slug, $manifest[$slug]['slug']);
+        }
+    }
+
+    public function testCommandReferenceListsTheCurrentCliCommands(): void
+    {
+        $process = proc_open(
+            [PHP_BINARY, __DIR__ . '/../packages/reprint-client/src/import.php', '--help'],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            dirname(__DIR__)
+        );
+        $this->assertIsResource($process);
+        $help = stream_get_contents($pipes[1]);
+        $errors = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        // Global help without a command currently exits 1. This test checks
+        // the command inventory, not the no-command help exit policy.
+        $this->assertContains(proc_close($process), [0, 1], $errors);
+
+        preg_match_all('/^  ([a-z]+(?:-[a-z]+)*)\s{2,}/m', $help, $commands);
+        $this->assertNotEmpty($commands[1]);
+        $reference = file_get_contents(__DIR__ . '/../docs/handbook/commands.md');
+        preg_match_all('/^\| `([a-z]+(?:-[a-z]+)*)` \|/m', $reference, $documented);
+        $this->assertEqualsCanonicalizing($commands[1], $documented[1], 'Update the command index when the CLI changes.');
+    }
+
+    public function testRepositoryDocumentationLinksResolveToFiles(): void
+    {
+        $root = dirname(__DIR__);
+        $files = array_merge([$root . '/README.md', $root . '/CONTRIBUTING.md'], glob($root . '/docs/contributing/*.md'));
+        foreach ($files as $file) {
+            preg_match_all('/\[[^\]]+\]\(([^\s)]+)\)/', file_get_contents($file), $links);
+            foreach ($links[1] as $link) {
+                $url = parse_url($link);
+                $this->assertNotFalse($url, $file . ': ' . $link);
+                if (isset($url['host']) || empty($url['path'])) {
+                    continue;
+                }
+                $this->assertFileExists(dirname($file) . '/' . rawurldecode($url['path']), $file . ': ' . $link);
             }
         }
     }

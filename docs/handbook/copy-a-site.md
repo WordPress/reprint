@@ -1,7 +1,7 @@
 # Copy a site to your computer
 
 This tutorial copies one single-site WordPress installation to your computer
-and opens it at `http://localhost:8881`. It uses SQLite, so you do not need a
+and opens it at http://localhost:8881. It uses SQLite, so you do not need a
 local MySQL server.
 
 For an example WordPress site, explore the
@@ -45,7 +45,7 @@ access steps.
 
 ## 3. Start the copy on your computer
 
-In the same terminal folder, run this command. Replace `https://example.com`
+In the same terminal folder, run this command. Replace https://example.com
 with the source site's HTTPS address:
 
 ```bash
@@ -73,7 +73,7 @@ Large sites take longer. Keep the terminal open.
 ## 4. Open and check the copy
 
 When Reprint starts the local server, open the address it prints. For this
-tutorial it is `http://localhost:8881`.
+tutorial it is http://localhost:8881.
 
 Before testing features that send email, take payments, or call other live
 services, disable those connections or replace them with test settings.

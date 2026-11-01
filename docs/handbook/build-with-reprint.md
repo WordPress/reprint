@@ -55,14 +55,17 @@ have its own output format; do not assume every command prints only progress.
 Use `pull-metadata` for saved lifecycle details rather than depending on private
 state-file layouts.
 
-Read the final result and exit status. A command may complete, need another
+Read the [final result and exit status](../progress-and-results/). A command may complete, need another
 bounded run, require user action, stop after a temporary failure, or fail.
 Do not treat every nonzero exit as permission to retry forever. Keep the
 command's state, show the reason, and let your caller decide when to run again.
 
 The smaller commands, such as `preflight`, `files-pull`, `db-pull`, `db-apply`,
 and `apply-runtime`, are available when your platform needs to control each
-stage. Consult each command's `--help` before building that pipeline.
+stage. Follow [Control each migration step](../integration-pipeline/) when you
+need that control; [Prepare a hosting destination](../hosting/) covers cleanup
+and startup checks. Use [Command reference](../commands/) to find each command's
+scope and detailed reference.
 
 For package source, embedding details, tests, and contributions, use the
 [development repository](https://github.com/WordPress/reprint). Get user-facing

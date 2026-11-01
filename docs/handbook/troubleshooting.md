@@ -65,7 +65,7 @@ version, extensions, database, or missing source-host service may be the cause.
 SQLite does not make every MySQL-dependent plugin work unchanged.
 
 Check the browser address too. The tutorial rewrites the site to
-`http://localhost:8881`; opening the original address still visits the live site.
+http://localhost:8881; opening the original address still visits the live site.
 
 To restart an already copied site, use `start.sh`. Repeating a completed `pull`
 can import the source database again and replace local database changes.

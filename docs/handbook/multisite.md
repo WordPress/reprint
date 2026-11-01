@@ -1,5 +1,45 @@
 # Move one site out of a network
 
+Use this guide to copy one multisite subsite into a single-site installation.
+It does not copy the whole network or create a new network.
+
+## 1. Select the site and authorize the client
+
+You need a network administrator to install and configure Reprint. Use the
+selected site's home address, such as https://network.example/shop/, rather
+than the network home. [Authorize the client](../authorize-client/) in Network
+Admin; on an OpenSSL host, enroll its Migration Token there. On a token-only
+host, add `--secret=NETWORK_TOKEN` to the command below.
+
+## 2. Copy into an empty destination
+
+Create the destination directories and an empty MySQL or SQLite target. Supply
+`--new-site-url` and `--site-admin=LOGIN`; LOGIN must identify a user included
+in the selected site's export. The example prepares files and SQLite data for
+https://shop.example without starting a development server:
+
+```sh
+php reprint.phar pull 'https://network.example/shop/?reprint-api' \
+  --state-dir=./state --fs-root=./files \
+  --target-engine=sqlite --target-sqlite-path=/srv/shop/database.sqlite \
+  --target-db=shop --new-site-url=https://shop.example --site-admin=alice \
+  --runtime=none --start-runtime=none
+```
+
+On a key-authenticated source, the first run can stop for enrollment. Run the
+same command after the network administrator authorizes its Migration Token.
+
+## 3. Configure and check the destination
+
+Configure the destination web server and database connection as described in
+[Move to another host](../move-to-another-host/) or use the
+[runtime configuration commands](../runtime/). Check the imported administrator,
+posts, media, theme, plugins, and site-specific services before switching traffic.
+Read the plugin-table and separate-work sections below before treating the
+copy as complete.
+
+## Resulting site configuration
+
 A pull from https://network.example/shop/?reprint-api selects the shop.
 It creates a single-site WordPress install, not a new network. If the shop
 uses network_7_posts, the target adopts `$table_prefix = 'network_7_'`.
@@ -12,29 +52,6 @@ The generated configuration uses CUSTOM_USER_TABLE and CUSTOM_USER_META_TABLE
 to select them. Only the chosen site's users and allowed profile fields are
 exported, not every network user. Capability keys and the roles option already
 match the adopted table prefix.
-
-In Network Admin → Settings → Reprint Server, set a network connection token.
-A site's ordinary administrator cannot set or read that token. Use the selected
-site's home URL with ?reprint-api, not the network's home URL.
-Preflight sends the selected site's URL bases and a separate list of child-site
-paths below those bases on the same host. It does not list other domains or
-pages. The URL map does not grow with network size.
-
-Run the pull with an empty MySQL or SQLite target database, --new-site-url, and
---site-admin=LOGIN. LOGIN must name a user included in the selected site's
-export. This explicitly adds the administrator role to that user at the target;
-it keeps their existing roles and direct capabilities. Other imported users
-keep their selected-site roles. Source superadmins are not copied merely
-because they administer the source network.
-
-For example, migrate the shop to a SQLite file:
-
-```sh
-php reprint.phar pull 'https://network.example/shop/?reprint-api' \
-  --secret=NETWORK_TOKEN --state-dir=./state --fs-root=./files \
-  --target-engine=sqlite --target-sqlite-path=/srv/shop/database.sqlite \
-  --target-db=shop --new-site-url=https://shop.example --site-admin=alice
-```
 
 The source can use MySQL or SQLite Database Integration 2.x/3.x. Reprint uses
 the source's active driver. The target uses the bundled SQLite driver.

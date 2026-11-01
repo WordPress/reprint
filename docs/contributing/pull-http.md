@@ -1,4 +1,9 @@
-# Export parameter rollout
+# Pull HTTP protocol
+
+Contributor reference for changes to the official client and server. Product
+integrations should start with the client commands in the public handbook.
+This document does not promise that private cursors or state formats are a
+stable API for independent clients.
 
 Keep the API routing marker (`?reprint-api` or the legacy `?site-export-api`)
 in the URL. The client keeps every parameter of the supplied API URL, including
@@ -19,8 +24,7 @@ in the POST body. For example, POST to
 }
 ```
 
-[PR #800](https://github.com/WordPress/reprint/pull/800) ships the POST client
-and the compatible exporter together. The exporter still reads export
+The exporter still reads export
 parameters from the query string, where clients sent them before the POST
 transport. A released token client, recognised by its
 `X-Auth-Content-Hash` header, is refused with `client_update_required` before
@@ -59,22 +63,8 @@ the body, which also keeps a large cursor clear of host header size limits. The
 exporter still reads an `X-Export-Cursor` header when the body has no cursor, for older
 clients. The strict-WAF test strips that header and checks SQL continuation.
 
-Multipart array fields use bracketed names built directly from their keys.
-They do not depend on PHP's `arg_separator.output` setting.
-
-The strict query-firewall test supplies an API URL with only its routing marker.
-The client does not remove caller-supplied query parameters to satisfy a WAF.
-The fixture strips every query parameter whose value contains anything but
-letters, digits, and underscores and forwards the rest. The reported firewall
-objected to base64 characters in query values. It strips such parameters on
-POST requests too.
-Request bodies and response streams pass through unchanged. This models the
-reported query rejection, and it does not promise that all firewalls accept all
-POST bodies.
-
-A backward-compatibility test bypasses the strict WAF and sends legacy GET
-query parameters, then uploads a multipart file list with its endpoint and
-options still in the query. Normal export requests in the other tests use POST parameters.
+Multipart array entries use field names such as `directory[0]` and
+`skip_rows[0][column]`.
 
 ## Sending file paths through source firewalls
 
@@ -89,11 +79,6 @@ POST fields after form decoding:
 
 The same format applies to `pulled_before` and other array entries in these
 directory parameters. The endpoint stays in the URL.
-
-A reported source passed preflight but redirected file-index requests with
-base64 paths in their POST bodies. Disabling its Hide My WP IDS allowed the
-migration to proceed. The format below is intended to avoid that kind of false
-match. It has not been tested against that source's IDS.
 
 ### Encoding and decoding a path
 
