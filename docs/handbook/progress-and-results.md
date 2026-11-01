@@ -1,7 +1,8 @@
 # Progress, results, and exit codes
 
 Use this reference when your product runs the client or your support team
-reads a migration log. A progress update is not a completed command.
+reads a migration log. For a working caller example, start with
+[Build with Reprint](../build-with-reprint/). A progress update is not a completed command.
 
 Examples use `$URL` for the source address, `$STATE_DIR` for persistent private
 state, and `$FS_ROOT` for downloaded files. Set those variables in your shell.
@@ -69,7 +70,9 @@ and terminal progress.
 `command` is the outer command the caller invoked. Preflight inside `pull`,
 `pull-files`, or `pull-db` does not produce a separate final report.
 
-`status` is `complete`, `partial`, `error`, or `aborted`. Files-push also retains
+`status` is `complete`, `partial`, `error`, or `aborted`. A first `pull` can
+report `enrollment_needed` with exit code `4`; display its `message` to ask the
+administrator to authorize the client. Files-push also retains
 its `interrupted`, `restart`, and `failed` outcomes and its `reason` and `detail`.
 `exit_code` is the actual exit code; reporting does not choose retry timing or
 change command outcomes. Exit 2 is unfinished work, not success. A successful

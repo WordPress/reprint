@@ -11,7 +11,7 @@ an interrupted transfer can continue.
 
 ## Start here
 
-- **Try Reprint:** explore the [demo site](https://reprint-demo.wordpress.net/).
+- **View the demo site:** explore the [demo site](https://reprint-demo.wordpress.net/).
 - **Clone my site:** follow [Copy a site to your computer](docs/handbook/copy-a-site.md).
 - **Integrate Reprint into my product:** start with [Build with Reprint](docs/handbook/build-with-reprint.md).
 

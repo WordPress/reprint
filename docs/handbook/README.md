@@ -7,9 +7,8 @@ one large archive on the source host.
 
 ## Choose your goal
 
-- **Try Reprint:** explore [the demo site](https://reprint-demo.wordpress.net/).
-  It has sample posts, photos, and block templates. Follow the demo's page for
-  the currently available ways to copy it.
+- **View the demo site:** explore [the demo site](https://reprint-demo.wordpress.net/).
+  See a sample WordPress journal with posts, photos, and block templates.
 - **Clone my site:** follow [Copy a site to your computer](copy-a-site/).
   This tutorial takes one route: the client, SQLite, and PHP's local server.
 - **Integrate Reprint into my product:** start with [Build with Reprint](build-with-reprint/).
@@ -22,12 +21,6 @@ administrator does not have to be the person running the client.
 
 The WordPress.org server package provides downloads only. These starting
 instructions do not enable changes to the source site's files or database.
-
-## Get started
-
-- [Requirements and downloads](requirements/)
-- [Authorize the Reprint client](authorize-client/)
-- [Copy a site to your computer](copy-a-site/)
 
 ## Guides
 
@@ -51,6 +44,7 @@ Choose a guide when you already know the result you want:
 
 Look up exact behavior while working:
 
+- [Requirements and downloads](requirements/)
 - [Commands](commands/)
 - [Authentication](authentication/)
 - [Preflight](preflight/)

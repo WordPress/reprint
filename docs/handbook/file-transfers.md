@@ -61,7 +61,7 @@ To request Reprint's host-plugin cleanup, pass `--exclude-host-plugins` before
 the pull starts:
 
 ```bash
-php reprint.phar pull-files "$REMOTE_REPRINT_API_URL" \
+php reprint.phar pull-files "$URL" \
     --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --exclude-host-plugins
 ```
 

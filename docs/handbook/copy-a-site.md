@@ -9,15 +9,14 @@ For an example WordPress site, explore the
 copying your own site, where you can install the plugin and authorize the client.
 
 You need administrator access to the WordPress site to install the Reprint
-plugin. The terminal examples use Bash on macOS, Linux, or Windows Subsystem
-for Linux (WSL). Check the [requirements and downloads](../requirements/)
-before continuing.
+plugin. Use a terminal on macOS or Linux, or Windows Subsystem for Linux (WSL).
+Check the [requirements and downloads](../requirements/) before continuing.
 
 ## 1. Prepare a working folder
 
 Open a terminal on your computer and run:
 
-```bash
+```sh
 mkdir reprint-demo
 cd reprint-demo
 ```
@@ -25,7 +24,7 @@ cd reprint-demo
 [Download the latest stable Reprint client](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar)
 into this folder as `reprint.phar`, or download it from your terminal:
 
-```bash
+```sh
 curl -fL https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar -o reprint.phar
 php reprint.phar --version
 ```
@@ -40,22 +39,21 @@ Search for **Reprint**, install it, and activate it. Then open
 **Tools → Reprint Server**.
 
 Leave that screen open. The next step gives you the Migration Token to paste
-there. See [Authorize the Reprint client](../authorize-client/) for the full
-access steps.
+there.
 
 ## 3. Start the copy on your computer
 
 In the same terminal folder, run this command. Replace https://example.com
 with the source site's HTTPS address:
 
-```bash
+```sh
 php reprint.phar pull https://example.com \
   --state-dir=./state --fs-root=./files \
   --target-engine=sqlite --new-site-url=http://localhost:8881
 ```
 
-The first run generates a private key, prints its public Migration Token,
-and stops with exit code `4`. This is the expected authorization step.
+The client pauses and prints a **Migration Token**. This is expected; you
+need to authorize it before copying starts.
 
 1. Copy the printed Migration Token.
 2. Paste it into **Tools → Reprint Server** on the source site.
@@ -94,7 +92,7 @@ see [Troubleshooting](../troubleshooting/).
 Press `Ctrl+C` in the terminal to stop serving the site. Your copy stays on
 disk. From the `reprint-demo` folder, start it again with:
 
-```bash
+```sh
 bash state/runtime/start.sh
 ```
 

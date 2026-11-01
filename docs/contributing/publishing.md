@@ -46,8 +46,9 @@ The [WP-CLI handbook](https://make.wordpress.org/cli/handbook/) also separates
 user/developer guides, reference, and contributing.
 
 The handbook home groups pages under Get started, Guides, Build with Reprint,
-Reference, and Understand Reprint. Readers enter by goal: Try Reprint, Clone my
-site, or Integrate Reprint into my product. Do not make them select a document
+Reference, and Understand Reprint. Readers enter by goal: view the demo, clone
+my site, or integrate Reprint into my product. Use Try Reprint only once the linked route actually lets a reader
+complete a Reprint copy. Do not make them select a document
 type before they know the tool.
 
 A technical detail belongs in public reference when a caller relies on it.

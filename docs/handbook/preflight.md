@@ -8,10 +8,13 @@ See [authorization](../authorize-client/) before running remote commands.
 First, we'll make sure the server is reachable and the environment is in a good shape:
 
 ```bash
-php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
-The preflight contacts the export server and collects environment details: PHP/MySQL versions, memory limits, filesystem access, database connectivity, WordPress version, plugins, themes, and directory layout. The result is stored in `$STATE_DIR/remotes/<md5-of-trimmed-remote-reprint-api-url>/pull/state.json` under the `preflight` key.
+Preflight checks the source's PHP and database versions, available memory,
+filesystem access, plugins, themes, and WordPress layout. It saves the report
+for later commands; it does not download the site's files or database. Use
+`preflight-assert` below to check the saved report.
 
 Some hosts link plugins or themes to shared files outside PHP's `open_basedir`
 allowed paths. Preflight keeps those plugin names with type `unknown`, omits
@@ -64,7 +67,7 @@ Low-level transfer commands require a saved preflight report. The high-level
 To check the saved filesystem and database report without another request, run:
 
 ```bash
-php reprint.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --secret="$SECRET"
+php reprint.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
 `preflight-assert` reads the saved report without making another preflight

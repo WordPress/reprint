@@ -1,72 +1,126 @@
 # Build with Reprint
 
-Use the Reprint client to add WordPress copying to your product or hosting
-platform. Your product runs the client; a site administrator installs Reprint
-Server and authorizes it on the source site.
+Your product can run the Reprint client to prepare a WordPress copy. This
+example runs one copy, prints stage messages, and reports whether the copy
+completed or needs user action. It uses PHP, with no extra libraries.
 
-First complete [Copy a site to your computer](../copy-a-site/). It shows the
-access steps your users will also need. The WordPress.org server package
-provides downloads only; do not offer push using that package.
+## Prepare the source and working folder
 
-## Start with the high-level commands
+Download [reprint.phar](../requirements/) into a private working folder.
+Install the [Reprint plugin](https://wordpress.org/plugins/reprint/) on the
+source site. This example uses the normal Migration Token authorization shown
+in the plugin settings; [Authentication](../authentication/) covers token-only hosts.
 
-| Command | Work performed |
+## Run a copy from your application
+
+Save this as `copy-site.php` beside `reprint.phar`:
+
+```php
+<?php
+if (!isset($argv[1])) {
+    fwrite(STDERR, "Usage: php copy-site.php https://example.com\n");
+    exit(1);
+}
+
+$process = proc_open(
+    [PHP_BINARY, __DIR__ . '/reprint.phar', 'pull', $argv[1],
+        '--state-dir=' . __DIR__ . '/state', '--fs-root=' . __DIR__ . '/files',
+        '--target-engine=sqlite', '--new-site-url=http://localhost:8881',
+        '--start-runtime=none', '--progress=compact'],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => STDERR],
+    $pipes,
+    __DIR__
+);
+if ($process === false) {
+    fwrite(STDERR, "Could not start the client.\n");
+    exit(1);
+}
+fclose($pipes[0]);
+
+$report = null;
+while (($line = fgets($pipes[1])) !== false) {
+    $record = json_decode($line, true);
+    if (!is_array($record)) {
+        continue;
+    }
+    if (($record['type'] ?? null) === 'reprint_report') {
+        if (($record['schema_version'] ?? null) === 1 && ($record['command'] ?? null) === 'pull') {
+            $report = $record;
+        }
+    } elseif (isset($record['message'])) {
+        echo $record['message'], "\n";
+    }
+}
+fclose($pipes[1]);
+$exit_code = proc_close($process);
+
+if ($report === null) {
+    fwrite(STDERR, "No supported final report. Check the client output.\n");
+    exit(1);
+}
+if ($exit_code === 4) {
+    echo $report['message'], "\n";
+    echo "After authorization, run this script again.\n";
+} elseif ($exit_code === 0 && $report['status'] === 'complete') {
+    echo "Copy prepared. Run: bash state/runtime/start.sh\n";
+} elseif ($exit_code === 2) {
+    echo "Work is unfinished. Run this script again to continue.\n";
+} elseif ($exit_code === 3) {
+    fwrite(STDERR, "Temporary failure. Run this script again later.\n");
+} else {
+    fwrite(STDERR, ($report['error'] ?? 'The copy did not complete.') . "\n");
+    $exit_code = $exit_code === 0 ? 1 : $exit_code;
+}
+exit($exit_code);
+```
+
+Run it with your source address:
+
+```sh
+php copy-site.php https://example.com
+```
+
+On the first run, the script prints a **Migration Token** and pauses. Paste it
+into **Tools → Reprint Server** on the source site, choose **Authorize tool**,
+then run the same script again. A product can display that request in its own
+UI instead of printing it in a terminal.
+
+During the copy, the script prints stage messages. After it reports
+**Copy prepared**, you can open the local result with:
+
+```sh
+bash state/runtime/start.sh
+```
+
+The client does not start a server while the integration job is running.
+The generated start script is only for local development.
+
+## Handle the next action
+
+| Result | What your product does |
 | --- | --- |
-| `pull` | Preflight, files, database download and apply, and runtime setup. |
-| `pull-files` | Preflight and file download, without database import or runtime setup. |
-| `pull-db` | Preflight, database download, and database apply. |
-| `pull-metadata` | Read saved pull lifecycle and source-site details without a network request. |
+| Authorization needed | Show the Migration Token, wait for the administrator, then run again. |
+| Copy prepared | Offer the prepared copy to your product's next step. |
+| Unfinished work | Run again with the same folder and source address. |
+| Temporary failure | Let the caller decide when to try again. |
+| Failure or missing final report | Show the error and stop; do not report a successful copy. |
 
-Use one state directory for each local filesystem root. Reuse the same source
-address and state directory to resume that transfer. Keep state and credentials
-outside the downloaded site and outside web-served directories.
+Keep each copy's working folder, including `state/` and `files/`, between runs.
+State contains credentials and transfer progress; keep it private and outside
+web-served directories. Use a separate folder for a different local copy.
+The script checks both the process result and the final command report rather
+than treating the last progress message as success.
 
-For a MySQL destination, choose a dedicated empty database and supply the
-target connection options. Database apply can replace existing target data.
-Check the options supported by the client you ship:
+## Go further when needed
 
-```bash
-php reprint.phar pull --help
-php reprint.phar pull-db --help
-php reprint.phar pull-metadata --help
-```
+- [Progress, results, and exit codes](../progress-and-results/) documents the full
+  output contract, including numeric counters for your UI.
+- [Copy selected files or the database](../copy-selected-data/) covers partial copies.
+- [Control each migration step](../integration-pipeline/) is for products that
+  need separate indexing, transfer, and import stages.
+- [Prepare a hosting destination](../hosting/) covers production-server setup
+  and cleanup. This example deliberately uses a local SQLite destination.
 
-## Run without starting a development server
-
-To prepare the same local SQLite copy as the tutorial, but return control to
-your product instead of starting the server:
-
-```bash
-php reprint.phar pull https://example.com \
-  --state-dir=./state --fs-root=./files \
-  --target-engine=sqlite --new-site-url=http://localhost:8881 \
-  --start-runtime=none --progress=jsonl
-```
-
-Handle the initial authorization stop as a request for user action. Show the
-Migration Token, send the administrator to Reprint Server settings, and run the
-same command after authorization. Do not treat the settings confirmation as
-confirmation that a transfer completed.
-
-## Report progress and handle exits
-
-Use `--progress=jsonl` for structured progress. SQL or other command data may
-have its own output format; do not assume every command prints only progress.
-Use `pull-metadata` for saved lifecycle details rather than depending on private
-state-file layouts.
-
-Read the [final result and exit status](../progress-and-results/). A command may complete, need another
-bounded run, require user action, stop after a temporary failure, or fail.
-Do not treat every nonzero exit as permission to retry forever. Keep the
-command's state, show the reason, and let your caller decide when to run again.
-
-The smaller commands, such as `preflight`, `files-pull`, `db-pull`, `db-apply`,
-and `apply-runtime`, are available when your platform needs to control each
-stage. Follow [Control each migration step](../integration-pipeline/) when you
-need that control; [Prepare a hosting destination](../hosting/) covers cleanup
-and startup checks. Use [Command reference](../commands/) to find each command's
-scope and detailed reference.
-
-For package source, embedding details, tests, and contributions, use the
-[development repository](https://github.com/WordPress/reprint). Get user-facing
-downloads from [WordPress.org](../requirements/).
+For a first manual copy, use [Copy a site to your computer](../copy-a-site/).
+For PHP embedding and source contributions, use the
+[development repository](https://github.com/WordPress/reprint).

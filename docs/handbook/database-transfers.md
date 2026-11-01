@@ -46,41 +46,17 @@ The three modes:
 
 ## Continue an interrupted database import
 
-When a source response stops mid-stream, the same importer asks for the
-remaining SQL and keeps an unfinished statement in memory. Each decoded SQL
-multipart body is at most 16 MiB. Each INSERT statement is also at most 16 MiB.
-When a batch contains complete statements followed by an unfinished statement,
-the source sends the complete prefix first so the importer can save its cursor.
-That split can leave at most 16 MiB after the checkpoint, and finishing the
-current bounded INSERT can add at most another 16 MiB. The next complete
-checkpoint is therefore at most 32 MiB away. A `db.sql` group adds one
-separator newline before its cursor marker.
+Run the same command with the same state directory, source address, and
+target database to continue. Keep the downloaded SQL file unchanged while an
+apply is unfinished. Do not delete migration state to restart the web server.
 
-Direct MySQL output stores the last committed group cursor in the target table
-`__reprint_db_pull_progress_<uuid>`. The UUID makes an accidental name clash
-unlikely and changes whenever the table schema changes. Reprint logs and excludes
-that internal name from the source dump.
+Transactional tables can resume from completed work. Keyed MyISAM tables can
+also resume, but a nontransactional table without a non-null unique key or an
+interrupted oversized-value update may require aborting and starting the import
+again. Follow the command's error instructions for those cases.
 
-File output keeps the same SQL groups by adding a harmless comment after each
-complete group. The comment records the exporter cursor. `db-apply` reads one
-group at a time and sends it through the same database importer for MySQL and
-SQLite. The target stores the exporter cursor and matching `db.sql` byte offset.
-A replacement process reads that row and seeks directly to the next group.
-
-For direct MySQL output and later `db-apply`, the MySQL importer executes the
-statements in a complete group one at a time. It stores the group cursor only
-after every statement in that group succeeds.
-
-For transactional target tables, the group and its next cursor are committed
-together. SQLite uses this transaction for every group. Table replacement and
-oversized-value updates remain separate groups. If a MySQL process stops, its
-replacement waits for the old target connection, reruns `db-session-setup.sql`,
-and continues from the cursor stored in MySQL. A repeated INSERT skips rows
-identified by a non-null unique key, so this also works for keyed MyISAM tables.
-Reprint cannot continue a nontransactional table without such a key, or while
-an oversized value is being appended in separate UPDATE statements; those cases
-require aborting and starting the database import again. After `db-apply`
-finishes, it removes its internal cursor table from the imported database.
+See [Progress, results, and exit codes](../progress-and-results/) when a product
+runs these commands on a user's behalf.
 
 ## Target schema compatibility
 
@@ -135,14 +111,13 @@ below that depth stay unchanged; shallower sibling values are still rewritten.
 
 ## WordPress cleanup after apply
 
-After applying the dump, `db-apply` removes `stylesheet_root`, `template_root`,
-`rewrite_rules`, the database-backed site transients `theme_roots`, `update_core`,
-`update_plugins`, and `update_themes`, and the `dirsize_cache` transient from the
-imported WordPress options table. Transient timeout records are removed too.
-WordPress can rebuild these caches for the local files and plugins; later update
-checks may make network requests. The selected theme, theme settings, permalink
-structure, custom upload paths, scheduled jobs, and locks stay unchanged. This
-cleanup does not load WordPress or flush an external object cache.
+After apply, Reprint clears database-backed WordPress caches for theme paths,
+permalink rules, update checks, and directory sizes so WordPress can rebuild
+them for the destination. Later update checks may make network requests.
+
+The selected theme, theme settings, permalink structure, upload paths, scheduled
+jobs, and locks stay unchanged. This does not load WordPress or flush an
+external object cache.
 
 ## Unavailable full-text parsers
 

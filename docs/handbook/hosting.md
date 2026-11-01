@@ -94,3 +94,17 @@ Keep downloaded copies and migration state private. For source-host adapters,
 PHP embedding, managed keys, and private push storage, consult the
 [plugin source guide](https://github.com/WordPress/reprint/blob/trunk/reprint-server-wp/README.md).
 The public WordPress.org package supplies downloads only.
+
+## Source-host requirements
+
+These checks are for the hosting provider when the source cannot complete
+preflight or supply its data.
+
+The host needs JSON and hash support. PDO with its MySQL driver is recommended;
+the plugin can use WordPress's database connection when they are unavailable.
+OpenSSL enables Migration Tokens; hosts without it use connection tokens.
+Use a working HTTPS address for the source site.
+
+MySQL 5.5 sources are supported. This does not imply MySQL 5.5 destination
+support: the destination must accept the exported schema and collations. See
+[Database transfer reference](../database-transfers/) for import behavior.

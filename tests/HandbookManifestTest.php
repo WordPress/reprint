@@ -53,8 +53,10 @@ final class HandbookManifestTest extends TestCase {
             'Every handbook page must be listed in the import manifest.'
         );
 
+        $navigation = [];
         foreach ($manifest as $key => $page) {
             $source = $page['markdown_source'];
+            $navigation[$published_paths[$key]] = [];
             preg_match_all('/\[[^\]]+\]\(([^\s)]+)\)/', $sources[$source], $links);
             foreach ($links[1] as $link) {
                 $url = parse_url($link);
@@ -82,15 +84,30 @@ final class HandbookManifestTest extends TestCase {
                         $target[] = $part;
                     }
                 }
-                $this->assertContains(implode('/', $target), $published_paths, $source . ': ' . $link);
+                $target = implode('/', $target);
+                $this->assertContains($target, $published_paths, $source . ': ' . $link);
+                $navigation[$published_paths[$key]][] = $target;
             }
         }
 
-        foreach ($manifest as $key => $page) {
-            if ($key !== 'handbook') {
-                $this->assertStringContainsString('](' . $page['slug'] . '/)', $sources['handbook/README.md'], 'Every page needs an entry in the handbook navigation.');
+        $pending = [$published_paths['handbook']];
+        $reachable = [];
+        while ($pending) {
+            $path = array_pop($pending);
+            if (isset($reachable[$path])) {
+                continue;
             }
+            $reachable[$path] = true;
+            $pending = array_merge($pending, $navigation[$path]);
         }
+        $this->assertEqualsCanonicalizing(array_values($published_paths), array_keys($reachable), 'Every page must be reachable from the home, without forcing every link onto it.');
+    }
+
+    public function testIntegrationExampleIsValidPhp(): void
+    {
+        $page = file_get_contents(__DIR__ . '/../docs/handbook/build-with-reprint.md');
+        $this->assertSame(1, preg_match('/```php\n(.*?)\n```/s', $page, $example));
+        $this->assertNotEmpty(token_get_all($example[1], TOKEN_PARSE));
     }
 
     public function testExistingPublishedSlugsRemainAvailable(): void

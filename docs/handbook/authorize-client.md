@@ -1,7 +1,8 @@
 # Authorize the Reprint client
 
-Use this guide to connect the Reprint client on your computer to your WordPress
-site. You grant access in WordPress admin, then run the copy in your terminal.
+Use this page when a Reprint client has given you a Migration Token to paste
+into WordPress. If you have not started a copy yet, follow
+[Copy a site to your computer](../copy-a-site/); it includes these steps.
 
 Authorizing the client lets it download the site's database and files,
 including private content.
@@ -20,16 +21,10 @@ to install it.
 
 ## Authorize the client
 
-Start a copy as shown in [Copy a site to your computer](../copy-a-site/).
-The client's first run prints a **Migration Token**, then stops.
-
 1. Copy the Migration Token printed by the client.
 2. In **Tools → Reprint Server**, find **Authorize a tool to copy this site**.
 3. Paste the token into **Migration Token** and choose **Authorize tool**.
 4. Run the same client command again to start the copy.
-
-The Migration Token is the public part of the client's key. The private key
-stays on your computer.
 
 The WordPress confirmation means the token was saved. Check copy progress
 in your terminal.
