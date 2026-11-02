@@ -3,6 +3,9 @@
 
 // phpcs:disable WordPress.Security.NonceVerification.Recommended -- Isolated package fixture routes test requests, not WordPress form submissions.
 
+// Do not depend on the host's date.timezone setting when running older PHP.
+date_default_timezone_set('UTC');
+
 define('ABSPATH', getenv('REPRINT_TEST_DOCROOT') . '/');
 define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', getenv('REPRINT_TEST_PLUGIN') . '/');
 define('REPRINT_SERVER_PUSH_ENABLED', true);

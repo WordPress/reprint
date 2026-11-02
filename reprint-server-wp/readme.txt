@@ -58,7 +58,7 @@ You can run copies from scripts, read exit codes, and show JSON progress to your
 
 The client and server are also available as Composer packages. See the [contributor guide](https://developer.wordpress.org/reprint/contributing/) for package and source information, or the [command reference](https://developer.wordpress.org/reprint/commands/) for CLI commands.
 
-Reprint is free and open-source software. Development and contributions happen in the [Reprint repository](https://github.com/WordPress/reprint).
+Reprint is free and open-source software. The maintained PHP source, license, build instructions, and development are in the [Reprint repository](https://github.com/WordPress/reprint). Both release builds adapt the server code for older PHP versions and bundle its dependencies. You do not need build tools on your site.
 
 == Installation ==
 
@@ -70,6 +70,10 @@ Reprint is free and open-source software. Development and contributions happen i
 If you have not started a client yet, [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) and follow [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/). The guide includes key creation, authorization, and complete copy commands for SQLite and MySQL.
 
 == Frequently Asked Questions ==
+
+= Which PHP versions can your source site use? =
+
+The released plugin supports downloads on PHP 5.6.20 or newer. Use a maintained PHP version when your host allows it. The separate command-line client needs PHP 7.4 or newer on the computer receiving the copy.
 
 = What does your copy include? =
 
