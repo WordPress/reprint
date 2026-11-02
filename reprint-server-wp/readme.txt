@@ -8,77 +8,93 @@ Stable tag: 0.11.5-dev
 License: GPL-2.0-or-later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
-Export a WordPress site's database and files to an authorized Reprint client for migration, backups, and local development.
+Copy your WordPress site's files and database to another computer or host with an authorized Reprint client.
 
 == Description ==
 
-Reprint Server connects your WordPress site to the open-source Reprint command-line client. The client can download the site's database and files, build a local copy, and synchronize files with the source site.
+Copy your WordPress site to your laptop, a development server, or another host.
 
-Transfers stream in chunks and can resume after interruption. You do not need to create one large backup archive on your hosting account.
+Install Reprint on the site you want to copy. A Reprint client downloads its files and database over HTTPS. You authorize the client in WordPress before it can access your site.
 
-The plugin provides the server API and its settings page. You need the separate command-line client to run transfers. [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) from WordPress.org. There is no hosted Reprint account or subscription requirement.
+To start a copy yourself, [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) and follow [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/). You need command-line PHP on the computer receiving the copy. No Reprint account or subscription is required.
 
-= Authentication =
+= Choose your next step =
 
-On hosts with OpenSSL, enroll the client's Migration Token under Tools > Reprint Server. The client keeps the private key and signs its requests. Hosts without OpenSSL use a connection token instead.
+* [Authorize a client](https://developer.wordpress.org/reprint/authorize-client/) if you already have a Migration Token to paste into WordPress.
+* [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/) to copy its files and database to the computer you choose.
+* [Try Reprint](https://developer.wordpress.org/reprint/try-reprint/) to copy the demo before connecting your own site.
 
-The WordPress.org build provides downloads only and does not include file-push or database-push implementations. The GitHub build also supports push.
+= Why use Reprint? =
 
-New keys and connection tokens authorize downloads only. In the GitHub build, file push requires a separate administrator grant. While enabled, an authorized client can upload, replace, and delete files in the site's document root, except excluded paths. Hosting providers can manage this permission centrally.
+* Copy files and database data over HTTPS. You do not need SSH access to the source site.
+* Stream the data without first creating a large archive on your hosting account.
+* Continue an interrupted transfer with the same command and saved progress.
+* Choose SQLite or MySQL for the copied database.
+* Copy selected files or the database when you do not need a full site copy.
 
-Push requires PHP 7.2 or newer and is not supported on multisite networks.
+See [Requirements and downloads](https://developer.wordpress.org/reprint/requirements/) to check your setup, or [Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/) to prepare a copy for a new hosting account.
 
-The WordPress.org package requires PHP 7.2 or newer. The GitHub package supports downloads on PHP 5.6.20 or newer. Use a maintained PHP version when your host allows it.
+= Build with Reprint =
 
-= Site data and privacy =
+You can run the client from your product and read its progress and results. Start with [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/), then use the [command reference](https://developer.wordpress.org/reprint/commands/) for individual commands.
 
-The plugin sends site data to the Reprint client you authorize. Exported databases and files may contain personal data, password hashes, and configuration secrets. Treat client credentials and downloaded site copies as private. Use HTTPS for remote transfers, and remove client access when it is no longer needed.
-
-On multisite, network administrators manage access. Enrolled keys or the network connection token can authorize downloads from sites in that network. See the [multisite documentation](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/multisite.md) before transferring a network or an individual site.
-
-= Source and build instructions =
-
-The maintained PHP source, license, and build tools are available in the [Reprint repository](https://github.com/WordPress/reprint). GitHub release builds downgrade a copy of the server's PHP syntax for older hosting environments. The WordPress.org build keeps the maintained PHP 7.2 source. Both bundle the server package with Composer. No build tools are required on the installed site.
-
-Build the GitHub package with bin/build-server-plugin.sh after installing the Composer dependencies in tools/php56-build. For the downloads-only directory package, run bin/build-server-plugin.sh reprint-wordpress-org.zip wordpress-org; that target uses the maintained PHP 7.2 source and does not need the downgrade tool. See reprint-server-wp/README.md in the repository for integration and hosting configuration.
+Reprint is open-source software. Development and contributions happen in the [Reprint repository](https://github.com/WordPress/reprint).
 
 == Installation ==
 
-1. Download Reprint from the [WordPress.org plugin directory](https://wordpress.org/plugins/reprint/).
-2. In WordPress, open Plugins > Add New > Upload Plugin, upload the ZIP, and activate Reprint Server. On multisite, network-activate the plugin.
-3. [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) to the machine where you will run transfers. The client requires PHP 7.4 or newer; file push from the client requires PHP 8.1 or newer.
-4. Run the pull command below. On a host with OpenSSL, the client prints the Migration Token to enroll and stops. Enroll it under Tools > Reprint Server, then run the same command again. On multisite, use the network settings page.
+1. On the site you want to copy, open Plugins > Add New Plugin and search for Reprint.
+2. Install and activate Reprint. On multisite, a network administrator must network-activate it.
+3. Open Tools > Reprint Server. On multisite, use the network settings page.
+4. Paste the client's Migration Token and choose Authorize tool. Return to the client to continue the copy. If the settings show a Connection token form instead, follow [Authorize the Reprint client](https://developer.wordpress.org/reprint/authorize-client/).
 
-    php reprint.phar pull https://example.com --state-dir=./state --fs-root=./files
-
-On a host without OpenSSL, save a connection token in the plugin settings and pass it to the client with --secret=TOKEN. See the [authentication reference](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/authentication.md) for credential selection and storage, and the [command reference](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/commands.md) for command details.
+If you have not started a client yet, [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) and follow [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/). The guide includes key creation, authorization, and complete copy commands for SQLite and MySQL.
 
 == Frequently Asked Questions ==
 
-= Does activating the plugin start a transfer? =
+= Does activating Reprint start a copy? =
 
-No. Configure client access, then start the transfer from the Reprint client. Activation alone does not authorize a client.
+No. Activate the plugin, authorize a client, then start the copy from that client.
 
-= Can I migrate this site to another host? =
+= Do you need the command-line client? =
 
-Yes. Downloads are enough to copy this site to another host or a local development environment.
+To start a copy yourself, you need the client and PHP 7.4 or newer on the receiving computer. If a client has already given you a Migration Token, you can authorize it in WordPress without installing the command-line client yourself.
 
-= How do I revoke access? =
+= Can you send changes back to the source site? =
 
-Remove an enrolled Migration Token in Tools > Reprint Server. On a host using connection tokens, clear or replace the token. Credentials supplied by your host through public-keys.php, secret.php, or managed configuration must be changed by the host.
+The WordPress.org plugin supports downloading files and database data. It does not accept uploads back into the site. Changes you make to the copy stay in that copy.
 
-= What happens when I deactivate or delete the plugin? =
+Copied plugins may still connect to live email, payment, or other services. Replace those connections with test settings before using the copy for development.
 
-Deactivation keeps the settings. Deleting the plugin through WordPress removes its stored credentials, push grants, and activation transient, including legacy settings. It does not delete migrated site files, downloaded client copies, or host-configured files and private transfer directories outside the plugin directory.
+= Can you copy a site from a multisite network? =
 
-= Where can I report a problem? =
+Yes. A network administrator manages access. Follow [Move one site out of a network](https://developer.wordpress.org/reprint/multisite/) for selecting a subsite and checking the copy.
 
-Use the [Reprint issue tracker](https://github.com/WordPress/reprint/issues) for reproducible bugs and feature requests. Do not include private keys, connection tokens, private site data, or database credentials in a public report. Do not post security vulnerability details in a public issue.
+= Who receives your site data? =
+
+The Reprint client you authorize receives the files and database. These may include private content, personal data, password hashes, and configuration secrets. Keep credentials and downloaded copies private. See [Authentication](https://developer.wordpress.org/reprint/authentication/) for access and credential details.
+
+= How do you revoke access? =
+
+Remove the client's Migration Token under Tools > Reprint Server. For connection-token access, clear or replace the token. If the settings say your host manages credentials, ask the host to change them. Revoking access leaves existing copies unchanged.
+
+= What happens when you deactivate or delete Reprint? =
+
+Deactivation keeps the settings. Deleting the plugin through WordPress removes its stored settings and credentials. Downloaded copies and files configured separately by your host stay in place.
+
+= Where can you get help? =
+
+Start with [Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/) or ask in the [WordPress.org support forum](https://wordpress.org/support/plugin/reprint/). For source contributions and reproducible bug reports, use the [development repository](https://github.com/WordPress/reprint).
+
+Keep credentials and private site data out of public reports. Report security vulnerabilities through [WordPress.org's private reporting process](https://developer.wordpress.org/plugins/wordpress-org/reporting-plugin-security-issues/).
 
 == Screenshots ==
 
-1. Authorize a tool to copy your site using a Migration Token.
+1. Authorize a client to copy your site using a Migration Token.
 
 == Changelog ==
 
-See the [GitHub release notes](https://github.com/WordPress/reprint/releases) for the changes in each release.
+= 0.11.4 =
+
+* Published the plugin and command-line client on WordPress.org.
+* Added clearer errors when Cloudflare requires a browser challenge, and capped waits when a host limits requests.
+* Cleared copied WordPress caches after database import so WordPress can rebuild them for the destination.
