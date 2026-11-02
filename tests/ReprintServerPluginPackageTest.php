@@ -37,6 +37,41 @@ class ReprintServerPluginPackageTest extends TestCase {
         $this->assertMatchesRegularExpression('/^Contributors: zieladam, wordpressdotorg$/m', $readme);
     }
 
+    public function testDirectoryImagesUseTheRequiredDimensions(): void {
+        foreach (['icon-128x128', 'icon-256x256', 'banner-772x250', 'banner-1544x500'] as $name) {
+            $path = __DIR__ . '/../.wordpress-org/' . $name . '.png';
+            $this->assertFileExists($path);
+            preg_match('/([0-9]+)x([0-9]+)$/', $name, $dimensions);
+            $image = getimagesize($path);
+            $this->assertNotFalse($image);
+            $width = (int) $dimensions[1];
+            $height = (int) $dimensions[2];
+            $this->assertSame([$width, $height, IMAGETYPE_PNG], array_slice($image, 0, 3));
+        }
+        $this->assertFileExists(__DIR__ . '/../.wordpress-org/icon.svg');
+    }
+
+    public function testReadmeLinksToHandbookPublicationRoutes(): void {
+        $manifest = json_decode(file_get_contents(__DIR__ . '/../docs/manifest.json'), true, 512, JSON_THROW_ON_ERROR);
+        $base = 'https://developer.wordpress.org/reprint/';
+        $routes = [];
+        foreach ($manifest as $key => $page) {
+            $routes[$key] = $key === 'handbook' ? $base : ( $page['parent'] === null ? $base : $routes[$page['parent']] ) . $page['slug'] . '/';
+        }
+        $readme = file_get_contents(__DIR__ . '/../reprint-server-wp/readme.txt');
+        preg_match_all('/\[[^\]]+\]\(([^\s)]+)\)/', $readme, $links);
+        foreach ($links[1] as $link) {
+            $this->assertStringStartsWith('https://', $link);
+            if (strpos($link, $base) === 0) {
+                $this->assertContains($link, $routes);
+            } elseif (strpos($link, 'https://github.com/') === 0) {
+                $this->assertSame('https://github.com/WordPress/reprint', $link, 'Only source development links to GitHub.');
+            }
+        }
+        $description = explode("\n\n", $readme)[1];
+        $this->assertLessThanOrEqual(150, mb_strlen($description));
+    }
+
     /** @dataProvider versionProvider */
     public function testStampKeepsTheHeaderRuntimeAndReadmeVersionsTogether(string ...$versions): void {
         foreach ($versions as $version) {
