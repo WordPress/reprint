@@ -137,7 +137,7 @@ jobs:
 
   plugin-distributions:
     name: GitHub and WordPress.org plugin packages
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -155,15 +155,15 @@ jobs:
       - name: Set up the directory package PHP minimum
         uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
-          php-version: '7.2'
+          php-version: '5.6'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
           tools: none
-      - name: Parse and run the directory package on PHP 7.2
+      - name: Parse and run the directory package on PHP 5.6
         run: |
           plugin_directory="$RUNNER_TEMP/wordpress-org/reprint"
           find "$plugin_directory" -type f -name '*.php' -print0 | xargs -0 -n1 php -l
           php tests/server-plugin-package.php "$plugin_directory" "" wordpress-org
-      - name: Test signed directory-package requests on PHP 7.2
+      - name: Test signed directory-package requests on PHP 5.6
         env:
           REPRINT_PACKAGED_PLUGIN_DIRECTORY: ${{ runner.temp }}/wordpress-org/reprint
         run: node --test --test-name-pattern='minimum PHP runtime' tests/server-plugin-build.test.mjs
