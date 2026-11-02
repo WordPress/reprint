@@ -23,6 +23,29 @@ site and choose **Authorize client**. Use that same source address below.
 For connection-token access, replace the private-key argument in the script
 with `'--secret=TOKEN'`, using the saved connection token.
 
+## Authorize from your product
+
+A product usually cannot ask its user to run `keygen` in a terminal. Two
+options keep the authorization step inside your interface:
+
+- Run `keygen` yourself with `--progress=jsonl`. Its final `reprint_report`
+  record carries `key_id`, `key_path`, and `public_key`, and its `message` holds
+  the same instructions the terminal would print. Show the Migration Token, the
+  `public_key` value, to the site administrator with a link to their site's
+  **Tools → Reprint Server** page. When they confirm, start the copy with
+  `--private-key-path` pointing at `key_path`.
+- Let `pull` do it. Run the copy command without `--private-key-path`. On the
+  first run the client generates a key inside the state directory, writes a
+  report with `status: "enrollment_needed"` and the same key fields, and exits
+  with code `4`. Show its `message` to the administrator. After they authorize
+  the token, run the same command again; later runs find the key in the state
+  directory as long as that directory is kept.
+
+Treat exit code `4` as a request for user action, not as a failure to retry
+automatically. If the administrator removes the token later, the client reports
+`AUTH_UNKNOWN_KEY`. The same Migration Token can be enrolled again;
+`pull-metadata` prints it as `key.publicKey`.
+
 ## Run a copy from your application
 
 Save this as `copy-site.php` beside `reprint.phar`:
@@ -97,7 +120,8 @@ During the copy, the script prints stage messages. After it reports
 bash state/runtime/start.sh
 ```
 
-The client does not start a server while the integration job is running.
+`--start-runtime=none` keeps the client from starting a server while the
+integration job runs; see [runtime options on pull](runtime.md#runtime-options-on-pull).
 The generated start script is only for local development.
 
 ## Handle the next action

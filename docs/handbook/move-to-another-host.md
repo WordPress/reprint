@@ -49,6 +49,10 @@ After the command finishes:
   Keep both folders. Deleting `/srv/reprint-files` would break the copy.
 - `site_database` contains the imported database.
 
+`--runtime=none --start-runtime=none` skip the development-server configuration
+and do not start a server, since your own web server will serve the copy. See
+[runtime options on pull](runtime.md#runtime-options-on-pull).
+
 Next, configure your web server to serve `/srv/site` and check that WordPress
 works. Once the copy is ready, point your domain to the destination server.
 The steps below cover that setup.
