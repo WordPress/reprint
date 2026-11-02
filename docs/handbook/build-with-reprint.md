@@ -11,6 +11,18 @@ Install the [Reprint plugin](https://wordpress.org/plugins/reprint/) on the
 source site. This example uses the normal Migration Token authorization shown
 in the plugin settings; [Authentication](authentication.md) covers token-only hosts.
 
+Generate a key in the working folder:
+
+```sh
+php reprint.phar keygen https://example.com \
+  --state-dir=./state --out=./reprint-key.pem
+```
+
+Paste the printed Migration Token into **Tools → Reprint Server** on the source
+site and choose **Authorize tool**. Use that same source address below.
+For connection-token access, replace the private-key argument in the script
+with `'--secret=TOKEN'`, using the saved connection token.
+
 ## Run a copy from your application
 
 Save this as `copy-site.php` beside `reprint.phar`:
@@ -24,6 +36,7 @@ if (!isset($argv[1])) {
 
 $process = proc_open(
     [PHP_BINARY, __DIR__ . '/reprint.phar', 'pull', $argv[1],
+        '--private-key-path=' . __DIR__ . '/reprint-key.pem',
         '--state-dir=' . __DIR__ . '/state', '--fs-root=' . __DIR__ . '/files',
         '--target-engine=sqlite', '--new-site-url=http://localhost:8881',
         '--start-runtime=none', '--progress=compact'],
@@ -58,10 +71,7 @@ if ($report === null) {
     fwrite(STDERR, "No supported final report. Check the client output.\n");
     exit(1);
 }
-if ($exit_code === 4) {
-    echo $report['message'], "\n";
-    echo "After authorization, run this script again.\n";
-} elseif ($exit_code === 0 && $report['status'] === 'complete') {
+if ($exit_code === 0 && $report['status'] === 'complete') {
     echo "Copy prepared. Run: bash state/runtime/start.sh\n";
 } elseif ($exit_code === 2) {
     echo "Work is unfinished. Run this script again to continue.\n";
@@ -80,11 +90,6 @@ Run it with your source address:
 php copy-site.php https://example.com
 ```
 
-On the first run, the script prints a **Migration Token** and pauses. Paste it
-into **Tools → Reprint Server** on the source site, choose **Authorize tool**,
-then run the same script again. A product can display that request in its own
-UI instead of printing it in a terminal.
-
 During the copy, the script prints stage messages. After it reports
 **Copy prepared**, you can open the local result with:
 
@@ -99,13 +104,13 @@ The generated start script is only for local development.
 
 | Result | What your product does |
 | --- | --- |
-| Authorization needed | Show the Migration Token, wait for the administrator, then run again. |
 | Copy prepared | Offer the prepared copy to your product's next step. |
 | Unfinished work | Run again with the same folder and source address. |
 | Temporary failure | Let the caller decide when to try again. |
 | Failure or missing final report | Show the error and stop; do not report a successful copy. |
 
-Keep each copy's working folder, including `state/` and `files/`, between runs.
+Keep each copy's working folder, including `reprint-key.pem`, `state/`, and
+`files/`, between runs.
 State contains credentials and transfer progress; keep it private and outside
 web-served directories. Use a separate folder for a different local copy.
 The script checks both the process result and the final command report rather

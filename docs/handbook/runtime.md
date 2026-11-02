@@ -1,9 +1,11 @@
 # Runtime configuration reference
 
-Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
-persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
-your shell first. Keep the state directory outside the filesystem root.
-See [authorization](authorize-client.md) before running remote commands.
+Examples use `$URL` for the Reprint API address, such as
+https://example.com/?reprint-api, `$STATE_DIR` for its persistent state directory,
+and `$FS_ROOT` for downloaded files. Copy the API address from the plugin
+settings and set these variables in your shell. Keep state outside the filesystem root.
+These commands use saved source information and local files; no source
+credential flag is needed.
 
 Use `$FLAT_DIR` for the assembled WordPress directory and `$RUNTIME_DIR` for
 generated configuration. Create the assembled layout first when using

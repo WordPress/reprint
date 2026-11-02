@@ -7,9 +7,17 @@ It does not copy the whole network or create a new network.
 
 You need a network administrator to install and configure Reprint. Use the
 selected site's home address, such as https://network.example/shop/, rather
-than the network home. [Authorize the client](authorize-client.md) in Network
-Admin using the form shown in the plugin settings. If it asks for a connection
-token, add `--secret=NETWORK_TOKEN` to the command below using the saved token.
+than the network home. Generate a key for the copy:
+
+```sh
+php reprint.phar keygen 'https://network.example/shop/?reprint-api' \
+  --state-dir=./state --out=./reprint-key.pem
+```
+
+[Authorize the printed Migration Token](authorize-client.md) in Network Admin.
+If the settings ask for a connection token instead, skip key generation and
+replace the private-key flag below with `--secret='NETWORK_TOKEN'` using the
+saved token.
 
 ## 2. Copy into an empty destination
 
@@ -20,14 +28,12 @@ https://shop.example without starting a development server:
 
 ```sh
 php reprint.phar pull 'https://network.example/shop/?reprint-api' \
+  --private-key-path=./reprint-key.pem \
   --state-dir=./state --fs-root=./files \
   --target-engine=sqlite --target-sqlite-path=/srv/shop/database.sqlite \
   --target-db=shop --new-site-url=https://shop.example --site-admin=alice \
   --runtime=none --start-runtime=none
 ```
-
-If the client prints a Migration Token and stops, have the network administrator
-authorize it, then run the same command again.
 
 ## 3. Configure and check the destination
 

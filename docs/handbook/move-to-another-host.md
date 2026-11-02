@@ -15,7 +15,17 @@ dedicated empty MySQL database and an account limited to it. Choose empty
 download and assembled-site directories. Keep migration state outside web-served
 directories.
 
-Install Reprint on the source and [authorize the client](authorize-client.md).
+Install Reprint on the source, then generate a key in a private destination
+directory:
+
+```sh
+php reprint.phar keygen https://source.example \
+  --state-dir=/srv/reprint-state --out=/srv/reprint-key.pem
+```
+
+[Authorize the printed Migration Token](authorize-client.md) on the source.
+If it uses a connection token, replace the private-key flag below with
+`--secret='TOKEN'` using the saved token.
 
 ## 2. Copy into the destination database
 
@@ -23,6 +33,7 @@ Replace the addresses, paths, database name, and credentials:
 
 ```sh
 php reprint.phar pull https://source.example \
+  --private-key-path=/srv/reprint-key.pem \
   --state-dir=/srv/reprint-state --fs-root=/srv/reprint-files \
   --flatten-to=/srv/site \
   --target-engine=mysql --target-host=127.0.0.1 \

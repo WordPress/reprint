@@ -38,10 +38,31 @@ In the source site's WordPress admin, open **Plugins → Add New Plugin**.
 Search for **Reprint**, install it, and activate it. Then open
 **Tools → Reprint Server**.
 
-Leave that screen open. The next step gives you the Migration Token to paste
-there.
+Leave that screen open for the authorization step below.
 
-## 3. Start the copy on your computer
+## 3. Authorize the client
+
+If the plugin shows a **Migration Token** form, generate a key on your computer.
+Replace https://example.com with the source site's HTTPS address:
+
+```sh
+php reprint.phar keygen https://example.com \
+  --state-dir=./state --out=./reprint-key.pem
+```
+
+1. Copy the printed Migration Token.
+2. Paste it into **Tools → Reprint Server** on the source site.
+3. Choose **Authorize tool**.
+
+The private key stays in `reprint-key.pem` on your computer. The copy commands
+below pass that file with `--private-key-path=./reprint-key.pem`.
+
+If the plugin instead shows a **Connection token** form, follow the
+[connection-token steps](authorize-client.md#if-the-screen-asks-for-a-connection-token).
+Replace the private-key flag in the copy command with `--secret='TOKEN'`,
+using the saved connection token. Use one credential flag, not both.
+
+## 4. Start the copy on your computer
 
 Choose one of the commands below. Run it in the same terminal folder and
 replace https://example.com with the source site's HTTPS address.
@@ -52,6 +73,7 @@ No local database server is needed:
 
 ```sh
 php reprint.phar pull https://example.com \
+  --private-key-path=./reprint-key.pem \
   --state-dir=./state --fs-root=./files \
   --target-engine=sqlite --new-site-url=http://localhost:8881
 ```
@@ -67,31 +89,18 @@ Change the host and port if your server uses different values:
 
 ```sh
 php reprint.phar pull https://example.com \
+  --private-key-path=./reprint-key.pem \
   --state-dir=./state --fs-root=./files \
   --target-engine=mysql --target-host=127.0.0.1 --target-port=3306 \
   --target-db=reprint_copy --target-user=reprint_user --target-pass='YOUR_PASSWORD' \
   --new-site-url=http://localhost:8881
 ```
 
-### Authorize the client
-
-The client pauses and prints a **Migration Token**. This is expected; you
-need to authorize it before copying starts.
-
-1. Copy the printed Migration Token.
-2. Paste it into **Tools → Reprint Server** on the source site.
-3. Choose **Authorize tool**.
-4. Run the same terminal command again.
-
-If the plugin instead shows a **Connection token** form, use the alternative
-steps in [Authorize the Reprint client](authorize-client.md), then add
-`--secret='TOKEN'` to the pull command using that connection token.
-
 The client now checks the source, downloads files and database data, imports
 the database into your chosen local database, rewrites the site URL, and
 prepares a local server. Large sites take longer. Keep the terminal open.
 
-## 4. Open and check the copy
+## 5. Open and check the copy
 
 When Reprint starts the local server, open the address it prints. For this
 tutorial it is http://localhost:8881.
@@ -110,7 +119,7 @@ Some plugins need MySQL rather than SQLite, or services provided by the source
 host. A completed transfer does not establish that every plugin works locally.
 If a check fails, see [Troubleshooting](troubleshooting.md).
 
-## 5. Stop and start the local server
+## 6. Stop and start the local server
 
 Press `Ctrl+C` in the terminal to stop serving the site. Your copy stays on
 disk. From the `reprint-demo` folder, start it again with:
@@ -119,7 +128,8 @@ disk. From the `reprint-demo` folder, start it again with:
 bash state/runtime/start.sh
 ```
 
-Keep this working folder in place, including `state/` and `files/`.
+Keep this working folder in place, including `reprint-key.pem`, `state/`, and
+`files/`.
 `state/` contains credentials, transfer progress, the SQL download, and
 generated server files.
 `files/` contains the downloaded site tree. With SQLite, it also contains the

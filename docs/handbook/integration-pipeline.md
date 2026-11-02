@@ -4,9 +4,10 @@ Start with [Build with Reprint](build-with-reprint.md). Its high-level `pull`
 example is enough when your product does not need separate stages. This guide
 is for products that must choose when to index, copy, import, and start WordPress.
 
-The examples use shell variables: `$URL` is the source URL, `$STATE_DIR` is
-persistent private state, and `$FS_ROOT` is the downloaded tree. Set them in
-your shell. Keep state outside every web-served directory and outside the
+The examples use shell variables: `$URL` is the Reprint API address, such as
+https://example.com/?reprint-api, `$STATE_DIR` is persistent private state, and
+`$FS_ROOT` is the downloaded tree. Copy the API address from the plugin settings
+and set these variables in your shell. Keep state outside every web-served directory and outside the
 filesystem root. The same source address selects the same saved remote state.
 
 ## 1. Authorize and inspect the source
@@ -14,19 +15,29 @@ filesystem root. The same source address selects the same saved remote state.
 Generate and enroll a Migration Token before starting low-level requests:
 
 ```bash
-php reprint.phar keygen "$URL" --state-dir="$STATE_DIR" --progress=jsonl
-php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
+php reprint.phar keygen "$URL" --state-dir="$STATE_DIR" \
+  --out=./reprint-key.pem --progress=jsonl
+```
+
+Have the administrator authorize the printed Migration Token before continuing:
+
+```bash
+php reprint.phar preflight "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
 php reprint.phar preflight-assert "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
 ```
 
-Pause your job between key generation and preflight while the administrator
-authorizes the client. A host without OpenSSL uses `--secret=TOKEN` instead.
-See [Authentication](authentication.md) and [Preflight](preflight.md).
+If the source uses a connection token, skip key generation and replace
+`--private-key-path=./reprint-key.pem` with `--secret='TOKEN'` on each command
+that contacts the source. Local commands such as `preflight-assert` and
+`db-apply` need no source credential. See [Authentication](authentication.md)
+and [Preflight](preflight.md).
 
 ## 2. Download files
 
 ```bash
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
+php reprint.phar files-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
 ```
 
 Choose filters and path selections before the run. The download can keep the
@@ -36,7 +47,8 @@ See [File transfer reference](file-transfers.md).
 ## 3. Download and apply the database
 
 ```bash
-php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
+php reprint.phar db-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
 php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
   --target-engine=sqlite --new-site-url=http://localhost:8881 --progress=jsonl
 ```
@@ -79,7 +91,8 @@ starting another delta:
 
 ```bash
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --abort
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
+php reprint.phar files-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --progress=jsonl
 ```
 
 This keeps downloaded files and the retained remote index. It is not a

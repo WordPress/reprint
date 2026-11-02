@@ -106,6 +106,37 @@ final class HandbookManifestTest extends TestCase {
         $page = file_get_contents(__DIR__ . '/../docs/handbook/build-with-reprint.md');
         $this->assertSame(1, preg_match('/```php\n(.*?)\n```/s', $page, $example));
         $this->assertNotEmpty(token_get_all($example[1], TOKEN_PARSE));
+        $this->assertStringContainsString('--private-key-path=', $example[1]);
+    }
+
+    public function testRemoteCommandExamplesNameTheirCredentials(): void
+    {
+        require_once __DIR__ . '/../packages/reprint-client/src/import.php';
+
+        $root = dirname(__DIR__);
+        $files = array_merge([$root . '/README.md'], glob($root . '/docs/*/*.md'));
+        $remote_commands = array_merge(ImportClient::REMOTE_COMMANDS, ['files-push', 'db-push']);
+        foreach ($files as $file) {
+            preg_match_all('/```(?:sh|bash)\n(.*?)\n```/s', file_get_contents($file), $blocks);
+            foreach ($blocks[1] as $block) {
+                $block = str_replace("\\\n", ' ', $block);
+                preg_match_all('/^php reprint\.phar ([a-z]+(?:-[a-z]+)*)\b([^\n]*)/m', $block, $commands, PREG_SET_ORDER);
+                foreach ($commands as $command) {
+                    if (!in_array($command[1], $remote_commands, true) || preg_match('/--(?:help|abort)\b/', $command[2])) {
+                        continue;
+                    }
+                    $this->assertMatchesRegularExpression('/--(?:private-key-path|secret)=\S+/', $command[2], $file . ': ' . $command[0]);
+                    $this->assertFalse(
+                        str_contains($command[2], '--private-key-path=') && str_contains($command[2], '--secret='),
+                        'Use one authorization method: ' . $command[0]
+                    );
+                    $this->assertStringContainsString('--state-dir=', $command[2], $file . ': ' . $command[0]);
+                    if ($command[1] !== 'db-push') {
+                        $this->assertStringContainsString('--fs-root=', $command[2], $file . ': ' . $command[0]);
+                    }
+                }
+            }
+        }
     }
 
     public function testExistingPublishedSlugsRemainAvailable(): void

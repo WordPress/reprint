@@ -1,14 +1,17 @@
 # Preflight reference
 
-Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
-persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
-your shell first. Keep the state directory outside the filesystem root.
-See [authorization](authorize-client.md) before running remote commands.
+Examples use `$URL` for the Reprint API address, such as
+https://example.com/?reprint-api, `$STATE_DIR` for its persistent state directory,
+and `$FS_ROOT` for downloaded files. Copy the API address from the plugin
+settings and set these variables in your shell. Keep state outside the filesystem root.
+Create and authorize `./reprint-key.pem` as shown in [Authentication](authentication.md).
+For connection-token access, replace the private-key flag with `--secret='TOKEN'`.
 
 Check whether the source is reachable and ready to supply a copy:
 
 ```bash
-php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
+php reprint.phar preflight "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
 Preflight checks the source's PHP and database versions, available memory,

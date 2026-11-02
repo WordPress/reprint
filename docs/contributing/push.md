@@ -83,22 +83,25 @@ durable commit recovery.
 ### Pushing with an enrolled key
 
 Use the same remote Reprint API URL and state directory as the existing pull.
-If no key exists yet, generate one:
+Use that pull's authorized private key with `--private-key-path`. If no key
+exists yet, generate one:
 
 ```sh
-php reprint.phar keygen 'https://example.com/?reprint-api' --state-dir=./state
+php reprint.phar keygen 'https://example.com/?reprint-api' \
+  --state-dir=./state --out=./reprint-key.pem
 ```
 
 Enroll the printed Migration Token under **Tools → Reprint Server**, then enable
 **Allow push** for that Migration Token. With saved preflight data from the pull, run:
 
 ```sh
-php reprint.phar files-push 'https://example.com/?reprint-api' --state-dir=./state --fs-root=./files
+php reprint.phar files-push 'https://example.com/?reprint-api' \
+  --private-key-path=./reprint-key.pem --state-dir=./state --fs-root=./files
 ```
 
-The command finds the private key in the state directory. Omit `--secret` on
-an OpenSSL host. If the private key is stored elsewhere, pass
-`--private-key-path=/path/to/key.pem`. Push from the client requires PHP 8.1+
+The command uses the key file named by `--private-key-path`. If the source uses
+a connection token, replace that flag with `--secret='TOKEN'`.
+Push from the client requires PHP 8.1+
 for streaming uploads; see [issue #327](https://github.com/WordPress/reprint/issues/327).
 
 ## Change detection: local machine compared against itself
@@ -511,7 +514,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 
 ## Low-level files-push command
 
-`php reprint.phar files-push <remote-reprint-api-url>` is the production CLI caller for one
+The `files-push` command is the production CLI caller for one
 `PushFilesSender`. It treats the saved preflight document root as a path beneath
 the resolved filesystem root named by `--fs-root`. It removes that local prefix when producing document-root-relative paths and excludes local paths
 outside the document root from push and delete work. It requires `--state-dir`,

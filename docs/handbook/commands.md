@@ -12,6 +12,15 @@ Command-specific help describes the complete options and defaults for the
 client you downloaded. Most transfer commands take a source URL, `--state-dir`,
 and `--fs-root`; local-only commands have different requirements.
 
+Commands that contact the source also need a credential. Examples pass
+`--private-key-path=./reprint-key.pem` after creating and authorizing that key.
+If the source uses a connection token, replace that flag with `--secret='TOKEN'`.
+See [Authentication](authentication.md) for both setups.
+
+For the WordPress plugin, use its Reprint API address, such as
+https://example.com/?reprint-api, for low-level commands. Copy that address from
+the plugin settings. The high-level `pull` command also accepts a plain site address.
+
 ## Complete workflows
 
 | Command | Result |

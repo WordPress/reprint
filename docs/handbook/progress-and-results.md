@@ -4,8 +4,11 @@ Use the final command report and exit code to determine whether a copy completed
 
 [PHP integration example](build-with-reprint.md)
 
-Examples use `$URL` for the source address, `$STATE_DIR` for persistent private
-state, and `$FS_ROOT` for downloaded files. Set those variables in your shell.
+Examples use `$URL` for the Reprint API address, such as
+https://example.com/?reprint-api, `$STATE_DIR` for persistent private state,
+and `$FS_ROOT` for downloaded files. Set those variables in your shell.
+Use an authorized `./reprint-key.pem` as shown in [Authentication](authentication.md).
+For connection-token access, replace the private-key flag with `--secret='TOKEN'`.
 
 ## Exit codes
 
@@ -27,7 +30,8 @@ JSONL and compact CLI output end with a final command result, so callers do not
 need to infer the outcome from progress messages. No separate flag is needed:
 
 ```sh
-php reprint.phar pull "$URL" --state-dir="$STATE_DIR" \
+php reprint.phar pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" \
     --fs-root="$FS_ROOT" --progress=compact
 ```
 
@@ -243,7 +247,8 @@ output is captured, or `--progress=jsonl` to force structured progress in a
 terminal:
 
 ```bash
-php reprint.phar files-push "$URL" --state-dir="$STATE_DIR" \
+php reprint.phar files-push "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" \
     --fs-root="$FS_ROOT" --progress=jsonl
 ```
 
@@ -271,7 +276,8 @@ Warnings and errors, including rejected symlink targets, remain individual
 records; compact mode does not group them.
 
 ```bash
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" \
+php reprint.phar files-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" \
     --fs-root="$FS_ROOT" --progress=compact
 ```
 
@@ -299,7 +305,7 @@ exits with code `2` and is run again.
 ## Read saved pull metadata
 
 ```bash
-php reprint.phar pull-metadata https://example.com --state-dir=./state
+php reprint.phar pull-metadata 'https://example.com/?reprint-api' --state-dir=./state
 ```
 
 This makes no network request. The source address selects the saved remote.

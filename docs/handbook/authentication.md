@@ -15,17 +15,24 @@ With no credential, a first `pull` generates a key, prints its Migration Token,
 and exits with code `4`. Ask the administrator to enroll it, then run the same
 command with the same state. Installing the plugin alone does not authorize it.
 
-For a pipeline that starts with a lower-level command, generate the key first:
+To use an explicit key file, generate it before running transfer commands:
 
 ```sh
-php reprint.phar keygen https://example.com --state-dir=./state
+php reprint.phar keygen 'https://example.com/?reprint-api' \
+  --state-dir=./state --out=./reprint-key.pem
 ```
 
-The generated private key is stored for that source under the state directory.
-Later remote commands find it automatically. `--private-key-path=PATH` selects
-another private key; `keygen --out=PATH` writes one to a chosen path.
-Deleting the state directory can therefore remove the credentials needed to
-continue. Use `pull-metadata` to inspect the saved key's public enrollment value.
+Authorize the printed Migration Token in WordPress, then pass the private key
+to each command that contacts the source:
+
+```sh
+php reprint.phar preflight 'https://example.com/?reprint-api' \
+  --private-key-path=./reprint-key.pem --state-dir=./state --fs-root=./files
+```
+
+Without `--out`, the client stores the key under the state directory and can
+find it automatically for the same source address. Handbook examples name the
+key file explicitly. Keep that file and the state directory between runs.
 
 In JSONL or compact mode, key generation reports its `key_id`, `key_path`, and
 `public_key` in the command report. Handle this as a request for user action,
@@ -36,6 +43,18 @@ not an automatic retry. See [Progress and results](progress-and-results.md).
 When the server does not support OpenSSL, the client and server use a shared
 connection token saved in WordPress settings. Pass it with `--secret=TOKEN`.
 The settings screen shows which authorization method the server supports.
+
+For example:
+
+```sh
+php reprint.phar preflight 'https://example.com/?reprint-api' \
+  --secret='TOKEN' --state-dir=./state --fs-root=./files
+```
+
+Replace `TOKEN` with the saved connection token and include it on every command
+that contacts that source, including later runs. Use `--secret` instead of
+`--private-key-path`, never both. Commands that only read or change local data,
+such as `db-apply` and `apply-runtime`, do not need source credentials.
 
 Update the client and plugin together when a token-format mismatch asks for an
 update. Preserve the original site URL, including any routing query parameters.

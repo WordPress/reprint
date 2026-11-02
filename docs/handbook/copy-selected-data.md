@@ -2,7 +2,9 @@
 
 Use this guide when you need only part of a site rather than another full copy.
 First [install the plugin and authorize the client](authorize-client.md).
-Keep the source address and state directory used for that authorization.
+Use the source address, state directory, and authorized `reprint-key.pem`
+from [Copy a site](copy-a-site.md). For connection-token access, replace the
+private-key flag with `--secret='TOKEN'`.
 
 The examples use https://example.com, `./state`, and `./files`. Replace them
 with your source address and directories. Keep state outside the downloaded tree.
@@ -11,6 +13,7 @@ with your source address and directories. Keep state outside the downloaded tree
 
 ```sh
 php reprint.phar pull-files https://example.com \
+  --private-key-path=./reprint-key.pem \
   --state-dir=./state --fs-root=./files
 ```
 
@@ -21,6 +24,7 @@ To copy WordPress content but omit uploads:
 
 ```sh
 php reprint.phar pull-files https://example.com \
+  --private-key-path=./reprint-key.pem \
   --state-dir=./state --fs-root=./files \
   --include=:wp-content: --exclude=:wp-uploads:
 ```
@@ -39,6 +43,7 @@ Use this with the files from an existing copy:
 
 ```sh
 php reprint.phar pull-db https://example.com \
+  --private-key-path=./reprint-key.pem \
   --state-dir=./state --fs-root=./files \
   --target-engine=sqlite --new-site-url=http://localhost:8881
 ```

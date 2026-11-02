@@ -37,8 +37,9 @@ Follow the form shown in the plugin settings.
 Choose **Generate new token**, then **Save connection token**. This token acts
 as a password for downloads; keep it private.
 
-Pass the saved value to the client with `--secret='TOKEN'` when running `pull`.
-Replace `TOKEN` with the actual value. Your shell history may retain the token.
+Replace `--private-key-path=...` with `--secret='TOKEN'` on commands that contact
+the source. Replace `TOKEN` with the saved value and include it again when
+resuming. Your shell history may retain the token.
 
 ## Remove access
 

@@ -1,16 +1,21 @@
 # Database transfer reference
 
-Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
-persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
-your shell first. Keep the state directory outside the filesystem root.
-See [authorization](authorize-client.md) before running remote commands.
+Examples use `$URL` for the Reprint API address, such as
+https://example.com/?reprint-api, `$STATE_DIR` for its persistent state directory,
+and `$FS_ROOT` for downloaded files. Copy the API address from the plugin
+settings and set these variables in your shell. Keep state outside the filesystem root.
+Create and authorize `./reprint-key.pem` as shown in [Authentication](authentication.md).
+For connection-token access, replace the private-key flag with `--secret='TOKEN'`.
+Run [preflight](preflight.md) with the same source address and state directory
+before downloading data.
 
 ## Download SQL
 
 By default, this streams a SQL dump into `$STATE_DIR/db.sql`:
 
 ```bash
-php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
+php reprint.phar db-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
 You can also pipe the SQL directly to stdout or stream it into a MySQL server
@@ -18,11 +23,13 @@ without writing a file to disk. Use `--sql-output` to choose the mode:
 
 ```bash
 # Pipe to stdout — useful for feeding into mysql CLI or another tool
-php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
+php reprint.phar db-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --sql-output=stdout | mysql --binary-mode --local-infile=0 -u import_user -p my_database
 
 # Stream directly into MySQL — no intermediate file, no pipe
-php reprint.phar db-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
+php reprint.phar db-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --sql-output=mysql --mysql-database=my_database --mysql-host=127.0.0.1 --mysql-user=import_user --mysql-password=secret
 ```
 

@@ -1,15 +1,20 @@
 # File transfer reference
 
-Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
-persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
-your shell first. Keep the state directory outside the filesystem root.
-See [authorization](authorize-client.md) before running remote commands.
+Examples use `$URL` for the Reprint API address, such as
+https://example.com/?reprint-api, `$STATE_DIR` for its persistent state directory,
+and `$FS_ROOT` for downloaded files. Copy the API address from the plugin
+settings and set these variables in your shell. Keep state outside the filesystem root.
+Create and authorize `./reprint-key.pem` as shown in [Authentication](authentication.md).
+For connection-token access, replace the private-key flag with `--secret='TOKEN'`.
+Run [preflight](preflight.md) with the same source address and state directory
+before downloading data.
 
 This first builds a full index of the remote directory tree, then streams every file.
 It can be interrupted and resumed at any time — just re-run the same command:
 
 ```bash
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
+php reprint.phar files-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
 Read [Progress, results, and exit codes](progress-and-results.md) for
@@ -26,7 +31,8 @@ Use mirror mode when paths inside today's pull selection must match today's
 remote index:
 
 ```bash
-php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
+php reprint.phar files-pull "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --mode=mirror
 ```
 
@@ -62,6 +68,7 @@ the pull starts:
 
 ```bash
 php reprint.phar pull-files "$URL" \
+  --private-key-path=./reprint-key.pem \
     --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" --exclude-host-plugins
 ```
 
@@ -123,7 +130,8 @@ Use repeatable source prefixes to include or exclude files. WordPress tokens
 expand from the saved preflight report:
 
 ```bash
-php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
+php reprint.phar pull-files "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
   --include=:wp-content: --exclude=:wp-uploads:
 ```
 
@@ -136,7 +144,8 @@ placed; use a target inside the filesystem root.
 To download only uploads in a later high-level file pull:
 
 ```bash
-php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
+php reprint.phar pull-files "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
   --include=:wp-uploads:
 ```
 
