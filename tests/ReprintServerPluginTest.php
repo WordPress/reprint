@@ -37,6 +37,29 @@ require_once __DIR__ . '/lib/ReprintServerPluginTestCase.php';
 
 final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 {
+    /** @dataProvider clientDownloadPageProvider */
+    public function testClientDownloadIsVisibleOnSiteAndNetworkPages(bool $key_host, bool $multisite): void
+    {
+        \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests($key_host);
+        $GLOBALS['reprint_server_test_multisite'] = $multisite;
+        $GLOBALS['reprint_server_test_user_can_manage_network'] = $multisite;
+
+        $document = new DOMDocument();
+        $document->loadHTML($this->renderAdminPage(), LIBXML_NOERROR | LIBXML_NOWARNING);
+        $xpath = new DOMXPath($document);
+        $this->assertCount(1, $xpath->query('//a[@href="https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar" and normalize-space(.)="Download the Reprint client" and not(ancestor::details)]'));
+    }
+
+    public static function clientDownloadPageProvider(): array
+    {
+        return [
+            'site with Migration Tokens' => [true, false],
+            'site with a connection token' => [false, false],
+            'network with Migration Tokens' => [true, true],
+            'network with a connection token' => [false, true],
+        ];
+    }
+
     public function testFirstVisitStartsWithAuthorizationAndKeepsTheUrlBelow(): void
     {
         $html = $this->renderAdminPage();

@@ -257,6 +257,10 @@ class SettingsPage {
         ?>
         <div class="wrap reprint-server-page">
             <h1><?php echo esc_html__('Reprint Server', 'reprint'); ?></h1>
+            <p>
+                <?php echo esc_html__('To copy this site, run the Reprint command-line client on your computer or another server.', 'reprint'); ?>
+                <a href="https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar"><?php echo esc_html__('Download the Reprint client', 'reprint'); ?></a>
+            </p>
             <?php $this->render_settings_notices(); ?>
             <?php $this->render_push_access_notice(); ?>
 
