@@ -42,9 +42,16 @@ php reprint.phar pull https://source.example \
   --runtime=none --start-runtime=none
 ```
 
-The assembled directory uses symlinks to the downloaded files; retain both
-directories. This command imports source data into the destination database.
-It does not configure a production web server or move DNS.
+After the command finishes:
+
+- `/srv/reprint-files` contains the downloaded files.
+- `/srv/site` links to those files and gives your web server one folder to serve.
+  Keep both folders. Deleting `/srv/reprint-files` would break the copy.
+- `site_database` contains the imported database.
+
+Next, configure your web server to serve `/srv/site` and check that WordPress
+works. Once the copy is ready, point your domain to the destination server.
+The steps below cover that setup.
 
 Run the same command to continue after interruption. See
 [Database transfer reference](database-transfers.md) for target compatibility
