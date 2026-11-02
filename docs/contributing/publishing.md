@@ -46,8 +46,9 @@ outputs, and limits. Explanation builds the reader's model of the system.
 The [WP-CLI handbook](https://make.wordpress.org/cli/handbook/) also separates
 user/developer guides, reference, and contributing.
 
-The handbook home groups pages under Guides, Build with Reprint, Reference,
-Understand Reprint, and Contributing. Readers enter by what they want to do:
+The handbook home groups pages under Get started, Copy sites with Reprint,
+Build with Reprint, Reference, Reprint internals, and Contribute to Reprint.
+Readers enter by what they want to do:
 try Reprint, clone a site, or add it to a product. A Try Reprint entry must include steps that complete a real
 copy; visiting the sample site alone does not try the client.
 

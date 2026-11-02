@@ -1,4 +1,4 @@
-# Guides
+# Copy sites with Reprint
 
 Use these guides after your first copy, or when moving a site with a particular setup.
 

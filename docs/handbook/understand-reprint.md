@@ -1,4 +1,4 @@
-# Understand Reprint
+# Reprint internals
 
 Learn how Reprint copies a site and where its limits matter.
 

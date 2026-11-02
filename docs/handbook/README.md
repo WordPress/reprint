@@ -19,10 +19,10 @@ back to a site, needs a server build configured by the site's host.
 ## Browse the handbook
 
 - [Get started](https://developer.wordpress.org/reprint/getting-started/) with your first copy and client access.
-- [Guides](https://developer.wordpress.org/reprint/guides/) for selected data, other hosts, Windows, and multisite.
+- [Copy sites with Reprint](https://developer.wordpress.org/reprint/guides/) for selected data, other hosts, Windows, and multisite.
 - [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/) to add the client to your product.
 - [Reference](https://developer.wordpress.org/reprint/reference/) for commands, options, transfers, and results.
-- [Understand Reprint](https://developer.wordpress.org/reprint/understand-reprint/) and its limits.
+- [Reprint internals](https://developer.wordpress.org/reprint/understand-reprint/) for how copying works and its limits.
 - [Contribute to Reprint](https://developer.wordpress.org/reprint/contributing/) with development, protocols, and releases.
 
 ## Get help

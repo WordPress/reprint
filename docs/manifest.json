@@ -42,7 +42,7 @@
         "order": 40
     },
     "guides": {
-        "title": "Guides",
+        "title": "Copy sites with Reprint",
         "slug": "guides",
         "markdown_source": "handbook/guides.md",
         "parent": null,
@@ -175,7 +175,7 @@
         "order": 80
     },
     "understand-reprint": {
-        "title": "Understand Reprint",
+        "title": "Reprint internals",
         "slug": "understand-reprint",
         "markdown_source": "handbook/understand-reprint.md",
         "parent": null,
