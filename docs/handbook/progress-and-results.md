@@ -4,11 +4,8 @@ Use the final command report and exit code to determine whether a copy completed
 
 [PHP integration example](build-with-reprint.md)
 
-Examples use `$URL` for the Reprint API address, such as
-https://example.com/?reprint-api, `$STATE_DIR` for persistent private state,
-and `$FS_ROOT` for downloaded files. Set those variables in your shell.
-Use an authorized `./reprint-key.pem` as shown in [Authentication](authentication.md).
-For connection-token access, replace the private-key flag with `--secret='TOKEN'`.
+Examples use `$URL`, `$STATE_DIR`, `$FS_ROOT`, and an authorized
+`./reprint-key.pem` as described in [Conventions](commands.md#conventions).
 
 ## Exit codes
 
@@ -320,8 +317,11 @@ current invocation completed. Check that invocation's exit code and report.
 Captured output can include the data object followed by a command report;
 do not decode all stdout as one JSON document.
 
-Other files under the state directory are private implementation details.
-Do not edit them or use their fields as a product integration contract.
+Other files under the state directory are private implementation details and
+can change between client versions. Earlier documentation described
+`pull/state.json`, `volatile-files.json`, and the directory layout; do not read
+or edit them from a product. The supported contract is the exit code, the final
+command report, `progress.json`, and `pull-metadata`.
 
 ## Audit log
 
@@ -330,57 +330,11 @@ requests, local mutations, warnings, and errors. `--verbose` also prints audit
 entries. Keep the log private and review it before sharing it in a support
 request; it can contain site paths and other site details.
 
-## Temporary pull failures
+## Temporary failures
 
-Run again immediately after exit `2`. Reprint retries temporary streaming
-failures itself. It stops with exit `3` when consecutive failed requests reach
-the retry limit without making saved progress. The limit is four for
-HTTP `429` and three for other temporary failures. Different temporary errors
-share this count. A successful request, or a failed request that still saves
-transfer progress, resets it.
-
-HTTP `429` reports `RATE_LIMITED`, including when the host sends an HTML block
-page. These responses do not shrink file chunks, index batches, or SQL batches:
-smaller batches would require more requests. Before repeating a streaming
-request after a temporary HTTP failure, Reprint waits for a valid `Retry-After`
-header, expressed as seconds or an HTTP date, capped at 30 seconds per wait.
-The audit log retains the original
-header; `retry_after_seconds` reports the actual capped wait. For consecutive
-`429` failures without a valid header, it waits 5, 10, and 15 seconds before
-the three retries. Transfer progress is saved before waiting.
-Stopping the process during that wait does not discard
-saved transfer progress. Successful requests do not gain any delay.
-
-Upstream HTTP `508` resource-limit responses are also temporary failures.
-Preflight uses the same waits and attempt limits for upstream HTTP `429`,
-`503`, and `508`, retrying the same User-Agent rather than cycling through
-headers immediately. It saves the failed report before waiting and exits `3`
-if the retry limit is reached. A later run fetches a fresh report. Explicit
-Reprint authentication and configuration refusals remain permanent failures.
-These waits also apply with `--no-adaptive`.
-
-While waiting, Reprint prints the HTTP failure and wait time. JSONL and compact
-output include a lifecycle record with `event: "retry"`, `http_code`,
-`error_code`, and `retry_after_seconds`; longer waits emit heartbeats every ten
-seconds. A fourth consecutive HTTP `429` failure without saved progress exits
-`3` without another wait. Other temporary errors keep the three-failure limit.
-
-After exit `3`, a caller may wait and run the same command later with the same
-state directory and filesystem root. Reprint keeps its saved progress and gives
-the later run a new retry allowance. Scheduling that later run is
-optional; without it, a person can run the command again. Exit `1` requires
-checking the error instead of scheduling an automatic retry.
-
-This applies to temporary streaming failures in file and database transfers,
-including those reached through `pull`, `pull-files`, and `pull-db`:
-
-- HTTP `400`, `408`, `413`, `418`, `421`, `425`, `429`, `500`, `502`, `503`,
-  `504`, and `520–524` without an explicit Reprint error.
-- Unmarked HTTP `401` or `403` after a signed request.
-- cURL timeouts, connection resets during transfer, empty or cut-short
-  responses, invalid compressed responses, and HTTP/2 or HTTP/3 stream errors.
-- Multipart responses missing their boundary or completion marker.
-
-Explicit Reprint errors (JSON containing a matching HTTP `code`) remain fatal.
-Preflight failures, DNS lookup failures, refused connections, certificate errors,
-and local errors keep their existing classification. After exit `3`, Reprint does not schedule a later invocation for the caller.
+Exit code `3` means the client reached its retry limit for a temporary
+failure, such as HTTP `429` or a dropped connection, without saving new
+progress. Run the same command again later with the same state directory and
+filesystem root. [Temporary failures and retries](temporary-failures.md) lists
+which failures count as temporary, how long the client waits, and what the
+retry records contain.

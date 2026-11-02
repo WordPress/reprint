@@ -12,10 +12,13 @@ The Reprint Server plugin runs on the source site. The client runs on the
 computer receiving the copy. For your own site, an administrator authorizes
 the client before copying.
 
-The WordPress.org plugin supports downloads only.
+The plugin from WordPress.org serves downloads. Push, which sends local changes
+back to a site, needs a server build configured by the site's host.
+[What Reprint does not do](limitations.md) lists this and the other limits.
 
 ## Guides
 
+- [Authorize a client to copy your site](authorize-client.md)
 - [Copy selected files or the database](copy-selected-data.md)
 - [Move to another host](move-to-another-host.md)
 - [Copy a Windows-hosted site](windows-sources.md)
@@ -39,10 +42,12 @@ The WordPress.org plugin supports downloads only.
 - [Database transfers](database-transfers.md)
 - [Runtime configuration](runtime.md)
 - [Progress, results, and exit codes](progress-and-results.md)
+- [Temporary failures and retries](temporary-failures.md)
 
 ## Understand Reprint
 
-[How Reprint works](how-it-works.md)
+- [How Reprint works](how-it-works.md)
+- [What Reprint does not do](limitations.md)
 
 ## Get help
 

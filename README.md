@@ -35,11 +35,10 @@ php reprint.phar pull https://reprint-demo.wordpress.net/ \
 When the local server starts, open http://localhost:8881.
 [Check, stop, or reopen your copy](docs/handbook/try-reprint.md).
 
-The WordPress.org plugin supports downloads only.
-
 ## Documentation
 
 - [Handbook](docs/handbook/README.md)
+- [What Reprint does not do](docs/handbook/limitations.md)
 - [Commands](docs/handbook/commands.md)
 - [Troubleshooting](docs/handbook/troubleshooting.md)
 - [Support forum](https://wordpress.org/support/plugin/reprint/)

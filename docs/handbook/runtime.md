@@ -1,11 +1,8 @@
 # Runtime configuration reference
 
-Examples use `$URL` for the Reprint API address, such as
-https://example.com/?reprint-api, `$STATE_DIR` for its persistent state directory,
-and `$FS_ROOT` for downloaded files. Copy the API address from the plugin
-settings and set these variables in your shell. Keep state outside the filesystem root.
-These commands use saved source information and local files; no source
-credential flag is needed.
+Examples use `$URL`, `$STATE_DIR`, and `$FS_ROOT` as described in
+[Conventions](commands.md#conventions). These commands use saved source
+information and local files; no source credential flag is needed.
 
 Use `$FLAT_DIR` for the assembled WordPress directory and `$RUNTIME_DIR` for
 generated configuration. Create the assembled layout first when using
@@ -99,3 +96,23 @@ Playground previews serve downloaded files only. They do not proxy missing
 uploads from the source or add a pull-state mount. Keep `--state-dir` outside
 the site directories. Run `apply-runtime` again to refresh an existing
 runtime's generated configuration.
+
+## Runtime options on pull
+
+The high-level `pull` command runs these stages itself. Four options control
+them:
+
+- `--flatten-to=PATH` assembles the standard layout at PATH, the same as
+  running `flat-docroot`. Keep the download tree; the layout links to it.
+- `--runtime=RUNTIME` selects which server configuration `pull` generates
+  after the database import: `php-builtin` by default, `nginx-fpm`,
+  `playground-cli`, or `none` to generate nothing.
+- `--start-runtime=RUNTIME` selects which runtime `pull` launches when it
+  finishes. Without it, `pull` starts a generated `php-builtin` or
+  `playground-cli` runtime and leaves `nginx-fpm` for you to load. Pass `none`
+  to prepare the copy without starting a server, for example on a destination
+  with its own web server or inside a product's background job. Naming a
+  runtime here also generates its configuration.
+- `--output-dir=DIR` chooses where the generated files go. The tutorials use
+  the default, the `runtime` directory inside the state directory, which is
+  why they start a finished copy with `bash state/runtime/start.sh`.

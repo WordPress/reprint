@@ -44,14 +44,14 @@ Build the GitHub package with bin/build-server-plugin.sh after installing the Co
 
 == Installation ==
 
-1. Download Reprint from the [WordPress.org plugin directory](https://wordpress.org/plugins/reprint/).
-2. In WordPress, open Plugins > Add New > Upload Plugin, upload the ZIP, and activate Reprint Server. On multisite, network-activate the plugin.
+1. In WordPress, open Plugins > Add New Plugin, search for Reprint, then install and activate it. You can also upload the ZIP from the [WordPress.org plugin directory](https://wordpress.org/plugins/reprint/). On multisite, network-activate the plugin.
+2. Open Tools > Reprint Server. The page shows the site's Reprint API address and the form for authorizing a client.
 3. [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) to the machine where you will run transfers. The client requires PHP 7.4 or newer; file push from the client requires PHP 8.1 or newer.
 4. Run the pull command below. On a host with OpenSSL, the client prints the Migration Token to enroll and stops. Enroll it under Tools > Reprint Server, then run the same command again. On multisite, use the network settings page.
 
     php reprint.phar pull https://example.com --state-dir=./state --fs-root=./files
 
-On a host without OpenSSL, save a connection token in the plugin settings and pass it to the client with --secret=TOKEN. See the [authentication reference](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/authentication.md) for credential selection and storage, and the [command reference](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/commands.md) for command details.
+The [Clone your site](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/copy-a-site.md) guide walks through the same steps with SQLite or MySQL and creates the key file explicitly before the first pull. On a host without OpenSSL, save a connection token in the plugin settings and pass it to the client with --secret=TOKEN. See the [authentication reference](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/authentication.md) for credential selection and storage, and the [command reference](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/commands.md) for command details.
 
 == Frequently Asked Questions ==
 

@@ -9,17 +9,38 @@ php reprint.phar pull --help
 ```
 
 Command-specific help describes the complete options and defaults for the
-client you downloaded. Most transfer commands take a source URL, `--state-dir`,
-and `--fs-root`; local-only commands have different requirements.
+client you downloaded. This page names every command, the conventions the
+handbook examples share, and the options those examples use.
 
-Commands that contact the source also need a credential. Examples pass
-`--private-key-path=./reprint-key.pem` after creating and authorizing that key.
-If the source uses a connection token, replace that flag with `--secret='TOKEN'`.
-See [Authentication](authentication.md) for both setups.
+## Conventions
 
-For the WordPress plugin, use its Reprint API address, such as
-https://example.com/?reprint-api, for low-level commands. Copy that address from
-the plugin settings. The high-level `pull` command also accepts a plain site address.
+Reference pages write commands with three shell variables. Set them before
+pasting an example:
+
+| Variable | Meaning |
+| --- | --- |
+| `$URL` | The source's Reprint API address, shown in **Tools → Reprint Server**. |
+| `$STATE_DIR` | A private directory for the client's credentials, saved progress, SQL download, and generated server files. |
+| `$FS_ROOT` | The directory that downloaded site files are written to. |
+
+**Two spellings of the source address.** The plugin answers at the site
+address plus a `?reprint-api` query, for example https://example.com/?reprint-api.
+The high-level `pull`, `pull-files`, and `pull-db` commands add that query
+themselves, so the tutorials pass the plain site address. The other commands
+send requests to the address exactly as given, so pass the full API address
+and copy it from the plugin settings.
+
+**Credentials.** Commands that contact the source need one credential flag:
+`--private-key-path=./reprint-key.pem` after creating and authorizing that key
+with `keygen`, or `--secret='TOKEN'` when the source uses a connection token.
+Never pass both. Local-only commands such as `db-apply`, `apply-runtime`, and
+`preflight-assert` take no credential. See [Authentication](authentication.md).
+
+**Directories.** Keep `$STATE_DIR` outside `$FS_ROOT` and outside every
+web-served directory. Use one state directory per filesystem root, and do not
+run two commands against the same state directory at once. To continue an
+interrupted transfer, run the same command with the same source address,
+state directory, and filesystem root.
 
 ## Complete workflows
 
@@ -66,9 +87,10 @@ See [File transfers](file-transfers.md), [Database transfers](database-transfers
 
 ## Local change inspection and push
 
-The client can inspect local changes without uploading. Uploads need a
-separately configured push-capable target. The WordPress.org server package
-does not include push implementations; configuring it cannot enable them.
+Push sends local file or database changes back to a site. The client can
+inspect local changes without uploading. Uploads need a separately configured
+push-capable target. The WordPress.org server package does not include push
+implementations; configuring it cannot enable them.
 
 | Command | Result |
 | --- | --- |
@@ -80,11 +102,47 @@ Hosts developing that integration should use the implementation and configuratio
 notes in the [development repository](https://github.com/WordPress/reprint).
 Do not offer push using the WordPress.org server package.
 
-## Shared behavior
+## Options used in this handbook
 
-Keep the same source address, state directory, and filesystem root to continue
-a transfer. Use one state directory per filesystem root, outside the downloaded
-site. Do not run commands concurrently against the same state directory.
+Each command's `--help` lists its complete options. These are the ones the
+handbook examples use, with the commands that accept them.
+
+| Option | What it does | Commands |
+| --- | --- | --- |
+| `--state-dir=DIR` | Private directory for credentials, saved progress, the SQL download, and generated server files. | Every command that reads or writes state. |
+| `--fs-root=DIR` | Directory that site files are written to or read from. | Transfer commands, `apply-runtime`, `recover`, `post-process`. |
+| `--private-key-path=PATH` | Private key that signs requests; overrides a key stored in the state directory. | Commands that contact the source. |
+| `--secret=TOKEN` | Connection token for a source whose host lacks OpenSSL. | Commands that contact the source. |
+| `--out=PATH` | Write the generated private key to PATH instead of the state directory. | `keygen` |
+| `--insecure` | Allow an HTTP address and skip HTTPS certificate checks. `REPRINT_INSECURE_TLS=1` does the same. | Every command. |
+| `--progress=MODE` | Progress output: `auto`, `tty`, `jsonl`, or `compact`. JSONL and compact append a final command report. | Every command. |
+| `--step=N`, `--steps=N` | Pipeline position written to `progress.json`. | Every command. |
+| `--verbose` | Print detailed request and response logs, including audit-log entries. | Transfer and runtime commands. |
+| `--abort` | Discard the named command's unfinished work; its help says what is kept. | `pull`, `pull-files`, `pull-db`, `files-pull`, `files-index`, `db-pull`, `db-index`, `db-apply`, `db-rewrite-urls`, and the push commands. |
+| `--target-engine=ENGINE` | Destination database engine: `mysql` or `sqlite`. | `pull`, `pull-db`, `db-apply`, `db-rewrite-urls`, `apply-runtime` |
+| `--target-host`, `--target-port`, `--target-user`, `--target-pass`, `--target-db` | Destination MySQL connection. The user and database name are required for MySQL. | Same as `--target-engine`. |
+| `--target-sqlite-path=PATH` | Destination SQLite file. Default: `wp-content/database/.ht.sqlite` under the copy. | Same as `--target-engine`. |
+| `--new-site-url=URL` | New site address. Creates the matching `--rewrite-url` from the source address. | `pull`, `pull-files`, `files-pull`, `pull-db`, `db-apply`, `db-rewrite-urls` |
+| `--rewrite-url FROM TO` | Replace FROM with TO in the database and CSS. Repeatable. | Same as `--new-site-url`, plus `db-push`. |
+| `--include=SOURCE`, `--exclude=SOURCE` | Restrict the file pull to, or omit, a source prefix: a token such as `:wp-content:` or an absolute source path. Exclusions win. | `pull-files`, `files-pull` |
+| `--remap SOURCE TARGET` | Place a selected source prefix at TARGET inside the filesystem root. | `pull-files`, `files-pull` |
+| `--mode=MODE` | File pull mode: `catch-up` (default) or `mirror`. | `pull`, `pull-files`, `files-pull` |
+| `--on-fs-root-nonempty=ACTION` | `error` (default) or `preserve-local` when the filesystem root already has files. | `pull`, `pull-files`, `files-pull` |
+| `--no-follow-symlinks` | Copy a selected symlink as a link without indexing its target. | `pull`, `pull-files`, `files-pull` |
+| `--exclude-host-plugins`, `--include-host-plugins` | Skip or keep host platform plugins; the choice is saved in state. On `apply-runtime`, they control local cleanup only. | `pull`, `pull-files`, `pull-db`, `files-pull`, `db-apply`, `apply-runtime` |
+| `--sql-output=MODE` with `--mysql-host`, `--mysql-port`, `--mysql-user`, `--mysql-password`, `--mysql-database` | Where `db-pull` writes SQL: `file` (default), `stdout`, or `mysql`. | `db-pull` |
+| `--site-admin=LOGIN` | Imported user who administers a site copied out of a network. | `pull`, `pull-db`, `db-apply` |
+| `--flatten-to=PATH` | Assemble a standard WordPress layout at PATH with symlinks to the downloaded tree. | `pull`, `flat-docroot` |
+| `--runtime=RUNTIME` | Server configuration to generate: `php-builtin`, `nginx-fpm`, `playground-cli`, or `none`. | `pull`, `apply-runtime` |
+| `--start-runtime=RUNTIME` | Runtime to launch after `pull` finishes; `none` starts nothing. | `pull` |
+| `--output-dir=DIR` | Directory for generated runtime files. | `pull`, `apply-runtime` |
+| `--flat-document-root=DIR` | Use an assembled layout as the document root. | `apply-runtime` |
+| `--tasks=LIST` | Post-processing tasks to run, or `all`. | `post-process` |
+
+See [Runtime configuration](runtime.md#runtime-options-on-pull) for how the
+runtime options combine on `pull`.
+
+## Shared behavior
 
 `--abort` is command-specific: it can discard an unfinished output or checkpoint.
 Read the command's help before using it. It is not a general rollback command.

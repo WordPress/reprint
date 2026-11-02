@@ -24,7 +24,9 @@ saved token.
 Create the destination directories and an empty MySQL or SQLite target. Supply
 `--new-site-url` and `--site-admin=LOGIN`; LOGIN must identify a user included
 in the selected site's export. The example prepares files and SQLite data for
-https://shop.example without starting a development server:
+https://shop.example without starting a development server
+(`--runtime=none --start-runtime=none`; see
+[runtime options on pull](runtime.md#runtime-options-on-pull)):
 
 ```sh
 php reprint.phar pull 'https://network.example/shop/?reprint-api' \
@@ -101,7 +103,7 @@ reject a MySQL 8 collation. Use `pull` or `pull-db` rather than direct
 
 A selected-site export uses a helper table on the source to collect users.
 Core WordPress tables and indexes are unchanged. If setup fails, ask the host
-to check the [multisite source requirements](hosting.md).
+to check the [multisite source requirements](requirements.md#multisite-sources).
 
 Only one export can run for a selected source site at a time. Another site in
 the network can export separately. Starting a fresh export prevents the older

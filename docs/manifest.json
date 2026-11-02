@@ -146,12 +146,26 @@
         "parent": null,
         "order": 210
     },
+    "temporary-failures": {
+        "title": "Temporary failures and retries",
+        "slug": "temporary-failures",
+        "markdown_source": "handbook/temporary-failures.md",
+        "parent": null,
+        "order": 215
+    },
     "how-it-works": {
         "title": "How Reprint works",
         "slug": "how-it-works",
         "markdown_source": "handbook/how-it-works.md",
         "parent": null,
         "order": 220
+    },
+    "limitations": {
+        "title": "What Reprint does not do",
+        "slug": "limitations",
+        "markdown_source": "handbook/limitations.md",
+        "parent": null,
+        "order": 225
     },
     "contributing": {
         "title": "Contribute to Reprint",

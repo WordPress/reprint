@@ -1,11 +1,7 @@
 # Database transfer reference
 
-Examples use `$URL` for the Reprint API address, such as
-https://example.com/?reprint-api, `$STATE_DIR` for its persistent state directory,
-and `$FS_ROOT` for downloaded files. Copy the API address from the plugin
-settings and set these variables in your shell. Keep state outside the filesystem root.
-Create and authorize `./reprint-key.pem` as shown in [Authentication](authentication.md).
-For connection-token access, replace the private-key flag with `--secret='TOKEN'`.
+Examples use `$URL`, `$STATE_DIR`, `$FS_ROOT`, and an authorized
+`./reprint-key.pem` as described in [Conventions](commands.md#conventions).
 Run [preflight](preflight.md) with the same source address and state directory
 before downloading data.
 
