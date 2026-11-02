@@ -4,9 +4,9 @@ This tutorial copies one single-site WordPress installation to your computer
 and opens it at http://localhost:8881. It uses SQLite, so you do not need a
 local MySQL server.
 
-For an example WordPress site, explore the
-[Reprint demo](https://reprint-demo.wordpress.net/). The steps below are for
-copying your own site, where you can install the plugin and authorize the client.
+To try Reprint before connecting your own site, follow
+[Try Reprint](https://developer.wordpress.org/reprint/try-reprint/). The steps
+below are for a site where you can install the plugin and authorize the client.
 
 You need administrator access to the WordPress site to install the Reprint
 plugin. Use a terminal on macOS or Linux, or Windows Subsystem for Linux (WSL).

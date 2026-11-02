@@ -6,6 +6,13 @@
         "parent": null,
         "order": 10
     },
+    "try-reprint": {
+        "title": "Try Reprint",
+        "slug": "try-reprint",
+        "markdown_source": "handbook/try-reprint.md",
+        "parent": null,
+        "order": 15
+    },
     "copy-a-site": {
         "title": "Copy a site to your computer",
         "slug": "copy-a-site",
@@ -26,13 +33,6 @@
         "markdown_source": "handbook/requirements.md",
         "parent": null,
         "order": 40
-    },
-    "copy-again": {
-        "title": "Copy again or resume",
-        "slug": "copy-again",
-        "markdown_source": "handbook/copy-again.md",
-        "parent": null,
-        "order": 50
     },
     "copy-selected-data": {
         "title": "Copy selected files or the database",

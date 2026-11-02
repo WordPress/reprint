@@ -101,8 +101,10 @@ change. Open the pull request in the
 ## Change documentation
 
 Edit the Markdown source under `docs/`. Use complete HTTPS URLs for every
-link, including links to another handbook page. For a new published page, add
-its title, slug, source file, parent, and order to `docs/manifest.json`, and link
+link in a published page, including links to another handbook page. The root
+README and CONTRIBUTING files use relative repository links instead. For a new
+published page, add its title, slug, source file, parent, and order to
+`docs/manifest.json`, and link
 it from the relevant section of the handbook.
 
 Run `HandbookManifestTest.php` after changing links or page structure. It checks

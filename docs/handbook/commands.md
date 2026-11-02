@@ -79,5 +79,7 @@ site. Do not run commands concurrently against the same state directory.
 
 `--abort` is command-specific: it can discard an unfinished output or checkpoint.
 Read the command's help before using it. It is not a general rollback command.
-See [Copy again or resume](https://developer.wordpress.org/reprint/copy-again/) for the difference between continuing,
-refreshing, and reopening a copy.
+Run the same command to continue an interrupted transfer. Use `pull-files`
+to fetch later file changes without replacing the local database. To reopen
+the local site without copying again, use the generated start script from
+[Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/).

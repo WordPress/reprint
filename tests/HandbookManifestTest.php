@@ -134,7 +134,7 @@ final class HandbookManifestTest extends TestCase {
         $this->assertEqualsCanonicalizing($commands[1], $documented[1], 'Update the command index when the CLI changes.');
     }
 
-    public function testDocumentationUsesAbsoluteUrlsAndSourceLinksResolveToFiles(): void
+    public function testPublishedLinksAreAbsoluteAndRepositoryLinksResolveToFiles(): void
     {
         $root = dirname(__DIR__);
         $files = array_merge([$root . '/README.md', $root . '/CONTRIBUTING.md'], glob($root . '/docs/*/*.md'));
@@ -150,7 +150,11 @@ final class HandbookManifestTest extends TestCase {
                         'A source line range must link to a specific commit, not a moving branch or relative file.'
                     );
                 }
-                $this->assertSame('https', $url['scheme'] ?? null, 'Use a complete HTTPS URL: ' . $link);
+                if (!isset($url['scheme']) && in_array($file, [$root . '/README.md', $root . '/CONTRIBUTING.md'], true)) {
+                    $this->assertFileExists($root . '/' . rawurldecode($url['path']), $file . ': ' . $link);
+                    continue;
+                }
+                $this->assertSame('https', $url['scheme'] ?? null, 'Published pages use complete HTTPS URLs: ' . $link);
                 if (preg_match('#^https://github\\.com/WordPress/reprint/(?:blob|tree)/trunk/(.+)$#', explode('#', $link, 2)[0], $source)) {
                     $this->assertFileExists($root . '/' . rawurldecode($source[1]), $file . ': ' . $link);
                 } elseif (preg_match('#^https://github\\.com/WordPress/reprint/actions/workflows/(.+)$#', $link, $workflow)) {
@@ -159,9 +163,11 @@ final class HandbookManifestTest extends TestCase {
             }
         }
 
-        preg_match_all('/(?:src|srcset)="([^"]+)"/', file_get_contents($root . '/README.md'), $images);
+        $readme = file_get_contents($root . '/README.md');
+        $this->assertStringNotContainsString('https://developer.wordpress.org/reprint/', $readme, 'README links must open documentation in the current GitHub branch, including before website publication.');
+        preg_match_all('/(?:src|srcset)="([^"]+)"/', $readme, $images);
         foreach ($images[1] as $image) {
-            $this->assertStringStartsWith('https://', $image, 'The README logo must work when shown outside GitHub.');
+            $this->assertFileExists($root . '/' . $image, 'The README logo must exist in the current GitHub branch.');
         }
     }
 }

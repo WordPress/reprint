@@ -141,7 +141,8 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
 Low-level `files-pull` needs a completed operation cleared with `--abort` before
-starting another delta. See [Copy again or resume](https://developer.wordpress.org/reprint/copy-again/).
+starting another delta. Use `pull-files` if you want the client to handle
+repeat runs without that manual reset.
 
 Older callers can still use `--filter=essential-files` to omit uploads and
 low-level `--filter=skipped-earlier` to select only uploads. These are presets

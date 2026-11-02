@@ -47,10 +47,9 @@ The [WP-CLI handbook](https://make.wordpress.org/cli/handbook/) also separates
 user/developer guides, reference, and contributing.
 
 The handbook home groups pages under Guides, Build with Reprint, Reference,
-Understand Reprint, and Contributing. Readers enter by goal: view the demo, clone
-my site, or integrate Reprint into my product. Use Try Reprint only once the linked route actually lets a reader
-complete a Reprint copy. Do not make them select a document
-type before they know the tool.
+Understand Reprint, and Contributing. Readers enter by what they want to do:
+try Reprint, clone a site, or add it to a product. A Try Reprint entry must include steps that complete a real
+copy; visiting the sample site alone does not try the tool.
 
 A technical detail belongs in public reference when a caller relies on it.
 A local implementation quirk belongs beside the code and in a regression test.
@@ -77,8 +76,8 @@ can swallow links after a URL in an inline-code span.
 
 ## Link to complete URLs
 
-Use complete HTTPS URLs in all documentation, including links within the same
-handbook. For example:
+Use complete HTTPS URLs in published handbook pages, including links within
+the same handbook. For example:
 
 ```text
 https://developer.wordpress.org/reprint/copy-a-site/
@@ -87,7 +86,11 @@ https://developer.wordpress.org/reprint/contributing/
 https://developer.wordpress.org/reprint/contributing/architecture/
 ```
 
-These are the publication targets. They will become live only after Meta
+The repository-root README and CONTRIBUTING files use relative file links.
+Readers can then open the documentation from the branch they are browsing on
+GitHub, even before the website is published.
+
+The handbook URLs above are the publication targets. They will become live only after Meta
 registers the handbook and the initial import passes. If Meta approves another
 base address, update the URLs and the manifest/link test together before import.
 Do not silently redirect readers to a different site during publishing.
@@ -152,6 +155,17 @@ Do not deploy the importer from the Reprint release workflow.
 
 ## First import and checks
 
+Before publishing Try Reprint, make the demo's `/public.key` available. It must
+contain an unencrypted PEM client signing key whose matching public key is
+authorized on the demo for downloads. A public verification key alone cannot
+sign client requests. Use a key dedicated to the demo, and confirm that its
+export contains only data and files intended to be public.
+
+Run the documented download and copy commands against the live demo, then
+check the local posts, photographs, and generated-server restart. Do not replace
+the key URL with a placeholder or describe the Playground button as a Reprint
+copy until that route actually runs the client.
+
 Test the real importer and Markdown parser in a disposable local WordPress
 installation first. Confirm that every manifest page renders, tables and code
 survive, and unchanged relative links reach the expected pages.
@@ -191,9 +205,10 @@ Replace `PAGE_ID` with the inspected main-page ID. Do not apply that command
 to contributor child pages. Recheck the resulting permalinks before updating
 links elsewhere.
 
-The README already uses the target handbook URLs. Prepare the Meta registration
-PR before merging this content. Coordinate the content merge, registration
-deployment, and first import; the links return 404 until those steps finish.
+Prepare the Meta registration PR before merging this content. Coordinate the
+content merge, registration deployment, and first import; the handbook URLs
+return 404 until those steps finish. Repository entry points remain usable
+through their file-relative links.
 After checking the live pages, update the product page and plugin listing.
 Keep GitHub links for development and source contribution; user downloads
 remain on WordPress.org. If any handbook

@@ -7,8 +7,8 @@ one large archive on the source host.
 
 ## Choose your goal
 
-- **View the demo site:** explore [the demo site](https://reprint-demo.wordpress.net/).
-  See a sample WordPress journal with posts, photos, and block templates.
+- **Try Reprint now:** [copy the demo to your computer](https://developer.wordpress.org/reprint/try-reprint/).
+  Follow the download and copy commands; no WordPress login is needed.
 - **Clone my site:** follow [Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/).
   This tutorial takes one route: the client, SQLite, and PHP's local server.
 - **Integrate Reprint into my product:** start with [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
@@ -26,7 +26,6 @@ instructions do not enable changes to the source site's files or database.
 
 Choose a guide when you already know the result you want:
 
-- [Copy again or resume](https://developer.wordpress.org/reprint/copy-again/)
 - [Copy selected files or the database](https://developer.wordpress.org/reprint/copy-selected-data/)
 - [Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/)
 - [Copy a Windows-hosted site](https://developer.wordpress.org/reprint/windows-sources/)
