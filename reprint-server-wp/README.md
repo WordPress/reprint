@@ -138,7 +138,7 @@ Every authentication error body carries `auth_version`. Embedders that write the
 
 ### Migration Tokens
 
-A Migration Token is the public key printed by your tool. The settings page has
+A Migration Token is the public key printed by your client. The settings page has
 an enrollment form which takes it as a PEM block or one line, and a table of
 enrolled Migration Tokens with each token's ID, the date it was added,
 and a per-key push grant. Enrolled keys live in the `reprint_server_public_keys`
@@ -186,30 +186,30 @@ rules.
 
 ## Administrator page
 
-For example, a tool prints a Migration Token and asks you to authorize it. Paste that
-token into **Authorize a tool to copy this site** and choose **Authorize tool**.
-The form becomes a confirmation telling you to return to your tool to start or
+For example, a client prints a Migration Token and asks you to authorize it. Paste that
+token into **Authorize a client to copy this site** and choose **Authorize client**.
+The form becomes a confirmation telling you to return to your client to start or
 resume the copy. This page saves access. It does not start a transfer, show
-transfer progress, or confirm that a tool connected.
+transfer progress, or confirm that a client connected.
 
 The Migration Token form stays visible on normal visits, even when other tokens are
 already saved. An existing token does not tell this page whether your current
-tool has access. **I don’t have a Migration Token yet** gives the steps to get one,
+client has access. **I don’t have a Migration Token yet** gives the steps to get one,
 with Reprint CLI help inside it. For HTTP sites, that help includes the required
 `--insecure` flag and warns that transfers are unencrypted. The remote Reprint
 API URL stays below the form. Existing Migration Tokens, push permissions, and unused credentials stay in the
-closed **Manage tool access** section. Results from those controls reopen it.
+closed **Manage client access** section. Results from those controls reopen it.
 There is no separate server-details section or routine status badge.
 
 | Visit or host state | Next action on the page |
 | --- | --- |
-| The tool already printed a Migration Token | Paste that Migration Token and choose **Authorize tool**. |
-| No Migration Token printed yet | Open **I don’t have a Migration Token yet**. Copy the API URL into the tool, then paste the Migration Token it gives you. The CLI help shows how to generate one. |
-| Other Migration Tokens are saved; another tool needs access | Paste its Migration Token into the same visible form. After authorization, return to the tool. |
-| A Migration Token should stop working | Open **Manage tool access**, match its Migration Token ID to the tool, and choose **Remove Migration Token**. |
-| A tool must change files on this site | Open **Manage tool access**, check **Allow push** for its Migration Token, and choose **Save push access**. Checking alone changes nothing. Token hosts have their push controls here too. |
-| OpenSSL is missing | Save a connection token and use the same token in the tool. Migration Token enrollment is not offered. Changing a saved token disconnects tools using the old token and revokes its push access. |
-| A token remains after moving to an OpenSSL host | **Manage tool access** explains that it is unused and offers removal for an option-stored token. |
+| The client already printed a Migration Token | Paste that Migration Token and choose **Authorize client**. |
+| No Migration Token printed yet | Open **I don’t have a Migration Token yet**. Copy the API URL into the client, then paste the Migration Token it gives you. The CLI help shows how to generate one. |
+| Other Migration Tokens are saved; another client needs access | Paste its Migration Token into the same visible form. After authorization, return to the client. |
+| A Migration Token should stop working | Open **Manage client access**, match its Migration Token ID to the client, and choose **Remove Migration Token**. |
+| A client must change files on this site | Open **Manage client access**, check **Allow push** for its Migration Token, and choose **Save push access**. Checking alone changes nothing. Token hosts have their push controls here too. |
+| OpenSSL is missing | Save a connection token and use the same token in the client. Migration Token enrollment is not offered. Changing a saved token disconnects clients using the old token and revokes its push access. |
+| A token remains after moving to an OpenSSL host | **Manage client access** explains that it is unused and offers removal for an option-stored token. |
 | `public-keys.php` supplies keys | Edit that file. The page lists its keys without enrollment or removal forms. |
 | `secret.php` supplies a token on a token host | Use the file's token. Editing the stored option does not replace the file. |
 | The hosting provider controls push access | Read the effective permission. Per-key push forms are not offered. The authorization confirmation uses that permission too. |
