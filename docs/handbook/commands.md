@@ -23,12 +23,10 @@ pasting an example:
 | `$STATE_DIR` | A private directory for the client's credentials, saved progress, SQL download, and generated server files. |
 | `$FS_ROOT` | The directory that downloaded site files are written to. |
 
-**Two spellings of the source address.** The plugin answers at the site
-address plus a `?reprint-api` query, for example https://example.com/?reprint-api.
-The high-level `pull`, `pull-files`, and `pull-db` commands add that query
-themselves, so the tutorials pass the plain site address. The other commands
-send requests to the address exactly as given, so pass the full API address
-and copy it from the plugin settings.
+**Site address or API address.** `pull`, `pull-files`, and `pull-db` accept
+the site address, such as https://example.com. Other commands need the Reprint
+API address, such as https://example.com/?reprint-api, shown in
+**Tools → Reprint Server**.
 
 **Credentials.** Commands that contact the source need one credential flag:
 `--private-key-path=./reprint-key.pem` after creating and authorizing that key
