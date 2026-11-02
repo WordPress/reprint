@@ -39,8 +39,8 @@ You should see a Reprint version number. If the command fails, follow
 ## 2. Install the plugin on the source site
 
 In the source site's WordPress admin, open **Plugins → Add New Plugin**.
-Search for **Reprint**, install it, and activate it. Then open
-**Tools → Reprint Server**.
+Search for [Reprint](https://wordpress.org/plugins/reprint/), install it, and
+activate it. Then open **Tools → Reprint Server**.
 
 Leave that screen open for the authorization step below.
 
