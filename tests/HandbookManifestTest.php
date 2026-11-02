@@ -152,6 +152,14 @@ final class HandbookManifestTest extends TestCase {
         }
     }
 
+    public function testRuntimePullOptionsKeepTheirLinkedHeadingId(): void
+    {
+        // The Handbook TOC leaves a one-heading body unchanged. Keep the ID
+        // in the source so links from other pages still reach this section.
+        $runtime = file_get_contents(__DIR__ . '/../docs/handbook/runtime.md');
+        $this->assertStringContainsString('<h2 id="runtime-options-on-pull">', $runtime);
+    }
+
     public function testExistingPublishedSlugsRemainAvailable(): void
     {
         $manifest = json_decode(file_get_contents(__DIR__ . '/../docs/manifest.json'), true, 512, JSON_THROW_ON_ERROR);
