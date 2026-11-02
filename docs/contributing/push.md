@@ -515,10 +515,22 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 ## Low-level files-push command
 
 The `files-push` command is the production CLI caller for one
-`PushFilesSender`. It treats the saved preflight document root as a path beneath
-the resolved filesystem root named by `--fs-root`. It removes that local prefix when producing document-root-relative paths and excludes local paths
-outside the document root from push and delete work. It requires `--state-dir`,
-`--fs-root`, an authorized key or connection token, and saved preflight data; HTTPS is required unless the
+`PushFilesSender`. It uses saved preflight `runtime.push_document_root` when
+reported, falling back to `runtime.document_root` for older servers. Preflight
+reports the resolved host-configured push `docroot` separately; `document_root`
+continues to describe the web server's document root for pull layout.
+With `--fs-root=DIR`, the push document root is a path beneath that filesystem
+root. The client removes that local prefix when producing document-root-relative
+paths and excludes local paths outside it from push and delete work.
+Alternatively, `--flat-document-root=DIR` uses a plain local WordPress directory
+as the document root's contents: paths relative to DIR are already
+document-root-relative paths. It is mutually exclusive with `--fs-root`.
+Both layouts retain the local index after commit, so unchanged runs send no
+paths and subsequent edits and deletes are incremental. Keep the same layout
+and state directory across runs; a different filesystem root needs a different
+state directory. `files-diff` accepts the same two layout options.
+It requires `--state-dir`, one layout option, an authorized key or connection
+token, and saved preflight data; HTTPS is required unless the
 operator passes `--insecure` or sets `REPRINT_INSECURE_TLS=1`. It reads but never writes
 `<remote-state-directory>/pull/state.json`. It does not run preflight itself,
 show a plan, ask for confirmation, transfer a database, retry a failed request,

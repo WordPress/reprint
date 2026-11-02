@@ -4,6 +4,7 @@
  * The result file keeps plugin output separate from the load result.
  */
 
+/** @var list<string> $argv CLI arguments supplied by the recovery parent. */
 $reprint_recover_result_file = $argv[2];
 
 register_shutdown_function(

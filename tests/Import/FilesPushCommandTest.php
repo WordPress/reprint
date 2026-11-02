@@ -93,6 +93,21 @@ final class FilesPushCommandTest extends TestCase
         );
     }
 
+    public function testFilesCommandsRejectBothDocumentRootLayouts(): void
+    {
+        foreach (['files-push', 'files-diff'] as $command) {
+            $result = $this->runCli([
+                $command,
+                'https://example.test/?reprint-api=1',
+                '--state-dir=' . $this->stateDirectory,
+                '--fs-root=' . $this->localTree,
+                '--flat-document-root=' . $this->localTree,
+            ]);
+            $this->assertSame(1, $result['exit'], $result['output']);
+            $this->assertStringContainsString('--fs-root and --flat-document-root are mutually exclusive', $result['output']);
+        }
+    }
+
     public function testFilesPushRejectsOptionsOutsideItsExactAllowlist(): void
     {
         foreach (['--filter=none', '--docroot=' . $this->localTree, '--duty=0.5'] as $rejectedOption) {

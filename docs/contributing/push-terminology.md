@@ -428,8 +428,11 @@ running the command again prints the complete report.
 
 The low-level, files-only command is `files-push`. Its `remote Reprint API URL` is the
 exporter API URL, and its `filesystem root` is the resolved absolute directory supplied by
-`--fs-root`. It requires saved preflight data and treats its remote document
-root as a path beneath that filesystem root. Local relative paths beneath the document root become document-root-relative paths; other local paths do not
+`--fs-root` or `--flat-document-root` (mutually exclusive). It requires saved
+preflight data and prefers `runtime.push_document_root`, falling back to
+`runtime.document_root`. With `--fs-root`, it treats that remote document
+root as a path beneath the filesystem root. With `--flat-document-root`,
+local relative paths are already document-root-relative paths. Local relative paths beneath the document root become document-root-relative paths; other local paths do not
 become push or delete work. On a host with OpenSSL it uses the key in the
 remote state directory or `--private-key-path=PATH`; on a host without OpenSSL
 it uses `--secret=TOKEN`. `--insecure` or `REPRINT_INSECURE_TLS=1` explicitly
