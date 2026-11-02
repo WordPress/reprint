@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Builds the Reprint Server plugin ZIP for GitHub (PHP 5.6) or WordPress.org
-# (PHP 7.2). The source checkout is never rewritten; all target-specific work
+# Builds the PHP 5.6-compatible Reprint Server plugin ZIP for GitHub or
+# WordPress.org. The source checkout is never rewritten; all target-specific work
 # is confined to a temporary staging directory.
 #
 # Usage:
@@ -21,11 +21,7 @@ if [ "$#" -gt 2 ] || [[ "$TARGET" != "github" && "$TARGET" != "wordpress-org" ]]
     exit 1
 fi
 
-if [ "$TARGET" = "wordpress-org" ]; then
-    MINIMUM_PHP_VERSION="7.2"
-else
-    MINIMUM_PHP_VERSION="5.6.20"
-fi
+MINIMUM_PHP_VERSION="5.6.20"
 
 case "$OUTPUT_PATH" in
     /*) ;;
@@ -39,7 +35,7 @@ for command_name in php composer zip; do
     fi
 done
 
-if [ "$TARGET" = "github" ] && [ ! -x "$PROJECT_ROOT/tools/php56-build/vendor/bin/rector" ]; then
+if [ ! -x "$PROJECT_ROOT/tools/php56-build/vendor/bin/rector" ]; then
     echo "Error: Reprint Server build dependencies are missing." >&2
     echo "Run: composer install --no-dev --working-dir=tools/php56-build" >&2
     exit 1
@@ -77,12 +73,10 @@ if [ "$TARGET" = "wordpress-org" ]; then
     php "$PROJECT_ROOT/bin/prepare-wordpress-org-plugin.php" "$BUILD_ROOT"
 fi
 
-if [ "$TARGET" = "github" ]; then
-    php "$PROJECT_ROOT/bin/downgrade-server-plugin.php" "$BUILD_ROOT"
-fi
+php "$PROJECT_ROOT/bin/downgrade-server-plugin.php" "$BUILD_ROOT"
 
-# Resolve the packaged runtime for the target’s declared PHP minimum. The
-# WordPress.org build keeps the maintained PHP 7.2 source without downgrading it.
+# The Composer packages describe the typed source requirement. Both generated
+# plugin distributions advertise and resolve for PHP 5.6.20 instead.
 php -r '
 $paths = array($argv[1], $argv[2]);
 $minimum_php_version = $argv[3];

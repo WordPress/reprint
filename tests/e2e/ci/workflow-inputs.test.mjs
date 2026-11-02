@@ -285,7 +285,7 @@ test('WordPress.org screenshot captions preserve the published readme and replac
 
 test('the first WordPress.org screenshot has a matching caption and is a PNG', async () => {
     const readme = await readFile(new URL('../../../reprint-server-wp/readme.txt', import.meta.url), 'utf8');
-    assert.match(readme, /== Screenshots ==\n\n1\. Authorize a tool to copy your site using a Migration Token\./);
+    assert.match(readme, /== Screenshots ==\n\n1\. Authorize a client to copy your site using a Migration Token\./);
     const image = await readFile(new URL('../../../.wordpress-org/screenshot-1.png', import.meta.url));
     assert.equal(image.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     assert.ok(image.length < 10 * 1024 * 1024);

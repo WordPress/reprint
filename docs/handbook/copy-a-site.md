@@ -63,9 +63,9 @@ below pass that file with `--private-key-path=./reprint-key.pem`.
 
 Running `pull` without a credential does the same work in one step: the client
 generates a key inside `state/`, prints the Migration Token, and stops with exit
-code `4`. Authorize the token, then run the same `pull` again. The plugin's
-installation steps use that shortcut. This guide creates the key file first so
-you know where it is and can pass it to every later command.
+code `4`. Authorize the token, then run the same `pull` again. This guide
+creates the key file first so you know where it is and can pass it to every
+later command.
 
 If the plugin instead shows a **Connection token** form, follow the
 [connection-token steps](authorize-client.md#if-the-screen-asks-for-a-connection-token).
