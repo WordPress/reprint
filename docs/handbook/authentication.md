@@ -1,6 +1,6 @@
 # Authentication reference
 
-[Authorize a client in WordPress](authorize-client.md)
+[Authorize a client in WordPress](https://developer.wordpress.org/reprint/authorize-client/)
 
 ## Migration Tokens
 
@@ -36,7 +36,7 @@ key file explicitly. Keep that file and the state directory between runs.
 
 In JSONL or compact mode, key generation reports its `key_id`, `key_path`, and
 `public_key` in the command report. Handle this as a request for user action,
-not an automatic retry. See [Progress and results](progress-and-results.md).
+not an automatic retry. See [Progress and results](https://developer.wordpress.org/reprint/progress-and-results/).
 
 ## Connection tokens
 

@@ -4,7 +4,7 @@ Some requests fail for reasons that pass: a rate limit, a busy host, a dropped
 connection. Reprint retries those itself during a run and stops with exit code
 `3` when retrying no longer saves progress. This page lists which failures
 count as temporary, how long the client waits, and what a caller does next.
-See [Progress, results, and exit codes](progress-and-results.md) for the other
+See [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/) for the other
 exit codes and the final command report.
 
 ## Which failures are temporary
@@ -72,4 +72,4 @@ requires checking the error instead of scheduling an automatic retry.
 The final command report for exit `3` includes `http_code` when one was
 received, a nonzero `curl_errno` when available, and
 `consecutive_failures_without_progress`, the failure count when the limit was
-reached. See [Progress, results, and exit codes](progress-and-results.md).
+reached. See [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/).

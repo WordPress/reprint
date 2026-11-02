@@ -2,14 +2,14 @@
 
 Use this page when changing how the client downloads data, writes local files,
 or continues a stopped transfer. Start with
-[How Reprint works](../handbook/how-it-works.md) for the reasons behind the design.
+[How Reprint works](https://developer.wordpress.org/reprint/how-it-works/) for the reasons behind the design.
 
 ## Find the code for your change
 
 | What you want to change | Where to start |
 | --- | --- |
 | A command or the order of migration steps | The [client entry point](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-client/src/import.php). |
-| How the source receives a request | The [server request handler](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-server/src/class-http-server.php) and [pull protocol](pull-http.md). |
+| How the source receives a request | The [server request handler](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-server/src/class-http-server.php) and [pull protocol](https://developer.wordpress.org/reprint/contributing/pull-http/). |
 | Where a downloaded path is written | The [source-to-local path mapper](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-client/src/lib/pull/class-remote-to-local-path-mapper.php). |
 | Settings copied from a source host | The [source-host analyzers](https://github.com/WordPress/reprint/tree/trunk/packages/reprint-client/src/lib/host). |
 | Generated PHP or web-server configuration | The [target runtime code](https://github.com/WordPress/reprint/tree/trunk/packages/reprint-client/src/lib/target-runtime). |
@@ -38,7 +38,7 @@ copy, not the new directory.
 
 For product integrations, read progress through `pull-metadata`, command
 reports, or the documented `progress.json` fields. See
-[Progress, results, and exit codes](../handbook/progress-and-results.md).
+[Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/).
 Private state files can change when the implementation changes; do not make a
 product depend on their current layout.
 
@@ -88,7 +88,7 @@ Cover both cases when changing path handling; the
 Read the source path format from preflight. For example, `//server/share` may
 be a Windows network share or a Unix path. Its spelling alone cannot tell you
 which rules to apply. The mapper uses the reported format before converting
-source paths to local paths. See [Windows sources](../handbook/windows-sources.md)
+source paths to local paths. See [Windows sources](https://developer.wordpress.org/reprint/windows-sources/)
 for the supported selections and destination limits.
 
 ## Separate host settings from destination setup
@@ -181,7 +181,7 @@ cleanup does not load WordPress or flush an external object cache.
 ## Multisite export
 
 Use this section when changing how one subsite becomes a single-site copy.
-For the commands and destination checks, follow the [multisite guide](../handbook/multisite.md).
+For the commands and destination checks, follow the [multisite guide](https://developer.wordpress.org/reprint/multisite/).
 
 ### Resulting site configuration
 

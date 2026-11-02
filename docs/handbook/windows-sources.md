@@ -1,6 +1,6 @@
 # Copy a Windows-hosted site
 
-Follow [Clone your site](copy-a-site.md) using a Linux, macOS, or WSL client.
+Follow [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/) using a Linux, macOS, or WSL client.
 Update both the source plugin and the client to versions with Windows
 path support. These notes explain source paths and checks before migration;
 they are not instructions for running the client in native Windows PHP.
@@ -47,6 +47,6 @@ are rejected. Use an ordinary drive or share spelling for those selections.
 
 `--no-follow-symlinks` copies a selected link without indexing its target.
 Selecting a path reached through a linked parent needs the default symlink
-following behavior. See [File transfer reference](file-transfers.md).
+following behavior. See [File transfer reference](https://developer.wordpress.org/reprint/file-transfers/).
 
 After copying, test assets and links on the destination's actual filesystem.

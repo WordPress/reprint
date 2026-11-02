@@ -6,15 +6,15 @@ if you do not have a database server, or MySQL if you already use one.
 
 These steps copy a single-site WordPress installation and start a development
 server so you can check it. To serve the copy publicly at a domain, follow
-[Move to another host](move-to-another-host.md).
+[Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/).
 
 To try Reprint before connecting your own site, follow
-[Try Reprint](try-reprint.md). The steps
+[Try Reprint](https://developer.wordpress.org/reprint/try-reprint/). The steps
 below are for a site where you can install the plugin and authorize the client.
 
 You need administrator access to the WordPress site to install the Reprint
 plugin. Use a terminal on macOS or Linux, or Windows Subsystem for Linux (WSL).
-Check the [requirements and downloads](requirements.md) before continuing.
+Check the [requirements and downloads](https://developer.wordpress.org/reprint/requirements/) before continuing.
 
 ## 1. Prepare a working folder
 
@@ -34,7 +34,7 @@ php reprint.phar --version
 ```
 
 You should see a Reprint version number. If the command fails, follow
-[Troubleshooting](troubleshooting.md) before starting a copy.
+[Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/) before starting a copy.
 
 ## 2. Install the plugin on the source site
 
@@ -68,7 +68,7 @@ creates the key file first so you know where it is and can pass it to every
 later command.
 
 If the plugin instead shows a **Connection token** form, follow the
-[connection-token steps](authorize-client.md#if-the-screen-asks-for-a-connection-token).
+[connection-token steps](https://developer.wordpress.org/reprint/authorize-client/#if-the-screen-asks-for-a-connection-token).
 Replace the private-key flag in the copy command with `--secret='TOKEN'`,
 using the saved connection token. Use one credential flag, not both.
 
@@ -128,7 +128,7 @@ Check these on the preview address:
 
 Some plugins need MySQL rather than SQLite, or services provided by the source
 host. A completed transfer does not establish that every plugin works on the
-destination. If a check fails, see [Troubleshooting](troubleshooting.md).
+destination. If a check fails, see [Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/).
 
 ## 6. Stop and start the development server
 
@@ -153,5 +153,5 @@ same source address and folders. To only restart the development server, use
 `start.sh` instead. Running `pull` after completion can replace destination
 database changes with source data.
 
-Next: [How Reprint works](how-it-works.md), or
-[remove client access](authorize-client.md) when you no longer need it.
+Next: [How Reprint works](https://developer.wordpress.org/reprint/how-it-works/), or
+[remove client access](https://developer.wordpress.org/reprint/authorize-client/) when you no longer need it.

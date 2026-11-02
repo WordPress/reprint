@@ -9,8 +9,8 @@ source prefix; unrelated old tables with a different prefix can remain. Do not
 assume that an import emptied the entire database.
 
 If your platform runs Reprint programmatically, start with
-[Build with Reprint](build-with-reprint.md). For generated PHP or nginx
-configuration, see [Runtime configuration](runtime.md).
+[Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/). For generated PHP or nginx
+configuration, see [Runtime configuration](https://developer.wordpress.org/reprint/runtime/).
 
 ## Run destination cleanup
 

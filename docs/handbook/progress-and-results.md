@@ -2,10 +2,10 @@
 
 Use the final command report and exit code to determine whether a copy completed.
 
-[PHP integration example](build-with-reprint.md)
+[PHP integration example](https://developer.wordpress.org/reprint/build-with-reprint/)
 
 Examples use `$URL`, `$STATE_DIR`, `$FS_ROOT`, and an authorized
-`./reprint-key.pem` as described in [Conventions](commands.md#conventions).
+`./reprint-key.pem` as described in [Conventions](https://developer.wordpress.org/reprint/commands/#conventions).
 
 ## Exit codes
 
@@ -335,6 +335,6 @@ request; it can contain site paths and other site details.
 Exit code `3` means the client reached its retry limit for a temporary
 failure, such as HTTP `429` or a dropped connection, without saving new
 progress. Run the same command again later with the same state directory and
-filesystem root. [Temporary failures and retries](temporary-failures.md) lists
+filesystem root. [Temporary failures and retries](https://developer.wordpress.org/reprint/temporary-failures/) lists
 which failures count as temporary, how long the client waits, and what the
 retry records contain.

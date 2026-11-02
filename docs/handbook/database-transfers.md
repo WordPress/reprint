@@ -1,8 +1,8 @@
 # Database transfer reference
 
 Examples use `$URL`, `$STATE_DIR`, `$FS_ROOT`, and an authorized
-`./reprint-key.pem` as described in [Conventions](commands.md#conventions).
-Run [preflight](preflight.md) with the same source address and state directory
+`./reprint-key.pem` as described in [Conventions](https://developer.wordpress.org/reprint/commands/#conventions).
+Run [preflight](https://developer.wordpress.org/reprint/preflight/) with the same source address and state directory
 before downloading data.
 
 ## Download SQL
@@ -58,7 +58,7 @@ also resume, but a nontransactional table without a non-null unique key or an
 interrupted oversized-value update may require aborting and starting the import
 again. Follow the command's error instructions for those cases.
 
-See [Progress, results, and exit codes](progress-and-results.md) when a product
+See [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/) when a product
 runs these commands on a user's behalf.
 
 ## Target schema compatibility
@@ -166,4 +166,4 @@ A direct SQL import does not run Reprint's WordPress cleanup or runtime setup.
 Use `db-apply` when you need those steps and their resumable import behavior.
 
 For a database that is already running, see
-[Rewrite URLs in a live database](rewrite-urls.md).
+[Rewrite URLs in a live database](https://developer.wordpress.org/reprint/rewrite-urls/).

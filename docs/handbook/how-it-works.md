@@ -69,7 +69,7 @@ The database travels as SQL rather than a Reprint-only data format. A dump can
 be saved, inspected, or sent to a MySQL-compatible database. Reprint can also
 apply it to SQLite. Source table definitions are kept in the dump; a different
 database engine can still require translation or compatibility changes. See
-[Database transfers](database-transfers.md) for those limits.
+[Database transfers](https://developer.wordpress.org/reprint/database-transfers/) for those limits.
 
 Copying files and rows is only part of making a site work elsewhere. The source
 host may supply configuration, plugins, or routes that the destination lacks.
@@ -114,5 +114,5 @@ coordinated snapshot of every file and database row. For a final move, plan
 when to pause orders, uploads, and other writes, then check the copied site
 before switching traffic.
 
-Next: [What Reprint does not do](limitations.md), [Clone your site](copy-a-site.md),
-or [Build with Reprint](build-with-reprint.md).
+Next: [What Reprint does not do](https://developer.wordpress.org/reprint/limitations/), [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/),
+or [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).

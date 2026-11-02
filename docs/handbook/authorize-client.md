@@ -2,7 +2,7 @@
 
 Use this page when a Reprint client has given you a Migration Token to paste
 into WordPress. If you have not started a copy yet, follow
-[Clone your site](copy-a-site.md); it includes these steps.
+[Clone your site](https://developer.wordpress.org/reprint/copy-a-site/); it includes these steps.
 
 Authorizing the client lets it download the site's database and files,
 including private content.
@@ -58,5 +58,5 @@ in the network's Reprint Server settings. Client access can cover multiple
 sites in that network. The cloning guide covers single-site installations
 only.
 
-Next: [Clone your site](copy-a-site.md), or
-[Troubleshooting](troubleshooting.md).
+Next: [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/), or
+[Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/).

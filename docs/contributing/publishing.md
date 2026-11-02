@@ -1,9 +1,9 @@
 # Documentation structure and publishing
 
-Reprint's proposed public documentation home is one project handbook at
-`https://developer.wordpress.org/reprint/`. This location still needs agreement
-and registration with the Meta team. Merging this repository does not create
-that handbook or publish its pages.
+Reprint's public documentation source targets one project handbook at
+`https://developer.wordpress.org/reprint/`. The source links are prepared for
+that address; registration and deployment still need coordination with Meta.
+Merging this repository does not create that handbook or publish its pages.
 
 ## Why a project handbook
 
@@ -15,7 +15,7 @@ Keep all Reprint user and integration documentation together:
 
 | Location | Role |
 | --- | --- |
-| `developer.wordpress.org/reprint/` | Proposed canonical handbook: tutorials, task guides, integration, reference, and explanation. |
+| `developer.wordpress.org/reprint/` | Target handbook: tutorials, task guides, integration, reference, and explanation. |
 | `wordpress.org/reprint/` | Product introduction and goal-based links into the handbook. |
 | WordPress.org plugin directory | Plugin installation, requirements, downloads, and support; link onward for client workflows. |
 | Repository README | Short project introduction, working example, and documentation/contribution links. |
@@ -79,25 +79,19 @@ the page. There is no MDX conversion, build output, or custom link rewriting.
 Put example addresses in fenced code or plain text; the native Markdown parser
 can swallow links after a URL in an inline-code span.
 
-## Link to repository files for now
+## Website and repository links
 
-Use relative `.md` links between documentation pages while the handbook is not
-live. These links open the files in the GitHub branch being read. For example,
-the handbook home links to `try-reprint.md`, and a contributor page links to
-`../handbook/try-reprint.md`. Keep section anchors when linking to a heading.
+The imported handbook pages use complete website URLs for links to other
+handbook pages. Keep section anchors when linking to a heading. The root
+README and CONTRIBUTING file links stay relative so they open documentation
+in the GitHub branch being read.
 
 Keep external links, source-code links, and downloads as complete HTTPS URLs.
-Do not send readers to the planned handbook address before it is available.
+Files outside the manifest, such as this publishing plan and the terminology
+contract, use complete GitHub URLs. There are no importer filters or a
+link-rewriting build.
 
-## Prepare website links before import
-
-Confirm the handbook base address with Meta. Before the first website import,
-replace internal Markdown-file links in the handbook source with the confirmed
-website URLs. Keep the root README and CONTRIBUTING file links relative for
-GitHub. This is a source edit before publication; do not add importer filters
-or a link-rewriting build.
-
-The planned targets are:
+The handbook targets are:
 
 ```text
 https://developer.wordpress.org/reprint/
@@ -105,8 +99,11 @@ https://developer.wordpress.org/reprint/try-reprint/
 https://developer.wordpress.org/reprint/contributing/architecture/
 ```
 
-Update the link checks to validate those destinations when preparing that
-publication change. Until then, the tests check relative file paths instead.
+`HandbookManifestTest.php` maps the manifest to website URLs and checks that
+page links name an imported page. It rejects relative page links in imported
+content and checks that every page can be reached from the handbook home.
+These checks use the source files, not HTTP requests; website availability
+still needs checking after deployment.
 
 The handbook home has slug `handbook` and no parent. The Handbook plugin serves
 that landing page at `/reprint/`. The main pages also have no parent, so a page
@@ -168,16 +165,19 @@ Do not deploy the importer from the Reprint release workflow.
 
 ## First import and checks
 
-Before publishing Try Reprint, make the demo's `/public.key` available. It must
-contain an unencrypted PEM client signing key whose matching public key is
+The demo's `/public.key` is a separate setup task. The tutorial keeps its
+intended address, which returns 404 until the demo key is configured. The file
+must contain an unencrypted PEM client signing key whose matching public key is
 authorized on the demo for downloads. A public verification key alone cannot
 sign client requests. Use a key dedicated to the demo, and confirm that its
 export contains only data and files intended to be public.
 
-Run the documented download and copy commands against the live demo, then
-check the local posts, photographs, and generated-server restart. Do not replace
-the key URL with a placeholder or describe the Playground button as a Reprint
-copy until that route actually runs the client.
+After configuring the key, run the documented download and copy commands
+against the live demo, then check the local posts, photographs, and
+generated-server restart. Do not claim that the demo copy is verified before
+these checks pass. Do not replace the key URL with a placeholder or describe
+the Playground button as a Reprint copy until that route actually runs the
+client.
 
 Test the real importer and Markdown parser in a disposable local WordPress
 installation first. Confirm that every manifest page renders, tables and code
@@ -218,10 +218,10 @@ Replace `PAGE_ID` with the inspected main-page ID. Do not apply that command
 to contributor child pages. Recheck the resulting permalinks before updating
 links elsewhere.
 
-Prepare the Meta registration PR before merging the website-link change.
-Coordinate that change, registration deployment, and first import; the handbook
-URLs return 404 until those steps finish. The current repository links remain
-usable through their relative file paths.
+Coordinate the website-link change, registration deployment, and first import;
+the handbook URLs return 404 until those steps finish. Merging the link
+preparation alone does not publish the handbook. The root README and
+CONTRIBUTING links still open the repository files.
 Check the imported website links before updating the product page and plugin
 listing.
 Keep GitHub links for development and source contribution; user downloads
