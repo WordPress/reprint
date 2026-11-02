@@ -10,7 +10,7 @@ assume that an import emptied the entire database.
 
 If your platform runs Reprint programmatically, start with
 [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/). For generated PHP or nginx
-configuration, see [Runtime configuration](https://developer.wordpress.org/reprint/runtime/).
+configuration, see [Runtime configuration](https://developer.wordpress.org/reprint/reference/runtime/).
 
 ## Run destination cleanup
 

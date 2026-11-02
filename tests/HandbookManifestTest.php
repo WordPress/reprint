@@ -11,6 +11,9 @@ final class HandbookManifestTest extends TestCase {
         $manifest = json_decode(file_get_contents($manifest_file), true, 512, JSON_THROW_ON_ERROR);
         $this->assertNotEmpty($manifest);
 
+        $chapter_groups = ['getting-started', 'guides', 'build-with-reprint', 'reference', 'understand-reprint', 'contributing'];
+        $root_pages = [];
+        $children_by_parent = [];
         $source_by_key = [];
         $sources = [];
         foreach ($manifest as $key => $page) {
@@ -21,12 +24,19 @@ final class HandbookManifestTest extends TestCase {
 
             $parent = $page['parent'];
             $contributor_page = str_starts_with($page['markdown_source'], 'contributing/');
-            // The Handbook plugin includes parent slugs in child URLs. Only
-            // contributor reference pages belong under another handbook page.
-            $expected_parent = $contributor_page && $key !== 'contributing' ? 'contributing' : null;
-            $this->assertSame($expected_parent, $parent);
+            // The Handbook plugin uses page parents for both Chapters groups
+            // and child URLs. Keep content pages under the six section pages.
+            if ($key === 'handbook' || in_array($key, $chapter_groups, true)) {
+                $this->assertNull($parent);
+                $root_pages[] = $key;
+            } elseif ($contributor_page) {
+                $this->assertSame('contributing', $parent);
+            } else {
+                $this->assertContains($parent, $chapter_groups, $key . ': Every content page needs a chapter group.');
+            }
             if ($parent !== null) {
                 $this->assertArrayHasKey($parent, $source_by_key, 'List each parent before its children.');
+                $children_by_parent[$parent][] = $key;
             }
             $source = $page['markdown_source'];
             $source_by_key[$key] = $source;
@@ -41,6 +51,10 @@ final class HandbookManifestTest extends TestCase {
                 $sources[$source],
                 $source . ': Put example addresses in fenced code or plain text; the native Markdown parser can swallow following links after an inline-code URL.'
             );
+        }
+        $this->assertSame(array_merge(['handbook'], $chapter_groups), $root_pages, 'Keep the chapter list to the handbook home and six sections.');
+        foreach ($chapter_groups as $group) {
+            $this->assertNotEmpty($children_by_parent[$group] ?? [], $group . ': Each chapter group needs child pages.');
         }
 
         $files = [];
@@ -171,11 +185,13 @@ final class HandbookManifestTest extends TestCase {
         $this->assertEqualsCanonicalizing($commands[1], $documented[1], 'Update the command index when the CLI changes.');
     }
 
-    public function testHandbookUrlsMatchTheLandingPageAndContributorHierarchy(): void
+    public function testHandbookUrlsMatchTheLandingPageAndChapterHierarchy(): void
     {
         $source_by_url = $this->handbookSourcesByUrl();
         $this->assertSame('handbook/README.md', $source_by_url['https://developer.wordpress.org/reprint/']);
-        $this->assertSame('handbook/copy-a-site.md', $source_by_url['https://developer.wordpress.org/reprint/copy-a-site/']);
+        $this->assertSame('handbook/copy-a-site.md', $source_by_url['https://developer.wordpress.org/reprint/getting-started/copy-a-site/']);
+        $this->assertSame('handbook/commands.md', $source_by_url['https://developer.wordpress.org/reprint/reference/commands/']);
+        $this->assertSame('handbook/integration-pipeline.md', $source_by_url['https://developer.wordpress.org/reprint/build-with-reprint/integration-pipeline/']);
         $this->assertSame('contributing/architecture.md', $source_by_url['https://developer.wordpress.org/reprint/contributing/architecture/']);
     }
 

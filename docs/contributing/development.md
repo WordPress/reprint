@@ -107,8 +107,9 @@ change. Open the pull request in the
 Edit the Markdown source under `docs/`. Link to other handbook pages with their
 complete website URLs, including any section anchor. For a new handbook page,
 add its title, slug, source file, parent, and order to `docs/manifest.json`, and
-link it from the relevant section. Main pages use `/reprint/SLUG/`; contributor
-child pages use `/reprint/contributing/SLUG/` on developer.wordpress.org.
+link it from the relevant section. Put content pages under one of the six
+chapter groups. Their URLs use `/reprint/SECTION/SLUG/` on developer.wordpress.org;
+the handbook home and section pages have no parent.
 
 Keep links to repository-only files and external resources as complete HTTPS
 URLs. The root README and CONTRIBUTING links stay relative for GitHub.

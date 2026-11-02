@@ -24,7 +24,7 @@ and extensions must also meet the copied site's own needs.
 If PHP is missing, install it with your operating system's package manager or
 use the PHP supplied by your local WordPress environment. In WSL, install PHP
 inside WSL. A missing extension must be enabled for that command-line PHP.
-See [Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/) if a check fails.
+See [Troubleshooting](https://developer.wordpress.org/reprint/guides/troubleshooting/) if a check fails.
 
 ## Download the client
 
@@ -51,11 +51,11 @@ If preflight fails on the source, the host can use the
 
 ## Choose a destination
 
-The [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/) guide offers SQLite and MySQL, using PHP's
+The [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/) guide offers SQLite and MySQL, using PHP's
 development server to preview the copied site. You can run it on your laptop
 or a remote server. SQLite needs no separate database server. Choose MySQL if
 a plugin requires it or you want to use your existing database server.
-See [Database transfer reference](https://developer.wordpress.org/reprint/database-transfers/) for other import options.
+See [Database transfer reference](https://developer.wordpress.org/reprint/reference/database-transfers/) for other import options.
 PHP's built-in server is for local development, not a public production site.
 
 ## Source host checks
@@ -73,11 +73,11 @@ The client sends POST requests with custom authentication headers to the
 site's Reprint API address. Security layers in front of the site must let
 those requests through: a Cloudflare browser challenge, a Wordfence request
 limit, or a proxy that strips custom headers stops the copy. See
-[Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/#a-security-service-blocks-the-client).
+[Troubleshooting](https://developer.wordpress.org/reprint/guides/troubleshooting/#a-security-service-blocks-the-client).
 
 MySQL 5.5 sources are supported. This does not imply MySQL 5.5 destination
 support: the destination must accept the exported schema and collations. See
-[Database transfer reference](https://developer.wordpress.org/reprint/database-transfers/) for import behavior.
+[Database transfer reference](https://developer.wordpress.org/reprint/reference/database-transfers/) for import behavior.
 
 ### Multisite sources
 
@@ -94,4 +94,4 @@ platform. The [plugin configuration guide](https://github.com/WordPress/reprint/
 covers `public-keys.php`, `secret.php`, the `reprint_server_api_options`
 filter, and library use.
 
-Next: [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/).
+Next: [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/).

@@ -32,7 +32,7 @@ API address, such as https://example.com/?reprint-api, shown in
 `--private-key-path=./reprint-key.pem` after creating and authorizing that key
 with `keygen`, or `--secret='TOKEN'` when the source uses a connection token.
 Never pass both. Local-only commands such as `db-apply`, `apply-runtime`, and
-`preflight-assert` take no credential. See [Authentication](https://developer.wordpress.org/reprint/authentication/).
+`preflight-assert` take no credential. See [Authentication](https://developer.wordpress.org/reprint/reference/authentication/).
 
 **Directories.** Keep `$STATE_DIR` outside `$FS_ROOT` and outside every
 web-served directory. Use one state directory per filesystem root, and do not
@@ -49,7 +49,7 @@ state directory, and filesystem root.
 | `pull-db` | Preflight, database download, and database apply, without file or runtime changes. |
 | `install-server` | Installation instructions for the source-site plugin; it does not install the plugin remotely. |
 
-Start with [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/) or [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
+Start with [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/) or [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
 
 ## Access and inspection
 
@@ -62,8 +62,8 @@ Start with [Clone your site](https://developer.wordpress.org/reprint/copy-a-site
 | `files-stats` | File counts and sizes from the next remote index. |
 | `db-index` | Database table metadata written to `db-tables.jsonl`. |
 
-See [Authentication](https://developer.wordpress.org/reprint/authentication/), [Preflight](https://developer.wordpress.org/reprint/preflight/), and
-[Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/).
+See [Authentication](https://developer.wordpress.org/reprint/reference/authentication/), [Preflight](https://developer.wordpress.org/reprint/reference/preflight/), and
+[Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/).
 
 ## Data transfer and preparation
 
@@ -80,8 +80,8 @@ See [Authentication](https://developer.wordpress.org/reprint/authentication/), [
 | `post-process` | Selected hosting cleanup and plugin startup-recovery tasks. |
 | `recover` | A WordPress startup check that can deactivate a failing regular plugin. |
 
-See [File transfers](https://developer.wordpress.org/reprint/file-transfers/), [Database transfers](https://developer.wordpress.org/reprint/database-transfers/),
-[Runtime configuration](https://developer.wordpress.org/reprint/runtime/), and [Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/).
+See [File transfers](https://developer.wordpress.org/reprint/reference/file-transfers/), [Database transfers](https://developer.wordpress.org/reprint/reference/database-transfers/),
+[Runtime configuration](https://developer.wordpress.org/reprint/reference/runtime/), and [Prepare a hosting destination](https://developer.wordpress.org/reprint/build-with-reprint/hosting/).
 
 ## Local change inspection and push
 
@@ -137,7 +137,7 @@ handbook examples use, with the commands that accept them.
 | `--flat-document-root=DIR` | Use an assembled layout as the document root. | `apply-runtime` |
 | `--tasks=LIST` | Post-processing tasks to run, or `all`. | `post-process` |
 
-See [Runtime configuration](https://developer.wordpress.org/reprint/runtime/#runtime-options-on-pull) for how the
+See [Runtime configuration](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull) for how the
 runtime options combine on `pull`.
 
 ## Shared behavior
@@ -147,4 +147,4 @@ Read the command's help before using it. It is not a general rollback command.
 Run the same command to continue an interrupted transfer. Use `pull-files`
 to fetch later file changes without replacing the local database. To reopen
 the local site without copying again, use the generated start script from
-[Clone your site](https://developer.wordpress.org/reprint/copy-a-site/).
+[Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/).

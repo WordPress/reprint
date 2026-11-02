@@ -16,4 +16,4 @@
 File and database push require a separately configured source build. The
 WordPress.org plugin provides downloads only.
 
-[Why Reprint uses HTTP and streaming](https://developer.wordpress.org/reprint/how-it-works/)
+[Why Reprint uses HTTP and streaming](https://developer.wordpress.org/reprint/understand-reprint/how-it-works/)

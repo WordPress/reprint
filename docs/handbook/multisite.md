@@ -14,7 +14,7 @@ php reprint.phar keygen 'https://network.example/shop/?reprint-api' \
   --state-dir=./state --out=./reprint-key.pem
 ```
 
-[Authorize the printed Migration Token](https://developer.wordpress.org/reprint/authorize-client/) in Network Admin.
+[Authorize the printed Migration Token](https://developer.wordpress.org/reprint/getting-started/authorize-client/) in Network Admin.
 If the settings ask for a connection token instead, skip key generation and
 replace the private-key flag below with `--secret='NETWORK_TOKEN'` using the
 saved token.
@@ -26,7 +26,7 @@ Create the destination directories and an empty MySQL or SQLite target. Supply
 in the selected site's export. The example prepares files and SQLite data for
 https://shop.example without starting a development server
 (`--runtime=none --start-runtime=none`; see
-[runtime options on pull](https://developer.wordpress.org/reprint/runtime/#runtime-options-on-pull)):
+[runtime options on pull](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull)):
 
 ```sh
 php reprint.phar pull 'https://network.example/shop/?reprint-api' \
@@ -40,8 +40,8 @@ php reprint.phar pull 'https://network.example/shop/?reprint-api' \
 ## 3. Configure and check the destination
 
 Configure the destination web server and database connection as described in
-[Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/) or use the
-[runtime configuration commands](https://developer.wordpress.org/reprint/runtime/). Check the imported administrator,
+[Move to another host](https://developer.wordpress.org/reprint/guides/move-to-another-host/) or use the
+[runtime configuration commands](https://developer.wordpress.org/reprint/reference/runtime/). Check the imported administrator,
 posts, media, theme, plugins, and site-specific services before switching traffic.
 Read the plugin-table and separate-work sections below before treating the
 copy as complete.
@@ -62,7 +62,7 @@ single-site WordPress. Existing non-main-site media paths keep their
 
 Network-active plugins become active on the copied site. Reprint itself stays
 inactive. Host plugins are downloaded by default; see
-[host-plugin selection](https://developer.wordpress.org/reprint/file-transfers/) if the destination does not need them.
+[host-plugin selection](https://developer.wordpress.org/reprint/reference/file-transfers/) if the destination does not need them.
 Sessions and WordPress application passwords are not copied.
 
 Links to the selected site and its media are rewritten to the new address.
@@ -103,7 +103,7 @@ reject a MySQL 8 collation. Use `pull` or `pull-db` rather than direct
 
 A selected-site export uses a helper table on the source to collect users.
 Core WordPress tables and indexes are unchanged. If setup fails, ask the host
-to check the [multisite source requirements](https://developer.wordpress.org/reprint/requirements/#multisite-sources).
+to check the [multisite source requirements](https://developer.wordpress.org/reprint/getting-started/requirements/#multisite-sources).
 
 Only one export can run for a selected source site at a time. Another site in
 the network can export separately. Starting a fresh export prevents the older

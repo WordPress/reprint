@@ -1,7 +1,7 @@
 # Runtime configuration reference
 
 Examples use `$URL`, `$STATE_DIR`, and `$FS_ROOT` as described in
-[Conventions](https://developer.wordpress.org/reprint/commands/#conventions). These commands use saved source
+[Conventions](https://developer.wordpress.org/reprint/reference/commands/#conventions). These commands use saved source
 information and local files; no source credential flag is needed.
 
 Use `$FLAT_DIR` for the assembled WordPress directory and `$RUNTIME_DIR` for
@@ -88,7 +88,7 @@ default for other hosts. WP Cloud support can generate missing image sizes
 in the copy.
 `apply-runtime` removes known host-plugin copies by default, independently of
 the saved download selection. Pass `apply-runtime --include-host-plugins` to
-skip that local cleanup. See [host platform plugins](https://developer.wordpress.org/reprint/file-transfers/) for download selection and cleanup.
+skip that local cleanup. See [host platform plugins](https://developer.wordpress.org/reprint/reference/file-transfers/) for download selection and cleanup.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 
