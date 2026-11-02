@@ -43,7 +43,7 @@ latest stable client. You do not need Git or Composer to run it.
 
 You need permission to install and configure the
 [Reprint plugin](https://wordpress.org/plugins/reprint/). It requires WordPress
-4.7 or newer, PHP 7.2 or newer, and a working HTTPS address. On multisite, a
+4.7 or newer, PHP 5.6.20 or newer, and a working HTTPS address. On multisite, a
 network administrator must install and configure it. Source-host SSH is not needed.
 
 If preflight fails on the source, the host can use the
