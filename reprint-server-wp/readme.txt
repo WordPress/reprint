@@ -23,21 +23,42 @@ Install Reprint on the site you want to copy. A Reprint client downloads its fil
 
 To start a copy yourself, [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) and follow [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/). You need command-line PHP on the computer receiving the copy. No Reprint account or subscription is required.
 
-= Why use Reprint? =
+= Big sites get across =
 
-* Copy files and database data over HTTPS. You do not need SSH access to the source site.
-* Stream the data without first creating a large archive on your hosting account.
-* Continue an interrupted transfer with the same command and saved progress.
-* Choose SQLite or MySQL for the copied database.
-* Copy selected files or the database when you do not need a full site copy.
+Reprint streams files and database rows in parts. Your host does not need to build one large archive before downloading can begin. You need enough space on the receiving computer for the files and database you copy.
 
-See [Requirements and downloads](https://developer.wordpress.org/reprint/requirements/) to check your setup, or [Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/) to prepare a copy for a new hosting account.
+= Pick up where you left off =
 
-= Build with Reprint =
+If your connection drops or the host times out, keep the downloaded files and saved progress. Run the same command again to continue the transfer. You do not need to start the whole copy over.
 
-You can run the client from your product and read its progress and results. Start with [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/), then use the [command reference](https://developer.wordpress.org/reprint/commands/) for individual commands.
+= Keep links working in the copy =
 
-Reprint is open-source software. Development and contributions happen in the [Reprint repository](https://github.com/WordPress/reprint).
+When your site's address changes, Reprint rewrites links in HTML, block markup, shortcodes, JSON, base64, and serialized PHP data, including data nested inside other formats. It keeps the surrounding data valid, including the lengths stored in serialized PHP values.
+
+See [Database transfers](https://developer.wordpress.org/reprint/database-transfers/) and [File transfers](https://developer.wordpress.org/reprint/file-transfers/) for supported rewriting and its limits.
+
+= Keep your copy up to date =
+
+Run the pull again to bring over files that changed on the source. Unchanged files are skipped, so later file transfers can be much smaller than the first copy.
+
+A database refresh replaces data rather than merging your edits. To update files without replacing the copied database, follow [Copy selected files or the database](https://developer.wordpress.org/reprint/copy-selected-data/).
+
+= Choose what to copy and where =
+
+* Choose MySQL or SQLite for the copied database.
+* Copy selected files or only the database when you do not need a full site copy.
+* Copy straight to a computer or server with PHP. You do not need WordPress installed at the destination or SSH access to the source site.
+* Follow [Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/) when you are ready to move the copy to a new hosting account.
+
+Check [Requirements and downloads](https://developer.wordpress.org/reprint/requirements/) for the PHP extensions, database setup, and disk space you need.
+
+= Script copies or build Reprint into your product =
+
+You can run copies from scripts, read exit codes, and show JSON progress to your users. Start with [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/). Use [Control each migration step](https://developer.wordpress.org/reprint/integration-pipeline/) when you need to run the steps separately, and [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/) to handle their results.
+
+The client and server are also available as Composer packages. See the [contributor guide](https://developer.wordpress.org/reprint/contributing/) for package and source information, or the [command reference](https://developer.wordpress.org/reprint/commands/) for CLI commands.
+
+Reprint is free and open-source software. Development and contributions happen in the [Reprint repository](https://github.com/WordPress/reprint).
 
 == Installation ==
 
@@ -49,6 +70,14 @@ Reprint is open-source software. Development and contributions happen in the [Re
 If you have not started a client yet, [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) and follow [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/). The guide includes key creation, authorization, and complete copy commands for SQLite and MySQL.
 
 == Frequently Asked Questions ==
+
+= What does your copy include? =
+
+Your site's files and database: posts, pages, media, users, settings, themes, plugins, and their tables. Reprint skips known caches, logs, backup archives, and temporary files. See [File transfers](https://developer.wordpress.org/reprint/file-transfers/) for file selection and skipped paths.
+
+= Can you copy a site while it is live? =
+
+Yes. The source can keep serving visitors during the copy. It can also keep changing, so the files and database are not one frozen snapshot. For a final move, pause new orders, uploads, and other writes, then take a final copy before switching visitors to the destination. Follow [Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/) for the steps.
 
 = Does activating Reprint start a copy? =
 
@@ -62,7 +91,9 @@ To start a copy yourself, you need the client and PHP 7.4 or newer on the receiv
 
 The WordPress.org plugin supports downloading files and database data. It does not accept uploads back into the site. Changes you make to the copy stay in that copy.
 
-Copied plugins may still connect to live email, payment, or other services. Replace those connections with test settings before using the copy for development.
+= Can the copy send email or use live payment settings? =
+
+Once you run the copied site, its plugins may still connect to live email, payment, or other services. Disable those connections or replace them with test settings before using the copy for development.
 
 = Can you copy a site from a multisite network? =
 
@@ -70,7 +101,7 @@ Yes. A network administrator manages access. Follow [Move one site out of a netw
 
 = Who receives your site data? =
 
-The Reprint client you authorize receives the files and database. These may include private content, personal data, password hashes, and configuration secrets. Keep credentials and downloaded copies private. See [Authentication](https://developer.wordpress.org/reprint/authentication/) for access and credential details.
+Your files and database travel over HTTPS directly to the Reprint client you authorize, without passing through a Reprint cloud service. They may include private content, personal data, password hashes, and configuration secrets. Keep credentials private and store copies somewhere visitors cannot access unless you intend to publish them. See [Authentication](https://developer.wordpress.org/reprint/authentication/) for access and credential details.
 
 = How do you revoke access? =
 
