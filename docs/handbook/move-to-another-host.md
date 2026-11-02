@@ -5,12 +5,12 @@ guide assumes you can run command-line PHP there, configure its web server,
 and create an empty database. Source WordPress administrator access is enough
 to install the plugin and authorize the client; source SSH is not required.
 
-For a first experiment, complete [Clone your site](copy-a-site.md).
-For a managed product, see [Build with Reprint](build-with-reprint.md).
+For a first experiment, complete [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/).
+For a managed product, see [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
 
 ## 1. Prepare the destination
 
-Install the [client and required PHP extensions](requirements.md). Create a
+Install the [client and required PHP extensions](https://developer.wordpress.org/reprint/requirements/). Create a
 dedicated empty MySQL database and an account limited to it. Choose empty
 download and assembled-site directories. Keep migration state outside web-served
 directories.
@@ -23,7 +23,7 @@ php reprint.phar keygen https://source.example \
   --state-dir=/srv/reprint-state --out=/srv/reprint-key.pem
 ```
 
-[Authorize the printed Migration Token](authorize-client.md) on the source.
+[Authorize the printed Migration Token](https://developer.wordpress.org/reprint/authorize-client/) on the source.
 If it uses a connection token, replace the private-key flag below with
 `--secret='TOKEN'` using the saved token.
 
@@ -51,22 +51,22 @@ After the command finishes:
 
 `--runtime=none --start-runtime=none` skip the development-server configuration
 and do not start a server, since your own web server will serve the copy. See
-[runtime options on pull](runtime.md#runtime-options-on-pull).
+[runtime options on pull](https://developer.wordpress.org/reprint/runtime/#runtime-options-on-pull).
 
 Next, configure your web server to serve `/srv/site` and check that WordPress
 works. Once the copy is ready, point your domain to the destination server.
 The steps below cover that setup.
 
 Run the same command to continue after interruption. See
-[Database transfer reference](database-transfers.md) for target compatibility
+[Database transfer reference](https://developer.wordpress.org/reprint/database-transfers/) for target compatibility
 and import recovery limits.
 
 ## 3. Configure and test WordPress
 
 Configure the destination web server and `wp-config.php` for the destination
 paths and database. Do not reuse source-host database credentials.
-[Prepare a hosting destination](hosting.md) covers cleanup and startup checks;
-[Runtime configuration](runtime.md) covers generated server configuration.
+[Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/) covers cleanup and startup checks;
+[Runtime configuration](https://developer.wordpress.org/reprint/runtime/) covers generated server configuration.
 
 Before opening the copy, disable outgoing mail, scheduled jobs, payments, and
 other production service connections that must not run from a second site.

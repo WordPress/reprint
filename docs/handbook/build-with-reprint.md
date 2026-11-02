@@ -6,10 +6,10 @@ completed or needs user action. It uses PHP, with no extra libraries.
 
 ## Prepare the source and working folder
 
-Download [reprint.phar](requirements.md) into a private working folder.
+Download [reprint.phar](https://developer.wordpress.org/reprint/requirements/) into a private working folder.
 Install the [Reprint plugin](https://wordpress.org/plugins/reprint/) on the
 source site. This example uses the normal Migration Token authorization shown
-in the plugin settings; [Authentication](authentication.md) covers token-only hosts.
+in the plugin settings; [Authentication](https://developer.wordpress.org/reprint/authentication/) covers token-only hosts.
 
 Generate a key in the working folder:
 
@@ -121,7 +121,7 @@ bash state/runtime/start.sh
 ```
 
 `--start-runtime=none` keeps the client from starting a server while the
-integration job runs; see [runtime options on pull](runtime.md#runtime-options-on-pull).
+integration job runs; see [runtime options on pull](https://developer.wordpress.org/reprint/runtime/#runtime-options-on-pull).
 The generated start script is only for local development.
 
 ## Handle the next action
@@ -142,14 +142,14 @@ than treating the last progress message as success.
 
 ## Go further when needed
 
-- [Progress, results, and exit codes](progress-and-results.md) documents the full
+- [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/) documents the full
   output contract, including numeric counters for your UI.
-- [Copy selected files or the database](copy-selected-data.md) covers partial copies.
-- [Control each migration step](integration-pipeline.md) is for products that
+- [Copy selected files or the database](https://developer.wordpress.org/reprint/copy-selected-data/) covers partial copies.
+- [Control each migration step](https://developer.wordpress.org/reprint/integration-pipeline/) is for products that
   need separate indexing, transfer, and import stages.
-- [Prepare a hosting destination](hosting.md) covers production-server setup
+- [Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/) covers production-server setup
   and cleanup. This example deliberately uses a local SQLite destination.
 
-For a first manual copy, use [Clone your site](copy-a-site.md).
+For a first manual copy, use [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/).
 For PHP embedding and source contributions, use the
 [development repository](https://github.com/WordPress/reprint).

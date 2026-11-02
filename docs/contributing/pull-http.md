@@ -2,7 +2,7 @@
 
 Use this reference when changing a request or response in the client and
 server together. If you are adding Reprint to a product, use the
-[client integration guide](../handbook/build-with-reprint.md)
+[client integration guide](https://developer.wordpress.org/reprint/build-with-reprint/)
 first; it handles these request details for you. Private cursor and state
 formats can change between client versions.
 
@@ -52,7 +52,7 @@ multipart upload streams without buffering.
 
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
 and `multipart/form-data`. The signature covers the URL, endpoint included, and
-never the body. Use the [file push reference](push.md)
+never the body. Use the [file push reference](https://developer.wordpress.org/reprint/contributing/push/)
 for push request fields.
 
 The client sends URL-encoded forms for preflight and streaming pull commands.

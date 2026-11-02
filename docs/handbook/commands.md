@@ -32,7 +32,7 @@ API address, such as https://example.com/?reprint-api, shown in
 `--private-key-path=./reprint-key.pem` after creating and authorizing that key
 with `keygen`, or `--secret='TOKEN'` when the source uses a connection token.
 Never pass both. Local-only commands such as `db-apply`, `apply-runtime`, and
-`preflight-assert` take no credential. See [Authentication](authentication.md).
+`preflight-assert` take no credential. See [Authentication](https://developer.wordpress.org/reprint/authentication/).
 
 **Directories.** Keep `$STATE_DIR` outside `$FS_ROOT` and outside every
 web-served directory. Use one state directory per filesystem root, and do not
@@ -49,7 +49,7 @@ state directory, and filesystem root.
 | `pull-db` | Preflight, database download, and database apply, without file or runtime changes. |
 | `install-server` | Installation instructions for the source-site plugin; it does not install the plugin remotely. |
 
-Start with [Clone your site](copy-a-site.md) or [Build with Reprint](build-with-reprint.md).
+Start with [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/) or [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
 
 ## Access and inspection
 
@@ -62,8 +62,8 @@ Start with [Clone your site](copy-a-site.md) or [Build with Reprint](build-with-
 | `files-stats` | File counts and sizes from the next remote index. |
 | `db-index` | Database table metadata written to `db-tables.jsonl`. |
 
-See [Authentication](authentication.md), [Preflight](preflight.md), and
-[Progress, results, and exit codes](progress-and-results.md).
+See [Authentication](https://developer.wordpress.org/reprint/authentication/), [Preflight](https://developer.wordpress.org/reprint/preflight/), and
+[Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/).
 
 ## Data transfer and preparation
 
@@ -80,8 +80,8 @@ See [Authentication](authentication.md), [Preflight](preflight.md), and
 | `post-process` | Selected hosting cleanup and plugin startup-recovery tasks. |
 | `recover` | A WordPress startup check that can deactivate a failing regular plugin. |
 
-See [File transfers](file-transfers.md), [Database transfers](database-transfers.md),
-[Runtime configuration](runtime.md), and [Prepare a hosting destination](hosting.md).
+See [File transfers](https://developer.wordpress.org/reprint/file-transfers/), [Database transfers](https://developer.wordpress.org/reprint/database-transfers/),
+[Runtime configuration](https://developer.wordpress.org/reprint/runtime/), and [Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/).
 
 ## Local change inspection and push
 
@@ -137,7 +137,7 @@ handbook examples use, with the commands that accept them.
 | `--flat-document-root=DIR` | Use an assembled layout as the document root. | `apply-runtime` |
 | `--tasks=LIST` | Post-processing tasks to run, or `all`. | `post-process` |
 
-See [Runtime configuration](runtime.md#runtime-options-on-pull) for how the
+See [Runtime configuration](https://developer.wordpress.org/reprint/runtime/#runtime-options-on-pull) for how the
 runtime options combine on `pull`.
 
 ## Shared behavior
@@ -147,4 +147,4 @@ Read the command's help before using it. It is not a general rollback command.
 Run the same command to continue an interrupted transfer. Use `pull-files`
 to fetch later file changes without replacing the local database. To reopen
 the local site without copying again, use the generated start script from
-[Clone your site](copy-a-site.md).
+[Clone your site](https://developer.wordpress.org/reprint/copy-a-site/).
