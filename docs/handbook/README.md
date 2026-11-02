@@ -1,30 +1,20 @@
 # Reprint handbook
 
-Reprint copies a WordPress site's files and database over HTTP. Use it to make
-a local copy for testing, move a site, or add copying to your product. Transfers
-stream in chunks and can continue after interruption, without first building
-one large archive on the source host.
+Reprint copies a WordPress site's files and database over HTTP.
 
 ## Choose your goal
 
-- **Try Reprint now:** [copy the demo to your computer](https://developer.wordpress.org/reprint/try-reprint/).
-  Follow the download and copy commands; no WordPress login is needed.
-- **Clone my site:** follow [Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/).
-  This tutorial takes one route: the client, SQLite, and PHP's local server.
-- **Integrate Reprint into my product:** start with [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
-  Run the client from your product and handle access, progress, and results.
+- [Try Reprint now](https://developer.wordpress.org/reprint/try-reprint/)
+- [Clone my site](https://developer.wordpress.org/reprint/copy-a-site/)
+- [Integrate Reprint into my product](https://developer.wordpress.org/reprint/build-with-reprint/)
 
-The Reprint Server plugin runs on the site being copied. The Reprint client
-runs on the computer or host receiving the copy. Installing the plugin does
-not start a transfer. A site administrator authorizes the client first; that
-administrator does not have to be the person running the client.
+The Reprint Server plugin runs on the source site. The client runs on the
+computer receiving the copy. For your own site, an administrator authorizes
+the client before copying.
 
-The WordPress.org server package provides downloads only. These starting
-instructions do not enable changes to the source site's files or database.
+The WordPress.org plugin supports downloads only.
 
 ## Guides
-
-Choose a guide when you already know the result you want:
 
 - [Copy selected files or the database](https://developer.wordpress.org/reprint/copy-selected-data/)
 - [Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/)
@@ -41,8 +31,6 @@ Choose a guide when you already know the result you want:
 
 ## Reference
 
-Look up exact behavior while working:
-
 - [Requirements and downloads](https://developer.wordpress.org/reprint/requirements/)
 - [Commands](https://developer.wordpress.org/reprint/commands/)
 - [Authentication](https://developer.wordpress.org/reprint/authentication/)
@@ -54,15 +42,13 @@ Look up exact behavior while working:
 
 ## Understand Reprint
 
-[How Reprint works](https://developer.wordpress.org/reprint/how-it-works/) explains the client/server split, streaming,
-resuming, and the limits of copying a live site.
+[How Reprint works](https://developer.wordpress.org/reprint/how-it-works/)
 
 ## Get help
 
-Use the [support forum](https://wordpress.org/support/plugin/reprint/) for help.
+[Support forum](https://wordpress.org/support/plugin/reprint/)
 
 ## Contribute to Reprint
 
-To change code, tests, or documentation, start with the
-[contributor guide](https://developer.wordpress.org/reprint/contributing/).
-Code and pull requests live in the [development repository](https://github.com/WordPress/reprint).
+- [Contributor guide](https://developer.wordpress.org/reprint/contributing/)
+- [Development repository](https://github.com/WordPress/reprint)

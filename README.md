@@ -11,9 +11,9 @@ an interrupted transfer can continue.
 
 ## Start here
 
-- **Try Reprint now:** [copy the demo to your computer](docs/handbook/try-reprint.md). No WordPress login needed.
-- **Clone my site:** follow [Copy a site to your computer](docs/handbook/copy-a-site.md).
-- **Integrate Reprint into my product:** start with [Build with Reprint](docs/handbook/build-with-reprint.md).
+- [Try Reprint now](docs/handbook/try-reprint.md)
+- [Clone my site](docs/handbook/copy-a-site.md)
+- [Integrate Reprint into my product](docs/handbook/build-with-reprint.md)
 
 ## Try it with the demo site
 
@@ -32,20 +32,14 @@ php reprint.phar pull https://reprint-demo.wordpress.net/ \
   --target-engine=sqlite --new-site-url=http://localhost:8881
 ```
 
-When the local server starts, open http://localhost:8881. The
-[Try Reprint tutorial](docs/handbook/try-reprint.md) covers checking the copy
-and stopping and restarting the server.
+When the local server starts, open http://localhost:8881.
+[Check, stop, or reopen your copy](docs/handbook/try-reprint.md).
 
-To copy a site you administer, follow
-[Copy a site to your computer](docs/handbook/copy-a-site.md). The WordPress.org
-server package provides downloads only; it does not provide push.
+The WordPress.org plugin supports downloads only.
 
 ## Documentation
 
-The [Reprint handbook](docs/handbook/README.md) contains tutorials, task guides,
-integration instructions, command reference, and explanations. Its Markdown
-source and WordPress.org import manifest live in this repository.
-
+- [Handbook](docs/handbook/README.md)
 - [Commands](docs/handbook/commands.md)
 - [Troubleshooting](docs/handbook/troubleshooting.md)
 - [Support forum](https://wordpress.org/support/plugin/reprint/)
@@ -53,9 +47,8 @@ source and WordPress.org import manifest live in this repository.
 
 ## Development
 
-See [Contributing](docs/contributing/contributing.md) for development setup, architecture, tests,
-and releases. Source packages live in
-[`packages/reprint-client`](packages/reprint-client/) and
-[`packages/reprint-server`](packages/reprint-server/).
+- [Contribute to Reprint](docs/contributing/contributing.md)
+- [Client source](packages/reprint-client/)
+- [Server source](packages/reprint-server/)
 
 Reprint is licensed under [GPL-2.0-or-later](LICENSE).

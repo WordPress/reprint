@@ -51,6 +51,10 @@ Understand Reprint, and Contributing. Readers enter by what they want to do:
 try Reprint, clone a site, or add it to a product. A Try Reprint entry must include steps that complete a real
 copy; visiting the sample site alone does not try the tool.
 
+Use the reader's goal as link text. Add a description only when it helps them
+choose, such as a required login or a destination limitation. Do not repeat
+the link label or announce what kind of document follows.
+
 A technical detail belongs in public reference when a caller relies on it.
 A local implementation quirk belongs beside the code and in a regression test.
 Describe requirements as capabilities, such as OpenSSL support, rather than

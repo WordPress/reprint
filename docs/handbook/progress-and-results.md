@@ -1,8 +1,8 @@
 # Progress, results, and exit codes
 
-Use this reference when your product runs the client or your support team
-reads a migration log. For a working caller example, start with
-[Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/). A progress update is not a completed command.
+Use the final command report and exit code to determine whether a copy completed.
+
+[PHP integration example](https://developer.wordpress.org/reprint/build-with-reprint/)
 
 Examples use `$URL` for the source address, `$STATE_DIR` for persistent private
 state, and `$FS_ROOT` for downloaded files. Set those variables in your shell.

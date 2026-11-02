@@ -1,8 +1,6 @@
 # Authentication reference
 
-For the WordPress settings steps, follow [Authorize the Reprint client](https://developer.wordpress.org/reprint/authorize-client/).
-This reference describes how the client chooses credentials and how a product
-should handle the authorization stop.
+[Authorize a client in WordPress](https://developer.wordpress.org/reprint/authorize-client/)
 
 ## Migration Tokens
 
