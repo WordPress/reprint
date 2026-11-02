@@ -105,7 +105,7 @@ tables. Grant this access only to deployment clients allowed to change the
 database; do not expose it as a limited SQL service for other callers.
 
 The keys file returns a list of one-line public keys, as printed by
-`reprint keygen`. On a server without OpenSSL, the plugin
+`php reprint.phar keygen`. On a server without OpenSSL, the plugin
 accepts a connection token instead: define `CONNECTION_TOKEN_FILE` as a file
 returning the shared secret as a PHP string. Either file is host-level
 permission for destructive pushes, not a setting to expose to visitors.
@@ -120,13 +120,13 @@ whose dependencies the account cannot inspect.
 
 ## Command flow
 
-Run the command examples from the repository root after `composer install`.
-`vendor/bin/reprint-client` uses the client code from your checkout. Keep one
+Run the command examples from the repository root with the `reprint.phar`
+built during development setup. Keep one
 private local state directory and the same remote Reprint API URL for every step. On a token host, pass `--secret=TOKEN` instead of `--private-key-path`. These examples use explicit source credentials; omitting them
 uses the local MySQL database previously recorded by `db-apply`.
 
 ```sh
-vendor/bin/reprint-client db-push https://example.com/reprint-api.php \
+php reprint.phar db-push https://example.com/reprint-api.php \
   --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem \
   --source-dsn='mysql:host=127.0.0.1;dbname=local_site;charset=utf8mb4' \
   --source-user=local_user --source-pass=LOCAL_PASSWORD \
@@ -145,7 +145,7 @@ queues, CLI commands, and schema migrations
 which may use these tables. WordPress's `.maintenance` file alone is not enough.
 
 ```sh
-vendor/bin/reprint-client db-push https://example.com/reprint-api.php \
+php reprint.phar db-push https://example.com/reprint-api.php \
   --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem \
   --commit=REVIEW_TOKEN --writers-stopped
 ```
@@ -165,7 +165,7 @@ writes; that would be another destructive overwrite.
 Once satisfied, explicitly delete the retained old tables:
 
 ```sh
-vendor/bin/reprint-client db-push https://example.com/reprint-api.php \
+php reprint.phar db-push https://example.com/reprint-api.php \
   --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem --cleanup
 ```
 

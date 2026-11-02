@@ -35,6 +35,7 @@ final class HandbookManifestTest extends TestCase {
             $this->assertArrayNotHasKey($source, $sources);
             $sources[$source] = file_get_contents($docs_directory . '/' . $source);
             $this->assertStringStartsWith('# ' . $page['title'] . "\n", $sources[$source]);
+            $this->assertStringNotContainsString('vendor/bin/reprint-client', $sources[$source], 'Run php reprint.phar in handbook examples, including contributor pages.');
             $this->assertDoesNotMatchRegularExpression(
                 '~(?<!`)`[^`\n]*https?://[^`\n]*`(?!`)~',
                 $sources[$source],

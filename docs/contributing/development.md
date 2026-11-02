@@ -18,11 +18,15 @@ composer install
 
 For an existing checkout, run `git submodule update --init --recursive` first.
 Composer links the local client and server packages into `vendor/`, so root
-tests use the code you edit under `packages/`. Check that the client runs with:
+tests use the code you edit under `packages/`. Build the client and check that
+it runs:
 
 ```sh
-vendor/bin/reprint-client --version
+composer build:phar
+php reprint.phar --version
 ```
+
+Run `composer build:phar` again after changing client code or its dependencies.
 
 The WordPress plugin keeps a copied server package instead. Before your first
 plugin test, install its dependencies:

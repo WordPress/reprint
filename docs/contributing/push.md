@@ -26,9 +26,8 @@ Use the [terminology contract](push-terminology.md)
 when naming paths, phases, or state fields in code.
 
 The WordPress.org plugin omits file and database push. These endpoints require
-a separately configured source build. The command examples run from the
-repository root after `composer install`; `vendor/bin/reprint-client` runs the
-client code from that checkout.
+a separately configured source build. Run the command examples from the
+repository root with the `reprint.phar` built during development setup.
 
 ## Transport and authentication
 
@@ -87,14 +86,14 @@ Use the same remote Reprint API URL and state directory as the existing pull.
 If no key exists yet, generate one:
 
 ```sh
-vendor/bin/reprint-client keygen 'https://example.com/?reprint-api' --state-dir=./state
+php reprint.phar keygen 'https://example.com/?reprint-api' --state-dir=./state
 ```
 
 Enroll the printed Migration Token under **Tools → Reprint Server**, then enable
 **Allow push** for that Migration Token. With saved preflight data from the pull, run:
 
 ```sh
-vendor/bin/reprint-client files-push 'https://example.com/?reprint-api' --state-dir=./state --fs-root=./files
+php reprint.phar files-push 'https://example.com/?reprint-api' --state-dir=./state --fs-root=./files
 ```
 
 The command finds the private key in the state directory. Omit `--secret` on
@@ -512,7 +511,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 
 ## Low-level files-push command
 
-`reprint files-push <remote-reprint-api-url>` is the production CLI caller for one
+`php reprint.phar files-push <remote-reprint-api-url>` is the production CLI caller for one
 `PushFilesSender`. It treats the saved preflight document root as a path beneath
 the resolved filesystem root named by `--fs-root`. It removes that local prefix when producing document-root-relative paths and excludes local paths
 outside the document root from push and delete work. It requires `--state-dir`,
@@ -608,7 +607,7 @@ before setup changes its local files.
 
 ## Local files-diff command
 
-`reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl|compact]`
+`php reprint.phar files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl|compact]`
 reports a local minimized push operation plan before target exclusions: the
 local paths a files-push would send or delete, compared against the same
 filtered patch base used by files-push. The retained local index is not
