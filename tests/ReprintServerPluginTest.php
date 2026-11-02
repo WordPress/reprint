@@ -40,8 +40,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
     public function testFirstVisitStartsWithAuthorizationAndKeepsTheUrlBelow(): void
     {
         $html = $this->renderAdminPage();
-        $this->assertStringContainsString('Authorize a tool to copy this site', $html);
-        $this->assertStringContainsString('Paste the Migration Token shown by the tool you want to use.', $html);
+        $this->assertStringContainsString('Authorize a client to copy this site', $html);
+        $this->assertStringContainsString('Paste the Migration Token shown by the client you want to use.', $html);
         $this->assertStringNotContainsString('public key', strip_tags($html));
         $this->assertStringNotContainsString('reprint-server-status', $html);
         $this->assertStringNotContainsString('reprint-server-host-details', $html);
@@ -58,7 +58,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $xpath = new DOMXPath($document);
         $this->assertCount(1, $xpath->query('//label[@for="reprint_server_public_key" and normalize-space(.)="Migration Token"]'));
         $this->assertCount(1, $xpath->query('//textarea[@id="reprint_server_public_key" and @required and @aria-describedby="reprint-server-public-key-help reprint-server-public-key-permission" and not(ancestor::details)]'));
-        $this->assertCount(1, $xpath->query('//input[@type="submit" and @value="Authorize tool" and contains(@class, "button-primary")]'));
+        $this->assertCount(1, $xpath->query('//input[@type="submit" and @value="Authorize client" and contains(@class, "button-primary")]'));
         $this->assertCount(1, $xpath->query('//details[not(@open)]/summary[contains(., "Migration Token yet")]'));
         $this->assertCount(1, $xpath->query('//details[summary[contains(., "Migration Token yet")]]//pre[contains(., "reprint keygen")]'));
         $this->assertCount(0, $xpath->query('//details[contains(@class, "reprint-server-manage-access")]'));
@@ -105,12 +105,12 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         update_option_public_keys([$entry]);
         $_GET = ['reprint_server_notice' => 'enrolled', 'reprint_server_key_id' => $entry['key_id']];
         $html = $this->renderAdminPage();
-        $this->assertStringContainsString('Tool authorized', $html);
-        $this->assertStringContainsString('Return to your tool to start or resume the copy.', $html);
+        $this->assertStringContainsString('Client authorized', $html);
+        $this->assertStringContainsString('Return to your client to start or resume the copy.', $html);
         $this->assertStringContainsString('This Migration Token allows downloads. It cannot change files on this site.', $html);
         $this->assertStringNotContainsString('id="reprint_server_public_key"', $html);
         $this->assertStringNotContainsString('notice-success', $html);
-        $this->assertStringContainsString('Authorize another tool', $html);
+        $this->assertStringContainsString('Authorize another client', $html);
         $this->assertStringContainsString('href="https://example.test/wp-admin/tools.php?page=reprint-server"', $html);
     }
 
@@ -133,7 +133,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $_GET = ['reprint_server_notice' => 'enrolled', 'reprint_server_key_id' => $entry['key_id']];
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('id="reprint_server_public_key"', $html);
-        $this->assertStringNotContainsString('Tool authorized', $html);
+        $this->assertStringNotContainsString('Client authorized', $html);
     }
 
     public function testManagementResultsReopenTheirControlsWithoutHidingAuthorization(): void
@@ -163,7 +163,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         file_put_contents(PUBLIC_KEYS_FILE, "<?php return [];\n");
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('public-keys.php', $html);
-        $this->assertStringContainsString('Edit that file to authorize a tool', $html);
+        $this->assertStringContainsString('Edit that file to authorize a client', $html);
         $this->assertStringNotContainsString('reprint_server_enroll_public_key', $html);
         $this->assertStringNotContainsString('class="notice ', $html);
     }
@@ -198,7 +198,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_var_export -- Builds the public-keys.php fixture source.
         file_put_contents(PUBLIC_KEYS_FILE, "<?php return [" . var_export($entry['public_key'], true) . "];\n");
         $html = $this->renderAdminPage();
-        $this->assertStringNotContainsString('Authorize another tool', $html);
+        $this->assertStringNotContainsString('Authorize another client', $html);
         $this->assertStringNotContainsString('reprint_server_enroll_public_key', $html);
         $this->assertStringNotContainsString('reprint_server_remove_public_key', $html);
         $document = new DOMDocument();
@@ -609,7 +609,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         \WordPress\Reprint\Server\Utils::override_key_auth_required_for_tests(false);
         $html = $this->renderAdminPage();
 
-        $this->assertStringContainsString('Authorize a tool to copy this site', $html);
+        $this->assertStringContainsString('Authorize a client to copy this site', $html);
         $this->assertStringContainsString('Save the token to authorize downloads', $html);
         $this->assertStringContainsString('id="reprint_server_connection_token"', $html);
         $this->assertStringContainsString('name="' . CONNECTION_TOKEN_OPTION . '"', $html);
@@ -644,8 +644,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $html = $this->renderAdminPage();
 
         $this->assertStringNotContainsString('class="notice ', $html);
-        $this->assertStringContainsString('Use the saved connection token in your tool.', $html);
-        $this->assertStringNotContainsString('Return to your tool', $html);
+        $this->assertStringContainsString('Use the saved connection token in your client.', $html);
+        $this->assertStringNotContainsString('Return to your client', $html);
         $this->assertStringNotContainsString('reprint-server-connection-heading', $html);
         $this->assertStringNotContainsString('reprint-server-next-heading', $html);
         $this->assertStringNotContainsString('notice notice-success inline', $html);
@@ -1057,7 +1057,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertStringContainsString('id="reprint_server_public_key"', $html);
         $this->assertStringContainsString('reprint_server_enroll_public_key', $html);
         $this->assertStringContainsString('not accepted on this host', $html, 'a stored token is shown as inert');
-        $this->assertStringContainsString('Authorize a tool to copy this site', $html);
+        $this->assertStringContainsString('Authorize a client to copy this site', $html);
     }
 
     public function testAdminPageOffersOnlyTokenAuthorizationOnAnHmacHost(): void
@@ -1124,8 +1124,8 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         parse_str( (string) parse_url($GLOBALS['reprint_server_test_redirect'], PHP_URL_QUERY), $_GET );
         $html = $this->renderAdminPage();
         $this->assertStringContainsString(get_enrolled_public_keys()[0]['key_id'], $html);
-        $this->assertStringContainsString('Tool authorized', $html);
-        $this->assertStringContainsString('Return to your tool to start or resume the copy.', $html);
+        $this->assertStringContainsString('Client authorized', $html);
+        $this->assertStringContainsString('Return to your client to start or resume the copy.', $html);
     }
 
     public function testEnrollHandlerStoresAndRedirects(): void
@@ -1179,7 +1179,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
         $this->assertFalse($state['push_enabled']);
 
         $html = $this->renderAdminPage();
-        $this->assertStringContainsString('Authorize a tool to copy this site', $html);
+        $this->assertStringContainsString('Authorize a client to copy this site', $html);
         $this->assertStringContainsString('id="reprint_server_public_key"', $html);
         $this->assertStringNotContainsString('name="reprint_server_push_enabled"', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html);
@@ -1198,7 +1198,7 @@ final class ReprintServerPluginTest extends ReprintServerPluginTestCase
 
         $html = $this->renderAdminPage();
         $this->assertStringContainsString('checked="checked"', $html);
-        $this->assertStringContainsString('Allow push only if a tool needs to upload, replace, or delete files', $html);
+        $this->assertStringContainsString('Allow push only if a client needs to upload, replace, or delete files', $html);
         $this->assertStringNotContainsString('<h2>Push access</h2>', $html, 'push grants live in the key table on a key host');
         $this->assertStringContainsString('id="reprint-server-api-url"', $html);
     }

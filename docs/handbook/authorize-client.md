@@ -22,8 +22,8 @@ to install it.
 ## Authorize the client
 
 1. Copy the Migration Token printed by the client.
-2. In **Tools → Reprint Server**, find **Authorize a tool to copy this site**.
-3. Paste the token into **Migration Token** and choose **Authorize tool**.
+2. In **Tools → Reprint Server**, find **Authorize a client to copy this site**.
+3. Paste the token into **Migration Token** and choose **Authorize client**.
 4. Run the same client command again to start the copy.
 
 The WordPress confirmation means the token was saved. Check copy progress

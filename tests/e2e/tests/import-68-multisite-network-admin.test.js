@@ -93,7 +93,7 @@ describe('Multisite network token administration over HTTP', () => {
             const html = await page.text();
             assert.equal(page.status, 200, html);
             assert.ok(html.includes('<code>secret.php</code> override is active.'));
-            assert.ok(html.includes('Use the connection token from that file in your tool. This page cannot change it.'));
+            assert.ok(html.includes('Use the connection token from that file in your client. This page cannot change it.'));
             assert.ok(html.includes('Remove secret.php to use the stored option value.'));
             const nonce = html.match(/name="_wpnonce" value="([^"]+)"/)?.[1];
             assert.ok(nonce);

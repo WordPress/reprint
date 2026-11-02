@@ -56,7 +56,7 @@ php reprint.phar keygen https://example.com \
 
 1. Copy the printed Migration Token.
 2. Paste it into **Tools → Reprint Server** on the source site.
-3. Choose **Authorize tool**.
+3. Choose **Authorize client**.
 
 The private key stays in `reprint-key.pem` on the destination. The copy commands
 below pass that file with `--private-key-path=./reprint-key.pem`.

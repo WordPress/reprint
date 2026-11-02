@@ -19,7 +19,7 @@ php reprint.phar keygen https://example.com \
 ```
 
 Paste the printed Migration Token into **Tools → Reprint Server** on the source
-site and choose **Authorize tool**. Use that same source address below.
+site and choose **Authorize client**. Use that same source address below.
 For connection-token access, replace the private-key argument in the script
 with `'--secret=TOKEN'`, using the saved connection token.
 

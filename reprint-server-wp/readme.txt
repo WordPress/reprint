@@ -77,7 +77,7 @@ Use the [Reprint issue tracker](https://github.com/WordPress/reprint/issues) for
 
 == Screenshots ==
 
-1. Authorize a tool to copy your site using a Migration Token.
+1. Authorize a client to copy your site using a Migration Token.
 
 == Changelog ==
 
