@@ -3,6 +3,30 @@
 Reprint copies a WordPress site's files and database from a site running the
 Reprint Server plugin to a computer or server running the client. The limits
 below follow from that design. Each one links to the page with the details.
+Read the first one before you copy a site a second time.
+
+## It does not merge
+
+A copy runs in one direction: the source replaces what is on the destination.
+Reprint never combines changes made on both sides.
+
+- **The database is replaced.** Running `pull` or `pull-db` again imports the
+  source database again. The import drops and recreates every table in the
+  source's dump, so posts, settings, orders, and users changed on the copy
+  since the last import are replaced with the source's versions.
+- **Files follow the pull mode.** The default catch-up mode keeps a local edit
+  until the same file changes on the source; then the source version replaces
+  it. Mirror mode also removes local files that the source does not have,
+  inside the pull selection. Neither mode combines two edits to one file.
+- **Push overwrites too.** On a host that offers database push, it replaces the
+  live site's tables with the local ones. Rows created on the live site in the
+  meantime are removed.
+
+To reopen a finished copy, run its start script rather than another `pull`.
+To fetch file changes without touching the database, use `pull-files`. Before
+refreshing the database, save anything you changed on the copy. See
+[How Reprint works](how-it-works.md#repeating-a-pull) and
+[Copy selected files or the database](copy-selected-data.md).
 
 ## During a copy
 
@@ -41,9 +65,14 @@ below follow from that design. Each one links to the page with the details.
   table definitions, including storage engines and collations. The destination
   decides what it accepts. MySQL 5.5 is supported as a source, not as a
   destination. See [Database transfers](database-transfers.md).
-- **It does not rewrite URLs in every file.** During a copy, URL rewriting
-  covers the database and CSS files. JavaScript, HTML files, and other file
-  types keep their original addresses. See [File transfers](file-transfers.md).
+- **It does not edit your media or code.** With a new site address, Reprint
+  rewrites the old address throughout the database, including serialized PHP,
+  JSON, and block markup, and in `.css` files, including stylesheets generated
+  under uploads. Everything else is copied byte for byte on purpose: images,
+  documents, and other media in uploads arrive identical to the source, and so
+  do PHP, JavaScript, and HTML files. A theme or plugin that writes the old
+  address into its code keeps it. See
+  [Rewrite asset URLs](file-transfers.md#rewrite-asset-urls).
 - **It does not rename files for a different filesystem.** Names ending in a dot
   or space, names that differ only by case, names over the destination's
   length limit, and NTFS alternate data streams are reported or skipped, not
@@ -51,10 +80,6 @@ below follow from that design. Each one links to the page with the details.
 - **It does not switch traffic or delete the source.** Changing DNS, routing
   visitors, and removing the original site stay with you and your host. See
   [Move to another host](move-to-another-host.md).
-- **It does not merge.** Importing a database again replaces destination tables
-  with source data; it does not combine changes made on both sides. Reopen a
-  finished copy with the generated start script instead of another `pull`.
-  See [How Reprint works](how-it-works.md).
 
 ## Scope
 
