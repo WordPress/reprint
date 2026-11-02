@@ -1,8 +1,12 @@
-# Copy a site to your computer
+# Clone your site
 
-This tutorial copies one single-site WordPress installation to your computer
-and opens it at http://localhost:8881. Choose SQLite if you do not have a local
-database server, or MySQL if you already use one.
+Run Reprint on the computer that should receive your site's files and database.
+You can use your laptop or a remote server with command-line PHP. Choose SQLite
+if you do not have a database server, or MySQL if you already use one.
+
+These steps copy a single-site WordPress installation and start a development
+server so you can check it. To serve the copy publicly at a domain, follow
+[Move to another host](move-to-another-host.md).
 
 To try Reprint before connecting your own site, follow
 [Try Reprint](try-reprint.md). The steps
@@ -14,7 +18,7 @@ Check the [requirements and downloads](requirements.md) before continuing.
 
 ## 1. Prepare a working folder
 
-Open a terminal on your computer and run:
+Open a terminal on the destination computer, directly or over SSH, and run:
 
 ```sh
 mkdir reprint-demo
@@ -42,7 +46,7 @@ Leave that screen open for the authorization step below.
 
 ## 3. Authorize the client
 
-If the plugin shows a **Migration Token** form, generate a key on your computer.
+If the plugin shows a **Migration Token** form, generate a key on the destination.
 Replace https://example.com with the source site's HTTPS address:
 
 ```sh
@@ -54,7 +58,7 @@ php reprint.phar keygen https://example.com \
 2. Paste it into **Tools → Reprint Server** on the source site.
 3. Choose **Authorize tool**.
 
-The private key stays in `reprint-key.pem` on your computer. The copy commands
+The private key stays in `reprint-key.pem` on the destination. The copy commands
 below pass that file with `--private-key-path=./reprint-key.pem`.
 
 If the plugin instead shows a **Connection token** form, follow the
@@ -62,14 +66,14 @@ If the plugin instead shows a **Connection token** form, follow the
 Replace the private-key flag in the copy command with `--secret='TOKEN'`,
 using the saved connection token. Use one credential flag, not both.
 
-## 4. Start the copy on your computer
+## 4. Start the copy
 
 Choose one of the commands below. Run it in the same terminal folder and
 replace https://example.com with the source site's HTTPS address.
 
 ### SQLite
 
-No local database server is needed:
+No separate database server is needed:
 
 ```sh
 php reprint.phar pull https://example.com \
@@ -80,12 +84,13 @@ php reprint.phar pull https://example.com \
 
 ### MySQL
 
-Start your local MySQL server and create an empty database for this copy, such
-as `reprint_copy`. Use an account that can create, change, and remove tables
-in that database. Importing can replace existing tables.
+Start a MySQL server you can connect to and create an empty database for this
+copy, such as `reprint_copy`. Use an account that can create, change, and remove
+tables in that database. Importing can replace existing tables.
 
-Replace `reprint_user` and `YOUR_PASSWORD` with your local MySQL credentials.
-Change the host and port if your server uses different values:
+Replace `reprint_user` and `YOUR_PASSWORD` with your destination database
+credentials. The example connects to MySQL on the same computer. Change the
+host and port if your database server is elsewhere:
 
 ```sh
 php reprint.phar pull https://example.com \
@@ -97,32 +102,43 @@ php reprint.phar pull https://example.com \
 ```
 
 The client now checks the source, downloads files and database data, imports
-the database into your chosen local database, rewrites the site URL, and
-prepares a local server. Large sites take longer. Keep the terminal open.
+the database into your chosen database, rewrites the site URL, and
+starts the development server. Large sites take longer. Keep the terminal open.
 
 ## 5. Open and check the copy
 
-When Reprint starts the local server, open the address it prints. For this
-tutorial it is http://localhost:8881.
+The examples start WordPress at http://localhost:8881 on the destination
+computer. Open that address in a browser on the same computer.
+
+If you ran Reprint on a remote server over SSH, open a second terminal on the
+computer with your browser and forward the port:
+
+```sh
+ssh -N -L 8881:localhost:8881 user@destination.example
+```
+
+Replace `user@destination.example` with your destination's SSH login. Leave
+that connection open, then open http://localhost:8881 in your browser.
 
 Before testing features that send email, take payments, or call other live
 services, disable those connections or replace them with test settings.
 
-Check these on the local address:
+Check these on the preview address:
 
 1. The home page opens.
-2. A few internal links stay on the local site.
+2. A few internal links stay on the copy.
 3. Images load.
 4. You can sign in at `/wp-admin/` with an account from the source site.
 
 Some plugins need MySQL rather than SQLite, or services provided by the source
-host. A completed transfer does not establish that every plugin works locally.
-If a check fails, see [Troubleshooting](troubleshooting.md).
+host. A completed transfer does not establish that every plugin works on the
+destination. If a check fails, see [Troubleshooting](troubleshooting.md).
 
-## 6. Stop and start the local server
+## 6. Stop and start the development server
 
-Press `Ctrl+C` in the terminal to stop serving the site. Your copy stays on
-disk. From the `reprint-demo` folder, start it again with:
+Press `Ctrl+C` in the terminal running Reprint to stop serving the site. Your
+copy stays on disk. From the destination's `reprint-demo` folder, start it again
+with:
 
 ```sh
 bash state/runtime/start.sh
@@ -133,13 +149,13 @@ Keep this working folder in place, including `reprint-key.pem`, `state/`, and
 `state/` contains credentials, transfer progress, the SQL download, and
 generated server files.
 `files/` contains the downloaded site tree. With SQLite, it also contains the
-local database. With MySQL, the database stays in your local MySQL server;
+SQLite database. With MySQL, the database stays in your chosen MySQL server;
 keep that server running when using the copy. Keep both folders private.
 
 To resume an interrupted transfer, run the same `pull` command again with the
-same source address and folders. To only restart the local server, use
-`start.sh` instead. Running `pull` after completion can replace local database
-changes with source data.
+same source address and folders. To only restart the development server, use
+`start.sh` instead. Running `pull` after completion can replace destination
+database changes with source data.
 
 Next: [How Reprint works](how-it-works.md), or
 [remove client access](authorize-client.md) when you no longer need it.

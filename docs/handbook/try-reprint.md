@@ -66,5 +66,5 @@ If the transfer stops before the copy is ready, run the same `pull` command
 again with the same folders and key. To reopen a finished copy, use the start
 script instead; another `pull` can replace local database changes.
 
-Next, [copy your own site](copy-a-site.md)
+Next, [Clone your site](copy-a-site.md)
 or [run Reprint from your product](build-with-reprint.md).

@@ -1,7 +1,7 @@
 # Copy a Windows-hosted site
 
-Use the normal [copy tutorial](copy-a-site.md) with a Linux, macOS, or WSL
-client. Update both the source plugin and the client to versions with Windows
+Follow [Clone your site](copy-a-site.md) using a Linux, macOS, or WSL client.
+Update both the source plugin and the client to versions with Windows
 path support. These notes explain source paths and checks before migration;
 they are not instructions for running the client in native Windows PHP.
 

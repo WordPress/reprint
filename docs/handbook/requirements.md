@@ -1,13 +1,14 @@
 # Requirements and downloads
 
-For a first local copy, you need a terminal, command-line PHP, enough disk
+To clone your site, you need a terminal, command-line PHP, enough disk
 space, and administrator access to the WordPress site you want to copy.
 
-## Check your computer
+## Check the destination computer
 
 The client requires PHP 7.4 or newer. Use a terminal on macOS or Linux, or WSL
-on Windows. The generated local-server start script uses Bash; you do not need
-to change your interactive shell.
+on Windows. Run these checks on the computer receiving the copy. The generated
+development-server start script uses Bash; you do not need to change your
+interactive shell.
 
 ```sh
 php --version
@@ -16,7 +17,7 @@ php -m
 
 The copy tutorial needs `curl`, `hash`, `json`, `mbstring`, `openssl`, `PDO`,
 and `zlib`. For SQLite, also enable `pdo_sqlite`. For MySQL, enable `mysqli`
-and have a local MySQL server and an empty destination database ready. Allow
+and have a reachable MySQL server and an empty destination database ready. Allow
 space for the downloaded files, SQL dump, and local database. Your PHP version
 and extensions must also meet the copied site's own needs.
 
@@ -50,10 +51,11 @@ extension and database checks, see [Prepare a hosting destination](hosting.md).
 
 ## Choose a destination
 
-The [copy tutorial](copy-a-site.md) offers SQLite and MySQL, using PHP's local
-server for the copied site. SQLite needs no separate database server. Choose
-MySQL if a plugin requires it or you want to use your existing local server.
+The [Clone your site](copy-a-site.md) guide offers SQLite and MySQL, using PHP's
+development server to preview the copied site. You can run it on your laptop
+or a remote server. SQLite needs no separate database server. Choose MySQL if
+a plugin requires it or you want to use your existing database server.
 See [Database transfer reference](database-transfers.md) for other import options.
 PHP's built-in server is for local development, not a public production site.
 
-Next: [Copy a site to your computer](copy-a-site.md).
+Next: [Clone your site](copy-a-site.md).

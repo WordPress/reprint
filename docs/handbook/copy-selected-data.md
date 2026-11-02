@@ -3,7 +3,7 @@
 Use this guide when you need only part of a site rather than another full copy.
 First [install the plugin and authorize the client](authorize-client.md).
 Use the source address, state directory, and authorized `reprint-key.pem`
-from [Copy a site](copy-a-site.md). For connection-token access, replace the
+from [Clone your site](copy-a-site.md). For connection-token access, replace the
 private-key flag with `--secret='TOKEN'`.
 
 The examples use https://example.com, `./state`, and `./files`. Replace them

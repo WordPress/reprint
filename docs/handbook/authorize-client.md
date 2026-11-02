@@ -2,7 +2,7 @@
 
 Use this page when a Reprint client has given you a Migration Token to paste
 into WordPress. If you have not started a copy yet, follow
-[Copy a site to your computer](copy-a-site.md); it includes these steps.
+[Clone your site](copy-a-site.md); it includes these steps.
 
 Authorizing the client lets it download the site's database and files,
 including private content.
@@ -49,14 +49,14 @@ connection token; this disconnects clients using the old value.
 
 If the screen says your host manages credentials through `public-keys.php`
 or `secret.php`, ask the host to change them. This screen cannot edit those
-files. Previously downloaded copies stay on your computer.
+files. Previously downloaded copies stay on the destination computer.
 
 ## Multisite networks
 
 A network administrator must network-activate the plugin and manage access
 in the network's Reprint Server settings. Client access can cover multiple
-sites in that network. The local-copy tutorial covers single-site installations
+sites in that network. The cloning guide covers single-site installations
 only.
 
-Next: [Copy a site to your computer](copy-a-site.md), or
+Next: [Clone your site](copy-a-site.md), or
 [Troubleshooting](troubleshooting.md).

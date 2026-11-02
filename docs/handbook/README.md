@@ -5,8 +5,8 @@ Reprint copies a WordPress site's files and database over HTTP.
 ## Choose your goal
 
 - [Try Reprint now](try-reprint.md)
-- [Clone my site](copy-a-site.md)
-- [Integrate Reprint into my product](build-with-reprint.md)
+- [Clone your site](copy-a-site.md)
+- [Integrate Reprint into your product](build-with-reprint.md)
 
 The Reprint Server plugin runs on the source site. The client runs on the
 computer receiving the copy. For your own site, an administrator authorizes

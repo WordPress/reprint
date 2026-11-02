@@ -12,8 +12,8 @@ an interrupted transfer can continue.
 ## Start here
 
 - [Try Reprint now](docs/handbook/try-reprint.md)
-- [Clone my site](docs/handbook/copy-a-site.md)
-- [Integrate Reprint into my product](docs/handbook/build-with-reprint.md)
+- [Clone your site](docs/handbook/copy-a-site.md)
+- [Integrate Reprint into your product](docs/handbook/build-with-reprint.md)
 
 ## Try it with the demo site
 

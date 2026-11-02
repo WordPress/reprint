@@ -1,8 +1,8 @@
 # How Reprint works
 
 Suppose you want to test a plugin update without changing your live site.
-Reprint can copy the live site's files and database to your computer, then
-prepare a local server for the copy.
+You can copy the live site's files and database to your laptop or a server,
+then prepare the copy to run there.
 
 ## Use the site's existing web access
 
@@ -77,11 +77,11 @@ Reprint detects known source-host settings separately from generating
 destination server files. Adding a source host does not require a separate
 migration flow for every destination server.
 
-The local-copy tutorial downloads database data, imports it into SQLite or MySQL,
+The cloning guide downloads database data, imports it into SQLite or MySQL,
 rewrites the site address, and generates configuration for PHP's built-in
 server. Reprint also adjusts known source-host settings for the local runtime.
 Those adjustments do not guarantee that every plugin or external service works
-on your computer. External services may still point at live accounts until you
+on the destination. External services may still point at live accounts until you
 disable them or supply test settings.
 
 The downloaded tree can keep the source host's directory layout. The generated
@@ -114,4 +114,4 @@ coordinated snapshot of every file and database row. For a final move, plan
 when to pause orders, uploads, and other writes, then check the copied site
 before switching traffic.
 
-Next: [Copy a site](copy-a-site.md) or [Build with Reprint](build-with-reprint.md).
+Next: [Clone your site](copy-a-site.md) or [Build with Reprint](build-with-reprint.md).

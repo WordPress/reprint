@@ -64,7 +64,7 @@ not a remedy for an invalid credential.
 ## Remove access
 
 Remove the enrolled Migration Token in WordPress settings, or replace or clear
-the connection token on a token-only source. Retaining a local copy does not
+the connection token on a token-only source. Keeping your copy does not
 require keeping source access enabled.
 
 ## Host-managed credentials

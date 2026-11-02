@@ -14,7 +14,7 @@
         "order": 15
     },
     "copy-a-site": {
-        "title": "Copy a site to your computer",
+        "title": "Clone your site",
         "slug": "copy-a-site",
         "markdown_source": "handbook/copy-a-site.md",
         "parent": null,

@@ -31,14 +31,14 @@ plugin development; it is not the home for using this particular plugin/client.
 
 ## Audiences and page types
 
-| Reader | First question | Starting point |
+| Reader | What you need | Starting point |
 | --- | --- | --- |
-| Curious WordPress user | What does this do, and can I try it? | Demo and first-copy tutorial. |
-| Person copying a site | How do I get a working copy and check it? | Copy tutorial, task guides, and troubleshooting. |
-| Administrator authorizing a copy | What do I install and paste in WordPress? | Short authorization guide. |
-| Product developer | How do I drive the client and interpret each result? | Integration guide and public command/output reference. |
-| Host or support engineer | What must the environment provide, and what failed? | Requirements, hosting guide, progress/results, and troubleshooting. |
-| Reprint contributor | How do I run the project, test a change, and submit it? | Handbook contributor guide and development setup. |
+| Curious WordPress user | See what Reprint does and try it. | Demo and first-copy tutorial. |
+| Person copying a site | Make a working copy and check it. | Copy tutorial, task guides, and troubleshooting. |
+| Administrator authorizing a copy | Install the plugin and authorize the client. | Short authorization guide. |
+| Product developer | Run the client in your product and interpret its results. | Integration guide and public command/output reference. |
+| Host or support engineer | Check environment requirements and find the cause of a failure. | Requirements, hosting guide, progress/results, and troubleshooting. |
+| Reprint contributor | Set up a checkout, test your change, and submit it. | Handbook contributor guide and development setup. |
 
 A tutorial takes one tested route to a first result. A task guide starts with a
 specific goal and ends with checks. Reference gives exact commands, options,
@@ -51,7 +51,8 @@ Understand Reprint, and Contributing. Readers enter by what they want to do:
 try Reprint, clone a site, or add it to a product. A Try Reprint entry must include steps that complete a real
 copy; visiting the sample site alone does not try the tool.
 
-Use the reader's goal as link text. Add a description only when it helps them
+Use the reader's goal as link text. Address readers as "you" and "your".
+Add a description only when it helps them
 choose, such as a required login or a destination limitation. Do not repeat
 the link label or announce what kind of document follows.
 

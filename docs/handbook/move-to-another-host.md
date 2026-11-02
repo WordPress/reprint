@@ -5,7 +5,7 @@ guide assumes you can run command-line PHP there, configure its web server,
 and create an empty database. Source WordPress administrator access is enough
 to install the plugin and authorize the client; source SSH is not required.
 
-For a first experiment, complete [Copy a site to your computer](copy-a-site.md).
+For a first experiment, complete [Clone your site](copy-a-site.md).
 For a managed product, see [Build with Reprint](build-with-reprint.md).
 
 ## 1. Prepare the destination

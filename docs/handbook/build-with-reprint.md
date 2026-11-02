@@ -126,6 +126,6 @@ than treating the last progress message as success.
 - [Prepare a hosting destination](hosting.md) covers production-server setup
   and cleanup. This example deliberately uses a local SQLite destination.
 
-For a first manual copy, use [Copy a site to your computer](copy-a-site.md).
+For a first manual copy, use [Clone your site](copy-a-site.md).
 For PHP embedding and source contributions, use the
 [development repository](https://github.com/WordPress/reprint).

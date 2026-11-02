@@ -30,7 +30,7 @@ the plugin settings. The high-level `pull` command also accepts a plain site add
 | `pull-db` | Preflight, database download, and database apply, without file or runtime changes. |
 | `install-server` | Installation instructions for the source-site plugin; it does not install the plugin remotely. |
 
-Start with [Copy a site](copy-a-site.md) or [Build with Reprint](build-with-reprint.md).
+Start with [Clone your site](copy-a-site.md) or [Build with Reprint](build-with-reprint.md).
 
 ## Access and inspection
 
@@ -91,4 +91,4 @@ Read the command's help before using it. It is not a general rollback command.
 Run the same command to continue an interrupted transfer. Use `pull-files`
 to fetch later file changes without replacing the local database. To reopen
 the local site without copying again, use the generated start script from
-[Copy a site to your computer](copy-a-site.md).
+[Clone your site](copy-a-site.md).
