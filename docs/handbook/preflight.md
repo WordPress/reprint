@@ -1,7 +1,7 @@
 # Preflight reference
 
 Examples use `$URL`, `$STATE_DIR`, `$FS_ROOT`, and an authorized
-`./reprint-key.pem` as described in [Conventions](https://developer.wordpress.org/reprint/commands/#conventions).
+`./reprint-key.pem` as described in [Conventions](https://developer.wordpress.org/reprint/reference/commands/#conventions).
 
 Check whether the source is reachable and ready to supply a copy:
 
@@ -51,7 +51,7 @@ object uses `INVALID_PREFLIGHT_RESPONSE`. Failed preflight checks use
 `PREFLIGHT_FAILED`. On success, `status` is `complete`, and both error fields
 are null. Permanent failures exit with code `1`. Temporary request failures
 can stop with code `3` after the retry allowance; see
-[Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/).
+[Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/).
 
 `progress.json` receives the same `error` and `error_code` as the command's
 JSON result, rather than a generic "Preflight failed" message.
@@ -88,4 +88,4 @@ failure details and codes. Download errors use the same four fields; their
 the failure detail. cURL failures use `CURL_ERROR` for both preflight and downloads.
 
 
-Next: [File transfers](https://developer.wordpress.org/reprint/file-transfers/) or [Database transfers](https://developer.wordpress.org/reprint/database-transfers/).
+Next: [File transfers](https://developer.wordpress.org/reprint/reference/file-transfers/) or [Database transfers](https://developer.wordpress.org/reprint/reference/database-transfers/).

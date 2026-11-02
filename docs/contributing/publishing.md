@@ -95,7 +95,7 @@ The handbook targets are:
 
 ```text
 https://developer.wordpress.org/reprint/
-https://developer.wordpress.org/reprint/try-reprint/
+https://developer.wordpress.org/reprint/getting-started/try-reprint/
 https://developer.wordpress.org/reprint/contributing/architecture/
 ```
 
@@ -106,16 +106,18 @@ These checks use the source files, not HTTP requests; website availability
 still needs checking after deployment.
 
 The handbook home has slug `handbook` and no parent. The Handbook plugin serves
-that landing page at `/reprint/`. The main pages also have no parent, so a page
-such as `copy-a-site` becomes `/reprint/copy-a-site/`. Giving it `handbook` as a
-parent would instead add `/handbook/` to the child URL.
+that landing page at `/reprint/`. Six section pages also have no parent:
+`getting-started`, `guides`, `build-with-reprint`, `reference`,
+`understand-reprint`, and `contributing`. The native Chapters menu collapses
+their child pages and opens the current section. Do not give the sections
+`handbook` as a parent; that would add `/handbook/` to their URLs.
 
-The contributor home has slug `contributing` and no parent. Its child pages
-use `contributing` as their parent, which gives them
-`/reprint/contributing/PAGE/` URLs. Keep the existing seven slugs. Check the
-actual permalinks with the WordPress.org Handbook plugin as well as the
-Markdown importer; importing content into ordinary WordPress pages does not
-check handbook routing.
+Every other page names its section as its parent. For example, `copy-a-site`
+belongs to `getting-started`, so its URL is
+`/reprint/getting-started/copy-a-site/`. Contributor pages keep their existing
+`/reprint/contributing/PAGE/` URLs. Check actual permalinks and chapter groups
+with the WordPress.org Handbook plugin as well as the Markdown importer;
+importing content into ordinary WordPress pages does not check handbook routing.
 
 Link to source code with a complete GitHub URL. Prefer a whole file over a
 private method or a line range. If a line range is necessary, pin the link to
@@ -204,19 +206,17 @@ sidebar order, edit-source links, code blocks, tables, internal links, and the
 WordPress.org client download. Confirm how the handbook appears in site search
 and navigation; creating a post type does not confirm discoverability.
 
-If an earlier manifest has already been imported, inspect `post_parent` in the
-listed records before using the new URLs. The Markdown importer does not
-automatically reparent existing pages. Main pages need parent `0`; only the
-contributor reference pages use the contributor home as their parent. A Meta
-operator can correct a selected record with:
+If an earlier flat manifest has already been imported, run both import jobs.
+The manifest import saves each page's new parent in its metadata; the Markdown
+import applies that parent to the existing page. Inspect `post_parent` in the
+listed records afterward. Only the handbook home and six section pages should
+have parent `0`. Check that each child is under its intended section, and that
+a repeated import keeps the same page IDs. Keep the hierarchy in the manifest
+rather than reparenting imported pages by hand.
 
-```sh
-wp --url=https://developer.wordpress.org post update PAGE_ID --post_parent=0
-```
-
-Replace `PAGE_ID` with the inspected main-page ID. Do not apply that command
-to contributor child pages. Recheck the resulting permalinks before updating
-links elsewhere.
+Check old short URLs, such as `/reprint/copy-a-site/`, as well as the new grouped
+URLs before updating links elsewhere. Any previously shared address must reach
+the corresponding page rather than a 404.
 
 Coordinate the website-link change, registration deployment, and first import;
 the handbook URLs return 404 until those steps finish. Merging the link

@@ -10,13 +10,13 @@ development environment's PHP binary. If PHP cannot open `reprint.phar`, check
 that your terminal is in the folder where you saved it.
 
 Run `php --version` and `php -m` and compare the output with
-[Requirements and downloads](https://developer.wordpress.org/reprint/requirements/). A missing PHP extension must
+[Requirements and downloads](https://developer.wordpress.org/reprint/getting-started/requirements/). A missing PHP extension must
 be enabled for the terminal's PHP, which may differ from your web server's PHP.
 
 ## The first command stops after printing a Migration Token
 
 This is expected. The client stops with exit code `4` so an administrator can
-[authorize it](https://developer.wordpress.org/reprint/authorize-client/). After authorization, run the same command
+[authorize it](https://developer.wordpress.org/reprint/getting-started/authorize-client/). After authorization, run the same command
 again, from the same folder and with the same `--state-dir`.
 
 If authorization still fails, check that you authorized the token printed by
@@ -74,7 +74,7 @@ every database engine or failure can resume.
 
 If the client stopped with exit code `3`, it reached its retry limit for a
 temporary failure such as a rate limit or a dropped connection. Run the same
-command again later. See [Temporary failures and retries](https://developer.wordpress.org/reprint/temporary-failures/).
+command again later. See [Temporary failures and retries](https://developer.wordpress.org/reprint/reference/temporary-failures/).
 
 ## The local server will not start
 
@@ -118,11 +118,11 @@ command report. Use it to find the cause:
 | `REDIRECT` | The site redirected the request. The client does not follow redirects. | Use the address the message names, with the right scheme and `www` form. |
 | `CLOUDFLARE_CHALLENGE`, `WORDFENCE_BLOCKED` | A security service blocked the request. | See [A security service blocks the client](#a-security-service-blocks-the-client). |
 | `RATE_LIMITED` | The source answered HTTP 429. The client waits and retries, then stops with exit code `3`. | Run the command again later. Ask the host to allow the migration machine if it continues. |
-| `REQUEST_TOO_LARGE` | The source rejected a request as too large (HTTP 413). | Treated as a temporary failure; see [Temporary failures and retries](https://developer.wordpress.org/reprint/temporary-failures/). |
+| `REQUEST_TOO_LARGE` | The source rejected a request as too large (HTTP 413). | Treated as a temporary failure; see [Temporary failures and retries](https://developer.wordpress.org/reprint/reference/temporary-failures/). |
 | `SERVER_ERROR` | The source answered with a server error. | Check the source's PHP error log. Temporary errors are retried. |
 | `CURL_ERROR` | The connection failed: DNS, a refused connection, a timeout, or a certificate problem. | Check the address and the site's certificate. |
 | `INVALID_JSON`, `INVALID_PREFLIGHT_RESPONSE` | The response was not the JSON the client expected. | Check for PHP warnings or a maintenance page at the source, and confirm the API address. |
-| `PREFLIGHT_FAILED` | A preflight check failed. | Read the listed checks; see [Preflight](https://developer.wordpress.org/reprint/preflight/). |
+| `PREFLIGHT_FAILED` | A preflight check failed. | Read the listed checks; see [Preflight](https://developer.wordpress.org/reprint/reference/preflight/). |
 | `PREFLIGHT_REQUIRED` | A low-level command ran before `preflight` saved a report. | Run `preflight` with the same source address and state directory. |
 
 ## Ask for help
