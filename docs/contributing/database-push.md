@@ -3,7 +3,7 @@
 Use this reference to configure a host for database push or change the upload
 and table-swap code. Database push requires a separately configured source
 build; it is absent from the WordPress.org plugin. For a checkout and test
-environment, follow [development setup](https://developer.wordpress.org/reprint/contributing/development/).
+environment, follow [development setup](development.md).
 
 Suppose production has `wp_options` and `wp_orders`, but the local database
 only has `wp_options`. `db-push` first loads a private incoming `wp_options`.

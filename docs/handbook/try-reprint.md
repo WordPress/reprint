@@ -5,7 +5,7 @@ You do not need your own WordPress site or a WordPress login. The demo provides
 a shared access key for the client.
 
 You need a terminal and PHP with SQLite support. Check
-[Requirements and downloads](https://developer.wordpress.org/reprint/requirements/)
+[Requirements and downloads](requirements.md)
 if PHP is not installed or a required extension is missing.
 
 ## 1. Download the client and demo access key
@@ -66,5 +66,5 @@ If the transfer stops before the copy is ready, run the same `pull` command
 again with the same folders and key. To reopen a finished copy, use the start
 script instead; another `pull` can replace local database changes.
 
-Next, [copy your own site](https://developer.wordpress.org/reprint/copy-a-site/)
-or [run Reprint from your product](https://developer.wordpress.org/reprint/build-with-reprint/).
+Next, [copy your own site](copy-a-site.md)
+or [run Reprint from your product](build-with-reprint.md).

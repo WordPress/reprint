@@ -91,7 +91,7 @@ that reproduce the problem or demonstrate the new behavior.
 Add a test for the behavior you changed. For a resume change, stop the operation
 at the boundary you changed, start a new process, and check that it neither
 skips unfinished work nor applies completed work twice. The
-[architecture guide](https://developer.wordpress.org/reprint/contributing/architecture/) explains how files, indexes, and database
+[architecture guide](architecture.md) explains how files, indexes, and database
 progress fit together.
 
 Update the relevant handbook page when command options, results, or limits
@@ -100,19 +100,21 @@ change. Open the pull request in the
 
 ## Change documentation
 
-Edit the Markdown source under `docs/`. Use complete HTTPS URLs for every
-link in a published page, including links to another handbook page. The root
-README and CONTRIBUTING files use relative repository links instead. For a new
-published page, add its title, slug, source file, parent, and order to
-`docs/manifest.json`, and link
-it from the relevant section of the handbook.
+Edit the Markdown source under `docs/`. Use relative `.md` links to other
+documentation files and complete HTTPS URLs for external resources. For a new
+handbook page, add its title, slug, source file, parent, and order to
+`docs/manifest.json`, and link it from the relevant section.
+
+The website is not published yet. Before its first import, a separate link pass
+will replace handbook file links with the confirmed website URLs. The root
+README and CONTRIBUTING links stay relative for GitHub.
 
 Run `HandbookManifestTest.php` after changing links or page structure. It checks
 that links name published pages, contributor pages are included, and every page
 can be reached from the handbook home. For importer registration and deployment,
-see the [publishing plan](https://github.com/WordPress/reprint/blob/trunk/docs/contributing/publishing.md).
+see the [publishing plan](publishing.md).
 
 ## Prepare a release
 
-Follow [Releasing Reprint](https://developer.wordpress.org/reprint/contributing/releases/) when publishing a stable version or
+Follow [Releasing Reprint](releases.md) when publishing a stable version or
 updating plugin-directory screenshots.

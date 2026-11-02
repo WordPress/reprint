@@ -3,7 +3,7 @@
 use PHPUnit\Framework\TestCase;
 
 final class HandbookManifestTest extends TestCase {
-    public function testEveryPageIsListedAndLinksResolveToPublishedRoutes(): void
+    public function testEveryPageIsListedAndLinksResolveToFiles(): void
     {
         $docs_directory = __DIR__ . '/../docs';
         $manifest_file = $docs_directory . '/manifest.json';
@@ -11,7 +11,7 @@ final class HandbookManifestTest extends TestCase {
         $manifest = json_decode(file_get_contents($manifest_file), true, 512, JSON_THROW_ON_ERROR);
         $this->assertNotEmpty($manifest);
 
-        $published_urls = [];
+        $source_by_key = [];
         $sources = [];
         foreach ($manifest as $key => $page) {
             $this->assertSame(['title', 'slug', 'markdown_source', 'parent', 'order'], array_keys($page));
@@ -26,10 +26,10 @@ final class HandbookManifestTest extends TestCase {
             $expected_parent = $contributor_page && $key !== 'contributing' ? 'contributing' : null;
             $this->assertSame($expected_parent, $parent);
             if ($parent !== null) {
-                $this->assertArrayHasKey($parent, $published_urls, 'List each parent before its children.');
+                $this->assertArrayHasKey($parent, $source_by_key, 'List each parent before its children.');
             }
-            $published_urls[$key] = $key === 'handbook' ? 'https://developer.wordpress.org/reprint/' : ( $parent === null ? 'https://developer.wordpress.org/reprint/' : $published_urls[$parent] ) . $page['slug'] . '/';
             $source = $page['markdown_source'];
+            $source_by_key[$key] = $source;
             $this->assertSame(( $contributor_page ? 'contributing/' : 'handbook/' ) . ( $key === 'handbook' ? 'README' : $page['slug'] ) . '.md', $source);
             $this->assertFileExists($docs_directory . '/' . $source);
             $this->assertArrayNotHasKey($source, $sources);
@@ -58,19 +58,25 @@ final class HandbookManifestTest extends TestCase {
         );
 
         $navigation = [];
-        foreach ($manifest as $key => $page) {
+        foreach ($manifest as $page) {
             $source = $page['markdown_source'];
-            $navigation[$published_urls[$key]] = [];
+            $navigation[$source] = [];
             preg_match_all('/\[[^\]]+\]\(([^\s)]+)\)/', $sources[$source], $links);
             foreach ($links[1] as $link) {
                 $url = parse_url($link);
                 $this->assertNotFalse($url, $source . ': ' . $link);
-                $this->assertSame('https', $url['scheme'] ?? null, 'Use a complete HTTPS URL, including for links within the handbook: ' . $link);
-                if (str_starts_with($link, 'https://developer.wordpress.org/reprint/')) {
-                    $target = explode('#', $link, 2)[0];
-                    $this->assertContains($target, $published_urls, $source . ': ' . $link);
-                    $navigation[$published_urls[$key]][] = $target;
-                } elseif ($url['host'] === 'github.com') {
+                $this->assertStringNotContainsString('https://developer.wordpress.org/reprint/', $link, 'Link to the Markdown file until the handbook is live: ' . $link);
+                if (!isset($url['scheme']) && !isset($url['host'])) {
+                    $target = empty($url['path']) ? $docs_directory . '/' . $source : dirname($docs_directory . '/' . $source) . '/' . rawurldecode($url['path']);
+                    $this->assertFileExists($target, $source . ': ' . $link);
+                    $target = substr(realpath($target), strlen(realpath($docs_directory)) + 1);
+                    if (isset($sources[$target])) {
+                        $navigation[$source][] = $target;
+                    }
+                    continue;
+                }
+                $this->assertSame('https', $url['scheme'] ?? null, $link);
+                if ($url['host'] === 'github.com') {
                     $this->assertMatchesRegularExpression('#^/WordPress/reprint(?:/(?:issues|tree|blob|actions/workflows)(?:/|$)|/?$)#', $url['path']);
                 } elseif (!in_array($url['host'], ['reprint-demo.wordpress.net', 'dev.mysql.com', 'mariadb.com'], true)) {
                     $this->assertMatchesRegularExpression('/(?:^|\.)wordpress\.org$/', $url['host'], $link);
@@ -81,7 +87,7 @@ final class HandbookManifestTest extends TestCase {
             }
         }
 
-        $pending = [$published_urls['handbook']];
+        $pending = [$source_by_key['handbook']];
         $reachable = [];
         while ($pending) {
             $path = array_pop($pending);
@@ -91,7 +97,7 @@ final class HandbookManifestTest extends TestCase {
             $reachable[$path] = true;
             $pending = array_merge($pending, $navigation[$path]);
         }
-        $this->assertEqualsCanonicalizing(array_values($published_urls), array_keys($reachable), 'Every page must be reachable from the home, without forcing every link onto it.');
+        $this->assertEqualsCanonicalizing(array_values($source_by_key), array_keys($reachable), 'Every page must be reachable from the home, without forcing every link onto it.');
     }
 
     public function testIntegrationExampleIsValidPhp(): void
@@ -134,7 +140,7 @@ final class HandbookManifestTest extends TestCase {
         $this->assertEqualsCanonicalizing($commands[1], $documented[1], 'Update the command index when the CLI changes.');
     }
 
-    public function testPublishedLinksAreAbsoluteAndRepositoryLinksResolveToFiles(): void
+    public function testDocumentationLinksResolveToFiles(): void
     {
         $root = dirname(__DIR__);
         $files = array_merge([$root . '/README.md', $root . '/CONTRIBUTING.md'], glob($root . '/docs/*/*.md'));
@@ -150,11 +156,13 @@ final class HandbookManifestTest extends TestCase {
                         'A source line range must link to a specific commit, not a moving branch or relative file.'
                     );
                 }
-                if (!isset($url['scheme']) && in_array($file, [$root . '/README.md', $root . '/CONTRIBUTING.md'], true)) {
-                    $this->assertFileExists($root . '/' . rawurldecode($url['path']), $file . ': ' . $link);
+                if (!isset($url['scheme']) && !isset($url['host'])) {
+                    $target = empty($url['path']) ? $file : dirname($file) . '/' . rawurldecode($url['path']);
+                    $this->assertFileExists($target, $file . ': ' . $link);
                     continue;
                 }
-                $this->assertSame('https', $url['scheme'] ?? null, 'Published pages use complete HTTPS URLs: ' . $link);
+                $this->assertStringNotContainsString('https://developer.wordpress.org/reprint/', $link, 'Link to repository files until the handbook is live.');
+                $this->assertSame('https', $url['scheme'] ?? null, 'External links use HTTPS: ' . $link);
                 if (preg_match('#^https://github\\.com/WordPress/reprint/(?:blob|tree)/trunk/(.+)$#', explode('#', $link, 2)[0], $source)) {
                     $this->assertFileExists($root . '/' . rawurldecode($source[1]), $file . ': ' . $link);
                 } elseif (preg_match('#^https://github\\.com/WordPress/reprint/actions/workflows/(.+)$#', $link, $workflow)) {

@@ -2,7 +2,7 @@
 
 Use this reference when changing a request or response in the client and
 server together. If you are adding Reprint to a product, use the
-[client integration guide](https://developer.wordpress.org/reprint/build-with-reprint/)
+[client integration guide](../handbook/build-with-reprint.md)
 first; it handles these request details for you. Private cursor and state
 formats can change between client versions.
 
@@ -38,7 +38,7 @@ in the query string.
 
 For `file_fetch`, send the requested paths in the multipart `file_list` upload.
 Each record's `path` uses ordinary base64 or
-[`rp.`-prefixed ROT13-base64](https://developer.wordpress.org/reprint/contributing/pull-http/#sending-file-paths-through-source-firewalls),
+[`rp.`-prefixed ROT13-base64](#sending-file-paths-through-source-firewalls),
 depending on the source's preflight capabilities.
 The server ignores any `file_list_path` request parameter. That option remains
 available to direct PHP callers of `endpoint_file_fetch()`.
@@ -52,13 +52,13 @@ multipart upload streams without buffering.
 
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
 and `multipart/form-data`. The signature covers the URL, endpoint included, and
-never the body. Use the [file push reference](https://developer.wordpress.org/reprint/contributing/push/)
+never the body. Use the [file push reference](push.md)
 for push request fields.
 
 The client sends URL-encoded forms for preflight and streaming pull commands.
 File-list downloads retain multipart uploads, with options before
 the file part. Path parameters use the
-[format selected by preflight](https://developer.wordpress.org/reprint/contributing/pull-http/#choosing-a-format-for-older-servers).
+[format selected by preflight](#choosing-a-format-for-older-servers).
 Both base64 formats preserve non-UTF-8 filename bytes. Cursors travel only in
 the body, which also keeps a large cursor clear of host header size limits. The
 exporter still reads an `X-Export-Cursor` header when the body has no cursor, for older

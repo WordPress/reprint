@@ -7,7 +7,7 @@ It does not copy the whole network or create a new network.
 
 You need a network administrator to install and configure Reprint. Use the
 selected site's home address, such as https://network.example/shop/, rather
-than the network home. [Authorize the client](https://developer.wordpress.org/reprint/authorize-client/) in Network
+than the network home. [Authorize the client](authorize-client.md) in Network
 Admin using the form shown in the plugin settings. If it asks for a connection
 token, add `--secret=NETWORK_TOKEN` to the command below using the saved token.
 
@@ -32,8 +32,8 @@ authorize it, then run the same command again.
 ## 3. Configure and check the destination
 
 Configure the destination web server and database connection as described in
-[Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/) or use the
-[runtime configuration commands](https://developer.wordpress.org/reprint/runtime/). Check the imported administrator,
+[Move to another host](move-to-another-host.md) or use the
+[runtime configuration commands](runtime.md). Check the imported administrator,
 posts, media, theme, plugins, and site-specific services before switching traffic.
 Read the plugin-table and separate-work sections below before treating the
 copy as complete.
@@ -54,7 +54,7 @@ single-site WordPress. Existing non-main-site media paths keep their
 
 Network-active plugins become active on the copied site. Reprint itself stays
 inactive. Host plugins are downloaded by default; see
-[host-plugin selection](https://developer.wordpress.org/reprint/file-transfers/) if the destination does not need them.
+[host-plugin selection](file-transfers.md) if the destination does not need them.
 Sessions and WordPress application passwords are not copied.
 
 Links to the selected site and its media are rewritten to the new address.
@@ -95,7 +95,7 @@ reject a MySQL 8 collation. Use `pull` or `pull-db` rather than direct
 
 A selected-site export uses a helper table on the source to collect users.
 Core WordPress tables and indexes are unchanged. If setup fails, ask the host
-to check the [multisite source requirements](https://developer.wordpress.org/reprint/hosting/).
+to check the [multisite source requirements](hosting.md).
 
 Only one export can run for a selected source site at a time. Another site in
 the network can export separately. Starting a fresh export prevents the older

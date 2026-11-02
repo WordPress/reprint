@@ -2,7 +2,7 @@
 
 Use this page when a Reprint client has given you a Migration Token to paste
 into WordPress. If you have not started a copy yet, follow
-[Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/); it includes these steps.
+[Copy a site to your computer](copy-a-site.md); it includes these steps.
 
 Authorizing the client lets it download the site's database and files,
 including private content.
@@ -57,5 +57,5 @@ in the network's Reprint Server settings. Client access can cover multiple
 sites in that network. The local-copy tutorial covers single-site installations
 only.
 
-Next: [Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/), or
-[Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/).
+Next: [Copy a site to your computer](copy-a-site.md), or
+[Troubleshooting](troubleshooting.md).

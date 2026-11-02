@@ -4,9 +4,9 @@ Reprint copies a WordPress site's files and database over HTTP.
 
 ## Choose your goal
 
-- [Try Reprint now](https://developer.wordpress.org/reprint/try-reprint/)
-- [Clone my site](https://developer.wordpress.org/reprint/copy-a-site/)
-- [Integrate Reprint into my product](https://developer.wordpress.org/reprint/build-with-reprint/)
+- [Try Reprint now](try-reprint.md)
+- [Clone my site](copy-a-site.md)
+- [Integrate Reprint into my product](build-with-reprint.md)
 
 The Reprint Server plugin runs on the source site. The client runs on the
 computer receiving the copy. For your own site, an administrator authorizes
@@ -16,33 +16,33 @@ The WordPress.org plugin supports downloads only.
 
 ## Guides
 
-- [Copy selected files or the database](https://developer.wordpress.org/reprint/copy-selected-data/)
-- [Move to another host](https://developer.wordpress.org/reprint/move-to-another-host/)
-- [Copy a Windows-hosted site](https://developer.wordpress.org/reprint/windows-sources/)
-- [Move one site out of a network](https://developer.wordpress.org/reprint/multisite/)
-- [Rewrite URLs in a live database](https://developer.wordpress.org/reprint/rewrite-urls/)
-- [Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/)
+- [Copy selected files or the database](copy-selected-data.md)
+- [Move to another host](move-to-another-host.md)
+- [Copy a Windows-hosted site](windows-sources.md)
+- [Move one site out of a network](multisite.md)
+- [Rewrite URLs in a live database](rewrite-urls.md)
+- [Troubleshooting](troubleshooting.md)
 
 ## Build with Reprint
 
-- [Your first integration](https://developer.wordpress.org/reprint/build-with-reprint/)
-- [Control each migration step](https://developer.wordpress.org/reprint/integration-pipeline/)
-- [Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/)
+- [Your first integration](build-with-reprint.md)
+- [Control each migration step](integration-pipeline.md)
+- [Prepare a hosting destination](hosting.md)
 
 ## Reference
 
-- [Requirements and downloads](https://developer.wordpress.org/reprint/requirements/)
-- [Commands](https://developer.wordpress.org/reprint/commands/)
-- [Authentication](https://developer.wordpress.org/reprint/authentication/)
-- [Preflight](https://developer.wordpress.org/reprint/preflight/)
-- [File transfers](https://developer.wordpress.org/reprint/file-transfers/)
-- [Database transfers](https://developer.wordpress.org/reprint/database-transfers/)
-- [Runtime configuration](https://developer.wordpress.org/reprint/runtime/)
-- [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/)
+- [Requirements and downloads](requirements.md)
+- [Commands](commands.md)
+- [Authentication](authentication.md)
+- [Preflight](preflight.md)
+- [File transfers](file-transfers.md)
+- [Database transfers](database-transfers.md)
+- [Runtime configuration](runtime.md)
+- [Progress, results, and exit codes](progress-and-results.md)
 
 ## Understand Reprint
 
-[How Reprint works](https://developer.wordpress.org/reprint/how-it-works/)
+[How Reprint works](how-it-works.md)
 
 ## Get help
 
@@ -50,5 +50,5 @@ The WordPress.org plugin supports downloads only.
 
 ## Contribute to Reprint
 
-- [Contributor guide](https://developer.wordpress.org/reprint/contributing/)
+- [Contributor guide](../contributing/contributing.md)
 - [Development repository](https://github.com/WordPress/reprint)

@@ -9,8 +9,8 @@ source prefix; unrelated old tables with a different prefix can remain. Do not
 assume that an import emptied the entire database.
 
 If your platform runs Reprint programmatically, start with
-[Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/). For generated PHP or nginx
-configuration, see [Runtime configuration](https://developer.wordpress.org/reprint/runtime/).
+[Build with Reprint](build-with-reprint.md). For generated PHP or nginx
+configuration, see [Runtime configuration](runtime.md).
 
 ## Run destination cleanup
 
@@ -109,7 +109,7 @@ Use a working HTTPS address for the source site.
 
 MySQL 5.5 sources are supported. This does not imply MySQL 5.5 destination
 support: the destination must accept the exported schema and collations. See
-[Database transfer reference](https://developer.wordpress.org/reprint/database-transfers/) for import behavior.
+[Database transfer reference](database-transfers.md) for import behavior.
 
 ### Multisite sources
 

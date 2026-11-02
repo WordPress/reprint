@@ -2,7 +2,7 @@
 
 Use this reference when changing file uploads or commit behavior, or when
 configuring a host to receive file pushes. Start with
-[development setup](https://developer.wordpress.org/reprint/contributing/development/)
+[development setup](development.md)
 if you do not have a working checkout.
 
 Suppose you edit a theme's `style.css` in a local copy. A file push has three jobs:
@@ -22,7 +22,7 @@ target confirms it. If a request loses its reply, the next process asks the
 target how much it accepted before sending more. The API details below explain
 which state each step may change.
 
-Use the [terminology contract](https://github.com/WordPress/reprint/blob/trunk/docs/contributing/push-terminology.md)
+Use the [terminology contract](push-terminology.md)
 when naming paths, phases, or state fields in code.
 
 The WordPress.org plugin omits file and database push. These endpoints require
@@ -48,7 +48,7 @@ OpenSSL rejects the token; the client never falls back to another credential.
 Every request carries a signature over newline-joined fields: the protocol
 label (plus the key id for a key), a random nonce, a timestamp, the HTTP method,
 and the URL's path and query (which name the endpoint). The label and field
-layout appear in [Pull HTTP protocol](https://developer.wordpress.org/reprint/contributing/pull-http/). The signature covers those fixed fields, not the uploaded content. That lets
+layout appear in [Pull HTTP protocol](pull-http.md). The signature covers those fixed fields, not the uploaded content. That lets
 the client send file chunks without reading the whole upload into memory first.
 Verified HTTPS protects the uploaded content during transfer. Neither the connection token nor the private key travels in a URL or body,
 so neither lands in an access log.
@@ -705,7 +705,7 @@ WordPress startup failing.
 intend to replace the selected production tables, including rows added on
 production since the last pull. That operation requires a separate host route
 and a pause of all database writers before commit. Follow the
-[database push guide](https://developer.wordpress.org/reprint/contributing/database-push/)
+[database push guide](database-push.md)
 for the table review, confirmation, and checks before reopening the site.
 
 ## Accepted limitations

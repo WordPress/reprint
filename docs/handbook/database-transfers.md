@@ -3,7 +3,7 @@
 Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
 persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
 your shell first. Keep the state directory outside the filesystem root.
-See [authorization](https://developer.wordpress.org/reprint/authorize-client/) before running remote commands.
+See [authorization](authorize-client.md) before running remote commands.
 
 ## Download SQL
 
@@ -55,7 +55,7 @@ also resume, but a nontransactional table without a non-null unique key or an
 interrupted oversized-value update may require aborting and starting the import
 again. Follow the command's error instructions for those cases.
 
-See [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/) when a product
+See [Progress, results, and exit codes](progress-and-results.md) when a product
 runs these commands on a user's behalf.
 
 ## Target schema compatibility
@@ -163,4 +163,4 @@ A direct SQL import does not run Reprint's WordPress cleanup or runtime setup.
 Use `db-apply` when you need those steps and their resumable import behavior.
 
 For a database that is already running, see
-[Rewrite URLs in a live database](https://developer.wordpress.org/reprint/rewrite-urls/).
+[Rewrite URLs in a live database](rewrite-urls.md).

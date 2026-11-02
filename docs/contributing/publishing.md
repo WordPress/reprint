@@ -78,26 +78,34 @@ the page. There is no MDX conversion, build output, or custom link rewriting.
 Put example addresses in fenced code or plain text; the native Markdown parser
 can swallow links after a URL in an inline-code span.
 
-## Link to complete URLs
+## Link to repository files for now
 
-Use complete HTTPS URLs in published handbook pages, including links within
-the same handbook. For example:
+Use relative `.md` links between documentation pages while the handbook is not
+live. These links open the files in the GitHub branch being read. For example,
+the handbook home links to `try-reprint.md`, and a contributor page links to
+`../handbook/try-reprint.md`. Keep section anchors when linking to a heading.
+
+Keep external links, source-code links, and downloads as complete HTTPS URLs.
+Do not send readers to the planned handbook address before it is available.
+
+## Prepare website links before import
+
+Confirm the handbook base address with Meta. Before the first website import,
+replace internal Markdown-file links in the handbook source with the confirmed
+website URLs. Keep the root README and CONTRIBUTING file links relative for
+GitHub. This is a source edit before publication; do not add importer filters
+or a link-rewriting build.
+
+The planned targets are:
 
 ```text
-https://developer.wordpress.org/reprint/copy-a-site/
-https://developer.wordpress.org/reprint/commands/
-https://developer.wordpress.org/reprint/contributing/
+https://developer.wordpress.org/reprint/
+https://developer.wordpress.org/reprint/try-reprint/
 https://developer.wordpress.org/reprint/contributing/architecture/
 ```
 
-The repository-root README and CONTRIBUTING files use relative file links.
-Readers can then open the documentation from the branch they are browsing on
-GitHub, even before the website is published.
-
-The handbook URLs above are the publication targets. They will become live only after Meta
-registers the handbook and the initial import passes. If Meta approves another
-base address, update the URLs and the manifest/link test together before import.
-Do not silently redirect readers to a different site during publishing.
+Update the link checks to validate those destinations when preparing that
+publication change. Until then, the tests check relative file paths instead.
 
 The handbook home has slug `handbook` and no parent. The Handbook plugin serves
 that landing page at `/reprint/`. The main pages also have no parent, so a page
@@ -172,7 +180,7 @@ copy until that route actually runs the client.
 
 Test the real importer and Markdown parser in a disposable local WordPress
 installation first. Confirm that every manifest page renders, tables and code
-survive, and unchanged relative links reach the expected pages.
+survive, and the prepared website links reach the expected pages.
 
 WordPress.org sandboxes share production databases and cache. An import there
 creates real records. Coordinate the initial import with Meta and read
@@ -209,11 +217,12 @@ Replace `PAGE_ID` with the inspected main-page ID. Do not apply that command
 to contributor child pages. Recheck the resulting permalinks before updating
 links elsewhere.
 
-Prepare the Meta registration PR before merging this content. Coordinate the
-content merge, registration deployment, and first import; the handbook URLs
-return 404 until those steps finish. Repository entry points remain usable
-through their file-relative links.
-After checking the live pages, update the product page and plugin listing.
+Prepare the Meta registration PR before merging the website-link change.
+Coordinate that change, registration deployment, and first import; the handbook
+URLs return 404 until those steps finish. The current repository links remain
+usable through their relative file paths.
+Check the imported website links before updating the product page and plugin
+listing.
 Keep GitHub links for development and source contribution; user downloads
 remain on WordPress.org. If any handbook
 URLs have already been published elsewhere, preserve their slugs or arrange

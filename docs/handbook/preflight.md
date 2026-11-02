@@ -3,7 +3,7 @@
 Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
 persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
 your shell first. Keep the state directory outside the filesystem root.
-See [authorization](https://developer.wordpress.org/reprint/authorize-client/) before running remote commands.
+See [authorization](authorize-client.md) before running remote commands.
 
 Check whether the source is reachable and ready to supply a copy:
 
@@ -52,7 +52,7 @@ object uses `INVALID_PREFLIGHT_RESPONSE`. Failed preflight checks use
 `PREFLIGHT_FAILED`. On success, `status` is `complete`, and both error fields
 are null. Permanent failures exit with code `1`. Temporary request failures
 can stop with code `3` after the retry allowance; see
-[Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/).
+[Progress, results, and exit codes](progress-and-results.md).
 
 `progress.json` receives the same `error` and `error_code` as the command's
 JSON result, rather than a generic "Preflight failed" message.
@@ -89,4 +89,4 @@ failure details and codes. Download errors use the same four fields; their
 the failure detail. cURL failures use `CURL_ERROR` for both preflight and downloads.
 
 
-Next: [File transfers](https://developer.wordpress.org/reprint/file-transfers/) or [Database transfers](https://developer.wordpress.org/reprint/database-transfers/).
+Next: [File transfers](file-transfers.md) or [Database transfers](database-transfers.md).

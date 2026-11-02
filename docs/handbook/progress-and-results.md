@@ -2,7 +2,7 @@
 
 Use the final command report and exit code to determine whether a copy completed.
 
-[PHP integration example](https://developer.wordpress.org/reprint/build-with-reprint/)
+[PHP integration example](build-with-reprint.md)
 
 Examples use `$URL` for the source address, `$STATE_DIR` for persistent private
 state, and `$FS_ROOT` for downloaded files. Set those variables in your shell.
