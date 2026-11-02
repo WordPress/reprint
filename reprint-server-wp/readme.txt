@@ -16,13 +16,12 @@ Copy your WordPress site to your laptop, a development server, or another host.
 
 Install Reprint on the site you want to copy. A Reprint client downloads its files and database over HTTPS. You authorize the client in WordPress before it can access your site.
 
-To start a copy yourself, [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) and follow [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/). You need command-line PHP on the computer receiving the copy. No Reprint account or subscription is required.
-
 = Choose your next step =
 
-* [Authorize a client](https://developer.wordpress.org/reprint/authorize-client/) if you already have a Migration Token to paste into WordPress.
-* [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/) to copy its files and database to the computer you choose.
 * [Try Reprint](https://developer.wordpress.org/reprint/try-reprint/) to copy the demo before connecting your own site.
+* [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/) to copy its files and database to the computer you choose.
+
+To start a copy yourself, [Download reprint.phar](https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar) and follow [Clone your site](https://developer.wordpress.org/reprint/copy-a-site/). You need command-line PHP on the computer receiving the copy. No Reprint account or subscription is required.
 
 = Why use Reprint? =
 
