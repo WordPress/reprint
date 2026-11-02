@@ -53,9 +53,10 @@ type before they know the tool.
 
 A technical detail belongs in public reference when a caller relies on it.
 A local implementation quirk belongs beside the code and in a regression test.
-Keep a separate design decision only when the reason spans components or would
-otherwise be easy to lose. Keep proposed work and past patch narratives in
-issues and PRs instead of presenting them as current instructions.
+Explain the larger design choices and tradeoffs in How Reprint works. Keep
+local implementation reasons with the code and regression tests, rather than
+growing a separate catalogue of past bugs. Keep proposed work and past patch
+narratives in issues and PRs instead of presenting them as current instructions.
 
 ## What this repository publishes
 
@@ -88,6 +89,22 @@ published routes: `commands/` from the home and `../commands/` from a child.
 They are not GitHub source-file links. Repository-facing pages use ordinary
 file links instead. A different approved handbook base still works with these
 relative links.
+
+For example, `../commands/` from `/reprint/copy-a-site/` resolves to
+`/reprint/commands/` in the browser. The importer can leave the link unchanged.
+A Markdown file link such as `commands.md` would instead request a file on
+the website and would need rewriting; do not use that form in the handbook.
+
+This has a source-browsing tradeoff: published-route links do not navigate
+between Markdown files on GitHub. Once the canonical handbook address is
+confirmed and live, full WordPress.org page URLs can work from either place
+without a publishing transform. Until then, do not hard-code the proposed URL
+as though the handbook were already live.
+
+Relative source-code links belong only in repository-facing pages, which are
+not imported. Prefer linking to a whole source file over naming a private
+method or line range. If a line range is necessary to explain past behavior,
+link to a specific commit so edits cannot move the referenced lines.
 
 ## One-time WordPress.org registration
 

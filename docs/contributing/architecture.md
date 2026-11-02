@@ -1,14 +1,16 @@
 # Architecture and durable state
 
-Read the [public explanation](../handbook/how-it-works.md) for the user model.
+Read [How Reprint works](../handbook/how-it-works.md) for the larger design
+choices: HTTP access, streaming, source-host budgets, client-side comparison,
+and separate destination setup.
 This document is for changes spanning the client, server, state, or runtime.
 Small local rules belong beside their implementation and in regression tests.
 Use the [terminology contract](push-terminology.md) for exact path and lifecycle names.
 
 ## Client and server
 
-[ImportClient](../../packages/reprint-client/src/import.php) drives pull workflows.
-The source [HTTP server](../../packages/reprint-server/src/class-http-server.php)
+[The client](../../packages/reprint-client/src/import.php) drives pull workflows.
+The source [request handler](../../packages/reprint-server/src/class-http-server.php)
 authenticates and dispatches requests; it does not schedule a background migration.
 The [pull protocol](pull-http.md) describes request fields and response framing.
 
@@ -102,10 +104,10 @@ active lexer and parser, not just whether an extension loaded.
 
 ## Streaming CSS rewriting
 
-The caller feeds `append_bytes()`, scans with `next_url()`, edits with
-`set_raw_url()`, and marks the real file end with `input_finished()`. Completed
-output is flushed after each URL. The shared parser cursor is an opaque string
-with no source bytes. An HTTP part can end inside a URL, so Reprint saves its
+The caller supplies successive byte strings to the CSS parser and flushes
+completed output after each URL. Input is marked complete only at the real
+file end. The shared parser cursor is an opaque string with no source bytes.
+An HTTP part can end inside a URL, so Reprint saves its
 unfinished bytes separately beside that cursor. Resume supplies those bytes
 before appending the next HTTP part. A URL split across requests is rewritten once.
 

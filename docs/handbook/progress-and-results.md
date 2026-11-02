@@ -113,9 +113,8 @@ OOM or an uncatchable signal cannot reliably print a final line. Missing or
 truncated reports mean the final result is unavailable; use the host job's
 status, never an earlier success or the last progress tick.
 
-The report is emitted at the CLI boundary. Library users calling
-`ImportClient::run()` directly still receive the command's regular output and
-can read its exit code or catch its exception.
+The CLI adds the final report. PHP library callers still receive the command's
+regular output and can read its exit code or catch its exception.
 
 ## Poll current progress
 

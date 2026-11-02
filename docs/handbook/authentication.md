@@ -6,7 +6,7 @@ should handle the authorization stop.
 
 ## Migration Tokens
 
-When the source PHP has `openssl_verify()`, Reprint Server accepts requests
+When the source PHP supports OpenSSL, Reprint Server accepts requests
 signed with an enrolled public key. The private key stays with the client.
 A connection token is not accepted by that source; the client does not fall
 back to a different method.

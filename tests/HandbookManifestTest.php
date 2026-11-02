@@ -152,6 +152,13 @@ final class HandbookManifestTest extends TestCase {
             foreach ($links[1] as $link) {
                 $url = parse_url($link);
                 $this->assertNotFalse($url, $file . ': ' . $link);
+                if (preg_match('/^L[0-9]+(?:-L?[0-9]+)?$/', $url['fragment'] ?? '')) {
+                    $this->assertMatchesRegularExpression(
+                        '#^https://github\\.com/WordPress/reprint/blob/[0-9a-f]{40}/#',
+                        $link,
+                        'A source line range must link to a specific commit, not a moving branch or relative file.'
+                    );
+                }
                 if (isset($url['host']) || empty($url['path'])) {
                     continue;
                 }

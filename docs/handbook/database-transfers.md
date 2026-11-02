@@ -60,6 +60,16 @@ runs these commands on a user's behalf.
 
 ## Target schema compatibility
 
+The SQL dump keeps the source table definitions, including storage-engine
+clauses such as `ENGINE=MyISAM`. Copying a database is not an instruction to
+upgrade its schema. Storage engines can affect locking, transactions,
+full-text search, and how IDs are generated.
+
+The destination database has the final say. A MySQL-compatible target may
+substitute an engine it enforces; Reprint permits that substitution rather
+than rewriting the engine clause itself. SQLite translates the definitions
+because it has no MyISAM or InnoDB backend.
+
 For example, Online Backup for WordPress uses a MyISAM table whose
 `AUTO_INCREMENT` column is second in a composite primary key. If the target
 reports `enforce_storage_engine=InnoDB`, direct MySQL output and `db-apply`

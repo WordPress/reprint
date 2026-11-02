@@ -41,7 +41,7 @@ are rejected. Use an ordinary drive or share spelling for those selections.
   them automatically.
 - Physical devices and named pipes are not migration files. NTFS alternate
   data streams are not copied; only the main file contents move.
-- Some Windows links can be followed by PHP but cannot be read by `readlink()`.
+- PHP can follow some Windows links but cannot read their target text.
   Such a link stops the pull. Recreate it with a backslash target, or use a
   full drive-letter target if PHP cannot resolve the link.
 

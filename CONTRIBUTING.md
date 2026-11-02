@@ -65,15 +65,15 @@ PHP version; push's PHP 8.1 client requirement is a runtime check.
 ## Read before changing a subsystem
 
 - [Architecture and durable state](docs/contributing/architecture.md)
-- [Design decisions](docs/contributing/design-decisions.md)
 - [Pull HTTP protocol](docs/contributing/pull-http.md)
 - [File push implementation](docs/contributing/push.md)
 - [Database push implementation](docs/contributing/database-push.md)
 - [Push terminology](docs/contributing/push-terminology.md)
 
-Keep future work in issues and PRs. Keep lasting design reasons with the code
-or in the small design-decisions document. A past bug's test matrix does not
-need a second maintained document.
+Read [How Reprint works](docs/handbook/how-it-works.md) for the larger design
+choices and their tradeoffs. Keep local implementation reasons with the code
+and regression tests. Future work belongs in issues and PRs; a past bug's test
+matrix does not need a second maintained document.
 
 ## Documentation and releases
 
