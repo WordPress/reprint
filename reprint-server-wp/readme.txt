@@ -34,7 +34,7 @@ The WordPress.org package requires PHP 7.2 or newer. The GitHub package supports
 
 The plugin sends site data to the Reprint client you authorize. Exported databases and files may contain personal data, password hashes, and configuration secrets. Treat client credentials and downloaded site copies as private. Use HTTPS for remote transfers, and remove client access when it is no longer needed.
 
-On multisite, network administrators manage access. Enrolled keys or the network connection token can authorize downloads from sites in that network. See the [multisite documentation](https://github.com/WordPress/reprint#multisite) before transferring a network or an individual site.
+On multisite, network administrators manage access. Enrolled keys or the network connection token can authorize downloads from sites in that network. See the [multisite documentation](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/multisite.md) before transferring a network or an individual site.
 
 = Source and build instructions =
 
@@ -51,7 +51,7 @@ Build the GitHub package with bin/build-server-plugin.sh after installing the Co
 
     php reprint.phar pull https://example.com --state-dir=./state --fs-root=./files
 
-On a host without OpenSSL, save a connection token in the plugin settings and pass it to the client with --secret=TOKEN. See the [client documentation](https://github.com/WordPress/reprint#authentication) for command options and credential storage.
+On a host without OpenSSL, save a connection token in the plugin settings and pass it to the client with --secret=TOKEN. See the [authentication reference](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/authentication.md) for credential selection and storage, and the [command reference](https://github.com/WordPress/reprint/blob/trunk/docs/handbook/commands.md) for command details.
 
 == Frequently Asked Questions ==
 

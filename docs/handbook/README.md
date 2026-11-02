@@ -1,43 +1,54 @@
 # Reprint handbook
 
-Reprint copies a WordPress site's database and files over HTTP. Use it to
-prepare a local copy for testing, or as part of a migration to another host.
-Transfers stream in chunks and can resume after interruption, without first
-building one large archive on the source host.
+Reprint copies a WordPress site's files and database over HTTP.
 
-## Choose your starting point
+## Choose your goal
 
-- **Explore a demo site:** visit [reprint-demo.wordpress.net](https://reprint-demo.wordpress.net/),
-  a sample WordPress journal with posts, photos, and block templates.
-- **Copy your site to your computer:** follow
-  [Copy a site to your computer](copy-a-site/). This tutorial uses the Reprint
-  client, SQLite, and PHP's local development server.
-- **Connect the Reprint client to your site:** follow
-  [Authorize the Reprint client](authorize-client/) to save its Migration Token
-  in WordPress admin.
-- **Integrate Reprint in your product:** start with
-  [Build with Reprint](build-with-reprint/).
+- [Try Reprint now](try-reprint.md)
+- [Clone your site](copy-a-site.md)
+- [Integrate Reprint into your product](build-with-reprint.md)
 
-## The two parts
+The Reprint Server plugin runs on the source site. The client runs on the
+computer receiving the copy. For your own site, an administrator authorizes
+the client before copying.
 
-The **Reprint Server plugin** runs on the WordPress site being copied. The
-**Reprint client** runs on the computer or host receiving the copy.
+The WordPress.org plugin supports downloads only.
 
-```text
-Existing WordPress site                   Your computer or destination host
-Reprint Server plugin  -- HTTPS data -->  Reprint client
-```
+## Guides
 
-Installing the plugin does not start a copy. You authorize a client, then
-start the transfer from that client.
+- [Copy selected files or the database](copy-selected-data.md)
+- [Move to another host](move-to-another-host.md)
+- [Copy a Windows-hosted site](windows-sources.md)
+- [Move one site out of a network](multisite.md)
+- [Rewrite URLs in a live database](rewrite-urls.md)
+- [Troubleshooting](troubleshooting.md)
 
-The WordPress.org plugin provides downloads only. These getting-started
-instructions do not enable changes to the source site's files or database.
+## Build with Reprint
 
-## More information
+- [Your first integration](build-with-reprint.md)
+- [Control each migration step](integration-pipeline.md)
+- [Prepare a hosting destination](hosting.md)
 
-- [Requirements and downloads](requirements/)
-- [Troubleshooting](troubleshooting/)
-- [How Reprint works](how-it-works/)
-- [Reprint on WordPress.org](https://wordpress.org/plugins/reprint/)
-- [Development and contributions](https://github.com/WordPress/reprint)
+## Reference
+
+- [Requirements and downloads](requirements.md)
+- [Commands](commands.md)
+- [Authentication](authentication.md)
+- [Preflight](preflight.md)
+- [File transfers](file-transfers.md)
+- [Database transfers](database-transfers.md)
+- [Runtime configuration](runtime.md)
+- [Progress, results, and exit codes](progress-and-results.md)
+
+## Understand Reprint
+
+[How Reprint works](how-it-works.md)
+
+## Get help
+
+[Support forum](https://wordpress.org/support/plugin/reprint/)
+
+## Contribute to Reprint
+
+- [Contributor guide](../contributing/contributing.md)
+- [Development repository](https://github.com/WordPress/reprint)

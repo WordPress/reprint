@@ -1,10 +1,15 @@
-# Export parameter rollout
+# Pull HTTP protocol
+
+Use this reference when changing a request or response in the client and
+server together. If you are adding Reprint to a product, use the
+[client integration guide](../handbook/build-with-reprint.md)
+first; it handles these request details for you. Private cursor and state
+formats can change between client versions.
 
 Keep the API routing marker (`?reprint-api` or the legacy `?site-export-api`)
 in the URL. The client keeps every parameter of the supplied API URL, including
-any custom routing query parameters, and appends `endpoint` to its query. It
-does not copy parameters out of that URL. Every other export parameter travels
-in the POST body. For example, POST to
+any custom routing query parameters, and appends `endpoint` to its query. Those
+query parameters stay in the URL. Additional export options go in the POST body. For example, POST to
 `/?reprint-api&endpoint=db_index` with:
 
 ```json
@@ -19,8 +24,7 @@ in the POST body. For example, POST to
 }
 ```
 
-[PR #800](https://github.com/WordPress/reprint/pull/800) ships the POST client
-and the compatible exporter together. The exporter still reads export
+The exporter still reads export
 parameters from the query string, where clients sent them before the POST
 transport. A released token client, recognised by its
 `X-Auth-Content-Hash` header, is refused with `client_update_required` before
@@ -48,7 +52,8 @@ multipart upload streams without buffering.
 
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
 and `multipart/form-data`. The signature covers the URL, endpoint included, and
-never the body. The separate push request contract is unchanged.
+never the body. Use the [file push reference](push.md)
+for push request fields.
 
 The client sends URL-encoded forms for preflight and streaming pull commands.
 File-list downloads retain multipart uploads, with options before
@@ -57,24 +62,11 @@ the file part. Path parameters use the
 Both base64 formats preserve non-UTF-8 filename bytes. Cursors travel only in
 the body, which also keeps a large cursor clear of host header size limits. The
 exporter still reads an `X-Export-Cursor` header when the body has no cursor, for older
-clients. The strict-WAF test strips that header and checks SQL continuation.
+clients. When changing cursor transport, test continuation with that header removed;
+a source firewall may discard it.
 
-Multipart array fields use bracketed names built directly from their keys.
-They do not depend on PHP's `arg_separator.output` setting.
-
-The strict query-firewall test supplies an API URL with only its routing marker.
-The client does not remove caller-supplied query parameters to satisfy a WAF.
-The fixture strips every query parameter whose value contains anything but
-letters, digits, and underscores and forwards the rest. The reported firewall
-objected to base64 characters in query values. It strips such parameters on
-POST requests too.
-Request bodies and response streams pass through unchanged. This models the
-reported query rejection, and it does not promise that all firewalls accept all
-POST bodies.
-
-A backward-compatibility test bypasses the strict WAF and sends legacy GET
-query parameters, then uploads a multipart file list with its endpoint and
-options still in the query. Normal export requests in the other tests use POST parameters.
+Multipart array entries use field names such as `directory[0]` and
+`skip_rows[0][column]`.
 
 ## Sending file paths through source firewalls
 
@@ -89,11 +81,6 @@ POST fields after form decoding:
 
 The same format applies to `pulled_before` and other array entries in these
 directory parameters. The endpoint stays in the URL.
-
-A reported source passed preflight but redirected file-index requests with
-base64 paths in their POST bodies. Disabling its Hide My WP IDS allowed the
-migration to proceed. The format below is intended to avoid that kind of false
-match. It has not been tested against that source's IDS.
 
 ### Encoding and decoding a path
 
@@ -200,9 +187,24 @@ before Reprint loads. Preflight still returns its JSON object. Streaming pull
 endpoints send uncompressed multipart data when they can no longer set headers.
 The client skips leading spaces, tabs, and line breaks before detecting the
 `--boundary-` line in the body. Part headers carry the cursors and other stream
-metadata as before. This does not buffer the response or change the protocol.
+metadata as before. The client still reads each part as it arrives.
 
 This fallback does not accept HTML or PHP warning text before the boundary.
 It also cannot restore an HTTP status or CORS header after headers were sent;
 a browser may still block a cross-origin request. Remove the early output on
 the source site to restore those headers and gzip compression.
+
+## Test a request-format change
+
+Run the request-body and path-encoding tests from `tests/`:
+
+```sh
+../vendor/bin/phpunit Import/MultipartRequestParametersTest.php
+../vendor/bin/phpunit Import/RequestUrlPathEncodingTest.php
+../vendor/bin/phpunit Import/KeySignedRequestTest.php
+```
+
+When changing the negotiated path format, check both a source that advertises
+support and one that does not. Include a non-UTF-8 filename and a cursor sent
+back after interruption; both must arrive at the source with their original
+bytes.

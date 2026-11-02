@@ -6,46 +6,200 @@
         "parent": null,
         "order": 10
     },
+    "try-reprint": {
+        "title": "Try Reprint",
+        "slug": "try-reprint",
+        "markdown_source": "handbook/try-reprint.md",
+        "parent": null,
+        "order": 15
+    },
     "copy-a-site": {
-        "title": "Copy a site to your computer",
+        "title": "Clone your site",
         "slug": "copy-a-site",
         "markdown_source": "handbook/copy-a-site.md",
-        "parent": "handbook",
-        "order": 10
+        "parent": null,
+        "order": 20
     },
     "authorize-client": {
         "title": "Authorize the Reprint client",
         "slug": "authorize-client",
         "markdown_source": "handbook/authorize-client.md",
-        "parent": "handbook",
-        "order": 20
+        "parent": null,
+        "order": 30
     },
     "requirements": {
         "title": "Requirements and downloads",
         "slug": "requirements",
         "markdown_source": "handbook/requirements.md",
-        "parent": "handbook",
-        "order": 30
+        "parent": null,
+        "order": 40
+    },
+    "copy-selected-data": {
+        "title": "Copy selected files or the database",
+        "slug": "copy-selected-data",
+        "markdown_source": "handbook/copy-selected-data.md",
+        "parent": null,
+        "order": 60
+    },
+    "move-to-another-host": {
+        "title": "Move to another host",
+        "slug": "move-to-another-host",
+        "markdown_source": "handbook/move-to-another-host.md",
+        "parent": null,
+        "order": 70
+    },
+    "windows-sources": {
+        "title": "Copy a Windows-hosted site",
+        "slug": "windows-sources",
+        "markdown_source": "handbook/windows-sources.md",
+        "parent": null,
+        "order": 80
+    },
+    "multisite": {
+        "title": "Move one site out of a network",
+        "slug": "multisite",
+        "markdown_source": "handbook/multisite.md",
+        "parent": null,
+        "order": 90
+    },
+    "rewrite-urls": {
+        "title": "Rewrite URLs in a live database",
+        "slug": "rewrite-urls",
+        "markdown_source": "handbook/rewrite-urls.md",
+        "parent": null,
+        "order": 100
     },
     "troubleshooting": {
         "title": "Troubleshooting",
         "slug": "troubleshooting",
         "markdown_source": "handbook/troubleshooting.md",
-        "parent": "handbook",
-        "order": 40
-    },
-    "how-it-works": {
-        "title": "How Reprint works",
-        "slug": "how-it-works",
-        "markdown_source": "handbook/how-it-works.md",
-        "parent": "handbook",
-        "order": 50
+        "parent": null,
+        "order": 110
     },
     "build-with-reprint": {
         "title": "Build with Reprint",
         "slug": "build-with-reprint",
         "markdown_source": "handbook/build-with-reprint.md",
-        "parent": "handbook",
+        "parent": null,
+        "order": 120
+    },
+    "integration-pipeline": {
+        "title": "Control each migration step",
+        "slug": "integration-pipeline",
+        "markdown_source": "handbook/integration-pipeline.md",
+        "parent": null,
+        "order": 130
+    },
+    "hosting": {
+        "title": "Prepare a hosting destination",
+        "slug": "hosting",
+        "markdown_source": "handbook/hosting.md",
+        "parent": null,
+        "order": 140
+    },
+    "commands": {
+        "title": "Command reference",
+        "slug": "commands",
+        "markdown_source": "handbook/commands.md",
+        "parent": null,
+        "order": 150
+    },
+    "authentication": {
+        "title": "Authentication reference",
+        "slug": "authentication",
+        "markdown_source": "handbook/authentication.md",
+        "parent": null,
+        "order": 160
+    },
+    "preflight": {
+        "title": "Preflight reference",
+        "slug": "preflight",
+        "markdown_source": "handbook/preflight.md",
+        "parent": null,
+        "order": 170
+    },
+    "file-transfers": {
+        "title": "File transfer reference",
+        "slug": "file-transfers",
+        "markdown_source": "handbook/file-transfers.md",
+        "parent": null,
+        "order": 180
+    },
+    "database-transfers": {
+        "title": "Database transfer reference",
+        "slug": "database-transfers",
+        "markdown_source": "handbook/database-transfers.md",
+        "parent": null,
+        "order": 190
+    },
+    "runtime": {
+        "title": "Runtime configuration reference",
+        "slug": "runtime",
+        "markdown_source": "handbook/runtime.md",
+        "parent": null,
+        "order": 200
+    },
+    "progress-and-results": {
+        "title": "Progress, results, and exit codes",
+        "slug": "progress-and-results",
+        "markdown_source": "handbook/progress-and-results.md",
+        "parent": null,
+        "order": 210
+    },
+    "how-it-works": {
+        "title": "How Reprint works",
+        "slug": "how-it-works",
+        "markdown_source": "handbook/how-it-works.md",
+        "parent": null,
+        "order": 220
+    },
+    "contributing": {
+        "title": "Contribute to Reprint",
+        "slug": "contributing",
+        "markdown_source": "contributing/contributing.md",
+        "parent": null,
+        "order": 230
+    },
+    "development": {
+        "title": "Set up Reprint development",
+        "slug": "development",
+        "markdown_source": "contributing/development.md",
+        "parent": "contributing",
+        "order": 10
+    },
+    "architecture": {
+        "title": "Architecture and durable state",
+        "slug": "architecture",
+        "markdown_source": "contributing/architecture.md",
+        "parent": "contributing",
+        "order": 20
+    },
+    "pull-http": {
+        "title": "Pull HTTP protocol",
+        "slug": "pull-http",
+        "markdown_source": "contributing/pull-http.md",
+        "parent": "contributing",
+        "order": 30
+    },
+    "push": {
+        "title": "File push implementation",
+        "slug": "push",
+        "markdown_source": "contributing/push.md",
+        "parent": "contributing",
+        "order": 40
+    },
+    "database-push": {
+        "title": "Database push implementation",
+        "slug": "database-push",
+        "markdown_source": "contributing/database-push.md",
+        "parent": "contributing",
+        "order": 50
+    },
+    "releases": {
+        "title": "Releasing Reprint",
+        "slug": "releases",
+        "markdown_source": "contributing/releases.md",
+        "parent": "contributing",
         "order": 60
     }
 }
