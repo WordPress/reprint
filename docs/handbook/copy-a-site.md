@@ -18,7 +18,7 @@ Check the [requirements and downloads](requirements.md) before continuing.
 
 ## 1. Prepare a working folder
 
-Open a terminal on the destination computer, directly or over SSH, and run:
+Open a terminal on the destination computer and run:
 
 ```sh
 mkdir reprint-demo
@@ -109,16 +109,6 @@ starts the development server. Large sites take longer. Keep the terminal open.
 
 The examples start WordPress at http://localhost:8881 on the destination
 computer. Open that address in a browser on the same computer.
-
-If you ran Reprint on a remote server over SSH, open a second terminal on the
-computer with your browser and forward the port:
-
-```sh
-ssh -N -L 8881:localhost:8881 user@destination.example
-```
-
-Replace `user@destination.example` with your destination's SSH login. Leave
-that connection open, then open http://localhost:8881 in your browser.
 
 Before testing features that send email, take payments, or call other live
 services, disable those connections or replace them with test settings.
