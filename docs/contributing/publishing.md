@@ -49,7 +49,7 @@ user/developer guides, reference, and contributing.
 The handbook home groups pages under Guides, Build with Reprint, Reference,
 Understand Reprint, and Contributing. Readers enter by what they want to do:
 try Reprint, clone a site, or add it to a product. A Try Reprint entry must include steps that complete a real
-copy; visiting the sample site alone does not try the tool.
+copy; visiting the sample site alone does not try the client.
 
 Use the reader's goal as link text. Address readers as "you" and "your".
 Add a description only when it helps them

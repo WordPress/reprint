@@ -4,11 +4,9 @@ Start with [Build with Reprint](build-with-reprint.md). Its high-level `pull`
 example is enough when your product does not need separate stages. This guide
 is for products that must choose when to index, copy, import, and start WordPress.
 
-The examples use shell variables: `$URL` is the Reprint API address, such as
-https://example.com/?reprint-api, `$STATE_DIR` is persistent private state, and
-`$FS_ROOT` is the downloaded tree. Copy the API address from the plugin settings
-and set these variables in your shell. Keep state outside every web-served directory and outside the
-filesystem root. The same source address selects the same saved remote state.
+The examples use `$URL`, `$STATE_DIR`, and `$FS_ROOT` as described in
+[Conventions](commands.md#conventions). Keep state outside every web-served
+directory. The same source address selects the same saved remote state.
 
 ## 1. Authorize and inspect the source
 
@@ -19,7 +17,9 @@ php reprint.phar keygen "$URL" --state-dir="$STATE_DIR" \
   --out=./reprint-key.pem --progress=jsonl
 ```
 
-Have the administrator authorize the printed Migration Token before continuing:
+Have the administrator authorize the printed Migration Token before continuing;
+[Authorize from your product](build-with-reprint.md#authorize-from-your-product)
+shows how to keep that step inside your interface:
 
 ```bash
 php reprint.phar preflight "$URL" \

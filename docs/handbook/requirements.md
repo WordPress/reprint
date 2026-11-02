@@ -43,11 +43,11 @@ latest stable client. You do not need Git or Composer to run it.
 
 You need permission to install and configure the
 [Reprint plugin](https://wordpress.org/plugins/reprint/). It requires WordPress
-4.7 or newer, PHP 7.2 or newer, and a working HTTPS address. On multisite, a
+4.7 or newer, PHP 5.6.20 or newer, and a working HTTPS address. On multisite, a
 network administrator must install and configure it. Source-host SSH is not needed.
 
-The WordPress.org package provides downloads, not push. For host-specific
-extension and database checks, see [Prepare a hosting destination](hosting.md).
+If preflight fails on the source, the host can use the
+[source host checks](#source-host-checks) below.
 
 ## Choose a destination
 
@@ -57,5 +57,41 @@ or a remote server. SQLite needs no separate database server. Choose MySQL if
 a plugin requires it or you want to use your existing database server.
 See [Database transfer reference](database-transfers.md) for other import options.
 PHP's built-in server is for local development, not a public production site.
+
+## Source host checks
+
+These checks are for the hosting provider when the source cannot complete
+preflight or supply its data.
+
+The host needs JSON and hash support. PDO with its MySQL driver is recommended;
+the plugin can use WordPress's database connection when they are unavailable.
+Servers with OpenSSL use public/private-key authorization through Migration
+Tokens. Servers without it use shared connection tokens.
+Use a working HTTPS address for the source site.
+
+The client sends POST requests with custom authentication headers to the
+site's Reprint API address. Security layers in front of the site must let
+those requests through: a Cloudflare browser challenge, a Wordfence request
+limit, or a proxy that strips custom headers stops the copy. See
+[Troubleshooting](troubleshooting.md#a-security-service-blocks-the-client).
+
+MySQL 5.5 sources are supported. This does not imply MySQL 5.5 destination
+support: the destination must accept the exported schema and collations. See
+[Database transfer reference](database-transfers.md) for import behavior.
+
+### Multisite sources
+
+For selected-site exports, MySQL sources need `pdo_mysql`, a direct database
+connection, and SELECT, CREATE, DROP, INSERT, and UPDATE privileges. SQLite
+sources need a persistent database, a writable database directory, and working
+filesystem locks. These allow Reprint to save its user list and resume exports.
+
+### For hosting providers
+
+A host can supply client keys or a connection token in files beside the
+plugin, replace the built-in authentication, and embed the server in its own
+platform. The [plugin configuration guide](https://github.com/WordPress/reprint/blob/trunk/reprint-server-wp/README.md)
+covers `public-keys.php`, `secret.php`, the `reprint_server_api_options`
+filter, and library use.
 
 Next: [Clone your site](copy-a-site.md).

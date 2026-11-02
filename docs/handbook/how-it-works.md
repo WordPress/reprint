@@ -114,4 +114,5 @@ coordinated snapshot of every file and database row. For a final move, plan
 when to pause orders, uploads, and other writes, then check the copied site
 before switching traffic.
 
-Next: [Clone your site](copy-a-site.md) or [Build with Reprint](build-with-reprint.md).
+Next: [What Reprint does not do](limitations.md), [Clone your site](copy-a-site.md),
+or [Build with Reprint](build-with-reprint.md).
