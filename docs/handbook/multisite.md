@@ -8,8 +8,8 @@ It does not copy the whole network or create a new network.
 You need a network administrator to install and configure Reprint. Use the
 selected site's home address, such as https://network.example/shop/, rather
 than the network home. [Authorize the client](../authorize-client/) in Network
-Admin; on an OpenSSL host, enroll its Migration Token there. On a token-only
-host, add `--secret=NETWORK_TOKEN` to the command below.
+Admin using the form shown in the plugin settings. If it asks for a connection
+token, add `--secret=NETWORK_TOKEN` to the command below using the saved token.
 
 ## 2. Copy into an empty destination
 
@@ -26,8 +26,8 @@ php reprint.phar pull 'https://network.example/shop/?reprint-api' \
   --runtime=none --start-runtime=none
 ```
 
-On a key-authenticated source, the first run can stop for enrollment. Run the
-same command after the network administrator authorizes its Migration Token.
+If the client prints a Migration Token and stops, have the network administrator
+authorize it, then run the same command again.
 
 ## 3. Configure and check the destination
 
@@ -94,17 +94,15 @@ reject a MySQL 8 collation. Use `pull` or `pull-db` rather than direct
 ## If export setup or resuming fails
 
 A selected-site export uses a helper table on the source to collect users.
-Core WordPress tables and indexes are unchanged. MySQL sources need `pdo_mysql`,
-a direct connection, and SELECT, CREATE, DROP, INSERT, and UPDATE privileges.
-SQLite sources need a persistent database, a writable database directory, and
-working filesystem locks. Ask the host to check these if setup fails.
+Core WordPress tables and indexes are unchanged. If setup fails, ask the host
+to check the [multisite source requirements](../hosting/).
 
 Only one export can run for a selected source site at a time. Another site in
-the network can export separately. Starting a fresh export replaces the saved
-user set and prevents the older export from resuming. Keep the same target,
-URL replacements, and administrator while continuing an unfinished import.
+the network can export separately. Starting a fresh export prevents the older
+export from resuming. Keep the same target, URL replacements, and administrator
+while continuing an unfinished import.
 Leave Reprint's lock and state files in place.
 
-Large networks can require substantial memory for site-path mapping and table
-discovery. Try a selected-site migration before planning a large rollout; a
-successful small-site copy does not establish capacity for the whole network.
+Large networks can require substantial memory even when copying one site.
+Try a selected-site migration before planning a large rollout; a successful
+small-site copy does not establish capacity for the whole network.

@@ -121,7 +121,7 @@ regular output and can read its exit code or catch its exception.
 When an external process (e.g. a web UI) needs to poll migration progress, it can read
 `$STATE_DIR/progress.json`.
 
-Pass `--step=N` and `--steps=N` to your `import.php` calls to embed the pipeline position in
+Pass `--step=N` and `--steps=N` to client commands to include the pipeline position in
 the progress file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
 preflight, `--step=2 --steps=4` for db-index, and so on.
 
@@ -169,14 +169,14 @@ to the current phase are `null` instead of disappearing:
 | `steps`          | `int \| null`     | Total pipeline steps. `null` when `--steps` is not passed. |
 | `command`        | `string \| null`  | Current command name (`preflight`, `files-pull`, `db-pull`, etc.). |
 | `status`         | `string`          | Command status. Common values are `in_progress`, `partial`, `complete`, `error`, and `aborted`; files-push also uses `interrupted`, `restart`, and `failed`. |
-| `phase`          | `string \| null`  | Durable phase within the command, such as `index`, `diff`, `fetch`, or `sql`. |
+| `phase`          | `string \| null`  | Current phase within the command, such as `index`, `diff`, `fetch`, or `sql`. |
 | `message`        | `string \| null`  | Short action text suitable for the main progress label. Read numeric progress from `progress` instead of parsing this text. |
 | `progress`       | `object`          | Stable progress-screen counters described below. |
 | `error`          | `string \| null`  | Error message when `status` is `error`, otherwise `null`. |
 | `error_code`     | `string \| null`  | Machine-readable error code when one is available. |
 | `reason`         | `string \| null`  | Files-push terminal reason when one is available. |
 | `detail`         | `string \| null`  | Files-push terminal detail when one is available. |
-| `ts`             | `float`           | Unix timestamp with microsecond precision (`microtime(true)`). |
+| `ts`             | `float`           | Unix timestamp in seconds, including a fractional part. |
 
 `progress.items` is either `null` or `{ "unit", "done", "total" }`.
 The unit says what is counted: `files`, `tables`, `local_paths`, `records`, or
@@ -236,8 +236,8 @@ Completed file bytes exclude failed files and use their downloaded size, not
 the earlier index size. Failed files or source size changes can make
 completed bytes differ from the planned byte total.
 
-Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl|compact`. The
-default `auto` mode uses terminal progress when its output stream is a TTY and
+Client commands accept `--progress=auto|tty|jsonl|compact`. The default `auto`
+mode uses terminal progress when its output stream is a terminal and
 JSONL otherwise. Use `--progress=tty` to force the terminal presentation when
 output is captured, or `--progress=jsonl` to force structured progress in a
 terminal:
@@ -251,7 +251,7 @@ The selected mode applies only to that invocation and is not retained in
 command state. Explicit `tty`, `jsonl`, and `compact` modes cannot be combined with
 `--verbose`.
 
-The selector governs progress, lifecycle, and status output. It does not
+The mode controls progress and status output. It does not
 reformat a command's data result, such as preflight or pull-metadata JSON,
 files-stats JSON, or SQL written with `--sql-output=stdout`.
 
@@ -263,8 +263,8 @@ unknown or zero, downloads show a spinner instead of a percentage.
 Use `--progress=compact` to print command starts, stage changes, command results,
 warnings, and errors as JSON lines. During a stage, it prints item and byte
 counters at most once every 30 seconds, only when they changed. These updates
-omit individual file paths and table names. They come from existing progress
-events, so a blocked request or a stage without item/byte counters stays quiet.
+omit individual file paths and table names. A blocked request or a stage
+without item/byte counters stays quiet.
 It hides per-file records, preserve-local skips, repeated stage labels,
 per-request results, receive-rate diagnostics, and debug chatter.
 Warnings and errors, including rejected symlink targets, remain individual
@@ -284,18 +284,17 @@ With `--sql-output=stdout`, SQL stays on stdout and compact progress goes to std
 The files-push terminal presentation uses one stage-weighted progress bar. The
 percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,
 or `Committing`. While pushing local paths, the line also shows target-confirmed
-file bytes against the file byte total collected by the plan. Durable index byte
-offsets, target-confirmed counts and byte offsets, and phase milestones advance
-the bar. The percentage describes lifecycle progress, not elapsed time or an
+file bytes against the planned file byte total. The percentage covers the
+whole push, including indexing and commit work; it is not elapsed time or an
 estimated completion time.
 
 The JSONL presentation emits `push_progress` records. After planning completes,
 their legacy `files_done` and `files_total` fields remain available. The same
 counts also appear in `progress.items` with the `local_paths` unit. During a
-byte-bounded files-push phase, `progress.bytes` reports the durable byte
+byte-bounded files-push phase, `progress.bytes` reports the saved byte
 position and total. The final result and `progress.json` use the same nested
-progress object. Target-confirmed counts and byte positions survive
-exit-code-2 restarts.
+progress object. Saved counts and byte positions are retained when a command
+exits with code `2` and is run again.
 
 ## Read saved pull metadata
 
@@ -329,10 +328,10 @@ request; it can contain site paths and other site details.
 
 Run again immediately after exit `2`. Reprint retries temporary streaming
 failures itself. It stops with exit `3` when consecutive failed requests reach
-the retry limit without advancing the durable cursor. The limit is four for
+the retry limit without making saved progress. The limit is four for
 HTTP `429` and three for other temporary failures. Different temporary errors
-share this count. A successful request or a failed request that advances the
-cursor resets it.
+share this count. A successful request, or a failed request that still saves
+transfer progress, resets it.
 
 HTTP `429` reports `RATE_LIMITED`, including when the host sends an HTML block
 page. These responses do not shrink file chunks, index batches, or SQL batches:
@@ -342,7 +341,7 @@ header, expressed as seconds or an HTTP date, capped at 30 seconds per wait.
 The audit log retains the original
 header; `retry_after_seconds` reports the actual capped wait. For consecutive
 `429` failures without a valid header, it waits 5, 10, and 15 seconds before
-the three retries. The wait starts after saving the durable cursor.
+the three retries. Transfer progress is saved before waiting.
 Stopping the process during that wait does not discard
 saved transfer progress. Successful requests do not gain any delay.
 
@@ -357,12 +356,12 @@ These waits also apply with `--no-adaptive`.
 While waiting, Reprint prints the HTTP failure and wait time. JSONL and compact
 output include a lifecycle record with `event: "retry"`, `http_code`,
 `error_code`, and `retry_after_seconds`; longer waits emit heartbeats every ten
-seconds. A fourth consecutive HTTP `429` failure without cursor progress exits
+seconds. A fourth consecutive HTTP `429` failure without saved progress exits
 `3` without another wait. Other temporary errors keep the three-failure limit.
 
 After exit `3`, a caller may wait and run the same command later with the same
 state directory and filesystem root. Reprint keeps its saved progress and gives
-the later run a new internal retry allowance. Scheduling that later run is
+the later run a new retry allowance. Scheduling that later run is
 optional; without it, a person can run the command again. Exit `1` requires
 checking the error instead of scheduling an automatic retry.
 

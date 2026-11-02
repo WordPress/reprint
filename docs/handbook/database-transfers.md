@@ -42,7 +42,7 @@ The three modes:
 |------|-------------|-------------|
 | `file` (default) | Writes SQL to `$STATE_DIR/db.sql` | `db.sql` |
 | `stdout` | Streams SQL to stdout, progress/status goes to stderr | none |
-| `mysql` | Connects through mysqli and executes complete statements one at a time | none |
+| `mysql` | Executes SQL directly against the target database | none |
 
 ## Continue an interrupted database import
 
@@ -70,15 +70,13 @@ substitute an engine it enforces; Reprint permits that substitution rather
 than rewriting the engine clause itself. SQLite translates the definitions
 because it has no MyISAM or InnoDB backend.
 
-For example, Online Backup for WordPress uses a MyISAM table whose
-`AUTO_INCREMENT` column is second in a composite primary key. If the target
-reports `enforce_storage_engine=InnoDB`, direct MySQL output and `db-apply`
-add a non-unique index starting with that column so InnoDB can create the
-table. Existing rows, IDs, and keys are kept. Future IDs use one table-wide
-sequence instead of separate sequences for each group; plugins that rely on
-per-group numbering may need changes. Reprint reports this change in terminal
-output, JSONL warning records, and `audit.log`. It does not change the source
-database or the downloaded SQL file, and leaves compatible schemas unchanged.
+For a MyISAM table with IDs numbered separately within each group, a target
+that enforces InnoDB may need an additional index. Reprint adds that index
+during import. Existing rows, IDs, and keys are kept, but future IDs use one
+table-wide sequence. Plugins that rely on per-group numbering may need changes.
+Reprint reports this change in terminal output, JSONL warning records, and
+`audit.log`. It does not change the source database or the downloaded SQL file,
+and leaves compatible schemas unchanged.
 
 The `mysql` mode requires `--mysql-database` and accepts `--mysql-host`,
 `--mysql-port`, `--mysql-user`, and `--mysql-password` (or the `MYSQL_PASSWORD`
@@ -110,14 +108,9 @@ php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --rewrite-url https://old-site.com https://new-site.com
 ```
 
-This reads `db.sql` from the state directory and executes each statement against
-the target database. For every data-bearing statement (`INSERT`, `UPDATE`), it
-decodes the base64-encoded column values, detects the data format (serialized PHP,
-JSON, block markup, plain text), and rewrites URLs through the appropriate parser
-so that surrounding structure stays intact. Serialized PHP `s:N:` length prefixes
-are recalculated, JSON is re-encoded, and block comment attributes are updated.
-Rewriting allows at most 16 active calls through nested encoded strings. Values
-below that depth stay unchanged; shallower sibling values are still rewritten.
+This imports `db.sql` from the state directory and rewrites URLs in serialized
+PHP values, JSON, block markup, and plain text while keeping those formats
+valid. URLs inside deeply nested encoded strings may remain unchanged.
 
 ## WordPress cleanup after apply
 

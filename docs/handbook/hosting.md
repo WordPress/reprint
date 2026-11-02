@@ -36,10 +36,10 @@ failure. A theme or must-use plugin fatal during startup therefore cannot
 prevent the earlier hosting cleanup.
 
 `disable-hosting-plugins` removes known source-host plugin, MU-plugin, and
-drop-in files using the same rules as `apply-runtime`. It reads the saved
-preflight from `--state-dir`; it does not contact the source, load WordPress,
-change `active_plugins`, or generate runtime files. Like runtime cleanup, it
-records removed paths for later pushes without changing the saved pull selection.
+drop-in files using the same rules as `apply-runtime`. It uses the source-host
+information saved in `--state-dir`. It does not contact the source, start
+WordPress, change which plugins WordPress lists as active, or generate server
+configuration. The saved download selection stays unchanged.
 Generic cache drop-ins are removed only when the saved source-host data calls
 for that. Finish an interrupted files-push, or finish or abort an interrupted
 files-pull, before running this task.
@@ -72,13 +72,14 @@ Once the destination has its files, database, and working `wp-config.php`, run:
 php reprint.phar recover --fs-root=/path/to/wordpress
 ```
 
-`php reprint.phar recover` requires `wp-load.php` in a fresh PHP process. If a fatal
-error's file belongs to one active regular plugin, it deactivates that plugin
-and tries again. It keeps the plugin's files and data and skips its deactivation hooks.
-Other failures stop the command. Multisite plugins are not deactivated.
+The command tries to start WordPress in a separate PHP process. If startup
+fails in a file belonging to one active regular plugin, it deactivates that
+plugin and tries again. It keeps the plugin's files and data, without running
+the plugin's usual deactivation code. Other failures stop the command.
+Multisite plugins are not deactivated.
 
 The JSON result lists the disabled plugins and their errors. Exit code 0 means
-`wp-load.php` loaded; exit code 1 means the check could not complete. The command
+WordPress started; exit code 1 means the check could not complete. The command
 uses the same PHP binary as Reprint. It does not check page rendering or the
 web server, and disabling a plugin may remove features from the site.
 No remote URL, connection token, or state directory is required.
@@ -102,9 +103,17 @@ preflight or supply its data.
 
 The host needs JSON and hash support. PDO with its MySQL driver is recommended;
 the plugin can use WordPress's database connection when they are unavailable.
-OpenSSL enables Migration Tokens; hosts without it use connection tokens.
+Servers with OpenSSL use public/private-key authorization through Migration
+Tokens. Servers without it use shared connection tokens.
 Use a working HTTPS address for the source site.
 
 MySQL 5.5 sources are supported. This does not imply MySQL 5.5 destination
 support: the destination must accept the exported schema and collations. See
 [Database transfer reference](../database-transfers/) for import behavior.
+
+### Multisite sources
+
+For selected-site exports, MySQL sources need `pdo_mysql`, a direct database
+connection, and SELECT, CREATE, DROP, INSERT, and UPDATE privileges. SQLite
+sources need a persistent database, a writable database directory, and working
+filesystem locks. These allow Reprint to save its user list and resume exports.

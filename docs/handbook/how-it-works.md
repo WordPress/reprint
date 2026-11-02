@@ -15,10 +15,10 @@ The Reprint Server plugin answers requests from an authorized client. The
 client decides when to request files and database data. The plugin does not
 start a background transfer when you activate it.
 
-With Migration Tokens, the client keeps a private key and the site stores its
-public key. The client signs requests to show which key it holds. On hosts
-without OpenSSL, both sides use a shared connection token instead. HTTPS
-protects the transferred data on the connection.
+Reprint uses public/private-key authorization whenever the server supports
+OpenSSL. The client keeps the private key; the Migration Token authorized on
+the site contains its public key. Servers without OpenSSL use a shared
+connection token instead. HTTPS protects the transferred data on the connection.
 
 ## Stream data instead of building a full-site archive
 

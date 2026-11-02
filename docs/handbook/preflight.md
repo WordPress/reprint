@@ -5,7 +5,7 @@ persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
 your shell first. Keep the state directory outside the filesystem root.
 See [authorization](../authorize-client/) before running remote commands.
 
-First, we'll make sure the server is reachable and the environment is in a good shape:
+Check whether the source is reachable and ready to supply a copy:
 
 ```bash
 php reprint.phar preflight "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
@@ -16,20 +16,27 @@ filesystem access, plugins, themes, and WordPress layout. It saves the report
 for later commands; it does not download the site's files or database. Use
 `preflight-assert` below to check the saved report.
 
-Some hosts link plugins or themes to shared files outside PHP's `open_basedir`
-allowed paths. Preflight keeps those plugin names with type `unknown`, omits
-uninspectable themes from the theme list, and records their base64 paths in
-`wp_content.unavailable_paths_b64`. The client prints a warning for each path
-and saves it in `audit.log`. These blocked entries do not stop the pull.
-PHP still cannot read the blocked files; the pull may omit them. If the site
-needs those files to run, ask the host to grant access or supply a replacement
-before treating the copy as ready to use.
+Some hosts restrict access to shared plugin or theme files. Reprint warns about
+files it cannot read and records those warnings in `audit.log`. The copy can
+continue without those files. If the site needs them to run, ask the host to
+grant access or supply a replacement before treating the copy as ready to use.
 
 ## Source address and connection checks
 
-Remote Reprint API URLs must start with https:// or http://; URLs without a scheme and other schemes are rejected. Reprint rejects HTTP remote Reprint API URLs before selecting remote state or making requests unless `--insecure` explicitly allows an unencrypted connection. This applies to every remote command, including local-only commands and local hosts. The supplied URL's scheme is never changed.
+Use the source site's full HTTPS address. Addresses without https:// or http://
+are rejected. An HTTP address requires `--insecure`, even for localhost or a
+command that only reads saved state. Reprint does not switch HTTP to HTTPS
+automatically.
 
-For a site with an expired, self-signed, or wrong-hostname HTTPS certificate, `--insecure` also skips certificate and hostname verification. HTTPS stays encrypted, but Reprint cannot verify the server's identity; an attacker on the connection can read or modify transferred content. This does not repair other TLS handshake failures. `REPRINT_INSECURE_TLS=1` is an alternative to the flag; unset it or set it to `0` to keep the default checks. The choice is not saved in migration state, so supply it again when resuming.
+For HTTPS, `--insecure` also accepts expired, self-signed, or wrong-hostname
+certificates. The connection stays encrypted, but Reprint cannot verify that
+it reached the intended server. Someone intercepting the connection could
+read or change the transferred data. Other HTTPS connection failures can
+still stop the transfer.
+
+`REPRINT_INSECURE_TLS=1` is an alternative to the flag. Unset it or set it to
+`0` to keep the default checks. The choice is not saved, so supply it again
+when resuming.
 
 To resume state created over HTTP by an older client, keep using the HTTP URL with `--insecure`.
 
@@ -50,14 +57,14 @@ can stop with code `3` after the retry allowance; see
 `progress.json` receives the same `error` and `error_code` as the command's
 JSON result, rather than a generic "Preflight failed" message.
 
-Responses with `cf-mitigated: challenge` use `CLOUDFLARE_CHALLENGE` in preflight
-and downloads. Reprint cannot complete Cloudflare browser challenges. Ask the
-site administrator to disable the challenge for POST requests to the Reprint
-API URL or allowlist the migration machine's IP address, then try again.
+Reprint reports `CLOUDFLARE_CHALLENGE` when Cloudflare requires a browser
+challenge. The client cannot complete that challenge. Ask the site administrator
+to disable the challenge for POST requests to the Reprint API URL or allowlist
+the migration machine's IP address, then try again.
 
 If preflight reports that a hosting preview domain rewrote the response,
 use the site's real domain or ask the host to disable response rewriting for
-Reprint requests. The plain and encoded source domains must agree.
+Reprint requests.
 
 Low-level transfer commands require a saved preflight report. The high-level
 `pull`, `pull-files`, and `pull-db` commands run preflight for you.

@@ -53,6 +53,9 @@ type before they know the tool.
 
 A technical detail belongs in public reference when a caller relies on it.
 A local implementation quirk belongs beside the code and in a regression test.
+Describe requirements as capabilities, such as OpenSSL support, rather than
+checks for PHP functions. Keep command options, output fields, limits, and
+side effects exact; leave driver calls and parser bookkeeping with the source.
 Explain the larger design choices and tradeoffs in How Reprint works. Keep
 local implementation reasons with the code and regression tests, rather than
 growing a separate catalogue of past bugs. Keep proposed work and past patch

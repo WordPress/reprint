@@ -6,10 +6,12 @@ should handle the authorization stop.
 
 ## Migration Tokens
 
-When the source PHP supports OpenSSL, Reprint Server accepts requests
-signed with an enrolled public key. The private key stays with the client.
-A connection token is not accepted by that source; the client does not fall
-back to a different method.
+Reprint uses public/private-key authorization whenever the server supports
+OpenSSL. The client keeps the private key. The Migration Token you authorize
+on the server contains the public key.
+
+A server using key authorization does not accept a connection token, and the
+client does not switch to a different authorization method after a failure.
 
 With no credential, a first `pull` generates a key, prints its Migration Token,
 and exits with code `4`. Ask the administrator to enroll it, then run the same
@@ -33,10 +35,9 @@ not an automatic retry. See [Progress and results](../progress-and-results/).
 
 ## Connection tokens
 
-When source PHP lacks OpenSSL verification, both sides use the connection token
-saved in WordPress settings. Pass it with `--secret=TOKEN`. The settings screen
-shows which method the source supports. A key signature is not accepted on a
-connection-token-only host.
+When the server does not support OpenSSL, the client and server use a shared
+connection token saved in WordPress settings. Pass it with `--secret=TOKEN`.
+The settings screen shows which authorization method the server supports.
 
 Update the client and plugin together when a token-format mismatch asks for an
 update. Preserve the original site URL, including any routing query parameters.

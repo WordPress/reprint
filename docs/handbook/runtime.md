@@ -84,9 +84,9 @@ wraps it differently:
 | `php-builtin` | `runtime.php`, `start.sh` | Used as the router script for `php -S` |
 | `nginx-fpm` | `runtime.php`, `nginx.conf` | Loaded via `auto_prepend_file` in `fastcgi_param PHP_VALUE` |
 
-Currently supported source hosts: WP Cloud (with on-the-fly thumbnail
-generation for missing image sizes and auto-detection of extra directories from
-`auto_prepend_file`/`auto_append_file` INI values), WP Engine, and a generic default.
+Reprint has source-host support for WP Cloud and WP Engine, plus a generic
+default for other hosts. WP Cloud support can generate missing image sizes
+in the copy.
 `apply-runtime` removes known host-plugin copies by default, independently of
 the saved download selection. Pass `apply-runtime --include-host-plugins` to
 skip that local cleanup. See [host platform plugins](../file-transfers/) for download selection and cleanup.

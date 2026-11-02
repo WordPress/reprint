@@ -31,8 +31,8 @@ in your terminal.
 
 ## If the screen asks for a connection token
 
-Hosts without the OpenSSL PHP extension use a shared connection token instead
-of a Migration Token. The settings screen tells you which kind it accepts.
+Some hosts use a shared connection token instead of a Migration Token.
+Follow the form shown in the plugin settings.
 
 Choose **Generate new token**, then **Save connection token**. This token acts
 as a password for downloads; keep it private.

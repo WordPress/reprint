@@ -86,20 +86,18 @@ explicitly requests the default cleanup. Neither flag changes the saved pull
 selection, and the two flags cannot be combined.
 
 The high-level `pull` command prepares a local runtime and uses this default
-cleanup regardless of its download selection. Integrations such as Studio can
-pull files unchanged, then call `apply-runtime` before starting WordPress.
-Targets such as wp.com can keep the plugins and run their own cleanup without
-calling `apply-runtime`. Preserved host plugins may prevent WordPress from
+cleanup regardless of its download selection. Product integrations can download
+files unchanged, then run `apply-runtime` before starting WordPress. A hosting
+platform can instead keep the plugins and perform its own setup without
+running `apply-runtime`. Preserved host plugins may prevent WordPress from
 booting without the source host's services.
 
-Runtime cleanup records its document-root-relative paths before deleting any
-local copy. `files-diff` and `files-push` exclude those paths, so a later theme
-push does not delete the source host's plugins. The record survives command
-resets, database imports, and later runtime opt-outs: skipping a later cleanup
-does not restore files already removed. Finish an interrupted files-push, or
-finish or abort an interrupted files-pull, before applying runtime cleanup.
-This protects the recorded file paths; it does not make other local runtime or
-database changes suitable for production.
+For push-capable integrations, `files-diff` and `files-push` exclude paths
+removed by runtime cleanup, so a later theme push does not delete the source
+host's plugins. Skipping a later cleanup does not restore files already
+removed. Finish an interrupted files-push, or finish or abort an interrupted
+files-pull, before applying runtime cleanup. This does not make other local
+runtime or database changes suitable for production.
 
 To fetch plugins skipped by a completed pull, start another `pull-files` with
 `--include-host-plugins`, or abort the completed `files-pull` and run it again
