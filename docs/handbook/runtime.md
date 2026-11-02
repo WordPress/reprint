@@ -97,7 +97,7 @@ uploads from the source or add a pull-state mount. Keep `--state-dir` outside
 the site directories. Run `apply-runtime` again to refresh an existing
 runtime's generated configuration.
 
-## Runtime options on pull
+<h2 id="runtime-options-on-pull">Runtime options on pull</h2>
 
 The high-level `pull` command runs these stages itself. Four options control
 them:
