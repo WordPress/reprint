@@ -26,6 +26,9 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         const publicKeyField = page.getByRole('textbox', { name: 'Migration Token', exact: true });
         const authorizeButton = page.getByRole('button', { name: 'Authorize tool', exact: true });
         const management = page.locator('.reprint-server-manage-access');
+        const clientDownload = page.getByRole('link', { name: 'Download the Reprint client', exact: true });
+        assert.equal(await clientDownload.isVisible(), true);
+        assert.equal(await clientDownload.getAttribute('href'), 'https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar');
         assert.equal(await page.getByRole('heading', { name: 'Authorize a tool to copy this site', exact: true }).isVisible(), true);
         assert.equal(await publicKeyField.isVisible(), true);
         assert.equal(await page.locator('.reprint-server-page .notice').count(), 0);
