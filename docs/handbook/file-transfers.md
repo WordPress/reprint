@@ -3,7 +3,7 @@
 Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
 persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
 your shell first. Keep the state directory outside the filesystem root.
-See [authorization](../authorize-client/) before running remote commands.
+See [authorization](https://developer.wordpress.org/reprint/authorize-client/) before running remote commands.
 
 This first builds a full index of the remote directory tree, then streams every file.
 It can be interrupted and resumed at any time — just re-run the same command:
@@ -12,7 +12,7 @@ It can be interrupted and resumed at any time — just re-run the same command:
 php reprint.phar files-pull "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
-Read [Progress, results, and exit codes](../progress-and-results/) for
+Read [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/) for
 completion, continuation, and temporary-failure handling.
 
 ## File pull modes
@@ -141,7 +141,7 @@ php reprint.phar pull-files "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
 Low-level `files-pull` needs a completed operation cleared with `--abort` before
-starting another delta. See [Copy again or resume](../copy-again/).
+starting another delta. See [Copy again or resume](https://developer.wordpress.org/reprint/copy-again/).
 
 Older callers can still use `--filter=essential-files` to omit uploads and
 low-level `--filter=skipped-earlier` to select only uploads. These are presets
@@ -158,7 +158,7 @@ Replacing or deleting a local symlink changes the link itself, not its target.
 Selected paths must remain inside the filesystem root after resolving existing
 parent links. Reprint reports blocked paths rather than writing outside that root.
 
-See [Windows sources](../windows-sources/) for drive-letter and share paths.
+See [Windows sources](https://developer.wordpress.org/reprint/windows-sources/) for drive-letter and share paths.
 
 ## Rewrite asset URLs
 

@@ -6,10 +6,10 @@ completed or needs user action. It uses PHP, with no extra libraries.
 
 ## Prepare the source and working folder
 
-Download [reprint.phar](../requirements/) into a private working folder.
+Download [reprint.phar](https://developer.wordpress.org/reprint/requirements/) into a private working folder.
 Install the [Reprint plugin](https://wordpress.org/plugins/reprint/) on the
 source site. This example uses the normal Migration Token authorization shown
-in the plugin settings; [Authentication](../authentication/) covers token-only hosts.
+in the plugin settings; [Authentication](https://developer.wordpress.org/reprint/authentication/) covers token-only hosts.
 
 ## Run a copy from your application
 
@@ -113,14 +113,14 @@ than treating the last progress message as success.
 
 ## Go further when needed
 
-- [Progress, results, and exit codes](../progress-and-results/) documents the full
+- [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/) documents the full
   output contract, including numeric counters for your UI.
-- [Copy selected files or the database](../copy-selected-data/) covers partial copies.
-- [Control each migration step](../integration-pipeline/) is for products that
+- [Copy selected files or the database](https://developer.wordpress.org/reprint/copy-selected-data/) covers partial copies.
+- [Control each migration step](https://developer.wordpress.org/reprint/integration-pipeline/) is for products that
   need separate indexing, transfer, and import stages.
-- [Prepare a hosting destination](../hosting/) covers production-server setup
+- [Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/) covers production-server setup
   and cleanup. This example deliberately uses a local SQLite destination.
 
-For a first manual copy, use [Copy a site to your computer](../copy-a-site/).
+For a first manual copy, use [Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/).
 For PHP embedding and source contributions, use the
 [development repository](https://github.com/WordPress/reprint).

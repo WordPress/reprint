@@ -15,7 +15,7 @@ php reprint.phar pull https://example.com \
 ```
 
 Do not delete state or use `--abort` just to continue. The client needs the saved
-positions and credentials. Check [Progress, results, and exit codes](../progress-and-results/)
+positions and credentials. Check [Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/)
 when running commands from a script.
 
 ## Reopen the copy without downloading again

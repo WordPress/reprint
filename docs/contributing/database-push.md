@@ -1,8 +1,9 @@
 # Database push implementation
 
-This is contributor and hosting implementation reference for the push-capable
-source build. The WordPress.org server package omits database push. It is not
-part of the first-copy workflow.
+Use this reference to configure a host for database push or change the upload
+and table-swap code. Database push requires a separately configured source
+build; it is absent from the WordPress.org plugin. For a checkout and test
+environment, follow [development setup](https://developer.wordpress.org/reprint/contributing/development/).
 
 Suppose production has `wp_options` and `wp_orders`, but the local database
 only has `wp_options`. `db-push` first loads a private incoming `wp_options`.
@@ -31,9 +32,9 @@ target triggers stay attached to the retained old tables and are deleted when
 cleanup drops those tables. Triggers on tables outside the selected tables
 are left alone. Staging or aborting a push does not remove live triggers.
 
-## Initial support
+## Check source and target requirements
 
-This first implementation is deliberately opt-in and limited:
+Check these limits before preparing a push:
 
 - The hosted database requires MySQL 8.0+ or MariaDB 10.6.1+ and InnoDB
   tables for the crash-safe swap. This requirement does not apply to the
@@ -98,14 +99,13 @@ require $plugin_directory . 'lib.php';
 ]);
 ```
 
-The server currently trusts DDL prepared by the authenticated client. It does
-not parse SQL or guarantee that arbitrary client SQL stays within the selected
-tables. A server-side parser remains a TODO; a keyword blacklist is not a SQL
-validator. Enable this route only for trusted deployment clients, not as a
-restricted SQL API for untrusted callers.
+The server accepts table definitions prepared by the authorized client. It
+does not check that arbitrary SQL from that client changes only the selected
+tables. Grant this access only to deployment clients allowed to change the
+database; do not expose it as a limited SQL service for other callers.
 
 The keys file returns a list of one-line public keys, as printed by
-`reprint keygen`. On a host where PHP lacks `openssl_verify()`, the plugin
+`reprint keygen`. On a server without OpenSSL, the plugin
 accepts a connection token instead: define `CONNECTION_TOKEN_FILE` as a file
 returning the shared secret as a PHP string. Either file is host-level
 permission for destructive pushes, not a setting to expose to visitors.
@@ -120,12 +120,13 @@ whose dependencies the account cannot inspect.
 
 ## Command flow
 
-Use a private local state directory and the same remote Reprint API URL for
-every step. On a token host, pass `--secret=TOKEN` instead of `--private-key-path`. These examples use explicit source credentials; omitting them
+Run the command examples from the repository root after `composer install`.
+`vendor/bin/reprint-client` uses the client code from your checkout. Keep one
+private local state directory and the same remote Reprint API URL for every step. On a token host, pass `--secret=TOKEN` instead of `--private-key-path`. These examples use explicit source credentials; omitting them
 uses the local MySQL database previously recorded by `db-apply`.
 
 ```sh
-reprint db-push https://example.com/reprint-api.php \
+vendor/bin/reprint-client db-push https://example.com/reprint-api.php \
   --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem \
   --source-dsn='mysql:host=127.0.0.1;dbname=local_site;charset=utf8mb4' \
   --source-user=local_user --source-pass=LOCAL_PASSWORD \
@@ -144,7 +145,7 @@ queues, CLI commands, and schema migrations
 which may use these tables. WordPress's `.maintenance` file alone is not enough.
 
 ```sh
-reprint db-push https://example.com/reprint-api.php \
+vendor/bin/reprint-client db-push https://example.com/reprint-api.php \
   --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem \
   --commit=REVIEW_TOKEN --writers-stopped
 ```
@@ -164,7 +165,7 @@ writes; that would be another destructive overwrite.
 Once satisfied, explicitly delete the retained old tables:
 
 ```sh
-reprint db-push https://example.com/reprint-api.php \
+vendor/bin/reprint-client db-push https://example.com/reprint-api.php \
   --state-dir=/private/deploy-42 --private-key-path=/private/deploy-key.pem --cleanup
 ```
 
@@ -183,8 +184,8 @@ Double any semicolon inside a DSN value. MySQL credentials are not used for SQLi
 
 For example, if row 10 changes locally after the target has copied it, the
 incoming table keeps the copied value. Rows read later may contain newer values.
-Push uses pull's row reader and its weaker consistency guarantee, without a
-transaction or table lock covering the whole push. Keep source data still if you
+The command does not hold a transaction or table lock over the whole source
+while copying it. Keep source data still if you
 need all copied tables to describe one moment. Keep source tables and columns
 unchanged until staging finishes.
 
@@ -214,7 +215,7 @@ conversion are a separate follow-up. SQLite sources still use their stored text.
 
 MySQL and MariaDB can store `SET('🙂','ok')` while exporting its definition as
 `SET('?','ok')`. Applying the numeric mask would silently change `🙂` to `?`.
-Numeric SET exports now stop when a selected row's label cannot survive the
+Numeric SET exports stop when a selected row's label cannot survive the
 server's table-definition encoding. The check runs in the existing row query,
 before returning that row or advancing its cursor; it does not scan the table
 again. Push cannot reach review or replace live tables after this rejection.
@@ -225,7 +226,9 @@ A saved cursor containing SET values cannot resume in a different format; abort
 that transfer and start again after upgrading. Old clients can still resume
 their label-format cursors after a server upgrade.
 
-Spatial type detection is shared, but the formats remain different. Push uses
+Spatial values contain the shape's bytes in WKB (well-known binary) format and
+an SRID number identifying its coordinate system. Pull and push recognize the
+same spatial types but transfer them in different formats. Push uses
 the source engine's WKB conversion plus SRID; pull retains its raw spatial bytes,
 large-value streaming, and cross-engine axis-order guard. Sharing the spatial
 format would require changing the SQL dump and importer together, not just
@@ -269,49 +272,38 @@ interruption. Cleanup and discard disable foreign key checks only around each
 private-table DROP so cycles do not prevent removal. Foreign keys from tables
 outside the selected site are rejected before staging and again before commit.
 The server needs no URL rewriter, HTML processor, SQLite translator, or SQL
-parser: it applies client-prepared DDL and binds row data.
+parser: it applies the table-definition SQL prepared by the client and inserts row data.
 
 Commit includes the progress table in the same multi-table rename as the
 site tables. Its new name identifies a completed swap even if the client
 never received the reply. The implementation requires the engine/version
-combination with atomic DDL support described by
+combination that applies the table renames as one operation, as described by
 [MySQL](https://dev.mysql.com/doc/refman/8.0/en/atomic-ddl.html) and
 [MariaDB](https://mariadb.com/docs/server/reference/sql-statements/data-definition/rename-table).
 Keep a separate backup: retained tables on the same server are not disaster
 recovery.
 
-## Tests
+## Test a database-push change
 
-The focused tests run against real MySQL/MariaDB and the production authenticated
-HTTP dispatcher. They cover staging without live changes, cancellation,
-process death with an open request after a confirmed request, discarded upload and
-commit responses, stale review tokens, failed unique-value imports, discard,
-cleanup, client-side serialization rewriting, row-size rejection, exact
-binary/decimal/BIT/NULL values, and zero auto-increment IDs. Compatibility
-cases run with a PDO-free endpoint, a client without `pdo_mysql`, MySQL 5.5
-and MyISAM sources, and SQLite ENUM labels, BIT numbers, and binary values. Schema tests cover
-keyword-like literals, generated values, spatial bytes and SRIDs, partitions,
-source storage placement, cyclic/self-referencing foreign keys, constraint
-validation failures, long names, and replay after an ALTER commits but its
-progress write times out, source edits between runs, raw composite-key cursors,
-and a row rollback when its progress write fails. They do not simulate database-server power loss or claim automatic writer draining.
+The database tests require the MySQL test server and environment variables
+listed in the [repository test setup](https://github.com/WordPress/reprint/blob/trunk/CLAUDE.md).
+Run the relevant group from `tests/`:
 
-Trigger tests use the real CLI and HTTP endpoint. They cover source triggers,
-target triggers, both, and neither; the warning also appears on a resumed
-review. They check that incoming tables have no triggers, old target triggers
-remain until cleanup, abort leaves live triggers working, and source triggers
-and triggers outside the selected prefix are unchanged.
+```sh
+../vendor/bin/phpunit MySQLDumpProducer/DatabasePushTest.php
+../vendor/bin/phpunit MySQLDumpProducer/DatabasePushIdentifierTest.php
+../vendor/bin/phpunit MySQLDumpProducer/DatabasePushHttpTest.php
+```
 
-The WordPress E2E suite shares pull datasets for SQL edge values, structured
-URL rewriting, binary/composite keys, legacy ENUM values, 200 × 80 KiB payloads,
-and a 50,050-row version of the pull batch-boundary fixture. It compares every
-site schema and every complete row against pull/apply, checks source and live
-tables before commit, and verifies home-page rendering and admin authentication
-after commit and cleanup. Builder markup is checked against explicit expected
-values and rendered through WordPress. The pull suite’s two known unsupported
-encoded-URL cases remain limitations of the shared rewriter. A separate 13 MiB
-row check verifies
-safe rejection at the current row limit.
+Use the first group for table and row behavior, the second for table selection
+and identifiers, and the HTTP group for uploads, interruption, and resumed
+requests. If you change when a row or cursor is saved, check both sides of that
+boundary: stop before the database commits and after it commits, then resume
+in a new process. The target must neither skip an unfinished row nor apply a
+completed row as new work.
 
-Selective changes remain separate future work in
-[issue #827](https://github.com/WordPress/reprint/issues/827).
+For the complete WordPress flow, use the
+[database-push E2E test](https://github.com/WordPress/reprint/blob/trunk/tests/e2e/tests/import-73-full-database-push.test.js).
+Check the source and live site before commit, then check pages, login, and
+selected tables after commit and cleanup. Keep a separate backup: these tests
+do not establish recovery from database-server power loss.

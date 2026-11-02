@@ -1,17 +1,34 @@
 # File push implementation
 
-This reference is for contributors changing file push and hosts configuring the
-push-capable source build. The WordPress.org server package omits file and
-database push; host configuration cannot enable code absent from that package.
+Use this reference when changing file uploads or commit behavior, or when
+configuring a host to receive file pushes. Start with
+[development setup](https://developer.wordpress.org/reprint/contributing/development/)
+if you do not have a working checkout.
 
-File push compares the current local tree with its retained local index,
-transfers selected changes into private work files, and drives a resumable
-commit on the target. A commit can span several requests. Keep the
-[terminology contract](push-terminology.md) when changing this lifecycle.
+Suppose you edit a theme's `style.css` in a local copy. A file push has three jobs:
 
-Database push is a separate full-overwrite operation, described in
-[Database push implementation](database-push.md). Selective database changes
-and package unification remain future work, not behavior promised by this guide.
+1. Compare the local files with the saved local index and select changed paths.
+2. Upload those paths to private work files on the target. Visitors still see
+   the existing site during upload.
+3. Commit the uploaded work: apply deletions and replacements to the target's
+   document root, then save the new local index.
+
+A **push session** holds the uploaded work and the saved position for commit.
+`PushFilesSender` is the client processor that runs these jobs. Its `PushPlan`
+prepares the paths to upload and delete. A **step** performs bounded work before
+returning to its caller, so the caller can stop and save progress between steps.
+A durable boundary is a saved position after a local action finishes or the
+target confirms it. If a request loses its reply, the next process asks the
+target how much it accepted before sending more. The API details below explain
+which state each step may change.
+
+Use the [terminology contract](https://github.com/WordPress/reprint/blob/trunk/docs/contributing/push-terminology.md)
+when naming paths, phases, or state fields in code.
+
+The WordPress.org plugin omits file and database push. These endpoints require
+a separately configured source build. The command examples run from the
+repository root after `composer install`; `vendor/bin/reprint-client` runs the
+client code from that checkout.
 
 ## Transport and authentication
 
@@ -22,8 +39,8 @@ content. Over HTTP or unverified HTTPS, an active attacker can read and modify
 it. Request signatures keep the connection token and private key off the wire
 and limit replay, but do not replace server verification.
 
-On a host with `openssl_verify()`, push requests use an enrolled public key.
-On a host without it, they use a connection token. The client uses the key in
+Servers with OpenSSL use public/private-key authorization. Servers without
+OpenSSL use a shared connection token. The client uses the key in
 `<remote-state-directory>/key.pem` unless `--private-key-path=PATH` supplies
 another key or `--secret=TOKEN` selects token authentication. A host with
 OpenSSL rejects the token; the client never falls back to another credential.
@@ -31,10 +48,9 @@ OpenSSL rejects the token; the client never falls back to another credential.
 Every request carries a signature over newline-joined fields: the protocol
 label (plus the key id for a key), a random nonce, a timestamp, the HTTP method,
 and the URL's path and query (which name the endpoint). The label and field
-layout appear in [Pull HTTP protocol](pull-http.md). Payloads are not signed and not hashed: TLS already
-guarantees their integrity, and signing streams was the single biggest cause of
-buffering pain. Signing cost is constant per request regardless of payload
-size. Neither the connection token nor the private key travels in a URL or body,
+layout appear in [Pull HTTP protocol](https://developer.wordpress.org/reprint/contributing/pull-http/). The signature covers those fixed fields, not the uploaded content. That lets
+the client send file chunks without reading the whole upload into memory first.
+Verified HTTPS protects the uploaded content during transfer. Neither the connection token nor the private key travels in a URL or body,
 so neither lands in an access log.
 
 Authentication does not grant write authority. Connection tokens and enrolled
@@ -47,11 +63,11 @@ Except for the bounded recovery case below, every `push_*` operation requires
 current push authorization before upload data is read, a push directory is created, or
 the document root changes; custom authentication uses the same gate.
 
-Revocation does not abandon durable recovery state. An authenticated caller
-may keep calling `push_commit` only when that push session already has a durable
-commit checkpoint. Those requests converge the already-started document-root
-mutation; they cannot upload more work, inspect or remove private work, or
-start commit for another push session. Other push operations return HTTP 403
+If **Allow push** is revoked after commit has started, blocking every further
+request could leave the site partly changed. A client that still authenticates
+may therefore call `push_commit` when that push session already has a saved
+commit checkpoint. Those calls finish the changes already started. They cannot
+upload more work, inspect or remove private work, or start another commit. Other push operations return HTTP 403
 with `reason: "push_disabled"`. This keeps token rotation, key push-grant
 revocation, or a managed policy change from stranding a partial commit and its
 maintenance marker.
@@ -71,14 +87,14 @@ Use the same remote Reprint API URL and state directory as the existing pull.
 If no key exists yet, generate one:
 
 ```sh
-reprint keygen 'https://example.com/?reprint-api' --state-dir=./state
+vendor/bin/reprint-client keygen 'https://example.com/?reprint-api' --state-dir=./state
 ```
 
 Enroll the printed Migration Token under **Tools → Reprint Server**, then enable
 **Allow push** for that Migration Token. With saved preflight data from the pull, run:
 
 ```sh
-reprint files-push 'https://example.com/?reprint-api' --state-dir=./state --fs-root=./files
+vendor/bin/reprint-client files-push 'https://example.com/?reprint-api' --state-dir=./state --fs-root=./files
 ```
 
 The command finds the private key in the state directory. Omit `--secret` on
@@ -106,16 +122,16 @@ local `files-diff` command, which reports the same comparison without pushing.
 
 Files-pull records each completed file, directory, symlink, or deletion in
 `<remote-state-directory>/pull/index.wal`. Each record carries the
-remote index projection and, for a non-skipped path beneath the filesystem
+source fields needed to update the remote index and, for a non-skipped path beneath the filesystem
 root, the mapped local relative path plus its locally observed type, size, and
 ctime. Applying a batch updates the remote index first, advances the local
 index second, and clears the WAL only after both replacements finish. Resume
 and abort replay the same batch.
 
-This is deliberately not a post-pull filesystem scan. Path selection, filters,
-remapping, preserve-local behavior, and failed local mutations leave unrelated
-local index entries unchanged, so pending local additions, edits, and
-deletions remain visible to files-diff and files-push. The merge applies the
+Only paths actually changed by the pull update the local index. For example,
+a local theme edit left alone by a preserving pull must still appear as an edit
+in the next `files-diff`. Scanning the whole local tree after the pull would
+record that edit as the new baseline and hide it from the next push. The merge applies the
 sorted path mutations directly and removes an indexed subtree when its root is
 deleted or replaced. Non-empty directories remain implicit. A successful
 initial pull with no local mutations creates an empty local index.
@@ -500,7 +516,7 @@ truncate a paused upload; pull remains PHP 7.4-compatible.
 `PushFilesSender`. It treats the saved preflight document root as a path beneath
 the resolved filesystem root named by `--fs-root`. It removes that local prefix when producing document-root-relative paths and excludes local paths
 outside the document root from push and delete work. It requires `--state-dir`,
-`--fs-root`, `--secret`, and saved preflight data; HTTPS is required unless the
+`--fs-root`, an authorized key or connection token, and saved preflight data; HTTPS is required unless the
 operator passes `--insecure` or sets `REPRINT_INSECURE_TLS=1`. It reads but never writes
 `<remote-state-directory>/pull/state.json`. It does not run preflight itself,
 show a plan, ask for confirmation, transfer a database, retry a failed request,
@@ -520,7 +536,7 @@ participate in the directory name. Fragments, URL user-info, and `SECRET_KEY`
 target parameters are rejected. The local push state directory must be outside
 the filesystem root so planning cannot index its own changing files.
 
-Like every `ImportClient` command, files-push accepts
+Like other client commands, files-push accepts
 `--progress=auto|tty|jsonl|compact` for one invocation. The default `auto` mode uses
 terminal progress when its output stream is a TTY and JSONL otherwise. `tty`
 and `jsonl` force the corresponding presentation. `compact` prints stage changes,
@@ -638,23 +654,23 @@ The remote is configured with one storage path for everything reprint keeps:
 the private push directory and any commit bookkeeping. The current push HTTP
 endpoints require this path to be outside the document root. They do not yet
 exclude an inside path from every file index or write web-server access guards,
-so endpoint construction rejects that configuration instead of exposing private
-push work. A host which cannot write outside the document root is not supported
-until those protections exist.
+so that configuration is rejected. Choose a location outside every web-served
+directory before enabling push.
 
 ## Commit
 
-Remote-side, journaled, idempotent, driven by repeated commands until done.
-Order:
+Commit applies the uploaded work to the live document root. Each request does
+part of that work and saves its position, so another request can continue if
+the process stops. The order is:
 
 1. **Receive work, outside maintenance:** multipart requests write one bounded
    chunk at a time into `work/inflight.data` and move complete values into
    `work/files`. The site runs normally throughout receipt.
 2. **Maintenance on.** Commit writes the `.maintenance` file itself, and since
-   WordPress executes that file, ours whitelists reprint API requests
-   (`$upgrading = 0` for us, `time()` for everyone else). WordPress's own
+   WordPress executes that file, it allows Reprint API requests to
+   continue while other WordPress requests see maintenance mode. WordPress's own
    rule that a `.maintenance` file older than 10 minutes is ignored stays
-   intact, so an interrupted commit can never leave the site down for good.
+   intact, so maintenance mode expires if no later commit request arrives.
 3. **Commit:** consume `work/deletes`, then `work/files`, with the durable
    `commit.json` checkpoint written before each document-root mutation. The
    symlink updates follow the same bounded cursor. Database overwrite uses
@@ -671,50 +687,26 @@ file after 10 minutes on its own, and the next commit request resumes from
 excluded from installs and deletes and reported as excluded in the summary.
 Updating reprint itself is a separate concern, never part of a sync.
 
-## Escape hatch: commit without booting WordPress
+## Finish a commit when WordPress cannot start
 
-Normally the endpoint runs through the WordPress boot because it is
-convenient. But a commit step can break that boot — a fatal in a partially
-committed plugin — so the same endpoint is also reachable as a standalone PHP file that
-never loads WordPress: it reads database credentials from `wp-config.php`
-directly and operates on the filesystem and database with reprint's own code.
-The driver falls back to it automatically when the normal route stops
-answering sensibly. This is what makes commit failures recoverable from the
-outside instead of requiring SSH.
+A replaced plugin can cause a PHP fatal error before commit finishes. The
+normal WordPress API route may then fail too, because starting WordPress loads
+that plugin.
 
-## Full database overwrite
+The client can continue through a standalone PHP route that reads
+`wp-config.php` without starting WordPress. It uses Reprint's own filesystem
+and database code to finish the remaining work. Keep that route independent
+of WordPress startup when changing routing, and test a resumed commit with
+WordPress startup failing.
 
-`db-push` stages a complete local MySQL or WordPress SQLite database in private
-incoming InnoDB tables. Source reads do not require the hosted database
-version needed for a crash-safe swap. MySQL connections may use `mysqli`
-instead of `pdo_mysql`; URL and schema rewriting remain on the client.
-URL rewriting happens in the client. Staging returns a table list and review
-token; a separate confirmed command exchanges the live and incoming tables
-with one multi-table rename. Production-only prefixed tables are moved aside
-too. `--include-table=plugin_orders` also selects an exact non-prefix table for
-full replacement; unlisted non-prefix tables stay untouched.
-No row diff is computed. Old tables remain until explicit cleanup.
+## Replace database data separately
 
-Rows stream without a full local or hosted archive. The target commits each row
-with its source cursor. Resume uses pull's row reader, without a frozen source
-snapshot: copied rows stay as they were, later reads may see changes, and unkeyed
-tables use OFFSET pagination. Keep the source still for a consistent copy.
-
-The shared row reader rejects numeric SET values whose labels change in the
-source server's table-definition encoding, such as `🙂` becoming `?`. This
-stops staging before review and leaves live tables unchanged; it does not
-reconstruct missing characters in unused SET members.
-
-Triggers are outside the database push scope. The table review always warns
-that the new live tables will have no triggers. Existing target triggers stay
-with the retained old tables until cleanup; source triggers and triggers on
-unselected tables are left alone.
-
-This command is separate from file commit. It requires a host-configured
-standalone API route, an operator-controlled stop of all writers, and manual
-cache clearing and site inspection before reopening. The first version has
-explicit engine, schema, and row-size limits. See [Full database push](database-push.md)
-for setup, commands, recovery, and current restrictions.
+`files-push` does not transfer the active local database. Use `db-push` when you
+intend to replace the selected production tables, including rows added on
+production since the last pull. That operation requires a separate host route
+and a pause of all database writers before commit. Follow the
+[database push guide](https://developer.wordpress.org/reprint/contributing/database-push/)
+for the table review, confirmation, and checks before reopening the site.
 
 ## Accepted limitations
 
@@ -722,8 +714,7 @@ These file-push limits do not replace the database overwrite requirement to
 stop all writers:
 
 - **Same-size corruption is invisible.** Transfers are verified by byte
-  count only. Corruption that preserves length passes. We decided detection
-  is not worth hashing multi-gigabyte work files inside PHP time limits.
+  count only. Corruption that preserves length passes. The target does not compare content hashes.
 - **Remote edits are overwritten.** Push is a local-wins deployment tool, not
   a bidirectional conflict resolver. Developers who edit the remote site
   outside Reprint are responsible for pulling or preserving those changes

@@ -10,7 +10,7 @@ copying your own site, where you can install the plugin and authorize the client
 
 You need administrator access to the WordPress site to install the Reprint
 plugin. Use a terminal on macOS or Linux, or Windows Subsystem for Linux (WSL).
-Check the [requirements and downloads](../requirements/) before continuing.
+Check the [requirements and downloads](https://developer.wordpress.org/reprint/requirements/) before continuing.
 
 ## 1. Prepare a working folder
 
@@ -30,7 +30,7 @@ php reprint.phar --version
 ```
 
 You should see a Reprint version number. If the command fails, follow
-[Troubleshooting](../troubleshooting/) before starting a copy.
+[Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/) before starting a copy.
 
 ## 2. Install the plugin on the source site
 
@@ -61,7 +61,7 @@ need to authorize it before copying starts.
 4. Run the same terminal command again.
 
 If the plugin instead shows a **Connection token** form, use the alternative
-steps in [Authorize the Reprint client](../authorize-client/), then add
+steps in [Authorize the Reprint client](https://developer.wordpress.org/reprint/authorize-client/), then add
 `--secret='TOKEN'` to the pull command using that connection token.
 
 The client now checks the source, downloads files and database data, imports
@@ -85,7 +85,7 @@ Check these on the local address:
 
 Some plugins need MySQL or services provided by the source host. A completed
 transfer does not establish that every plugin works locally. If a check fails,
-see [Troubleshooting](../troubleshooting/).
+see [Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/).
 
 ## 5. Stop and start the local server
 
@@ -107,5 +107,5 @@ same source address and folders. To only restart the local server, use
 `start.sh` instead. Running `pull` after completion can replace local database
 changes with source data.
 
-Next: [How Reprint works](../how-it-works/), or
-[remove client access](../authorize-client/) when you no longer need it.
+Next: [How Reprint works](https://developer.wordpress.org/reprint/how-it-works/), or
+[remove client access](https://developer.wordpress.org/reprint/authorize-client/) when you no longer need it.

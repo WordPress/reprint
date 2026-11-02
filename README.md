@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/reprint-logo-dark.svg">
-  <img src="docs/assets/reprint-logo.svg" alt="Reprint" width="250" height="75">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/WordPress/reprint/trunk/docs/assets/reprint-logo-dark.svg">
+  <img src="https://raw.githubusercontent.com/WordPress/reprint/trunk/docs/assets/reprint-logo.svg" alt="Reprint" width="250" height="75">
 </picture>
 
 # Reprint — WordPress Site Migration
@@ -12,8 +12,8 @@ an interrupted transfer can continue.
 ## Start here
 
 - **View the demo site:** explore the [demo site](https://reprint-demo.wordpress.net/).
-- **Clone my site:** follow [Copy a site to your computer](docs/handbook/copy-a-site.md).
-- **Integrate Reprint into my product:** start with [Build with Reprint](docs/handbook/build-with-reprint.md).
+- **Clone my site:** follow [Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/).
+- **Integrate Reprint into my product:** start with [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
 
 ## Quick start
 
@@ -30,28 +30,28 @@ php reprint.phar pull https://example.com \
 
 The first pull prints a Migration Token and stops. Enroll it under
 **Tools → Reprint Server** on the source site, then run the same command again.
-The [tutorial](docs/handbook/copy-a-site.md) covers the complete setup and checks.
+The [tutorial](https://developer.wordpress.org/reprint/copy-a-site/) covers the complete setup and checks.
 
 The client needs PHP 7.4 or newer and the extensions listed in
-[Requirements and downloads](docs/handbook/requirements.md). The WordPress.org
+[Requirements and downloads](https://developer.wordpress.org/reprint/requirements/). The WordPress.org
 server package provides downloads only; it does not provide push.
 
 ## Documentation
 
-The [Reprint handbook](docs/handbook/README.md) contains tutorials, task guides,
+The [Reprint handbook](https://developer.wordpress.org/reprint/) contains tutorials, task guides,
 integration instructions, command reference, and explanations. Its Markdown
 source and WordPress.org import manifest live in this repository.
 
-- [Commands](docs/handbook/commands.md)
-- [Troubleshooting](docs/handbook/troubleshooting.md)
+- [Commands](https://developer.wordpress.org/reprint/commands/)
+- [Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/)
 - [Support forum](https://wordpress.org/support/plugin/reprint/)
 - [Report a reproducible bug](https://github.com/WordPress/reprint/issues)
 
 ## Development
 
-See [Contributing](CONTRIBUTING.md) for development setup, architecture, tests,
+See [Contributing](https://developer.wordpress.org/reprint/contributing/) for development setup, architecture, tests,
 and releases. Source packages live in
-[`packages/reprint-client`](packages/reprint-client/) and
-[`packages/reprint-server`](packages/reprint-server/).
+[`packages/reprint-client`](https://github.com/WordPress/reprint/tree/trunk/packages/reprint-client) and
+[`packages/reprint-server`](https://github.com/WordPress/reprint/tree/trunk/packages/reprint-server).
 
-Reprint is licensed under [GPL-2.0-or-later](LICENSE).
+Reprint is licensed under [GPL-2.0-or-later](https://github.com/WordPress/reprint/blob/trunk/LICENSE).

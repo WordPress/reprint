@@ -1,6 +1,6 @@
 # Authentication reference
 
-For the WordPress settings steps, follow [Authorize the Reprint client](../authorize-client/).
+For the WordPress settings steps, follow [Authorize the Reprint client](https://developer.wordpress.org/reprint/authorize-client/).
 This reference describes how the client chooses credentials and how a product
 should handle the authorization stop.
 
@@ -31,7 +31,7 @@ continue. Use `pull-metadata` to inspect the saved key's public enrollment value
 
 In JSONL or compact mode, key generation reports its `key_id`, `key_path`, and
 `public_key` in the command report. Handle this as a request for user action,
-not an automatic retry. See [Progress and results](../progress-and-results/).
+not an automatic retry. See [Progress and results](https://developer.wordpress.org/reprint/progress-and-results/).
 
 ## Connection tokens
 

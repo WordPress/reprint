@@ -5,17 +5,17 @@ guide assumes you can run command-line PHP there, configure its web server,
 and create an empty database. Source WordPress administrator access is enough
 to install the plugin and authorize the client; source SSH is not required.
 
-For a first experiment, complete [Copy a site to your computer](../copy-a-site/).
-For a managed product, see [Build with Reprint](../build-with-reprint/).
+For a first experiment, complete [Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/).
+For a managed product, see [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
 
 ## 1. Prepare the destination
 
-Install the [client and required PHP extensions](../requirements/). Create a
+Install the [client and required PHP extensions](https://developer.wordpress.org/reprint/requirements/). Create a
 dedicated empty MySQL database and an account limited to it. Choose empty
 download and assembled-site directories. Keep migration state outside web-served
 directories.
 
-Install Reprint on the source and [authorize the client](../authorize-client/).
+Install Reprint on the source and [authorize the client](https://developer.wordpress.org/reprint/authorize-client/).
 
 ## 2. Copy into the destination database
 
@@ -36,15 +36,15 @@ directories. This command imports source data into the destination database.
 It does not configure a production web server or move DNS.
 
 Run the same command to continue after interruption. See
-[Database transfer reference](../database-transfers/) for target compatibility
+[Database transfer reference](https://developer.wordpress.org/reprint/database-transfers/) for target compatibility
 and import recovery limits.
 
 ## 3. Configure and test WordPress
 
 Configure the destination web server and `wp-config.php` for the destination
 paths and database. Do not reuse source-host database credentials.
-[Prepare a hosting destination](../hosting/) covers cleanup and startup checks;
-[Runtime configuration](../runtime/) covers generated server configuration.
+[Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/) covers cleanup and startup checks;
+[Runtime configuration](https://developer.wordpress.org/reprint/runtime/) covers generated server configuration.
 
 Before opening the copy, disable outgoing mail, scheduled jobs, payments, and
 other production service connections that must not run from a second site.

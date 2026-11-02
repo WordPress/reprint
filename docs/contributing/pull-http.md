@@ -1,15 +1,15 @@
 # Pull HTTP protocol
 
-Contributor reference for changes to the official client and server. Product
-integrations should start with the client commands in the public handbook.
-This document does not promise that private cursors or state formats are a
-stable API for independent clients.
+Use this reference when changing a request or response in the client and
+server together. If you are adding Reprint to a product, use the
+[client integration guide](https://developer.wordpress.org/reprint/build-with-reprint/)
+first; it handles these request details for you. Private cursor and state
+formats can change between client versions.
 
 Keep the API routing marker (`?reprint-api` or the legacy `?site-export-api`)
 in the URL. The client keeps every parameter of the supplied API URL, including
-any custom routing query parameters, and appends `endpoint` to its query. It
-does not copy parameters out of that URL. Every other export parameter travels
-in the POST body. For example, POST to
+any custom routing query parameters, and appends `endpoint` to its query. Those
+query parameters stay in the URL. Additional export options go in the POST body. For example, POST to
 `/?reprint-api&endpoint=db_index` with:
 
 ```json
@@ -38,7 +38,7 @@ in the query string.
 
 For `file_fetch`, send the requested paths in the multipart `file_list` upload.
 Each record's `path` uses ordinary base64 or
-[`rp.`-prefixed ROT13-base64](#sending-file-paths-through-source-firewalls),
+[`rp.`-prefixed ROT13-base64](https://developer.wordpress.org/reprint/contributing/pull-http/#sending-file-paths-through-source-firewalls),
 depending on the source's preflight capabilities.
 The server ignores any `file_list_path` request parameter. That option remains
 available to direct PHP callers of `endpoint_file_fetch()`.
@@ -52,16 +52,18 @@ multipart upload streams without buffering.
 
 The exporter accepts `application/json`, `application/x-www-form-urlencoded`,
 and `multipart/form-data`. The signature covers the URL, endpoint included, and
-never the body. The separate push request contract is unchanged.
+never the body. Use the [file push reference](https://developer.wordpress.org/reprint/contributing/push/)
+for push request fields.
 
 The client sends URL-encoded forms for preflight and streaming pull commands.
 File-list downloads retain multipart uploads, with options before
 the file part. Path parameters use the
-[format selected by preflight](#choosing-a-format-for-older-servers).
+[format selected by preflight](https://developer.wordpress.org/reprint/contributing/pull-http/#choosing-a-format-for-older-servers).
 Both base64 formats preserve non-UTF-8 filename bytes. Cursors travel only in
 the body, which also keeps a large cursor clear of host header size limits. The
 exporter still reads an `X-Export-Cursor` header when the body has no cursor, for older
-clients. The strict-WAF test strips that header and checks SQL continuation.
+clients. When changing cursor transport, test continuation with that header removed;
+a source firewall may discard it.
 
 Multipart array entries use field names such as `directory[0]` and
 `skip_rows[0][column]`.
@@ -185,9 +187,24 @@ before Reprint loads. Preflight still returns its JSON object. Streaming pull
 endpoints send uncompressed multipart data when they can no longer set headers.
 The client skips leading spaces, tabs, and line breaks before detecting the
 `--boundary-` line in the body. Part headers carry the cursors and other stream
-metadata as before. This does not buffer the response or change the protocol.
+metadata as before. The client still reads each part as it arrives.
 
 This fallback does not accept HTML or PHP warning text before the boundary.
 It also cannot restore an HTTP status or CORS header after headers were sent;
 a browser may still block a cross-origin request. Remove the early output on
 the source site to restore those headers and gzip compression.
+
+## Test a request-format change
+
+Run the request-body and path-encoding tests from `tests/`:
+
+```sh
+../vendor/bin/phpunit Import/MultipartRequestParametersTest.php
+../vendor/bin/phpunit Import/RequestUrlPathEncodingTest.php
+../vendor/bin/phpunit Import/KeySignedRequestTest.php
+```
+
+When changing the negotiated path format, check both a source that advertises
+support and one that does not. Include a non-UTF-8 filename and a cursor sent
+back after interruption; both must arrive at the source with their original
+bytes.

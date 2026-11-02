@@ -19,7 +19,8 @@ Keep all Reprint user and integration documentation together:
 | `wordpress.org/reprint/` | Product introduction and goal-based links into the handbook. |
 | WordPress.org plugin directory | Plugin installation, requirements, downloads, and support; link onward for client workflows. |
 | Repository README | Short project introduction, working example, and documentation/contribution links. |
-| Repository contributor docs | Code architecture, private formats, tests, design decisions, and releases. |
+| Handbook contributor section | Development setup, architecture, protocol reference, tests, and releases. |
+| Repository-only working files | Code naming rules, agent instructions, and this deployment plan. |
 | Developer Blog or Learn WordPress | Optional introductions and lessons linking to the handbook, not another command reference. |
 
 Do not put Reprint commands in the
@@ -37,7 +38,7 @@ plugin development; it is not the home for using this particular plugin/client.
 | Administrator authorizing a copy | What do I install and paste in WordPress? | Short authorization guide. |
 | Product developer | How do I drive the client and interpret each result? | Integration guide and public command/output reference. |
 | Host or support engineer | What must the environment provide, and what failed? | Requirements, hosting guide, progress/results, and troubleshooting. |
-| Reprint contributor | How do I change the implementation without breaking it? | CONTRIBUTING and repository-only notes. |
+| Reprint contributor | How do I run the project, test a change, and submit it? | Handbook contributor guide and development setup. |
 
 A tutorial takes one tested route to a first result. A task guide starts with a
 specific goal and ends with checks. Reference gives exact commands, options,
@@ -45,8 +46,8 @@ outputs, and limits. Explanation builds the reader's model of the system.
 The [WP-CLI handbook](https://make.wordpress.org/cli/handbook/) also separates
 user/developer guides, reference, and contributing.
 
-The handbook home groups pages under Get started, Guides, Build with Reprint,
-Reference, and Understand Reprint. Readers enter by goal: view the demo, clone
+The handbook home groups pages under Guides, Build with Reprint, Reference,
+Understand Reprint, and Contributing. Readers enter by goal: view the demo, clone
 my site, or integrate Reprint into my product. Use Try Reprint only once the linked route actually lets a reader
 complete a Reprint copy. Do not make them select a document
 type before they know the tool.
@@ -63,51 +64,50 @@ narratives in issues and PRs instead of presenting them as current instructions.
 
 ## What this repository publishes
 
-`docs/manifest.json` is the explicit allowlist. It contains only Markdown pages
-under `docs/handbook/`. The contributor directory, this publishing plan, and
-working instructions are not handbook pages.
+`docs/manifest.json` lists the pages to import from `docs/handbook/` and
+`docs/contributing/`. The contributor section includes development setup,
+architecture, protocol reference, and releases. This deployment plan and the
+code-naming contract stay in the repository; they are not introductory or
+reference pages for handbook readers.
 
-Pages use plain Markdown, fenced code, and tables. There is no MDX conversion,
-build output, or custom link rewriting. Put example addresses in fenced code
-or plain text. The native parser's URL preservation can consume an inline-code
-URL's closing backtick and prevent later links from rendering; the handbook test
-guards against that form. Source filenames describe the page;
-only the handbook home is `README.md`.
+Pages use plain Markdown, fenced code, and tables. Source filenames describe
+the page. There is no MDX conversion, build output, or custom link rewriting.
+Put example addresses in fenced code or plain text; the native Markdown parser
+can swallow links after a URL in an inline-code span.
 
-Keep the existing seven page slugs. New pages are siblings beneath the handbook
-home, and the home groups them by purpose. Proposed examples are:
+## Link to complete URLs
+
+Use complete HTTPS URLs in all documentation, including links within the same
+handbook. For example:
 
 ```text
-/reprint/
-/reprint/copy-a-site/
-/reprint/build-with-reprint/
-/reprint/commands/
-/reprint/file-transfers/
-/reprint/progress-and-results/
+https://developer.wordpress.org/reprint/copy-a-site/
+https://developer.wordpress.org/reprint/commands/
+https://developer.wordpress.org/reprint/contributing/
+https://developer.wordpress.org/reprint/contributing/architecture/
 ```
 
-The manifest's parent relationship puts every page beneath the handbook root.
-Do not add nested URL prefixes just to group the menu. Internal links target
-published routes: `commands/` from the home and `../commands/` from a child.
-They are not GitHub source-file links. Repository-facing pages use ordinary
-file links instead. A different approved handbook base still works with these
-relative links.
+These are the publication targets. They will become live only after Meta
+registers the handbook and the initial import passes. If Meta approves another
+base address, update the URLs and the manifest/link test together before import.
+Do not silently redirect readers to a different site during publishing.
 
-For example, `../commands/` from `/reprint/copy-a-site/` resolves to
-`/reprint/commands/` in the browser. The importer can leave the link unchanged.
-A Markdown file link such as `commands.md` would instead request a file on
-the website and would need rewriting; do not use that form in the handbook.
+The handbook home has slug `handbook` and no parent. The Handbook plugin serves
+that landing page at `/reprint/`. The main pages also have no parent, so a page
+such as `copy-a-site` becomes `/reprint/copy-a-site/`. Giving it `handbook` as a
+parent would instead add `/handbook/` to the child URL.
 
-This has a source-browsing tradeoff: published-route links do not navigate
-between Markdown files on GitHub. Once the canonical handbook address is
-confirmed and live, full WordPress.org page URLs can work from either place
-without a publishing transform. Until then, do not hard-code the proposed URL
-as though the handbook were already live.
+The contributor home has slug `contributing` and no parent. Its child pages
+use `contributing` as their parent, which gives them
+`/reprint/contributing/PAGE/` URLs. Keep the existing seven slugs. Check the
+actual permalinks with the WordPress.org Handbook plugin as well as the
+Markdown importer; importing content into ordinary WordPress pages does not
+check handbook routing.
 
-Relative source-code links belong only in repository-facing pages, which are
-not imported. Prefer linking to a whole source file over naming a private
-method or line range. If a line range is necessary to explain past behavior,
-link to a specific commit so edits cannot move the referenced lines.
+Link to source code with a complete GitHub URL. Prefer a whole file over a
+private method or a line range. If a line range is necessary, pin the link to
+a commit so later edits cannot move those lines. User downloads stay on
+WordPress.org.
 
 ## One-time WordPress.org registration
 
@@ -177,9 +177,26 @@ sidebar order, edit-source links, code blocks, tables, internal links, and the
 WordPress.org client download. Confirm how the handbook appears in site search
 and navigation; creating a post type does not confirm discoverability.
 
-Only after those checks, change the README, product page, and plugin listing to
-link to the confirmed live handbook URLs. Keep GitHub links for development and
-source contribution; user downloads remain on WordPress.org. If any handbook
+If an earlier manifest has already been imported, inspect `post_parent` in the
+listed records before using the new URLs. The Markdown importer does not
+automatically reparent existing pages. Main pages need parent `0`; only the
+contributor reference pages use the contributor home as their parent. A Meta
+operator can correct a selected record with:
+
+```sh
+wp --url=https://developer.wordpress.org post update PAGE_ID --post_parent=0
+```
+
+Replace `PAGE_ID` with the inspected main-page ID. Do not apply that command
+to contributor child pages. Recheck the resulting permalinks before updating
+links elsewhere.
+
+The README already uses the target handbook URLs. Prepare the Meta registration
+PR before merging this content. Coordinate the content merge, registration
+deployment, and first import; the links return 404 until those steps finish.
+After checking the live pages, update the product page and plugin listing.
+Keep GitHub links for development and source contribution; user downloads
+remain on WordPress.org. If any handbook
 URLs have already been published elsewhere, preserve their slugs or arrange
 redirects before changing them.
 

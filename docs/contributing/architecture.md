@@ -1,124 +1,135 @@
 # Architecture and durable state
 
-Read [How Reprint works](../handbook/how-it-works.md) for the larger design
-choices: HTTP access, streaming, source-host budgets, client-side comparison,
-and separate destination setup.
-This document is for changes spanning the client, server, state, or runtime.
-Small local rules belong beside their implementation and in regression tests.
-Use the [terminology contract](push-terminology.md) for exact path and lifecycle names.
+Use this page when changing how the client downloads data, writes local files,
+or continues a stopped transfer. Start with
+[How Reprint works](https://developer.wordpress.org/reprint/how-it-works/) for the reasons behind the design.
 
-## Client and server
+## Find the code for your change
 
-[The client](../../packages/reprint-client/src/import.php) drives pull workflows.
-The source [request handler](../../packages/reprint-server/src/class-http-server.php)
-authenticates and dispatches requests; it does not schedule a background migration.
-The [pull protocol](pull-http.md) describes request fields and response framing.
+| What you want to change | Where to start |
+| --- | --- |
+| A command or the order of migration steps | The [client entry point](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-client/src/import.php). |
+| How the source receives a request | The [server request handler](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-server/src/class-http-server.php) and [pull protocol](https://developer.wordpress.org/reprint/contributing/pull-http/). |
+| Where a downloaded path is written | The [source-to-local path mapper](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-client/src/lib/pull/class-remote-to-local-path-mapper.php). |
+| Settings copied from a source host | The [source-host analyzers](https://github.com/WordPress/reprint/tree/trunk/packages/reprint-client/src/lib/host). |
+| Generated PHP or web-server configuration | The [target runtime code](https://github.com/WordPress/reprint/tree/trunk/packages/reprint-client/src/lib/target-runtime). |
 
-The client offers both a high-level pull pipeline and smaller commands. The
-pipeline coordinates saved preflight, file transfer, database download and apply,
-flattening, and runtime setup. Keep that coordination in the pipeline rather
-than requiring integrations to duplicate it. The public
-[integration guide](../handbook/build-with-reprint.md) recommends that path first.
+The client starts each migration step and asks the source for data. The source
+answers the request, then releases its PHP worker. Installing the plugin does
+not start a background migration. Keep the complete `pull` workflow in the
+client so products can use one command rather than rebuild the same sequence.
 
-## State is not a second public API
+## Keep progress after a process stops
 
-The caller supplies one state directory per filesystem root. Commands addressing
-one remote Reprint API URL share its remote state directory. Changing the
-filesystem root while retaining that state is rejected. Local command workflows
-use the state-directory-wide Reprint process lock.
+Suppose the client has downloaded part of a large image when the process stops.
+The next process needs to know which bytes are saved and which source to ask
+for the rest. A **cursor** is that saved position. It may contain a byte offset,
+a database key, or the position in an index.
 
-```text
-<state-dir>/
-  process.lock
-  progress.json
-  audit.log
-  remotes/<md5-of-trimmed-remote-reprint-api-url>/
-    key.pem
-    local_index.jsonl
-    pull/
-      state.json
-      remote-index.jsonl
-      remote-index.next.jsonl
-      index.wal
-      fetch-list.jsonl
-      volatile-files.json
-    push/
-```
+Use one state directory for each local filesystem root. The filesystem root
+contains the downloaded site files. The state directory contains credentials,
+cursors, indexes, and logs. Keep state outside the downloaded files so a pull
+cannot replace the information needed to continue it.
 
-Use the [state classes](../../packages/reprint-client/src/lib/state/) and
-[terminology contract](push-terminology.md) when changing these records. They
-contain cursors, tuning state, and per-command checkpoints. Do not reproduce
-all private fields as an integration schema. `pull-metadata`, command reports,
-and the documented `progress.json` shape are the public inspection surfaces.
+Within state, the remote Reprint API URL selects the records for that source.
+Changing the URL can select different records. Reusing the same state with a
+different filesystem root is rejected: its saved positions describe the first
+copy, not the new directory.
 
-The pull index WAL records completed local actions awaiting projection into
-remote and local indexes. Resume must retain or replay the unconfirmed suffix;
-bytes beyond a durable offset are not completed work. The next remote index,
-fetch list, and file cursors are streamed instead of loaded as complete arrays.
-Files-diff and files-push must not consume an unfinished files-pull WAL.
+For product integrations, read progress through `pull-metadata`, command
+reports, or the documented `progress.json` fields. See
+[Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/).
+Private state files can change when the implementation changes; do not make a
+product depend on their current layout.
 
-A changed source file is tracked for a later file pass. Successful later
-fetches clear that file's volatile record. File-fetch errors use the same path
-mapping and selection as file data; they must not remove arbitrary local paths.
-Existing physical parents are checked before local removal or replacement.
+## Keep file indexes in step with completed writes
 
-For file push, [PushFilesSender and PushPlan](push.md) share one caller-visible
-lifecycle. Read their interruption and target-confirmation rules before changing
-checkpoint timing. Database push has its own
-[full-overwrite lifecycle](database-push.md).
+A file pull keeps two indexes. The remote index records source paths and source
+change fields. The local index records paths and change fields observed on the
+receiving computer. They are used for later file comparison.
 
-## Source paths and filesystem writes
+A file write and both index updates cannot happen as one filesystem operation.
+For example, a process can stop after replacing the remote index but before
+replacing the local index. Clearing its update records at that point would
+leave the local index missing completed changes.
 
-Source path format comes from preflight, not a guessed path prefix. The same
-text can mean a Unix path or a Windows share. Relative selections and resolved
-symlink targets need different handling; keep those concepts separate.
-[RemoteToLocalPathMapper](../../packages/reprint-client/src/lib/pull/class-remote-to-local-path-mapper.php)
-applies the saved mapping before writes.
+The pull index WAL is a write-ahead log at `pull/index.wal`. It records completed
+local changes until both indexes include them:
 
-Windows reads use PHP file functions, not FFI or an external program. Long UNC
-paths use a PHP-supported namespace spelling at I/O time without changing the
-index's path coordinates. Keep the user-visible path restrictions and destination
-limits in [Windows sources](../handbook/windows-sources.md). The Windows migration
-workflow covers drive and share sources against a Linux destination.
+1. Apply a downloaded file, directory, link, or deletion locally.
+2. Record that completed change in the pull index WAL.
+3. Apply the recorded changes to the remote index and then the local index.
+4. Clear the records only after both index replacements finish.
 
-## Source hosts and target runtimes
+Resume and abort replay the saved batch if either index replacement was
+interrupted. Read the indexes and path lists in order from disk; loading an
+entire site index would make memory use grow with the site's file count.
+`files-diff` and `files-push` must wait until an unfinished file pull has finished
+or been aborted, so they do not compare against a partly updated local index.
 
-[Host analyzers](../../packages/reprint-client/src/lib/host/) read preflight data
-and produce a declarative RuntimeManifest: constants, INI settings, and routes.
-[Runtime appliers](../../packages/reprint-client/src/lib/target-runtime/) write
-configuration for PHP's built-in server, nginx/PHP-FPM, or Playground CLI.
-This keeps source-host detection separate from destination server generation.
+If a source file changes while it is being read, the client records it for a
+later pass. A successful later download removes it from that list. A failed
+file response still has to pass the same path checks as a successful response;
+an error must not cause removal of an unrelated local file.
 
-Download selection and local runtime cleanup are separate choices. A preserving
-pull can retain source-host files, then runtime setup can remove their local
-copies. Cleanup records those document-root-relative paths for file-push
-exclusions before removing files. It must not teach a later push to delete the
-source host's own plugins. See [File transfer reference](../handbook/file-transfers.md)
-for the public options.
+## Check where a path will actually write
 
-For Playground CI, `PHP_BINARY=tests/e2e/ci/playground-php.sh` selects the wrapper.
-`WP_MYSQL_PARSER_EXTENSION_MANIFEST` selects the local PHP.wasm runner so it can
-load the SQLite integration's native parser extension. The
-[verification script](../../tests/e2e/ci/verify-wp-mysql-parser.php) checks the
-active lexer and parser, not just whether an extension loaded.
+Suppose the copy lives at `/work/files`, but `/work/files/uploads` is a symlink
+to `/srv/shared`. Writing `/work/files/uploads/photo.jpg` would change a file
+outside the copy. Removing that path would have the same problem.
 
-## Streaming CSS rewriting
+Before writing, replacing, or removing a local path, resolve its existing
+parent directories and check that the result stays inside the filesystem root.
+Removing a symlink itself must remove the link, not the file it points to.
+Cover both cases when changing path handling; the
+[symlink path tests](https://github.com/WordPress/reprint/blob/trunk/tests/Import/UnixSymlinkPathTest.php) and
+[file-error path tests](https://github.com/WordPress/reprint/blob/trunk/tests/Import/PullFileErrorPathTest.php) exercise them.
 
-The caller supplies successive byte strings to the CSS parser and flushes
-completed output after each URL. Input is marked complete only at the real
-file end. The shared parser cursor is an opaque string with no source bytes.
-An HTTP part can end inside a URL, so Reprint saves its
-unfinished bytes separately beside that cursor. Resume supplies those bytes
-before appending the next HTTP part. A URL split across requests is rewritten once.
+Read the source path format from preflight. For example, `//server/share` may
+be a Windows network share or a Unix path. Its spelling alone cannot tell you
+which rules to apply. The mapper uses the reported format before converting
+source paths to local paths. See [Windows sources](https://developer.wordpress.org/reprint/windows-sources/)
+for the supported selections and destination limits.
 
-The processor keeps each unfinished CSS token and parses it again when more
-bytes arrive. A large comment or embedded image therefore increases memory
-use and saved state size; token size is not capped. Completed input is released.
-Malformed string and URL tokens stay unchanged. More than 128 nested
-`image-set()` functions are rejected. An error names the stylesheet; the
-partial file is not marked complete.
+## Separate host settings from destination setup
+
+A source host can supply plugins, PHP settings, or image routes that are absent
+on the receiving computer. Host analyzers turn those findings into a description
+of the settings the copy needs. Runtime code uses that description to generate
+files for PHP's local server, nginx/PHP-FPM, or Playground CLI.
+
+Keep these two jobs separate. Adding support for another source host should
+not require a separate implementation for every destination server.
+
+Host-plugin cleanup can remove a local plugin that still exists on the source.
+Without an exclusion, a later file push could treat that absence as a request
+to delete the source plugin. Runtime setup therefore saves the removed
+paths before deleting their local copies, and file push excludes those paths.
+Keep those exclusions through command resets and database imports. Skipping a
+later cleanup does not bring removed files back.
+
+## Continue a stylesheet across requests
+
+An HTTP response can end halfway through a CSS URL. Save both the parser's
+position and the unfinished text. On resume, give the parser that unfinished
+text before reading the next response. Otherwise a split URL can be missed or
+rewritten twice.
+
+The file downloader supplies successive byte strings to the CSS parser and
+writes completed output after each URL. Mark input complete only at the real
+file end, not at the end of one HTTP part. The parser position contains no
+source text; the unfinished text is saved separately.
+
+A long comment or embedded image can make the unfinished token large, so this
+part of the parser has no fixed memory bound. Malformed tokens stay unchanged.
+More than 128 nested `image-set()` functions stop that stylesheet, and the
+partial download is not marked complete.
 
 ## Database import checkpoints
+
+A SQL group contains complete SQL statements and an exporter cursor. The
+importer saves that cursor after applying the group, so the next process knows
+which statements still need to run.
 
 When a source response stops mid-stream, the same importer asks for the
 remaining SQL and keeps an unfinished statement in memory. Each decoded SQL
@@ -131,8 +142,8 @@ checkpoint is therefore at most 32 MiB away. A `db.sql` group adds one
 separator newline before its cursor marker.
 
 Direct MySQL output stores the last committed group cursor in the target table
-`__reprint_db_pull_progress_<uuid>`. The UUID makes an accidental name clash
-unlikely and changes whenever the table schema changes. Reprint logs and excludes
+`__reprint_db_pull_progress_<uuid>`. The UUID separates this progress table from site tables and from older
+versions of the progress-table schema. Reprint logs and excludes
 that internal name from the source dump.
 
 File output keeps the same SQL groups by adding a harmless comment after each
@@ -169,8 +180,8 @@ cleanup does not load WordPress or flush an external object cache.
 
 ## Multisite export
 
-These notes explain the selected-site export and URL-mapping implementation.
-For the task and its user-visible limits, use the [multisite guide](../handbook/multisite.md).
+Use this section when changing how one subsite becomes a single-site copy.
+For the commands and destination checks, follow the [multisite guide](https://developer.wordpress.org/reprint/multisite/).
 
 ### Resulting site configuration
 
@@ -218,7 +229,7 @@ Use apply-runtime (included in pull) to write the new wp-config.php. Source
 database credentials, salts, Reprint tokens, network constants, and custom
 bootstrap includes are not used in that configuration.
 
-### Child-site URL mapping and large-network costs
+### Keep links to other sites on the source
 
 Page links follow the selected home/site URL bases. Selecting
 `shop.network.test` rewrites its pages, not pages on `news.network.test`.
@@ -236,8 +247,9 @@ an older source without it still applies the broad selected-base rule.
 The importer saves the list once in a separate, immutable JSON file under the
 remote's pull-state directory. Progress saves contain its file name, not its
 paths. SQL apply keeps the same file across interruptions, even if a later
-preflight finds different paths. Each new apply process loads the list once
-and builds a hash set. Each URL checks its path segments against that set,
+preflight finds different paths. Otherwise identical URLs could be rewritten
+differently before and after an interruption. Each new apply process loads the
+list once and builds a hash set. Each URL checks its path segments against that set,
 stopping at the longest stored path instead of hashing ever-longer prefixes.
 It does not scan the site list. Older list files remain in the state directory;
 keep that directory until the migration is complete.
@@ -252,11 +264,12 @@ The plain-text scanner retains one next match per rule. It searches again only
 when the cursor passes that match. A rule with no remaining match is finished,
 so it does not rescan the rest of a large value for every other URL.
 
-The generated URL map has at most 20 entries. One million other-domain records
+When changing path lookup, test it with a large network. The generated URL map
+has at most 20 entries. One million other-domain records
 do not enlarge preflight. One million matching 20-byte child paths need about
 62 MiB for the PHP list and 86 MiB for the lookup set on PHP 8.4. Building the
-set temporarily holds both. JSON handling also needs space; this is an accepted
-memory cost, not a fixed bound independent of network size. The source uses
+set temporarily holds both. JSON handling also needs space. Account for both lists when estimating
+memory use for a large network. The source uses
 the wpdb adapter with at most 1,000 buffered rows per query. The first query
 uses domain/path filters; it can scan and sort many rows. Further batches scan
 primary-key windows, including non-matches, rather than repeatedly sorting the
@@ -292,7 +305,6 @@ child-site exclusions, its URLs remain unchanged in such text, including
 selected-site URLs. For example, an HTML `href` to `/shop/about` still moves,
 but the same absolute URL in an unsupported plugin field stays remote. Hosts
 without child-site exclusions retain the cautious source-base replacement.
-This fallback no longer scans or copies a path suffix to guess a site's scope.
 
 STYLE bodies use the CSS parser. Non-block markup also keeps raw source-base
 replacement. For source hosts without child-site exclusions, that fallback can
@@ -340,10 +352,9 @@ not remove those users from the site's export.
 Next, a separate stage reads network usermeta for the selected capabilities
 key, adding members with no content. It reads one primary-key window at a time
 and saves last_scanned_usermeta_id. It does not load profile values into PHP.
-There is no second list of content tables to discover or resume.
 
-Users and allowed profiles go last. Membership collection is not entered again
-for either table. Their queries use primary-key lookups into the saved table,
+Users and allowed profiles go last. Do not repeat membership collection when resuming either table; their saved
+user set already identifies which rows to export. Their queries use primary-key lookups into the saved table,
 rather than repeating full comment and link scans per batch. Each membership
 batch and the boundaries before and after this stage have a resume cursor.
 
@@ -375,8 +386,9 @@ Rows use the existing batched, resumable SQL reader, including oversized values.
 
 This uses the plugin convention of building site-local table names from
 `$wpdb->prefix`. A prefix does not prove that a plugin stores only that site's
-private data. The current flow requires network administrator authorization; this rule must not
-be treated as permission to expose arbitrary plugin data to site-only admins.
+private data. Only a network administrator can authorize the export. Do not grant this
+access to a subsite administrator: a plugin may have put other sites' data
+in the same table.
 
 Unnumbered plugin tables such as `network_orders` still stop the pull, even
 when selecting site 1: they may contain main-site or shared network data.

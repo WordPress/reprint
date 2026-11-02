@@ -10,13 +10,13 @@ development environment's PHP binary. If PHP cannot open `reprint.phar`, check
 that your terminal is in the folder where you saved it.
 
 Run `php --version` and `php -m` and compare the output with
-[Requirements and downloads](../requirements/). A missing PHP extension must
+[Requirements and downloads](https://developer.wordpress.org/reprint/requirements/). A missing PHP extension must
 be enabled for the terminal's PHP, which may differ from your web server's PHP.
 
 ## The first command stops after printing a Migration Token
 
 This is expected. The client stops with exit code `4` so an administrator can
-[authorize it](../authorize-client/). After authorization, run the same command
+[authorize it](https://developer.wordpress.org/reprint/authorize-client/). After authorization, run the same command
 again, from the same folder and with the same `--state-dir`.
 
 If authorization still fails, check that you authorized the token printed by

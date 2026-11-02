@@ -22,7 +22,7 @@ site's own needs.
 If PHP is missing, install it with your operating system's package manager or
 use the PHP supplied by your local WordPress environment. In WSL, install PHP
 inside WSL. A missing extension must be enabled for that command-line PHP.
-See [Troubleshooting](../troubleshooting/) if a check fails.
+See [Troubleshooting](https://developer.wordpress.org/reprint/troubleshooting/) if a check fails.
 
 ## Download the client
 
@@ -45,13 +45,13 @@ You need permission to install and configure the
 network administrator must install and configure it. Source-host SSH is not needed.
 
 The WordPress.org package provides downloads, not push. For host-specific
-extension and database checks, see [Prepare a hosting destination](../hosting/).
+extension and database checks, see [Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/).
 
 ## Choose a destination
 
-The [first-copy tutorial](../copy-a-site/) uses SQLite and PHP's local server,
+The [first-copy tutorial](https://developer.wordpress.org/reprint/copy-a-site/) uses SQLite and PHP's local server,
 so no local MySQL server is needed. Some plugins need a MySQL destination;
-see [Database transfer reference](../database-transfers/) when choosing one.
+see [Database transfer reference](https://developer.wordpress.org/reprint/database-transfers/) when choosing one.
 PHP's built-in server is for local development, not a public production site.
 
-Next: [Copy a site to your computer](../copy-a-site/).
+Next: [Copy a site to your computer](https://developer.wordpress.org/reprint/copy-a-site/).

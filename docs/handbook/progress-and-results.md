@@ -2,7 +2,7 @@
 
 Use this reference when your product runs the client or your support team
 reads a migration log. For a working caller example, start with
-[Build with Reprint](../build-with-reprint/). A progress update is not a completed command.
+[Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/). A progress update is not a completed command.
 
 Examples use `$URL` for the source address, `$STATE_DIR` for persistent private
 state, and `$FS_ROOT` for downloaded files. Set those variables in your shell.

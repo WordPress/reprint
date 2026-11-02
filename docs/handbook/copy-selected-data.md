@@ -1,7 +1,7 @@
 # Copy selected files or the database
 
 Use this guide when you need only part of a site rather than another full copy.
-First [install the plugin and authorize the client](../authorize-client/).
+First [install the plugin and authorize the client](https://developer.wordpress.org/reprint/authorize-client/).
 Keep the source address and state directory used for that authorization.
 
 The examples use https://example.com, `./state`, and `./files`. Replace them
@@ -27,7 +27,7 @@ php reprint.phar pull-files https://example.com \
 
 Repeat `--include` and `--exclude` for more source prefixes. Exclusions win.
 Built-in skipped paths cannot be added back with an include rule.
-See [File transfer reference](../file-transfers/) for filters, symlinks, and
+See [File transfer reference](https://developer.wordpress.org/reprint/file-transfers/) for filters, symlinks, and
 host-plugin selection.
 
 Check the selected files in the downloaded tree. This does not make a working
@@ -48,7 +48,7 @@ files or runtime configuration. Applying the database can replace local data;
 save local work before refreshing it. Keep the existing target connection and
 URL choices when resuming an unfinished import.
 
-Use [Database transfer reference](../database-transfers/) to download a SQL
+Use [Database transfer reference](https://developer.wordpress.org/reprint/database-transfers/) to download a SQL
 dump without applying it or to choose a MySQL destination.
 
 After the command completes, open the copied site and check its pages and login.

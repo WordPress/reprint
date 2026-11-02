@@ -3,7 +3,7 @@
 Examples use `$URL` for the authorized source address, `$STATE_DIR` for its
 persistent state directory, and `$FS_ROOT` for downloaded files. Set these in
 your shell first. Keep the state directory outside the filesystem root.
-See [authorization](../authorize-client/) before running remote commands.
+See [authorization](https://developer.wordpress.org/reprint/authorize-client/) before running remote commands.
 
 Use `$FLAT_DIR` for the assembled WordPress directory and `$RUNTIME_DIR` for
 generated configuration. Create the assembled layout first when using
@@ -89,7 +89,7 @@ default for other hosts. WP Cloud support can generate missing image sizes
 in the copy.
 `apply-runtime` removes known host-plugin copies by default, independently of
 the saved download selection. Pass `apply-runtime --include-host-plugins` to
-skip that local cleanup. See [host platform plugins](../file-transfers/) for download selection and cleanup.
+skip that local cleanup. See [host platform plugins](https://developer.wordpress.org/reprint/file-transfers/) for download selection and cleanup.
 Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in
 development server, and WordPress Playground CLI.
 

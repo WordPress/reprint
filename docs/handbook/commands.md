@@ -21,7 +21,7 @@ and `--fs-root`; local-only commands have different requirements.
 | `pull-db` | Preflight, database download, and database apply, without file or runtime changes. |
 | `install-server` | Installation instructions for the source-site plugin; it does not install the plugin remotely. |
 
-Start with [Copy a site](../copy-a-site/) or [Build with Reprint](../build-with-reprint/).
+Start with [Copy a site](https://developer.wordpress.org/reprint/copy-a-site/) or [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/).
 
 ## Access and inspection
 
@@ -34,8 +34,8 @@ Start with [Copy a site](../copy-a-site/) or [Build with Reprint](../build-with-
 | `files-stats` | File counts and sizes from the next remote index. |
 | `db-index` | Database table metadata written to `db-tables.jsonl`. |
 
-See [Authentication](../authentication/), [Preflight](../preflight/), and
-[Progress, results, and exit codes](../progress-and-results/).
+See [Authentication](https://developer.wordpress.org/reprint/authentication/), [Preflight](https://developer.wordpress.org/reprint/preflight/), and
+[Progress, results, and exit codes](https://developer.wordpress.org/reprint/progress-and-results/).
 
 ## Data transfer and preparation
 
@@ -52,8 +52,8 @@ See [Authentication](../authentication/), [Preflight](../preflight/), and
 | `post-process` | Selected hosting cleanup and plugin startup-recovery tasks. |
 | `recover` | A WordPress startup check that can deactivate a failing regular plugin. |
 
-See [File transfers](../file-transfers/), [Database transfers](../database-transfers/),
-[Runtime configuration](../runtime/), and [Prepare a hosting destination](../hosting/).
+See [File transfers](https://developer.wordpress.org/reprint/file-transfers/), [Database transfers](https://developer.wordpress.org/reprint/database-transfers/),
+[Runtime configuration](https://developer.wordpress.org/reprint/runtime/), and [Prepare a hosting destination](https://developer.wordpress.org/reprint/hosting/).
 
 ## Local change inspection and push
 
@@ -79,5 +79,5 @@ site. Do not run commands concurrently against the same state directory.
 
 `--abort` is command-specific: it can discard an unfinished output or checkpoint.
 Read the command's help before using it. It is not a general rollback command.
-See [Copy again or resume](../copy-again/) for the difference between continuing,
+See [Copy again or resume](https://developer.wordpress.org/reprint/copy-again/) for the difference between continuing,
 refreshing, and reopening a copy.
