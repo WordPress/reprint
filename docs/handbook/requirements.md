@@ -14,10 +14,11 @@ php --version
 php -m
 ```
 
-The first-copy tutorial needs `curl`, `hash`, `json`, `mbstring`, `openssl`,
-`PDO`, `pdo_sqlite`, and `zlib`. Allow space for the downloaded files, SQL dump,
-and local database. Your PHP version and extensions must also meet the copied
-site's own needs.
+The copy tutorial needs `curl`, `hash`, `json`, `mbstring`, `openssl`, `PDO`,
+and `zlib`. For SQLite, also enable `pdo_sqlite`. For MySQL, enable `mysqli`
+and have a local MySQL server and an empty destination database ready. Allow
+space for the downloaded files, SQL dump, and local database. Your PHP version
+and extensions must also meet the copied site's own needs.
 
 If PHP is missing, install it with your operating system's package manager or
 use the PHP supplied by your local WordPress environment. In WSL, install PHP
@@ -49,9 +50,10 @@ extension and database checks, see [Prepare a hosting destination](hosting.md).
 
 ## Choose a destination
 
-The [first-copy tutorial](copy-a-site.md) uses SQLite and PHP's local server,
-so no local MySQL server is needed. Some plugins need a MySQL destination;
-see [Database transfer reference](database-transfers.md) when choosing one.
+The [copy tutorial](copy-a-site.md) offers SQLite and MySQL, using PHP's local
+server for the copied site. SQLite needs no separate database server. Choose
+MySQL if a plugin requires it or you want to use your existing local server.
+See [Database transfer reference](database-transfers.md) for other import options.
 PHP's built-in server is for local development, not a public production site.
 
 Next: [Copy a site to your computer](copy-a-site.md).

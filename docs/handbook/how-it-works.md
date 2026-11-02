@@ -77,7 +77,7 @@ Reprint detects known source-host settings separately from generating
 destination server files. Adding a source host does not require a separate
 migration flow for every destination server.
 
-The local-copy tutorial downloads database data, imports it into SQLite,
+The local-copy tutorial downloads database data, imports it into SQLite or MySQL,
 rewrites the site address, and generates configuration for PHP's built-in
 server. Reprint also adjusts known source-host settings for the local runtime.
 Those adjustments do not guarantee that every plugin or external service works

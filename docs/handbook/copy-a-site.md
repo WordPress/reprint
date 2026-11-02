@@ -1,8 +1,8 @@
 # Copy a site to your computer
 
 This tutorial copies one single-site WordPress installation to your computer
-and opens it at http://localhost:8881. It uses SQLite, so you do not need a
-local MySQL server.
+and opens it at http://localhost:8881. Choose SQLite if you do not have a local
+database server, or MySQL if you already use one.
 
 To try Reprint before connecting your own site, follow
 [Try Reprint](try-reprint.md). The steps
@@ -43,14 +43,37 @@ there.
 
 ## 3. Start the copy on your computer
 
-In the same terminal folder, run this command. Replace https://example.com
-with the source site's HTTPS address:
+Choose one of the commands below. Run it in the same terminal folder and
+replace https://example.com with the source site's HTTPS address.
+
+### SQLite
+
+No local database server is needed:
 
 ```sh
 php reprint.phar pull https://example.com \
   --state-dir=./state --fs-root=./files \
   --target-engine=sqlite --new-site-url=http://localhost:8881
 ```
+
+### MySQL
+
+Start your local MySQL server and create an empty database for this copy, such
+as `reprint_copy`. Use an account that can create, change, and remove tables
+in that database. Importing can replace existing tables.
+
+Replace `reprint_user` and `YOUR_PASSWORD` with your local MySQL credentials.
+Change the host and port if your server uses different values:
+
+```sh
+php reprint.phar pull https://example.com \
+  --state-dir=./state --fs-root=./files \
+  --target-engine=mysql --target-host=127.0.0.1 --target-port=3306 \
+  --target-db=reprint_copy --target-user=reprint_user --target-pass='YOUR_PASSWORD' \
+  --new-site-url=http://localhost:8881
+```
+
+### Authorize the client
 
 The client pauses and prints a **Migration Token**. This is expected; you
 need to authorize it before copying starts.
@@ -65,8 +88,8 @@ steps in [Authorize the Reprint client](authorize-client.md), then add
 `--secret='TOKEN'` to the pull command using that connection token.
 
 The client now checks the source, downloads files and database data, imports
-the database into SQLite, rewrites the site URL, and prepares a local server.
-Large sites take longer. Keep the terminal open.
+the database into your chosen local database, rewrites the site URL, and
+prepares a local server. Large sites take longer. Keep the terminal open.
 
 ## 4. Open and check the copy
 
@@ -83,9 +106,9 @@ Check these on the local address:
 3. Images load.
 4. You can sign in at `/wp-admin/` with an account from the source site.
 
-Some plugins need MySQL or services provided by the source host. A completed
-transfer does not establish that every plugin works locally. If a check fails,
-see [Troubleshooting](troubleshooting.md).
+Some plugins need MySQL rather than SQLite, or services provided by the source
+host. A completed transfer does not establish that every plugin works locally.
+If a check fails, see [Troubleshooting](troubleshooting.md).
 
 ## 5. Stop and start the local server
 
@@ -99,8 +122,9 @@ bash state/runtime/start.sh
 Keep this working folder in place, including `state/` and `files/`.
 `state/` contains credentials, transfer progress, the SQL download, and
 generated server files.
-`files/` contains the downloaded site tree, including its local SQLite database.
-Keep both private.
+`files/` contains the downloaded site tree. With SQLite, it also contains the
+local database. With MySQL, the database stays in your local MySQL server;
+keep that server running when using the copy. Keep both folders private.
 
 To resume an interrupted transfer, run the same `pull` command again with the
 same source address and folders. To only restart the local server, use
