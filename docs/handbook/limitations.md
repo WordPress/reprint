@@ -66,13 +66,10 @@ refreshing the database, save anything you changed on the copy. See
   decides what it accepts. MySQL 5.5 is supported as a source, not as a
   destination. See [Database transfers](database-transfers.md).
 - **It does not edit your media or code.** With a new site address, Reprint
-  rewrites the old address throughout the database, including serialized PHP,
-  JSON, and block markup. It also rewrites every `.css` file it downloads,
-  including stylesheets under uploads that the site no longer loads; it does
-  not check which stylesheets are in use. Everything else is copied byte for
-  byte on purpose: images, documents, and other media in uploads arrive
-  identical to the source, and so do PHP, JavaScript, and HTML files. A theme
-  or plugin that writes the old address into its code keeps it. See
+  rewrites the old address in the database and in stylesheets. Images,
+  documents, and other media are copied byte for byte by design, and so are
+  PHP, JavaScript, and HTML files. A theme or plugin that writes the old
+  address into its code keeps it. See
   [Rewrite asset URLs](file-transfers.md#rewrite-asset-urls).
 - **It does not rename files for a different filesystem.** Names ending in a dot
   or space, names that differ only by case, names over the destination's
