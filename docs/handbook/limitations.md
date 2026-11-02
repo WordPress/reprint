@@ -96,9 +96,6 @@ refreshing the database, save anything you changed on the copy. See
 - **The handbook does not cover native Windows PHP for the client.** Run the
   client on macOS, Linux, or Windows Subsystem for Linux. Windows-hosted
   sources are supported. See [Requirements and downloads](requirements.md).
-- **PHP's built-in server is not a production web server.** The generated start
-  script is for checking a copy locally. For a public site, serve the copy with
-  your own web server. See [Runtime configuration](runtime.md).
 
 ## What you do not need
 
