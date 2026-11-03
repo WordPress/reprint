@@ -6633,6 +6633,14 @@ class ImportClient
             );
         }
 
+        // Link mode refuses this through its existing-file check. Copying
+        // would instead replace the pulled core with copies of itself.
+        if ($copy_core_files && realpath($flatten_to) === realpath($local_abspath)) {
+            throw new InvalidArgumentException(
+                "--core-files=copy cannot flatten into the pulled ABSPATH itself: {$local_abspath}",
+            );
+        }
+
         $this->audit_log(
             sprintf(
                 "FLAT-DOCUMENT-ROOT | abspath=%s wp_admin=%s wp_includes=%s " .
@@ -7066,33 +7074,50 @@ class ImportClient
      * Replace $target with a fresh copy of the core entry at $source.
      *
      * The copy is assembled next to the target and renamed into place, so
-     * an interrupted run never leaves a partially copied core directory.
-     * Whatever was at the target before — a symlink from an earlier
-     * --core-files=link run, or an earlier copy — is removed first.
+     * an interrupted run never leaves a partially copied or partially
+     * deleted core directory. Whatever was at the target before — a symlink
+     * from an earlier --core-files=link run, or an earlier copy — is
+     * replaced. Leftovers from an interrupted run are removed first.
      */
     private function flatten_place_copy(string $source, string $target, int &$copied): void
     {
         $temporary_target = $target . ".reprint-tmp";
-        if (is_link($temporary_target) || is_file($temporary_target)) {
-            unlink($temporary_target);
-        } elseif (is_dir($temporary_target)) {
-            $this->remove_directory_recursive($temporary_target);
-        }
+        $previous_target = $target . ".reprint-old";
+        $this->flatten_remove_entry($temporary_target);
+        $this->flatten_remove_entry($previous_target);
 
         $this->flatten_copy_core_tree($source, $temporary_target);
 
-        if (is_link($target) || is_file($target)) {
-            unlink($target);
-        } elseif (is_dir($target)) {
-            $this->remove_directory_recursive($target);
+        // rename() replaces a file or symlink in one step, but it cannot
+        // replace a directory or put a directory where a file is. Such a
+        // target moves aside and is deleted once the copy is in place.
+        $target_is_directory = is_dir($target) && !is_link($target);
+        $target_exists = $target_is_directory || is_link($target) || file_exists($target);
+        if ($target_exists && ($target_is_directory || is_dir($temporary_target))) {
+            if (!rename($target, $previous_target)) {
+                throw new RuntimeException(
+                    "Failed to move the previous core entry aside: {$target}",
+                );
+            }
         }
         if (!rename($temporary_target, $target)) {
             throw new RuntimeException(
                 "Failed to move copied core entry into place: {$target}",
             );
         }
+        $this->flatten_remove_entry($previous_target);
         $this->audit_log("FLAT-DOCUMENT-ROOT | Copied core entry: {$target}");
         ++$copied;
+    }
+
+    /** Remove a file, symlink, or directory tree if it exists. */
+    private function flatten_remove_entry(string $path): void
+    {
+        if (is_link($path) || is_file($path)) {
+            unlink($path);
+        } elseif (is_dir($path)) {
+            $this->remove_directory_recursive($path);
+        }
     }
 
     /**
@@ -16105,6 +16130,7 @@ if (
             'target' => 'core_files',
             'placeholder' => 'MODE',
             'help' => 'How to place WordPress core in the flattened layout (link|copy, default link)',
+            'valid_values' => ['link', 'copy'],
             'commands' => ['pull', 'flat-docroot'],
         ],
 

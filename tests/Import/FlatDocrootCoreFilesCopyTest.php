@@ -139,6 +139,78 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->flatten(['core_files' => 'copy']);
     }
 
+    public function testCopiesDetachedWpAdminAndWpIncludes(): void
+    {
+        $this->createCoreTree($this->fsRoot . '/wordpress/core/7.1.3', '7.1.3');
+        $abspath = $this->fsRoot . '/srv/htdocs';
+        mkdir($abspath . '/wp-content', 0755, true);
+        file_put_contents($abspath . '/index.php', '<?php // site index');
+        $this->writePreflight([
+            'abspath' => '/srv/htdocs',
+            'wp_admin_path' => '/wordpress/core/7.1.3/wp-admin',
+            'wp_includes_path' => '/wordpress/core/7.1.3/wp-includes',
+        ]);
+
+        $this->flatten(['core_files' => 'copy']);
+
+        foreach (['wp-admin', 'wp-includes'] as $directory) {
+            $this->assertFalse(is_link($this->flattenTo . '/' . $directory), "{$directory} should be a real directory");
+        }
+        $this->assertSame('<?php // admin', file_get_contents($this->flattenTo . '/wp-admin/admin.php'));
+        $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+    }
+
+    public function testSwitchingBackToLinkNeedsForce(): void
+    {
+        $this->createWpCloudLayout();
+        $this->flatten(['core_files' => 'copy']);
+
+        try {
+            $this->flatten(['core_files' => 'link']);
+            $this->fail('Replacing copied core with links should require --force');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('--force', $exception->getMessage());
+        }
+
+        $this->flatten(['core_files' => 'link', 'force' => true]);
+
+        $this->assertTrue(is_link($this->flattenTo . '/wp-includes'));
+        $this->assertTrue(is_link($this->flattenTo . '/index.php'));
+    }
+
+    public function testRemovesLeftoversFromAnInterruptedCopy(): void
+    {
+        $this->createWpCloudLayout();
+        $this->flatten(['core_files' => 'copy']);
+        mkdir($this->flattenTo . '/wp-includes.reprint-tmp');
+        file_put_contents($this->flattenTo . '/wp-includes.reprint-tmp/partial.php', '<?php // partial');
+        mkdir($this->flattenTo . '/wp-admin.reprint-old');
+        file_put_contents($this->flattenTo . '/index.php.reprint-tmp', '<?php // partial');
+
+        $this->flatten(['core_files' => 'copy']);
+
+        $this->assertFileDoesNotExist($this->flattenTo . '/wp-includes.reprint-tmp');
+        $this->assertFileDoesNotExist($this->flattenTo . '/wp-admin.reprint-old');
+        $this->assertFileDoesNotExist($this->flattenTo . '/index.php.reprint-tmp');
+        $this->assertFileDoesNotExist($this->flattenTo . '/wp-includes/partial.php');
+        $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+    }
+
+    public function testCopyRefusesToFlattenIntoThePulledAbspath(): void
+    {
+        $this->createWpCloudLayout();
+        $this->flattenTo = $this->fsRoot . '/wordpress/core/7.1.3';
+
+        try {
+            $this->flatten(['core_files' => 'copy']);
+            $this->fail('Copying core onto itself should be rejected');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('ABSPATH', $exception->getMessage());
+        }
+
+        $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+    }
+
     public function testRejectsInvalidCoreFilesValue(): void
     {
         $this->createWpCloudLayout();
