@@ -43,9 +43,9 @@ class FileTreeProducer
      * Checked even when the client skips the index and supplies a path directly.
      * Null leaves the ordinary single-site file rules in place.
      *
-     * @var MultisiteFileSelection|null
+     * @var PullFileSelection|null
      */
-    private $multisite_selection;
+    private $file_selection;
 
     /** Ephemeral index into $paths; NOT stored in cursor. */
     /** @var int */
@@ -78,16 +78,16 @@ class FileTreeProducer
      *     @type int    $chunk_size Bytes per file chunk (default 5MB).
      *     @type bool   $index_only Emit index entries instead of file contents.
      *     @type string $cursor     JSON cursor string for resumption.
-     *     @type MultisiteFileSelection|null $multisite_selection Shared code and
-     *         selected uploads allowed by the source WordPress site. Default null.
+     *     @type PullFileSelection|null $file_selection Trusted source-side file selection. Default null.
      *     @type array  $paths      Paths to stream (required).
      * }
      */
     public function __construct($directories, array $options = [])
     {
-        $this->multisite_selection = $options['multisite_selection'] ?? null;
-        if ($this->multisite_selection !== null && !$this->multisite_selection instanceof MultisiteFileSelection) {
-            throw new InvalidArgumentException('multisite_selection must be a trusted MultisiteFileSelection object.');
+        // Older direct callers supply their multisite selection under its original name.
+        $this->file_selection = $options['file_selection'] ?? $options['multisite_selection'] ?? null;
+        if ($this->file_selection !== null && !$this->file_selection instanceof PullFileSelection) {
+            throw new InvalidArgumentException('file_selection must be a trusted PullFileSelection object.');
         }
         $this->directories = $this->normalize_directories($directories);
         $this->chunk_size = $options["chunk_size"] ?? self::DEFAULT_CHUNK_SIZE;
@@ -162,9 +162,9 @@ class FileTreeProducer
 
         // Check before the finished-phase return: a completed cursor has no
         // file path left to check, but it must still belong to this selection.
-        $selection_identity = $this->multisite_selection === null ? null : $this->multisite_selection->get_identity();
+        $selection_identity = $this->file_selection === null ? null : $this->file_selection->get_identity();
         if (( $cursor['multisite_selection'] ?? null ) !== $selection_identity) {
-            throw new InvalidArgumentException('Cannot resume file fetch: multisite selection changed.');
+            throw new InvalidArgumentException('Cannot resume file fetch: pull file selection changed.');
         }
         $this->phase = $cursor["phase"] ?? self::PHASE_STREAMING;
         $this->filesystem_root = isset($cursor["root"])
@@ -206,8 +206,8 @@ class FileTreeProducer
                 'File cursor path must be an absolute filesystem path without NUL bytes when resuming file bytes; received ' . json_encode($path) . '.'
             );
         }
-        if ($path !== null && $this->multisite_selection !== null) {
-            $this->multisite_selection->assert_path_allowed($path);
+        if ($path !== null && $this->file_selection !== null && ( $byte_offset > 0 || $this->file_selection instanceof MultisiteFileSelection )) {
+            $this->file_selection->assert_path_allowed($path);
         }
         $ctime = $cursor["ctime"] ?? null;
 
@@ -357,8 +357,11 @@ class FileTreeProducer
             $path = $this->paths[$this->paths_position];
             $this->paths_position++;
 
-            if ($this->multisite_selection !== null) {
-                $this->multisite_selection->assert_path_allowed($path);
+            if ($this->file_selection !== null && (
+                $this->file_selection instanceof MultisiteFileSelection
+                || Utils::is_absolute_path($path, Utils::native_path_format())
+            )) {
+                $this->file_selection->assert_path_allowed($path);
             }
             $resolved_path = $this->resolve_path($path);
             if ($resolved_path === null) {
@@ -372,6 +375,9 @@ class FileTreeProducer
                 return null;
             }
 
+            if ($this->file_selection !== null && $resolved_path !== $path) {
+                $this->file_selection->assert_path_allowed($resolved_path);
+            }
             $info = $this->lstat_path($resolved_path);
             if ($info === null) {
                 continue;
@@ -460,8 +466,8 @@ class FileTreeProducer
     private function stream_file_chunk(array $file): void
     {
         if ($this->streaming_file_handle === null) {
-            if ($this->multisite_selection !== null) {
-                $this->multisite_selection->assert_path_allowed($file["path"]);
+            if ($this->file_selection !== null) {
+                $this->file_selection->assert_path_allowed($file["path"]);
             }
             clearstatcache(true, $file["path"]);
             $pre_stat = @Utils::source_lstat($file["path"]);
@@ -634,7 +640,7 @@ class FileTreeProducer
         if ($this->phase === self::PHASE_FINISHED) {
             return json_encode([
                 "phase" => self::PHASE_FINISHED,
-                "multisite_selection" => $this->multisite_selection === null ? null : $this->multisite_selection->get_identity(),
+                "multisite_selection" => $this->file_selection === null ? null : $this->file_selection->get_identity(),
                 "root" => base64_encode($this->filesystem_root),
             ]);
         }
@@ -644,8 +650,8 @@ class FileTreeProducer
             "root" => base64_encode($this->filesystem_root),
         ];
 
-        if ($this->multisite_selection !== null) {
-            $cursor['multisite_selection'] = $this->multisite_selection->get_identity();
+        if ($this->file_selection !== null) {
+            $cursor['multisite_selection'] = $this->file_selection->get_identity();
         }
         if ($this->current_file_meta !== null) {
             $cursor["path"] = base64_encode($this->current_file_meta["path"]);

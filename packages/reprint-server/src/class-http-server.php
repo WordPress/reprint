@@ -52,8 +52,20 @@ final class HTTPServer {
     /** @var array|null Trusted WordPress source metadata, never read from the request. */
     private $multisite;
 
+    /** @var ExcludedPullPaths|null Trusted paths excluded by the source host. */
+    private $pull_file_selection;
+
     public function __construct(array $options = []) {
         $this->multisite = $options['multisite'] ?? null;
+        $excluded_paths = array_key_exists('pull_excluded_paths', $options) ? $options['pull_excluded_paths'] : [];
+        if (!is_array($excluded_paths)) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Trusted configuration error, not HTML.
+            throw new InvalidArgumentException('pull_excluded_paths must be an array; observed ' . gettype($excluded_paths) . '.');
+        }
+        if ($excluded_paths !== [] && $this->multisite !== null) {
+            throw new InvalidArgumentException('pull_excluded_paths is not supported for multisite exports.');
+        }
+        $this->pull_file_selection = $excluded_paths === [] ? null : new ExcludedPullPaths($excluded_paths);
         $this->budget_factory = $options['budget_factory'] ?? [$this, 'default_budget_factory'];
         $this->body_reader = $options['body_reader'] ?? static function (): string {
             $body = file_get_contents('php://input');
@@ -313,7 +325,10 @@ final class HTTPServer {
      */
     public function normalize_config(array $config, array $server = []): array {
         // HTTP callers upload file_list; file_list_path is for direct PHP calls.
-        unset($config['_multisite'], $config['file_list_path']);
+        unset($config['_multisite'], $config['_pull_file_selection'], $config['file_list_path']);
+        if ($this->pull_file_selection !== null) {
+            $config['_pull_file_selection'] = $this->pull_file_selection;
+        }
         if ($this->multisite !== null) {
             // This existing wire value names the selected-site export format.
             // It does not require the client to create a multisite target.

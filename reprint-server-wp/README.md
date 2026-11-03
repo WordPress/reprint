@@ -150,6 +150,24 @@ shows its keys read-only and refuses enrollment. Removing a key from the table
 revokes its push grant with it. Keys from `public-keys.php` carry no grant, so
 push to such a site needs the managed policy below.
 
+## Exclude source files from pull
+
+A must-use plugin can exclude specific paths from the single-site file index
+and downloads. Supply remote absolute paths, as PHP sees them on the source:
+
+```php
+add_filter('reprint_server_api_options', static function (array $options): array {
+    $options['pull_excluded_paths'] = ['/srv/htdocs/wp-config.php'];
+    return $options;
+});
+```
+
+The server excludes each path and its descendants, including symlinks that
+resolve to an excluded path. Unresolvable paths are omitted when exclusions
+are active. A file cursor made under another selection must be restarted.
+This does not redact database rows or prevent downloads of other files, such
+as a separate backup copy of an excluded file.
+
 ## Push access
 
 Connection tokens and enrolled keys authorize downloads only by default. This

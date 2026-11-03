@@ -108,7 +108,7 @@ class MultisiteFileSelectionTest extends TestCase
         $this->assertGreaterThan(1, $chunks);
         $options['multisite_selection'] = $this->selection(1);
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('multisite selection changed');
+        $this->expectExceptionMessage('pull file selection changed');
         new FileTreeProducer([$this->root], $options);
     }
 
@@ -145,7 +145,7 @@ class MultisiteFileSelectionTest extends TestCase
         $cursor = json_encode($processor->get_cursor());
         $processor->close();
         $this->expectException(InvalidArgumentException::class);
-        $this->expectExceptionMessage('multisite selection changed');
+        $this->expectExceptionMessage('pull file selection changed');
         FileIndexProcessor::resume($roots, $cursor, false, '', $this->selection(1));
     }
 
