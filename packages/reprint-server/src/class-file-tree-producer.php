@@ -217,7 +217,8 @@ class FileTreeProducer
         if ($path !== null && $byte_offset > 0) {
             // Resuming mid-file.
             clearstatcache(true, $path);
-            $size = @filesize(Utils::source_io_path($path));
+            $source_path = $this->pull_file_source_path($path);
+            $size = @filesize(Utils::source_io_path($source_path));
             if ($size === false) {
                 // File disappeared; treat as completed.
                 $this->current_file_meta = null;
@@ -226,6 +227,7 @@ class FileTreeProducer
             } else {
                 $this->current_file_meta = [
                     "path" => $path,
+                    "source_path" => $source_path,
                     "ctime" => $ctime,
                     "size" => $size,
                 ];
@@ -372,8 +374,8 @@ class FileTreeProducer
                 return null;
             }
 
-            $this->assert_pull_file_allowed($resolved_path);
-            $info = $this->lstat_path($resolved_path);
+            $source_path = $this->pull_file_source_path($resolved_path);
+            $info = $this->lstat_path($source_path);
             if ($info === null) {
                 continue;
             }
@@ -410,6 +412,7 @@ class FileTreeProducer
                 }
                 $this->current_file_meta = [
                     "path" => $resolved_path,
+                    "source_path" => $source_path,
                     "ctime" => $ctime,
                     "size" => $size,
                 ];
@@ -460,13 +463,13 @@ class FileTreeProducer
      */
     private function stream_file_chunk(array $file): void
     {
+        $source_path = $file["source_path"];
         if ($this->streaming_file_handle === null) {
             if ($this->multisite_selection !== null) {
                 $this->multisite_selection->assert_path_allowed($file["path"]);
             }
-            clearstatcache(true, $file["path"]);
-            $this->assert_pull_file_allowed($file["path"]);
-            $pre_stat = @Utils::source_lstat($file["path"]);
+            clearstatcache(true, $source_path);
+            $pre_stat = @Utils::source_lstat($source_path);
             if ($pre_stat === false || (($pre_stat["mode"] & 0170000) !== 0100000)) {
                 $this->streaming_file_handle = null;
                 $this->current_file_meta = null;
@@ -483,7 +486,7 @@ class FileTreeProducer
                 return;
             }
 
-            $this->streaming_file_handle = @fopen(Utils::source_io_path($file["path"]), "r");
+            $this->streaming_file_handle = @fopen(Utils::source_io_path($source_path), "r");
             if (!$this->streaming_file_handle) {
                 $this->streaming_file_handle = null;
                 $this->current_file_meta = null;
@@ -549,8 +552,8 @@ class FileTreeProducer
         $error_type = "file_changed";
 
         // Detect whether the file changed while we were reading it.
-        clearstatcache(true, $file["path"]);
-        $stat = @stat(Utils::source_io_path($file["path"]));
+        clearstatcache(true, $source_path);
+        $stat = @stat(Utils::source_io_path($source_path));
         if ($stat === false) {
             $changed = true;
             $error_type = "file_missing";
@@ -611,12 +614,14 @@ class FileTreeProducer
         }
     }
 
-    private function assert_pull_file_allowed(string $path): void
+    private function pull_file_source_path(string $path): string
     {
-        if (Utils::is_pull_file_excluded($path)) {
+        $source_path = Utils::pull_file_source_path($path);
+        if ($source_path === null) {
             // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, not HTML.
             throw new InvalidArgumentException('Source file is excluded from pull: ' . $path);
         }
+        return $source_path;
     }
 
     /**

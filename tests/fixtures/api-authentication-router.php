@@ -17,9 +17,12 @@ if (!is_array($reprint_auth_test_configuration)) {
 }
 
 if (isset($reprint_auth_test_configuration['excluded_pull_file'])) {
-    function reprint_exclude_pull_file(string $path): bool {
+    function reprint_pull_file_override(string $path) {
         global $reprint_auth_test_configuration;
-        return $path === $reprint_auth_test_configuration['excluded_pull_file'];
+        if ($path === $reprint_auth_test_configuration['excluded_pull_file']) {
+            return $reprint_auth_test_configuration['replacement_pull_file'] ?? true;
+        }
+        return false;
     }
 }
 

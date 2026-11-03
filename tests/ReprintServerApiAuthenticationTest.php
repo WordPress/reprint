@@ -55,7 +55,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
             proc_terminate($this->server_process);
             proc_close($this->server_process);
         }
-        foreach (['/credentials/secret.php', '/configuration.json', '/server.log', '/docroot/config-link.php', '/docroot/wp-config.php', '/docroot/public.txt'] as $file) {
+        foreach (['/credentials/secret.php', '/configuration.json', '/server.log', '/docroot/config-link.php', '/docroot/wp-config.php', '/docroot/public.txt', '/demo-config.php'] as $file) {
             if (file_exists($this->root . $file)) {
                 unlink($this->root . $file);
             }
@@ -346,12 +346,21 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $this->assertSame('client_update_required', $response['body']['reason']);
     }
 
-    public function testPullExclusionsHideFilesFromTheIndexAndDenyDirectDownloads(): void
+    public static function pullFileOverrides(): array
+    {
+        return ['exclude' => [false], 'replace' => [true]];
+    }
+
+    #[\PHPUnit\Framework\Attributes\DataProvider('pullFileOverrides')]
+    public function testPullFileOverride(bool $replace): void
     {
         $root = realpath($this->root . '/docroot');
         $this->assertIsString($root);
         $protected = $root . '/wp-config.php';
         $alias = $root . '/config-link.php';
+        $replacement = dirname($root) . '/demo-config.php';
+        $replacement_bytes = "<?php /* demo-only config */\n";
+        file_put_contents($replacement, $replacement_bytes);
         $public = $root . '/public.txt';
         file_put_contents($protected, 'protected-config-bytes');
         file_put_contents($public, 'public-demo-bytes');
@@ -361,6 +370,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         $this->startServer([
             'options' => $this->keyOptions($key_client, false),
             'excluded_pull_file' => $protected,
+            'replacement_pull_file' => $replace ? $replacement : null,
         ]);
         $index_url = $this->endpointUrl('file_index');
         $index_request = json_encode([
@@ -374,7 +384,16 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         );
         $this->assertSame(200, $index['status']);
         $this->assertStringContainsString(base64_encode($public), $index['body']);
-        $this->assertStringNotContainsString(base64_encode($protected), $index['body']);
+        if ($replace) {
+            $this->assertStringContainsString(
+                '"path":"' . base64_encode($protected) . '","ctime":' . filectime($replacement)
+                    . ',"size":' . strlen($replacement_bytes) . ',"type":"file"',
+                $index['body']
+            );
+        } else {
+            $this->assertStringNotContainsString(base64_encode($protected), $index['body']);
+        }
+        $this->assertStringNotContainsString(base64_encode($replacement), $index['body']);
         $this->assertStringNotContainsString(base64_encode($alias), $index['body']);
 
         $fetch_url = $this->endpointUrl('file_fetch');
@@ -400,6 +419,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
                 $cursor = json_decode( (string) base64_decode($matches[1], true), true, 512, JSON_THROW_ON_ERROR);
                 $cursor['path'] = base64_encode($protected);
                 $cursor['bytes'] = 1;
+                $cursor['ctime'] = filectime($replacement);
                 $resumed = $this->requestBytes(
                     $key_client->get_auth_headers('POST', $fetch_url) + [
                         'Content-Type' => 'multipart/form-data; boundary=reprint-test',
@@ -409,12 +429,32 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
                     'POST',
                     $body
                 );
-                $this->assertStringContainsString('excluded from pull', $resumed['body']);
+                $this->assertStringContainsString(
+                    $replace ? substr($replacement_bytes, 1) : 'excluded from pull',
+                    $resumed['body']
+                );
                 $this->assertStringNotContainsString('rotected-config-bytes', $resumed['body']);
             } else {
                 $this->assertStringNotContainsString('protected-config-bytes', $fetch['body'], $requested);
-                $this->assertStringContainsString('excluded from pull', $fetch['body'], $requested);
+                $this->assertStringContainsString(
+                    $replace ? $replacement_bytes : 'excluded from pull',
+                    $fetch['body'],
+                    $requested
+                );
             }
+        }
+
+        if ($replace) {
+            unlink($replacement);
+            $unavailable = $this->requestBytes(
+                $key_client->get_auth_headers('POST', $fetch_url)
+                    + ['Content-Type' => 'multipart/form-data; boundary=reprint-test'],
+                $fetch_url,
+                'POST',
+                $body
+            );
+            $this->assertStringContainsString('Pull replacement is not a readable regular file', $unavailable['body']);
+            $this->assertStringNotContainsString('protected-config-bytes', $unavailable['body']);
         }
     }
 

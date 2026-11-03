@@ -3279,8 +3279,22 @@ function endpoint_file_index(
             switch ($file_index->get_step_status()) {
                 case FileIndexProcessor::STATUS_INDEXED:
                     foreach ($file_index->get_index_entries() as $index_entry) {
-                        if ($index_entry['type'] !== 'dir' && Utils::is_pull_file_excluded($index_entry['path'])) {
-                            continue;
+                        if ($index_entry['type'] !== 'dir') {
+                            $source_path = Utils::pull_file_source_path($index_entry['path']);
+                            if ($source_path === null) {
+                                continue;
+                            }
+                            if ($source_path !== $index_entry['path']) {
+                                if ($index_entry['type'] === 'link') {
+                                    continue;
+                                }
+                                $stat = Utils::source_lstat($source_path);
+                                if ($stat === false || ( $stat['mode'] & 0170000 ) !== 0100000) {
+                                    throw new RuntimeException('Cannot inspect pull replacement for ' . $index_entry['path']);
+                                }
+                                $index_entry['size'] = $stat['size'];
+                                $index_entry['ctime'] = $stat['ctime'];
+                            }
                         }
                         $batch_items[] = $index_entry;
                     }
