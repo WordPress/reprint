@@ -5,7 +5,7 @@ namespace WordPress\Reprint\Server;
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol errors, not HTML.
 
 /** Shared WordPress code and one site's uploads, without sibling upload trees. */
-class MultisiteFileSelection {
+class MultisiteFileSelection implements PullFileSelection {
 
     /**
      * WordPress context for the site selected by the remote Reprint API URL.

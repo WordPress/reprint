@@ -55,7 +55,7 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
             proc_terminate($this->server_process);
             proc_close($this->server_process);
         }
-        foreach (['/credentials/secret.php', '/configuration.json', '/server.log'] as $file) {
+        foreach (['/credentials/secret.php', '/configuration.json', '/server.log', '/docroot/config-link.php', '/docroot/wp-config.php', '/docroot/public.txt'] as $file) {
             if (file_exists($this->root . $file)) {
                 unlink($this->root . $file);
             }
@@ -347,6 +347,81 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
     }
 
     /** @param array{status:int,body:array<string,mixed>} $response */
+    public function testPullExclusionsHideFilesFromTheIndexAndDenyDirectDownloads(): void
+    {
+        $root = realpath($this->root . '/docroot');
+        $this->assertIsString($root);
+        $protected = $root . '/wp-config.php';
+        $alias = $root . '/config-link.php';
+        $public = $root . '/public.txt';
+        file_put_contents($protected, 'protected-config-bytes');
+        file_put_contents($public, 'public-demo-bytes');
+        $this->assertTrue(symlink($protected, $alias));
+
+        $key_client = $this->newKeyClient();
+        $this->startServer([
+            'options' => $this->keyOptions($key_client, false),
+            'api_options' => ['pull_excluded_paths' => [$protected]],
+        ]);
+        $index_url = $this->endpointUrl('file_index');
+        $index_request = json_encode([
+            'directory' => $root, 'list_dir' => $root, 'follow_symlinks' => true,
+            '_pull_file_selection' => null, 'pull_excluded_paths' => [],
+        ], JSON_THROW_ON_ERROR);
+        $index = $this->requestBytes(
+            $key_client->get_auth_headers('POST', $index_url) + ['Content-Type' => 'application/json'],
+            $index_url,
+            'POST',
+            $index_request
+        );
+        $this->assertSame(200, $index['status']);
+        $this->assertStringContainsString(base64_encode($public), $index['body']);
+        $this->assertStringNotContainsString(base64_encode($protected), $index['body']);
+        $this->assertStringNotContainsString(base64_encode($alias), $index['body']);
+
+        $fetch_url = $this->endpointUrl('file_fetch');
+        foreach ([$public, $protected, $alias, 'wp-config.php', $root . '/./wp-config.php'] as $requested) {
+            $file_list = json_encode([['path' => base64_encode($requested)]], JSON_THROW_ON_ERROR);
+            $body = "--reprint-test\r\nContent-Disposition: form-data; name=\"directory\"\r\n\r\n"
+                . $root . "\r\n--reprint-test\r\n"
+                . "Content-Disposition: form-data; name=\"file_list\"; filename=\"paths.json\"\r\n\r\n"
+                . $file_list . "\r\n--reprint-test--\r\n";
+            $fetch = $this->requestBytes(
+                $key_client->get_auth_headers('POST', $fetch_url)
+                    + ['Content-Type' => 'multipart/form-data; boundary=reprint-test'],
+                $fetch_url,
+                'POST',
+                $body
+            );
+            if ($requested === $public) {
+                $this->assertSame(200, $fetch['status']);
+                $this->assertStringContainsString('public-demo-bytes', $fetch['body']);
+
+                // A caller can edit a real cursor, including the path and byte
+                // offset, without changing the source selection fingerprint.
+                $this->assertSame(1, preg_match('/^X-Cursor: (\S+)/mi', $fetch['body'], $matches));
+                $cursor = json_decode( (string) base64_decode($matches[1], true), true, 512, JSON_THROW_ON_ERROR);
+                $cursor['path'] = base64_encode($protected);
+                $cursor['bytes'] = 1;
+                $resumed = $this->requestBytes(
+                    $key_client->get_auth_headers('POST', $fetch_url) + [
+                        'Content-Type' => 'multipart/form-data; boundary=reprint-test',
+                        'X-Export-Cursor' => base64_encode(json_encode($cursor, JSON_THROW_ON_ERROR)),
+                    ],
+                    $fetch_url,
+                    'POST',
+                    $body
+                );
+                $this->assertSame(400, $resumed['status']);
+                $this->assertStringContainsString('excluded from pull', $resumed['body']);
+                $this->assertStringNotContainsString('rotected-config-bytes', $resumed['body']);
+            } else {
+                $this->assertStringNotContainsString('protected-config-bytes', $fetch['body'], $requested);
+                $this->assertStringContainsString('excluded from pull', $fetch['body'], $requested);
+            }
+        }
+    }
+
     private function assertReachedDispatcher(array $response): void
     {
         $this->assertSame(400, $response['status']);
@@ -413,6 +488,18 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
      */
     private function request(array $headers, ?string $url = null, string $http_method = 'GET', string $body = ''): array
     {
+        $response = $this->requestBytes($headers, $url, $http_method, $body);
+        $decoded = json_decode($response['body'], true);
+        $this->assertIsArray($decoded, $response['body']);
+        return ['status' => $response['status'], 'body' => $decoded];
+    }
+
+    /**
+     * @param array<string,string> $headers Name => value.
+     * @return array{status:int,body:string}
+     */
+    private function requestBytes(array $headers, ?string $url, string $http_method, string $body): array
+    {
         $header_lines = [];
         foreach ($headers as $name => $value) {
             $header_lines[] = $name . ': ' . $value;
@@ -431,9 +518,11 @@ final class ReprintServerApiAuthenticationTest extends TestCase {
         // phpcs:ignore WordPress.PHP.DiscouragedPHPFunctions.runtime_configuration_http_response_header -- Set by the HTTP stream wrapper above.
         $status_line = $http_response_header[0] ?? '';
         $this->assertSame(1, preg_match('#^HTTP/\S+ (\d{3})#', $status_line, $matches), $status_line);
-        $decoded = json_decode($response_body, true);
-        $this->assertIsArray($decoded, $response_body);
-        return ['status' => (int) $matches[1], 'body' => $decoded];
+        if (substr($response_body, 0, 2) === "\x1f\x8b") {
+            $response_body = gzdecode($response_body);
+            $this->assertIsString($response_body);
+        }
+        return ['status' => (int) $matches[1], 'body' => $response_body];
     }
 
     /**

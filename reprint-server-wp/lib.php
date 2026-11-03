@@ -535,6 +535,8 @@ function update_push_authorization(bool $enabled): bool {
  *                                  owns the whole decision. Defaults to
  *                                  RequestAuthenticator with the stored
  *                                  connection token and enrolled keys.
+ *     @type string[] $pull_excluded_paths Optional. Remote absolute file or
+ *                                        directory paths omitted from pull.
  *     @type string $docroot Optional. Document root for push. Defaults
  *                           to the server's DOCUMENT_ROOT. The configured path
  *                           must resolve to an existing directory.
@@ -553,6 +555,7 @@ function update_push_authorization(bool $enabled): bool {
  * @phpstan-param array{
  *     database_push?:bool,
  *     authenticate?:callable,
+ *     pull_excluded_paths?:string[],
  *     docroot?:string,
  *     reprint_directory?:string,
  *     excluded_paths?:string[],
@@ -745,6 +748,9 @@ function handle_api_request(array $options = []): void {
     // -- Dispatch --
     try {
         $server_options = ['default_directory' => ABSPATH];
+        if (array_key_exists('pull_excluded_paths', $options)) {
+            $server_options['pull_excluded_paths'] = $options['pull_excluded_paths'];
+        }
         if (function_exists('is_multisite') && is_multisite()) {
             require_once __DIR__ . '/wordpress/multisite.php';
             $server_options['multisite'] = get_multisite_export_context();

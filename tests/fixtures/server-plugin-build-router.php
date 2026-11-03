@@ -68,6 +68,7 @@ function apply_filters($name, $value) {
             'docroot' => getenv('REPRINT_TEST_DOCROOT'),
             'reprint_directory' => getenv('REPRINT_TEST_DOCROOT') . '-push-state',
             'database_push' => true,
+            'pull_excluded_paths' => [getenv('REPRINT_TEST_DOCROOT') . '/wp-config.php'],
         ];
     }
     return $value;
