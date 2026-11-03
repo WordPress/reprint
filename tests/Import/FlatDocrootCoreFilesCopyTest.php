@@ -211,6 +211,36 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
     }
 
+    public function testKeepsSiteConfigFilesLinkedButCopiesSampleConfig(): void
+    {
+        $abspath = $this->fsRoot . '/var/www/html';
+        $this->createCoreTree($abspath, '7.1.3');
+        file_put_contents($abspath . '/wp-config-sample.php', '<?php // sample');
+        file_put_contents($abspath . '/wp-config-local.php', '<?php // local settings');
+        $this->writePreflight(['abspath' => '/var/www/html']);
+
+        $this->flatten(['core_files' => 'copy']);
+
+        $this->assertFalse(is_link($this->flattenTo . '/wp-config-sample.php'), 'wp-config-sample.php ships with core');
+        $this->assertTrue(is_link($this->flattenTo . '/wp-config-local.php'), 'wp-config-local.php belongs to the site');
+    }
+
+    public function testKeepsCoreEntriesThatAreSymlinksOnTheSourceLinked(): void
+    {
+        $this->createCoreTree($this->fsRoot . '/srv/htdocs/__wp__', '7.1.3');
+        $abspath = $this->fsRoot . '/srv/htdocs';
+        unlink($abspath . '/__wp__/index.php');
+        symlink('__wp__/wp-load.php', $abspath . '/wp-load.php');
+        file_put_contents($abspath . '/index.php', '<?php // site index');
+        $this->writePreflight(['abspath' => '/srv/htdocs']);
+
+        $this->flatten(['core_files' => 'copy']);
+
+        $this->assertTrue(is_link($this->flattenTo . '/wp-load.php'), 'a symlinked core entry should stay a link');
+        $this->assertSame('<?php // wp-load', file_get_contents($this->flattenTo . '/wp-load.php'));
+        $this->assertFalse(is_link($this->flattenTo . '/index.php'));
+    }
+
     public function testRejectsInvalidCoreFilesValue(): void
     {
         $this->createWpCloudLayout();

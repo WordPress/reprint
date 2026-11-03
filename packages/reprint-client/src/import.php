@@ -6699,7 +6699,9 @@ class ImportClient
 
             $source = wp_join_unix_paths($local_abspath, $entry);
             $target = wp_join_unix_paths($flatten_to, $entry);
-            if ($copy_core_files && self::flatten_is_core_entry($entry)) {
+            // A core entry that is itself a symlink on the source stays a
+            // link, as in link mode.
+            if ($copy_core_files && self::flatten_is_core_entry($entry) && !is_link($source)) {
                 $this->flatten_place_copy($source, $target, $copied);
                 continue;
             }
@@ -6724,7 +6726,7 @@ class ImportClient
         }
         foreach ($detached_core_directories as $entry => $source) {
             $target = wp_join_unix_paths($flatten_to, $entry);
-            if ($copy_core_files) {
+            if ($copy_core_files && !is_link($source)) {
                 $this->flatten_place_copy($source, $target, $copied);
                 continue;
             }
@@ -7064,8 +7066,12 @@ class ImportClient
         if (in_array($entry, ["wp-admin", "wp-includes", "index.php", "xmlrpc.php", "license.txt", "readme.html"], true)) {
             return true;
         }
-        // wp-config-sample.php ships with core; wp-config.php belongs to the site.
-        return $entry !== "wp-config.php"
+        // wp-config-sample.php ships with core. wp-config.php and the files
+        // it often requires (wp-config-local.php, ...) belong to the site.
+        if ($entry === "wp-config-sample.php") {
+            return true;
+        }
+        return strncmp($entry, "wp-config", 9) !== 0
             && strncmp($entry, "wp-", 3) === 0
             && substr($entry, -4) === ".php";
     }
@@ -17063,10 +17069,12 @@ if (
                 "\n" .
                 "--core-files=copy copies WordPress core (wp-admin, wp-includes,\n" .
                 "index.php, xmlrpc.php, license.txt, readme.html, and wp-*.php\n" .
-                "except wp-config.php) instead of linking it. Every run replaces\n" .
-                "the copy, so local edits to core are discarded and never reach\n" .
-                "--fs-root. wp-content, wp-config.php, and other site files stay\n" .
-                "linked.\n",
+                "other than wp-config*.php, though wp-config-sample.php is core)\n" .
+                "instead of linking it. Every run replaces the copy, so local\n" .
+                "edits to core are discarded and never reach --fs-root.\n" .
+                "wp-content, wp-config.php and files like wp-config-local.php,\n" .
+                "other site files, and core entries that are symlinks on the\n" .
+                "source stay linked.\n",
             "extra" => null,
         ],
         "merge-wp-content" => [
