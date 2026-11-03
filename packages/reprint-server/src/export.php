@@ -3193,8 +3193,10 @@ function endpoint_file_index(
     // requests so path type transitions (symlink/file/dir) are seen correctly.
     clearstatcache(true);
 
-    $file_selection = $config['_pull_file_selection']
-        ?? ( isset($config['_multisite']) ? new MultisiteFileSelection($config['_multisite']) : null );
+    $file_selection = $config['_pull_file_selection'] ?? null;
+    if ($file_selection === null && isset($config['_multisite'])) {
+        $file_selection = new MultisiteFileSelection($config['_multisite']);
+    }
     $file_index_roots = resolve_file_index_roots($config);
     $batch_size = require_int_range(
         "batch_size",
@@ -3571,8 +3573,10 @@ function endpoint_file_fetch(
         $sync_options["cursor"] = $config["cursor"];
     }
 
-    $sync_options['file_selection'] = $config['_pull_file_selection']
-        ?? ( isset($config['_multisite']) ? new MultisiteFileSelection($config['_multisite']) : null );
+    $sync_options['file_selection'] = $config['_pull_file_selection'] ?? null;
+    if ($sync_options['file_selection'] === null && isset($config['_multisite'])) {
+        $sync_options['file_selection'] = new MultisiteFileSelection($config['_multisite']);
+    }
     $producer = new FileTreeProducer($directories, $sync_options);
     return stream_file_producer(
         $producer,
