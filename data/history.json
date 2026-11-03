@@ -49724,6 +49724,223 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "5f36baab5eebda0aaa7d6c86cd3361fcc3740ff9",
+      "shortSha": "5f36baa",
+      "date": "2026-11-03T17:22:32+01:00",
+      "message": "[PHP] Let sources exclude or replace files in pulls (#976)",
+      "author": "Adam Zieliński",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.12",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "preflightImporter": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 158.8689720000002,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 10553.998107,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 40465.758543,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 56200.58149900001,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 104.83720399999584,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 52144.91634599998,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 558083.537427,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 156.10957400000188,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 109.10471599991433,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 6360.420537999948,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-html",
+          "elapsedMs": 128.501293,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-style-elements",
+          "elapsedMs": 38.447241,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-style-large-value",
+          "elapsedMs": 347.427442,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-literal-urls",
+          "elapsedMs": 47.686607,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-nested-html",
+          "elapsedMs": 49.102052,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-repeated-urls",
+          "elapsedMs": 48.579072,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-escaped-quotes",
+          "elapsedMs": 175.140947,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-encoded-shortcodes",
+          "elapsedMs": 333.357911,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-no-source-urls",
+          "elapsedMs": 1.55489,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-serialized-options",
+          "elapsedMs": 33.267149,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-html",
+          "elapsedMs": 80.395859,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-style-elements",
+          "elapsedMs": 108.434659,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-style-large-value",
+          "elapsedMs": 382.873594,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-literal-urls",
+          "elapsedMs": 54.765196,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-nested-html",
+          "elapsedMs": 117.757288,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-repeated-urls",
+          "elapsedMs": 94.985474,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-escaped-quotes",
+          "elapsedMs": 119.191139,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-encoded-shortcodes",
+          "elapsedMs": 269.426924,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-no-source-urls",
+          "elapsedMs": 1.634957,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-serialized-options",
+          "elapsedMs": 34.040406,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-style-elements",
+          "elapsedMs": 108.684373,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-blocks-nested-html",
+          "elapsedMs": 119.202822,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-blocks-repeated-urls",
+          "elapsedMs": 94.832105,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
