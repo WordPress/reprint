@@ -46,9 +46,10 @@ final class HandbookManifestTest extends TestCase {
             $sources[$source] = file_get_contents($docs_directory . '/' . $source);
             $this->assertStringStartsWith('# ' . $page['title'] . "\n", $sources[$source]);
             $this->assertStringNotContainsString('vendor/bin/reprint-client', $sources[$source], 'Run php reprint.phar in handbook examples, including contributor pages.');
+            preg_match_all('~(?<!`)`[^`\n]*`(?!`)~', $sources[$source], $inline_code);
             $this->assertDoesNotMatchRegularExpression(
-                '~(?<!`)`[^`\n]*https?://[^`\n]*`(?!`)~',
-                $sources[$source],
+                '~https?://~',
+                implode("\n", $inline_code[0]),
                 $source . ': Put example addresses in fenced code or plain text; the native Markdown parser can swallow following links after an inline-code URL.'
             );
         }

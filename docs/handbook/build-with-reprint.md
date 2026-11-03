@@ -1,15 +1,10 @@
 # Build with Reprint
 
-Your product can run the Reprint client to prepare a WordPress copy. This
-example runs one copy, prints stage messages, and reports whether the copy
-completed or needs user action. It uses PHP, with no extra libraries.
+Your product can run the Reprint client to prepare a WordPress copy. This example runs one copy, prints stage messages, and reports whether the copy completed or needs user action. It uses PHP, with no extra libraries.
 
 ## Prepare the source and working folder
 
-Download [reprint.phar](https://developer.wordpress.org/reprint/getting-started/requirements/) into a private working folder.
-Install the [Reprint plugin](https://wordpress.org/plugins/reprint/) on the
-source site. This example uses the normal Migration Token authorization shown
-in the plugin settings; [Authentication](https://developer.wordpress.org/reprint/reference/authentication/) covers token-only hosts.
+Download [reprint.phar](https://developer.wordpress.org/reprint/getting-started/requirements/) into a private working folder. Install the [Reprint plugin](https://wordpress.org/plugins/reprint/) on the source site. This example uses the normal Migration Token authorization shown in the plugin settings; [Authentication](https://developer.wordpress.org/reprint/reference/authentication/) covers token-only hosts.
 
 Generate a key in the working folder:
 
@@ -18,33 +13,16 @@ php reprint.phar keygen https://example.com \
   --state-dir=./state --out=./reprint-key.pem
 ```
 
-Paste the printed Migration Token into **Tools → Reprint Server** on the source
-site and choose **Authorize client**. Use that same source address below.
-For connection-token access, replace the private-key argument in the script
-with `'--secret=TOKEN'`, using the saved connection token.
+Paste the printed Migration Token into **Tools → Reprint Server** on the source site and choose **Authorize client**. Use that same source address below. For connection-token access, replace the private-key argument in the script with `'--secret=TOKEN'`, using the saved connection token.
 
 ## Authorize from your product
 
-A product usually cannot ask its user to run `keygen` in a terminal. Two
-options keep the authorization step inside your interface:
+A product usually cannot ask its user to run `keygen` in a terminal. Two options keep the authorization step inside your interface:
 
-- Run `keygen` yourself with `--progress=jsonl`. Its final `reprint_report`
-  record carries `key_id`, `key_path`, and `public_key`, and its `message` holds
-  the same instructions the terminal would print. Show the Migration Token, the
-  `public_key` value, to the site administrator with a link to their site's
-  **Tools → Reprint Server** page. When they confirm, start the copy with
-  `--private-key-path` pointing at `key_path`.
-- Let `pull` do it. Run the copy command without `--private-key-path`. On the
-  first run the client generates a key inside the state directory, writes a
-  report with `status: "enrollment_needed"` and the same key fields, and exits
-  with code `4`. Show its `message` to the administrator. After they authorize
-  the token, run the same command again; later runs find the key in the state
-  directory as long as that directory is kept.
+- Run `keygen` yourself with `--progress=jsonl`. Its final `reprint_report` record carries `key_id`, `key_path`, and `public_key`, and its `message` holds the same instructions the terminal would print. Show the Migration Token, the `public_key` value, to the site administrator with a link to their site's **Tools → Reprint Server** page. When they confirm, start the copy with `--private-key-path` pointing at `key_path`.
+- Let `pull` do it. Run the copy command without `--private-key-path`. On the first run the client generates a key inside the state directory, writes a report with `status: "enrollment_needed"` and the same key fields, and exits with code `4`. Show its `message` to the administrator. After they authorize the token, run the same command again; later runs find the key in the state directory as long as that directory is kept.
 
-Treat exit code `4` as a request for user action, not as a failure to retry
-automatically. If the administrator removes the token later, the client reports
-`AUTH_UNKNOWN_KEY`. The same Migration Token can be enrolled again;
-`pull-metadata` prints it as `key.publicKey`.
+Treat exit code `4` as a request for user action, not as a failure to retry automatically. If the administrator removes the token later, the client reports `AUTH_UNKNOWN_KEY`. The same Migration Token can be enrolled again; `pull-metadata` prints it as `key.publicKey`.
 
 ## Run a copy from your application
 
@@ -113,16 +91,13 @@ Run it with your source address:
 php copy-site.php https://example.com
 ```
 
-During the copy, the script prints stage messages. After it reports
-**Copy prepared**, you can open the local result with:
+During the copy, the script prints stage messages. After it reports **Copy prepared**, you can open the local result with:
 
 ```sh
 bash state/runtime/start.sh
 ```
 
-`--start-runtime=none` keeps the client from starting a server while the
-integration job runs; see [runtime options on pull](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull).
-The generated start script is only for local development.
+`--start-runtime=none` keeps the client from starting a server while the integration job runs; see [runtime options on pull](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull). The generated start script is only for local development.
 
 ## Handle the next action
 
@@ -133,23 +108,13 @@ The generated start script is only for local development.
 | Temporary failure | Let the caller decide when to try again. |
 | Failure or missing final report | Show the error and stop; do not report a successful copy. |
 
-Keep each copy's working folder, including `reprint-key.pem`, `state/`, and
-`files/`, between runs.
-State contains credentials and transfer progress; keep it private and outside
-web-served directories. Use a separate folder for a different local copy.
-The script checks both the process result and the final command report rather
-than treating the last progress message as success.
+Keep each copy's working folder, including `reprint-key.pem`, `state/`, and `files/`, between runs. State contains credentials and transfer progress; keep it private and outside web-served directories. Use a separate folder for a different local copy. The script checks both the process result and the final command report rather than treating the last progress message as success.
 
 ## Go further when needed
 
-- [Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/) documents the full
-  output contract, including numeric counters for your UI.
+- [Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/) documents the full output contract, including numeric counters for your UI.
 - [Copy selected files or the database](https://developer.wordpress.org/reprint/guides/copy-selected-data/) covers partial copies.
-- [Control each migration step](https://developer.wordpress.org/reprint/build-with-reprint/integration-pipeline/) is for products that
-  need separate indexing, transfer, and import stages.
-- [Prepare a hosting destination](https://developer.wordpress.org/reprint/build-with-reprint/hosting/) covers production-server setup
-  and cleanup. This example deliberately uses a local SQLite destination.
+- [Control each migration step](https://developer.wordpress.org/reprint/build-with-reprint/integration-pipeline/) is for products that need separate indexing, transfer, and import stages.
+- [Prepare a hosting destination](https://developer.wordpress.org/reprint/build-with-reprint/hosting/) covers production-server setup and cleanup. This example deliberately uses a local SQLite destination.
 
-For a first manual copy, use [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/).
-For PHP embedding and source contributions, use the
-[development repository](https://github.com/WordPress/reprint).
+For a first manual copy, use [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/). For PHP embedding and source contributions, use the [development repository](https://github.com/WordPress/reprint).

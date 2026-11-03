@@ -4,8 +4,7 @@ Use the final command report and exit code to determine whether a copy completed
 
 [PHP integration example](https://developer.wordpress.org/reprint/build-with-reprint/)
 
-Examples use `$URL`, `$STATE_DIR`, `$FS_ROOT`, and an authorized
-`./reprint-key.pem` as described in [Conventions](https://developer.wordpress.org/reprint/reference/commands/#conventions).
+Examples use `$URL`, `$STATE_DIR`, `$FS_ROOT`, and an authorized `./reprint-key.pem` as described in [Conventions](https://developer.wordpress.org/reprint/reference/commands/#conventions).
 
 ## Exit codes
 
@@ -17,14 +16,11 @@ Examples use `$URL`, `$STATE_DIR`, `$FS_ROOT`, and an authorized
 | `3` | Temporary transfer failure stopped this run. | Decide whether and when to run it again. |
 | `4` | Client authorization is needed. | Enroll the Migration Token, then run again. |
 
-Check command-specific help too. Some commands, including files-push, have
-additional result statuses and do not retry inside the run. The WordPress.org
-server package does not provide push.
+Check command-specific help too. Some commands, including files-push, have additional result statuses and do not retry inside the run. The WordPress.org server package does not provide push.
 
 ## Final command reports
 
-JSONL and compact CLI output end with a final command result, so callers do not
-need to infer the outcome from progress messages. No separate flag is needed:
+JSONL and compact CLI output end with a final command result, so callers do not need to infer the outcome from progress messages. No separate flag is needed:
 
 ```sh
 php reprint.phar pull "$URL" \
@@ -32,23 +28,11 @@ php reprint.phar pull "$URL" \
     --fs-root="$FS_ROOT" --progress=compact
 ```
 
-The CLI appends one JSON line after a command returns or throws a handled
-exception in `--progress=jsonl` or `--progress=compact` mode. The default `auto`
-mode also appends it when the progress stream is not a terminal. `--progress=tty`
-and `auto` on a terminal do not append a report.
+The CLI appends one JSON line after a command returns or throws a handled exception in `--progress=jsonl` or `--progress=compact` mode. The default `auto` mode also appends it when the progress stream is not a terminal. `--progress=tty` and `auto` on a terminal do not append a report.
 
-Existing progress and command data stay in place. Stage updates say which
-command and stage are running; the final report says how the invocation ended.
-It does not repeat individual preflight checks. Captured `preflight` output
-contains its data record followed by the final report. Downloading runtime
-files can also emit progress before those records. Callers must read the
-records separately, not decode all of stdout as one JSON document or assume a
-fixed line count. The same applies to other commands that print JSON data,
-such as `pull-metadata` and `files-stats`; their data keeps its existing formatting.
+Existing progress and command data stay in place. Stage updates say which command and stage are running; the final report says how the invocation ended. It does not repeat individual preflight checks. Captured `preflight` output contains its data record followed by the final report. Downloading runtime files can also emit progress before those records. Callers must read the records separately, not decode all of stdout as one JSON document or assume a fixed line count. The same applies to other commands that print JSON data, such as `pull-metadata` and `files-stats`; their data keeps its existing formatting.
 
-The report goes to stdout, except when stdout carries SQL; then it goes to
-stderr with the other progress records. `progress.json` remains the source for
-live progress. A caller does not need its last update to read the final error.
+The report goes to stdout, except when stdout carries SQL; then it goes to stderr with the other progress records. `progress.json` remains the source for live progress. A caller does not need its last update to read the final error.
 
 ```json
 {
@@ -63,71 +47,35 @@ live progress. A caller does not need its last update to read the final error.
 }
 ```
 
-`--progress=compact` prints short progress followed by the final report. It does
-not create an additional progress log; `progress.json` snapshots and `audit.log`
-are unchanged. With SQL on stdout, `auto` checks stderr to choose between JSONL
-and terminal progress.
+`--progress=compact` prints short progress followed by the final report. It does not create an additional progress log; `progress.json` snapshots and `audit.log` are unchanged. With SQL on stdout, `auto` checks stderr to choose between JSONL and terminal progress.
 
-`command` is the outer command the caller invoked. Preflight inside `pull`,
-`pull-files`, or `pull-db` does not produce a separate final report.
+`command` is the outer command the caller invoked. Preflight inside `pull`, `pull-files`, or `pull-db` does not produce a separate final report.
 
-`status` is `complete`, `partial`, `error`, or `aborted`. A first `pull` can
-report `enrollment_needed` with exit code `4`; display its `message` to ask the
-administrator to authorize the client. Files-push also retains
-its `interrupted`, `restart`, and `failed` outcomes and its `reason` and `detail`.
-`exit_code` is the actual exit code; reporting does not choose retry timing or
-change command outcomes. Exit 2 is unfinished work, not success. A successful
-`--abort` reports `aborted`, not `complete`.
+`status` is `complete`, `partial`, `error`, or `aborted`. A first `pull` can report `enrollment_needed` with exit code `4`; display its `message` to ask the administrator to authorize the client. Files-push also retains its `interrupted`, `restart`, and `failed` outcomes and its `reason` and `detail`. `exit_code` is the actual exit code; reporting does not choose retry timing or change command outcomes. Exit 2 is unfinished work, not success. A successful `--abort` reports `aborted`, not `complete`.
 
-`failed_stage`, `error`, and `error_code` are null when unavailable. Failed
-commands which have no specific error code still provide their error message.
-HTTP and cURL details, including `http_code`, `curl_errno`, and
-`consecutive_failures_without_progress`, are included when the command reports
-them. Callers must not depend on every failure having those fields.
+`failed_stage`, `error`, and `error_code` are null when unavailable. Failed commands which have no specific error code still provide their error message. HTTP and cURL details, including `http_code`, `curl_errno`, and `consecutive_failures_without_progress`, are included when the command reports them. Callers must not depend on every failure having those fields.
 
-`preflight-assert` keeps its existing `checks` in its command result, with
-`label`, `pass`, and `detail` for each check. These are not copied into the final
-report, and no per-check codes are added.
+`preflight-assert` keeps its existing `checks` in its command result, with `label`, `pass`, and `detail` for each check. These are not copied into the final report, and no per-check codes are added.
 
-Source progress in JSONL uses `type: "remote_progress"`. Its `phase` names the
-client phase reading the response. Optional `remote_message` and
-`remote_counters` describe the source scan; `file_bytes_total` and
-`file_bytes_read` are non-negative integer counts for its current file. These
-records do not change client screen counters, stages, or final report fields.
-Compact output omits them.
+Source progress in JSONL uses `type: "remote_progress"`. Its `phase` names the client phase reading the response. Optional `remote_message` and `remote_counters` describe the source scan; `file_bytes_total` and `file_bytes_read` are non-negative integer counts for its current file. These records do not change client screen counters, stages, or final report fields. Compact output omits them.
 
 ## Reading a ticket
 
-Split the captured output into lines. Decode each whole line as JSON, ignore
-non-JSON lines, and select records with `type: "reprint_report"` and a supported
-`schema_version`. Do not match JSON prefixes or assume field order.
+Split the captured output into lines. Decode each whole line as JSON, ignore non-JSON lines, and select records with `type: "reprint_report"` and a supported `schema_version`. Do not match JSON prefixes or assume field order.
 
-Each report describes one invocation. A ticket containing separately invoked
-preflight and download commands can contain several reports. The adapter must
-associate those reports with its steps and produce the overall migration
-result. Selecting the last success without checking which command ran can
-mistake a preflight success for a completed migration.
+Each report describes one invocation. A ticket containing separately invoked preflight and download commands can contain several reports. The adapter must associate those reports with its steps and produce the overall migration result. Selecting the last success without checking which command ran can mistake a preflight success for a completed migration.
 
-There is no report if PHP cannot load the program, argument parsing exits
-before command setup, the process is killed, or its output pipe breaks. An
-OOM or an uncatchable signal cannot reliably print a final line. Missing or
-truncated reports mean the final result is unavailable; use the host job's
-status, never an earlier success or the last progress tick.
+There is no report if PHP cannot load the program, argument parsing exits before command setup, the process is killed, or its output pipe breaks. An OOM or an uncatchable signal cannot reliably print a final line. Missing or truncated reports mean the final result is unavailable; use the host job's status, never an earlier success or the last progress tick.
 
-The CLI adds the final report. PHP library callers still receive the command's
-regular output and can read its exit code or catch its exception.
+The CLI adds the final report. PHP library callers still receive the command's regular output and can read its exit code or catch its exception.
 
 ## Poll current progress
 
-When an external process (e.g. a web UI) needs to poll migration progress, it can read
-`$STATE_DIR/progress.json`.
+When an external process (e.g. a web UI) needs to poll migration progress, it can read `$STATE_DIR/progress.json`.
 
-Pass `--step=N` and `--steps=N` to client commands to include the pipeline position in
-the progress file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the
-preflight, `--step=2 --steps=4` for db-index, and so on.
+Pass `--step=N` and `--steps=N` to client commands to include the pipeline position in the progress file. For example, a four-step pipeline would pass `--step=1 --steps=4` for the preflight, `--step=2 --steps=4` for db-index, and so on.
 
-The file uses one versioned shape for every command. Fields that do not apply
-to the current phase are `null` instead of disappearing:
+The file uses one versioned shape for every command. Fields that do not apply to the current phase are `null` instead of disappearing:
 
 ```json
 {
@@ -179,22 +127,9 @@ to the current phase are `null` instead of disappearing:
 | `detail`         | `string \| null`  | Files-push terminal detail when one is available. |
 | `ts`             | `float`           | Unix timestamp in seconds, including a fractional part. |
 
-`progress.items` is either `null` or `{ "unit", "done", "total" }`.
-The unit says what is counted: `files`, `tables`, `local_paths`, `records`, or
-`statements`. `total` is `null` when Reprint cannot know the total before
-finishing the work. `progress.bytes` is either `null` or `{ "done", "total" }`
-for the current byte-bounded phase. `progress.current_file` is either `null` or
-`{ "path_b64", "bytes_done", "bytes_total" }`. The path is base64 because
-filesystem names are arbitrary bytes. During a file fetch, the item and byte
-totals cover the paths selected by the current pull. A delta pull therefore
-reports only changed paths. The byte total adds regular-file content sizes;
-directories and symlinks add zero bytes.
+`progress.items` is either `null` or `{ "unit", "done", "total" }`. The unit says what is counted: `files`, `tables`, `local_paths`, `records`, or `statements`. `total` is `null` when Reprint cannot know the total before finishing the work. `progress.bytes` is either `null` or `{ "done", "total" }` for the current byte-bounded phase. `progress.current_file` is either `null` or `{ "path_b64", "bytes_done", "bytes_total" }`. The path is base64 because filesystem names are arbitrary bytes. During a file fetch, the item and byte totals cover the paths selected by the current pull. A delta pull therefore reports only changed paths. The byte total adds regular-file content sizes; directories and symlinks add zero bytes.
 
-During `db-pull`, `progress.items` counts exported tables and
-`progress.current_table` reports row progress for the active table. MySQL's
-table row count is an estimate, so `rows_total_is_estimate` is always `true`.
-The reported row count is suitable for approximate progress, not an exact
-completion percentage:
+During `db-pull`, `progress.items` counts exported tables and `progress.current_table` reports row progress for the active table. MySQL's table row count is an estimate, so `rows_total_is_estimate` is always `true`. The reported row count is suitable for approximate progress, not an exact completion percentage:
 
 ```json
 {
@@ -222,26 +157,9 @@ completion percentage:
 }
 ```
 
-Reprint replaces `progress.json` atomically at most once per second while a
-command is active. A terminal, partial, cleared, or error state is written
-immediately. A polling UI can therefore read this file without parsing JSONL.
-The JSONL records that report screen progress carry the same `schema_version`
-and nested `progress` object, while their event-specific top-level fields stay
-available for existing consumers.
-Ordinary log events, such as a skipped path, do not replace the screen's action
-label. File counts include every processed path, including failed or skipped
-paths, directories and symlinks. Live updates and resume use the same rule.
-If a batch must be downloaded again, its old batch counts are cleared first.
-A new file reports its own path and size even after an error in the previous file.
-Completed file bytes exclude failed files and use their downloaded size, not
-the earlier index size. Failed files or source size changes can make
-completed bytes differ from the planned byte total.
+Reprint replaces `progress.json` atomically at most once per second while a command is active. A terminal, partial, cleared, or error state is written immediately. A polling UI can therefore read this file without parsing JSONL. The JSONL records that report screen progress carry the same `schema_version` and nested `progress` object, while their event-specific top-level fields stay available for existing consumers. Ordinary log events, such as a skipped path, do not replace the screen's action label. File counts include every processed path, including failed or skipped paths, directories and symlinks. Live updates and resume use the same rule. If a batch must be downloaded again, its old batch counts are cleared first. A new file reports its own path and size even after an error in the previous file. Completed file bytes exclude failed files and use their downloaded size, not the earlier index size. Failed files or source size changes can make completed bytes differ from the planned byte total.
 
-Client commands accept `--progress=auto|tty|jsonl|compact`. The default `auto`
-mode uses terminal progress when its output stream is a terminal and
-JSONL otherwise. Use `--progress=tty` to force the terminal presentation when
-output is captured, or `--progress=jsonl` to force structured progress in a
-terminal:
+Client commands accept `--progress=auto|tty|jsonl|compact`. The default `auto` mode uses terminal progress when its output stream is a terminal and JSONL otherwise. Use `--progress=tty` to force the terminal presentation when output is captured, or `--progress=jsonl` to force structured progress in a terminal:
 
 ```bash
 php reprint.phar files-push "$URL" \
@@ -249,28 +167,13 @@ php reprint.phar files-push "$URL" \
     --fs-root="$FS_ROOT" --progress=jsonl
 ```
 
-The selected mode applies only to that invocation and is not retained in
-command state. Explicit `tty`, `jsonl`, and `compact` modes cannot be combined with
-`--verbose`.
+The selected mode applies only to that invocation and is not retained in command state. Explicit `tty`, `jsonl`, and `compact` modes cannot be combined with `--verbose`.
 
-The mode controls progress and status output. It does not
-reformat a command's data result, such as preflight or pull-metadata JSON,
-files-stats JSON, or SQL written with `--sql-output=stdout`.
+The mode controls progress and status output. It does not reformat a command's data result, such as preflight or pull-metadata JSON, files-stats JSON, or SQL written with `--sql-output=stdout`.
 
-The file-download bar in `pull` and `pull-files` uses downloaded bytes divided
-by the selected file byte total, including bytes written for the current file.
-The file count beside it still counts completed paths. When the byte total is
-unknown or zero, downloads show a spinner instead of a percentage.
+The file-download bar in `pull` and `pull-files` uses downloaded bytes divided by the selected file byte total, including bytes written for the current file. The file count beside it still counts completed paths. When the byte total is unknown or zero, downloads show a spinner instead of a percentage.
 
-Use `--progress=compact` to print command starts, stage changes, command results,
-warnings, and errors as JSON lines. During a stage, it prints item and byte
-counters at most once every 30 seconds, only when they changed. These updates
-omit individual file paths and table names. A blocked request or a stage
-without item/byte counters stays quiet.
-It hides per-file records, preserve-local skips, repeated stage labels,
-per-request results, receive-rate diagnostics, and debug chatter.
-Warnings and errors, including rejected symlink targets, remain individual
-records; compact mode does not group them.
+Use `--progress=compact` to print command starts, stage changes, command results, warnings, and errors as JSON lines. During a stage, it prints item and byte counters at most once every 30 seconds, only when they changed. These updates omit individual file paths and table names. A blocked request or a stage without item/byte counters stays quiet. It hides per-file records, preserve-local skips, repeated stage labels, per-request results, receive-rate diagnostics, and debug chatter. Warnings and errors, including rejected symlink targets, remain individual records; compact mode does not group them.
 
 ```bash
 php reprint.phar files-pull "$URL" \
@@ -278,26 +181,11 @@ php reprint.phar files-pull "$URL" \
     --fs-root="$FS_ROOT" --progress=compact
 ```
 
-Compact mode only changes the displayed output. It does not save the omitted
-records or create `progress.jsonl`. `progress.json` still receives the latest
-progress snapshot, and `audit.log` remains available for troubleshooting.
-Use `--progress=jsonl` when the caller wants the full progress stream.
-With `--sql-output=stdout`, SQL stays on stdout and compact progress goes to stderr.
+Compact mode only changes the displayed output. It does not save the omitted records or create `progress.jsonl`. `progress.json` still receives the latest progress snapshot, and `audit.log` remains available for troubleshooting. Use `--progress=jsonl` when the caller wants the full progress stream. With `--sql-output=stdout`, SQL stays on stdout and compact progress goes to stderr.
 
-The files-push terminal presentation uses one stage-weighted progress bar. The
-percentage comes first, followed by a major stage such as `Indexing`, `Pushing`,
-or `Committing`. While pushing local paths, the line also shows target-confirmed
-file bytes against the planned file byte total. The percentage covers the
-whole push, including indexing and commit work; it is not elapsed time or an
-estimated completion time.
+The files-push terminal presentation uses one stage-weighted progress bar. The percentage comes first, followed by a major stage such as `Indexing`, `Pushing`, or `Committing`. While pushing local paths, the line also shows target-confirmed file bytes against the planned file byte total. The percentage covers the whole push, including indexing and commit work; it is not elapsed time or an estimated completion time.
 
-The JSONL presentation emits `push_progress` records. After planning completes,
-their legacy `files_done` and `files_total` fields remain available. The same
-counts also appear in `progress.items` with the `local_paths` unit. During a
-byte-bounded files-push phase, `progress.bytes` reports the saved byte
-position and total. The final result and `progress.json` use the same nested
-progress object. Saved counts and byte positions are retained when a command
-exits with code `2` and is run again.
+The JSONL presentation emits `push_progress` records. After planning completes, their legacy `files_done` and `files_total` fields remain available. The same counts also appear in `progress.items` with the `local_paths` unit. During a byte-bounded files-push phase, `progress.bytes` reports the saved byte position and total. The final result and `progress.json` use the same nested progress object. Saved counts and byte positions are retained when a command exits with code `2` and is run again.
 
 ## Read saved pull metadata
 
@@ -305,36 +193,16 @@ exits with code `2` and is run again.
 php reprint.phar pull-metadata 'https://example.com/?reprint-api' --state-dir=./state
 ```
 
-This makes no network request. The source address selects the saved remote.
-The result includes `hasCompletedOnce`, artifact availability, `sourceSite`,
-and `key`. `sourceSite` contains the source WordPress home and site URLs,
-table prefix, and reported charsets; unavailable fields are null. `key`
-contains the stored key's `id`, private-key `path`, and enrollable `publicKey`,
-or is null when no key is stored.
+This makes no network request. The source address selects the saved remote. The result includes `hasCompletedOnce`, artifact availability, `sourceSite`, and `key`. `sourceSite` contains the source WordPress home and site URLs, table prefix, and reported charsets; unavailable fields are null. `key` contains the stored key's `id`, private-key `path`, and enrollable `publicKey`, or is null when no key is stored.
 
-`hasCompletedOnce` records a past completed pull. It does not prove that the
-current invocation completed. Check that invocation's exit code and report.
-Captured output can include the data object followed by a command report;
-do not decode all stdout as one JSON document.
+`hasCompletedOnce` records a past completed pull. It does not prove that the current invocation completed. Check that invocation's exit code and report. Captured output can include the data object followed by a command report; do not decode all stdout as one JSON document.
 
-Other files under the state directory are private implementation details and
-can change between client versions. Earlier documentation described
-`pull/state.json`, `volatile-files.json`, and the directory layout; do not read
-or edit them from a product. The supported contract is the exit code, the final
-command report, `progress.json`, and `pull-metadata`.
+Other files under the state directory are private implementation details and can change between client versions. Earlier documentation described `pull/state.json`, `volatile-files.json`, and the directory layout; do not read or edit them from a product. The supported contract is the exit code, the final command report, `progress.json`, and `pull-metadata`.
 
 ## Audit log
 
-`audit.log` is an append-only diagnostic log in the state directory. It records
-requests, local mutations, warnings, and errors. `--verbose` also prints audit
-entries. Keep the log private and review it before sharing it in a support
-request; it can contain site paths and other site details.
+`audit.log` is an append-only diagnostic log in the state directory. It records requests, local mutations, warnings, and errors. `--verbose` also prints audit entries. Keep the log private and review it before sharing it in a support request; it can contain site paths and other site details.
 
 ## Temporary failures
 
-Exit code `3` means the client reached its retry limit for a temporary
-failure, such as HTTP `429` or a dropped connection, without saving new
-progress. Run the same command again later with the same state directory and
-filesystem root. [Temporary failures and retries](https://developer.wordpress.org/reprint/reference/temporary-failures/) lists
-which failures count as temporary, how long the client waits, and what the
-retry records contain.
+Exit code `3` means the client reached its retry limit for a temporary failure, such as HTTP `429` or a dropped connection, without saving new progress. Run the same command again later with the same state directory and filesystem root. [Temporary failures and retries](https://developer.wordpress.org/reprint/reference/temporary-failures/) lists which failures count as temporary, how long the client waits, and what the retry records contain.
