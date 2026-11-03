@@ -73,6 +73,13 @@ function apply_filters($name, $value) {
     return $value;
 }
 
+function reprint_pull_file_override($path) {
+    if ($path === getenv('REPRINT_TEST_DOCROOT') . '/wp-config.php') {
+        return getenv('REPRINT_TEST_DOCROOT') . '-demo-config.php';
+    }
+    return false;
+}
+
 /** Supply an enrolled key with a stored push grant through the normal option path. */
 function get_option($name, $default = false) {
     if ($name === 'reprint_server_public_keys') {

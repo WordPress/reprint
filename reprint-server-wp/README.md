@@ -336,3 +336,29 @@ fires — and early enough that the settings page has not yet registered its
 option listeners, so moving the token does not read as a rotation and does not
 revoke push authorization. Once no site carries the legacy options,
 `compat.php` can be deleted outright.
+
+### Exclude or replace a file in pulls
+
+Define this function in an MU plugin, or load it before dispatching the Reprint
+API in a standalone PHP entry point. WordPress is not required.
+
+```php
+function reprint_pull_file_override( $path ) {
+    if ( $path === '/srv/htdocs/wp-config.php' ) {
+        return '/srv/reprint-export/demo-wp-config.php';
+    }
+    return false;
+}
+```
+
+Return `false` to leave a path alone, `true` to exclude it, or an absolute
+path to a separate, readable regular file to serve in its place. Keep the
+replacement stable during a pull. The index reports the replacement's size and
+change time under the original name. If the replacement is unavailable,
+Reprint does not fall back to the live file.
+
+Use the live file's actual absolute path. Reprint also checks resolved paths:
+a symlink to an overridden file is omitted from the listing and a direct
+download through it cannot return the original bytes. This hook does not
+prune directory trees, protect separate copies or hard links, or change the
+database export. Never use a copy of the live config as the replacement.

@@ -174,6 +174,9 @@ async function checkRequests(plugin, target, root) {
     const docroot = join(root, `${target}-docroot`);
     await mkdir(docroot);
     await writeFile(join(docroot, 'keep.txt'), 'original');
+    const liveConfig = join(docroot, 'wp-config.php');
+    await writeFile(liveConfig, 'private config marker');
+    await writeFile(docroot + '-demo-config.php', '<?php /* demo config marker */');
     const listener = createServer();
     await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
     const port = listener.address().port;
@@ -205,6 +208,12 @@ async function checkRequests(plugin, target, root) {
         const downloaded = await request(url + 'file_fetch', { method: 'POST', body: form });
         assert.equal(downloaded.status, 200);
         assert.match(await downloaded.text(), /original/);
+        form.set('file_list', new Blob([JSON.stringify([{ path: Buffer.from(liveConfig).toString('base64') }])]), 'paths.json');
+        const config = await request(url + 'file_fetch', { method: 'POST', body: form });
+        assert.equal(config.status, 200);
+        const configBody = await config.text();
+        assert.match(configBody, /demo config marker/);
+        assert.doesNotMatch(configBody, /private config marker/);
         for (const scheme of ['key', 'hmac']) {
             const response = await fetch(`http://127.0.0.1:${port}/?admin_probe=${scheme}`);
             const text = await response.text();

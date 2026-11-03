@@ -1017,6 +1017,41 @@ final class Utils
     }
 
     /**
+     * Returns the file to read for a pull path, or null to omit it.
+     * The returned path is used for I/O only; the wire keeps the original name.
+     */
+    public static function pull_file_source_path(string $path): ?string {
+        if (!function_exists('reprint_pull_file_override')) {
+            return $path;
+        }
+        $override = \reprint_pull_file_override($path);
+        $resolved = self::source_realpath($path);
+        if ($override === false && $resolved !== false && $resolved !== $path) {
+            $override = \reprint_pull_file_override($resolved);
+        }
+        if ($override === false) {
+            return $path;
+        }
+        if ($override === true) {
+            return null;
+        }
+        if (!is_string($override) || strpos($override, "\0") !== false || !self::is_absolute_path($override, self::native_path_format())) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Trusted configuration error, not HTML.
+            throw new InvalidArgumentException('Pull file override must return false, true, or an absolute replacement path.');
+        }
+
+        clearstatcache(true);
+        $replacement = self::source_realpath($override);
+        if ($replacement === false || $replacement === $resolved
+            || !is_file(self::source_io_path($replacement)) || !is_readable(self::source_io_path($replacement))
+        ) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Trusted configuration error, not HTML.
+            throw new InvalidArgumentException('Pull replacement is not a readable regular file distinct from the source: ' . $path);
+        }
+        return $replacement;
+    }
+
+    /**
      * Resolves source paths through PHP and returns the shared index spelling.
      *
      * Windows PHP realpath() can fail on a link whose stored target starts at the

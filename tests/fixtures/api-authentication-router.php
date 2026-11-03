@@ -16,6 +16,16 @@ if (!is_array($reprint_auth_test_configuration)) {
     $reprint_auth_test_configuration = [];
 }
 
+if (isset($reprint_auth_test_configuration['excluded_pull_file'])) {
+    function reprint_pull_file_override(string $path) {
+        global $reprint_auth_test_configuration;
+        if ($path === $reprint_auth_test_configuration['excluded_pull_file']) {
+            return $reprint_auth_test_configuration['replacement_pull_file'] ?? true;
+        }
+        return false;
+    }
+}
+
 if (isset($reprint_auth_test_configuration['sqlite_database_path'])) {
     require_once dirname(__DIR__, 2) . '/lib/sqlite-database-integration/packages/mysql-on-sqlite/src/load.php';
     define('SQLITE_DB_DROPIN_VERSION', '1.0');
