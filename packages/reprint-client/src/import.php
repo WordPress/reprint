@@ -6523,6 +6523,13 @@ class ImportClient
 
         $flatten_to = Utils::trim_right_slash($flatten_to, Utils::native_path_format());
         $force = $options["force"] ?? false;
+        $core_files = $options["core_files"] ?? "link";
+        if (!in_array($core_files, ["link", "copy"], true)) {
+            throw new InvalidArgumentException(
+                "Invalid --core-files value: {$core_files}. Expected link or copy.",
+            );
+        }
+        $copy_core_files = $core_files === "copy";
 
         // Ensure the filesystem root exists
         if (!is_dir($this->filesystem_root)) {
@@ -6645,6 +6652,7 @@ class ImportClient
         $created = 0;
         $refreshed = 0;
         $forced = 0;
+        $copied = 0;
 
         // Determine what to skip from ABSPATH enumeration.
         // Components with known detached locations are handled separately.
@@ -6683,6 +6691,10 @@ class ImportClient
 
             $source = wp_join_unix_paths($local_abspath, $entry);
             $target = wp_join_unix_paths($flatten_to, $entry);
+            if ($copy_core_files && self::flatten_is_core_entry($entry)) {
+                $this->flatten_place_copy($source, $target, $copied);
+                continue;
+            }
             $this->flatten_place_symlink(
                 $source,
                 $target,
@@ -6695,20 +6707,22 @@ class ImportClient
 
         // Phase 1b: Symlink detached wp-admin and wp-includes from their
         // resolved physical locations (e.g. /wordpress/wp-admin on WP Cloud).
+        $detached_core_directories = [];
         if ($wp_admin_detached && $local_wp_admin !== null && is_dir($local_wp_admin)) {
-            $this->flatten_place_symlink(
-                $local_wp_admin,
-                wp_join_unix_paths($flatten_to, "wp-admin"),
-                $force,
-                $created,
-                $refreshed,
-                $forced,
-            );
+            $detached_core_directories["wp-admin"] = $local_wp_admin;
         }
         if ($wp_includes_detached && $local_wp_includes !== null && is_dir($local_wp_includes)) {
+            $detached_core_directories["wp-includes"] = $local_wp_includes;
+        }
+        foreach ($detached_core_directories as $entry => $source) {
+            $target = wp_join_unix_paths($flatten_to, $entry);
+            if ($copy_core_files) {
+                $this->flatten_place_copy($source, $target, $copied);
+                continue;
+            }
             $this->flatten_place_symlink(
-                $local_wp_includes,
-                wp_join_unix_paths($flatten_to, "wp-includes"),
+                $source,
+                $target,
                 $force,
                 $created,
                 $refreshed,
@@ -6848,10 +6862,11 @@ class ImportClient
 
         $this->audit_log(
             sprintf(
-                "FLAT-DOCUMENT-ROOT | Complete: %d created, %d refreshed, %d force-replaced",
+                "FLAT-DOCUMENT-ROOT | Complete: %d created, %d refreshed, %d force-replaced, %d core entries copied",
                 $created,
                 $refreshed,
                 $forced,
+                $copied,
             ),
             true,
         );
@@ -6868,6 +6883,8 @@ class ImportClient
             "created" => $created,
             "refreshed" => $refreshed,
             "force_replaced" => $forced,
+            "core_files" => $core_files,
+            "core_entries_copied" => $copied,
         ];
         if (!$this->progress->is_mode('pipeline')) {
             fwrite($this->progress_fd, json_encode($result) . "\n");
@@ -7022,6 +7039,101 @@ class ImportClient
             "FLAT-DOCUMENT-ROOT | Created symlink: {$target} -> {$link_value}",
         );
         $created++;
+    }
+
+    /**
+     * Whether a top-level ABSPATH entry is WordPress core.
+     *
+     * With --core-files=copy, core entries are copied into the flattened
+     * site and every other entry stays linked. The hosting platform decides
+     * which core version a site runs, so local edits to core never need to
+     * reach the filesystem root. Site files that share ABSPATH with core on
+     * standard hosts (.htaccess, robots.txt, wp-config.php, wp-content) must
+     * stay linked so their edits do.
+     */
+    private static function flatten_is_core_entry(string $entry): bool
+    {
+        if (in_array($entry, ["wp-admin", "wp-includes", "index.php", "xmlrpc.php", "license.txt", "readme.html"], true)) {
+            return true;
+        }
+        // wp-config-sample.php ships with core; wp-config.php belongs to the site.
+        return $entry !== "wp-config.php"
+            && strncmp($entry, "wp-", 3) === 0
+            && substr($entry, -4) === ".php";
+    }
+
+    /**
+     * Replace $target with a fresh copy of the core entry at $source.
+     *
+     * The copy is assembled next to the target and renamed into place, so
+     * an interrupted run never leaves a partially copied core directory.
+     * Whatever was at the target before — a symlink from an earlier
+     * --core-files=link run, or an earlier copy — is removed first.
+     */
+    private function flatten_place_copy(string $source, string $target, int &$copied): void
+    {
+        $temporary_target = $target . ".reprint-tmp";
+        if (is_link($temporary_target) || is_file($temporary_target)) {
+            unlink($temporary_target);
+        } elseif (is_dir($temporary_target)) {
+            $this->remove_directory_recursive($temporary_target);
+        }
+
+        $this->flatten_copy_core_tree($source, $temporary_target);
+
+        if (is_link($target) || is_file($target)) {
+            unlink($target);
+        } elseif (is_dir($target)) {
+            $this->remove_directory_recursive($target);
+        }
+        if (!rename($temporary_target, $target)) {
+            throw new RuntimeException(
+                "Failed to move copied core entry into place: {$target}",
+            );
+        }
+        $this->audit_log("FLAT-DOCUMENT-ROOT | Copied core entry: {$target}");
+        ++$copied;
+    }
+
+    /**
+     * Recursively copy a core file or directory.
+     *
+     * WordPress core contains no symlinks. Following one could copy files
+     * from outside core or loop on a cycle, so a symlink stops the copy.
+     */
+    private function flatten_copy_core_tree(string $source, string $destination): void
+    {
+        if (is_link($source)) {
+            throw new RuntimeException(
+                "Cannot copy core: found a symlink inside WordPress core at {$source}",
+            );
+        }
+        if (!is_dir($source)) {
+            if (!copy($source, $destination)) {
+                throw new RuntimeException(
+                    "Failed to copy core file: {$source} to {$destination}",
+                );
+            }
+            return;
+        }
+        if (!mkdir($destination, 0755)) {
+            throw new RuntimeException(
+                "Failed to create core directory copy: {$destination}",
+            );
+        }
+        $entries = @scandir($source);
+        if ($entries === false) {
+            throw new RuntimeException("Failed to scan core directory: {$source}");
+        }
+        foreach ($entries as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            $this->flatten_copy_core_tree(
+                wp_join_unix_paths($source, $entry),
+                wp_join_unix_paths($destination, $entry),
+            );
+        }
     }
 
     /**
@@ -15987,6 +16099,14 @@ if (
             'help' => 'Remove conflicting non-symlink files and replace with symlinks',
             'commands' => ['pull', 'flat-docroot'],
         ],
+        [
+            'name' => 'core-files',
+            'type' => 'value',
+            'target' => 'core_files',
+            'placeholder' => 'MODE',
+            'help' => 'How to place WordPress core in the flattened layout (link|copy, default link)',
+            'commands' => ['pull', 'flat-docroot'],
+        ],
 
         // ── merge-wp-content options ─────────────────────────────
         [
@@ -16910,9 +17030,17 @@ if (
                 "directories on the source server (e.g. WP Cloud with ABSPATH at\n" .
                 "/srv/htdocs and WP_CONTENT_DIR at /tmp/__wp__/wp-content).\n" .
                 "\n" .
-                "No files are copied — only symlinks are created. Idempotent.\n" .
-                "If a path that should be a symlink is a regular file or directory,\n" .
-                "the command stops with an error unless --force is specified.\n",
+                "By default no files are copied — only symlinks are created.\n" .
+                "Idempotent. If a path that should be a symlink is a regular file\n" .
+                "or directory, the command stops with an error unless --force is\n" .
+                "specified.\n" .
+                "\n" .
+                "--core-files=copy copies WordPress core (wp-admin, wp-includes,\n" .
+                "index.php, xmlrpc.php, license.txt, readme.html, and wp-*.php\n" .
+                "except wp-config.php) instead of linking it. Every run replaces\n" .
+                "the copy, so local edits to core are discarded and never reach\n" .
+                "--fs-root. wp-content, wp-config.php, and other site files stay\n" .
+                "linked.\n",
             "extra" => null,
         ],
         "merge-wp-content" => [
