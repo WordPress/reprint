@@ -13,7 +13,6 @@
 - [File push](https://developer.wordpress.org/reprint/contributing/push/)
 - [Database push](https://developer.wordpress.org/reprint/contributing/database-push/)
 
-File and database push require a separately configured source build. The
-WordPress.org plugin provides downloads only.
+File and database push require a separately configured source build. The WordPress.org plugin provides downloads only.
 
 [Why Reprint uses HTTP and streaming](https://developer.wordpress.org/reprint/understand-reprint/how-it-works/)

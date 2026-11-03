@@ -1,21 +1,17 @@
 # Command reference
 
-Use the high-level commands for a first copy or product integration. Use the
-smaller commands when your product needs to control individual stages.
+Use the high-level commands for a first copy or product integration. Use the smaller commands when your product needs to control individual stages.
 
 ```sh
 php reprint.phar --help
 php reprint.phar pull --help
 ```
 
-Command-specific help describes the complete options and defaults for the
-client you downloaded. This page names every command, the conventions the
-handbook examples share, and the options those examples use.
+Command-specific help describes the complete options and defaults for the client you downloaded. This page names every command, the conventions the handbook examples share, and the options those examples use.
 
 ## Conventions
 
-Reference pages write commands with three shell variables. Set them before
-pasting an example:
+Reference pages write commands with three shell variables. Set them before pasting an example:
 
 | Variable | Meaning |
 | --- | --- |
@@ -23,22 +19,11 @@ pasting an example:
 | `$STATE_DIR` | A private directory for the client's credentials, saved progress, SQL download, and generated server files. |
 | `$FS_ROOT` | The directory that downloaded site files are written to. |
 
-**Site address or API address.** `pull`, `pull-files`, and `pull-db` accept
-the site address, such as https://example.com. Other commands need the Reprint
-API address, such as https://example.com/?reprint-api, shown in
-**Tools → Reprint Server**.
+**Site address or API address.** `pull`, `pull-files`, and `pull-db` accept the site address, such as https://example.com. Other commands need the Reprint API address, such as https://example.com/?reprint-api, shown in **Tools → Reprint Server**.
 
-**Credentials.** Commands that contact the source need one credential flag:
-`--private-key-path=./reprint-key.pem` after creating and authorizing that key
-with `keygen`, or `--secret='TOKEN'` when the source uses a connection token.
-Never pass both. Local-only commands such as `db-apply`, `apply-runtime`, and
-`preflight-assert` take no credential. See [Authentication](https://developer.wordpress.org/reprint/reference/authentication/).
+**Credentials.** Commands that contact the source need one credential flag: `--private-key-path=./reprint-key.pem` after creating and authorizing that key with `keygen`, or `--secret='TOKEN'` when the source uses a connection token. Never pass both. Local-only commands such as `db-apply`, `apply-runtime`, and `preflight-assert` take no credential. See [Authentication](https://developer.wordpress.org/reprint/reference/authentication/).
 
-**Directories.** Keep `$STATE_DIR` outside `$FS_ROOT` and outside every
-web-served directory. Use one state directory per filesystem root, and do not
-run two commands against the same state directory at once. To continue an
-interrupted transfer, run the same command with the same source address,
-state directory, and filesystem root.
+**Directories.** Keep `$STATE_DIR` outside `$FS_ROOT` and outside every web-served directory. Use one state directory per filesystem root, and do not run two commands against the same state directory at once. To continue an interrupted transfer, run the same command with the same source address, state directory, and filesystem root.
 
 ## Complete workflows
 
@@ -62,8 +47,7 @@ Start with [Clone your site](https://developer.wordpress.org/reprint/getting-sta
 | `files-stats` | File counts and sizes from the next remote index. |
 | `db-index` | Database table metadata written to `db-tables.jsonl`. |
 
-See [Authentication](https://developer.wordpress.org/reprint/reference/authentication/), [Preflight](https://developer.wordpress.org/reprint/reference/preflight/), and
-[Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/).
+See [Authentication](https://developer.wordpress.org/reprint/reference/authentication/), [Preflight](https://developer.wordpress.org/reprint/reference/preflight/), and [Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/).
 
 ## Data transfer and preparation
 
@@ -80,15 +64,11 @@ See [Authentication](https://developer.wordpress.org/reprint/reference/authentic
 | `post-process` | Selected hosting cleanup and plugin startup-recovery tasks. |
 | `recover` | A WordPress startup check that can deactivate a failing regular plugin. |
 
-See [File transfers](https://developer.wordpress.org/reprint/reference/file-transfers/), [Database transfers](https://developer.wordpress.org/reprint/reference/database-transfers/),
-[Runtime configuration](https://developer.wordpress.org/reprint/reference/runtime/), and [Prepare a hosting destination](https://developer.wordpress.org/reprint/build-with-reprint/hosting/).
+See [File transfers](https://developer.wordpress.org/reprint/reference/file-transfers/), [Database transfers](https://developer.wordpress.org/reprint/reference/database-transfers/), [Runtime configuration](https://developer.wordpress.org/reprint/reference/runtime/), and [Prepare a hosting destination](https://developer.wordpress.org/reprint/build-with-reprint/hosting/).
 
 ## Local change inspection and push
 
-Push sends local file or database changes back to a site. The client can
-inspect local changes without uploading. Uploads need a separately configured
-push-capable target. The WordPress.org server package does not include push
-implementations; configuring it cannot enable them.
+Push sends local file or database changes back to a site. The client can inspect local changes without uploading. Uploads need a separately configured push-capable target. The WordPress.org server package does not include push implementations; configuring it cannot enable them.
 
 | Command | Result |
 | --- | --- |
@@ -96,14 +76,11 @@ implementations; configuring it cannot enable them.
 | `files-push` | A resumable file push to a separately configured push-capable target. |
 | `db-push` | A staged full database overwrite requiring explicit confirmation. |
 
-Hosts developing that integration should use the implementation and configuration
-notes in the [development repository](https://github.com/WordPress/reprint).
-Do not offer push using the WordPress.org server package.
+Hosts developing that integration should use the implementation and configuration notes in the [development repository](https://github.com/WordPress/reprint). Do not offer push using the WordPress.org server package.
 
 ## Options used in this handbook
 
-Each command's `--help` lists its complete options. These are the ones the
-handbook examples use, with the commands that accept them.
+Each command's `--help` lists its complete options. These are the ones the handbook examples use, with the commands that accept them.
 
 | Option | What it does | Commands |
 | --- | --- | --- |
@@ -137,14 +114,8 @@ handbook examples use, with the commands that accept them.
 | `--flat-document-root=DIR` | Use an assembled layout as the document root. | `apply-runtime` |
 | `--tasks=LIST` | Post-processing tasks to run, or `all`. | `post-process` |
 
-See [Runtime configuration](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull) for how the
-runtime options combine on `pull`.
+See [Runtime configuration](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull) for how the runtime options combine on `pull`.
 
 ## Shared behavior
 
-`--abort` is command-specific: it can discard an unfinished output or checkpoint.
-Read the command's help before using it. It is not a general rollback command.
-Run the same command to continue an interrupted transfer. Use `pull-files`
-to fetch later file changes without replacing the local database. To reopen
-the local site without copying again, use the generated start script from
-[Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/).
+`--abort` is command-specific: it can discard an unfinished output or checkpoint. Read the command's help before using it. It is not a general rollback command. Run the same command to continue an interrupted transfer. Use `pull-files` to fetch later file changes without replacing the local database. To reopen the local site without copying again, use the generated start script from [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/).

@@ -8,13 +8,9 @@ Reprint copies a WordPress site's files and database over HTTP.
 - [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/)
 - [Integrate Reprint into your product](https://developer.wordpress.org/reprint/build-with-reprint/)
 
-The Reprint Server plugin runs on the source site. The client runs on the
-computer receiving the copy. For your own site, an administrator authorizes
-the client before copying.
+The Reprint Server plugin runs on the source site. The client runs on the computer receiving the copy. For your own site, an administrator authorizes the client before copying.
 
-The plugin from WordPress.org serves downloads. Push, which sends local changes
-back to a site, needs a server build configured by the site's host.
-[What Reprint does not do](https://developer.wordpress.org/reprint/understand-reprint/limitations/) lists this and the other limits.
+The plugin from WordPress.org serves downloads. Push, which sends local changes back to a site, needs a server build configured by the site's host. [What Reprint does not do](https://developer.wordpress.org/reprint/understand-reprint/limitations/) lists this and the other limits.
 
 ## Browse the handbook
 

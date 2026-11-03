@@ -1,14 +1,10 @@
 # Set up Reprint development
 
-Use this guide to run Reprint from a checkout, test a change, and prepare a pull
-request. You need Git, command-line PHP, and Composer. Read the
-[repository working rules](https://github.com/WordPress/reprint/blob/trunk/AGENTS.md) before changing code or documentation.
+Use this guide to run Reprint from a checkout, test a change, and prepare a pull request. You need Git, command-line PHP, and Composer. Read the [repository working rules](https://github.com/WordPress/reprint/blob/trunk/AGENTS.md) before changing code or documentation.
 
 ## Set up a checkout
 
-Use PHP 8.1 or newer for the development tools and PHPUnit. Install Composer
-and the PHP extensions required by
-[composer.json](https://github.com/WordPress/reprint/blob/trunk/composer.json). Docker is needed for the end-to-end tests.
+Use PHP 8.1 or newer for the development tools and PHPUnit. Install Composer and the PHP extensions required by [composer.json](https://github.com/WordPress/reprint/blob/trunk/composer.json). Docker is needed for the end-to-end tests.
 
 ```sh
 git clone --recurse-submodules https://github.com/WordPress/reprint.git
@@ -16,10 +12,7 @@ cd reprint
 composer install
 ```
 
-For an existing checkout, run `git submodule update --init --recursive` first.
-Composer links the local client and server packages into `vendor/`, so root
-tests use the code you edit under `packages/`. Build the client and check that
-it runs:
+For an existing checkout, run `git submodule update --init --recursive` first. Composer links the local client and server packages into `vendor/`, so root tests use the code you edit under `packages/`. Build the client and check that it runs:
 
 ```sh
 composer build:phar
@@ -28,8 +21,7 @@ php reprint.phar --version
 
 Run `composer build:phar` again after changing client code or its dependencies.
 
-The WordPress plugin keeps a copied server package instead. Before your first
-plugin test, install its dependencies:
+The WordPress plugin keeps a copied server package instead. Before your first plugin test, install its dependencies:
 
 ```sh
 composer --working-dir=reprint-server-wp install
@@ -57,11 +49,7 @@ Without that refresh, a test of the plugin bundle may run the old server code.
 | `docs/handbook` | Public documentation, listed in `docs/manifest.json`. |
 | `docs/contributing` | Contributor guides and protocol reference. The manifest selects which pages are published. |
 
-The client and server are separate Composer packages,
-`wp-php-toolkit/reprint-client` and `wp-php-toolkit/reprint-server`.
-For embedding details, read the
-[client package](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-client/README.md)
-and [server package](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-server/README.md) guides.
+The client and server are separate Composer packages, `wp-php-toolkit/reprint-client` and `wp-php-toolkit/reprint-server`. For embedding details, read the [client package](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-client/README.md) and [server package](https://github.com/WordPress/reprint/blob/trunk/packages/reprint-server/README.md) guides.
 
 ## Test a change
 
@@ -75,51 +63,26 @@ composer analyze -- --memory-limit=1G
 git diff --check
 ```
 
-Use the test file for the behavior you changed. Run `composer test` for the
-PHPUnit suite. The [admin UI test guide](https://github.com/WordPress/reprint/blob/trunk/tests/e2e/admin-ui/README.md) and
-[end-to-end test configuration](https://github.com/WordPress/reprint/blob/trunk/tests/e2e/package.json) cover the browser and
-migration tests. Tests that use MySQL need the database described in
-[CLAUDE.md](https://github.com/WordPress/reprint/blob/trunk/CLAUDE.md).
+Use the test file for the behavior you changed. Run `composer test` for the PHPUnit suite. The [admin UI test guide](https://github.com/WordPress/reprint/blob/trunk/tests/e2e/admin-ui/README.md) and [end-to-end test configuration](https://github.com/WordPress/reprint/blob/trunk/tests/e2e/package.json) cover the browser and migration tests. Tests that use MySQL need the database described in [CLAUDE.md](https://github.com/WordPress/reprint/blob/trunk/CLAUDE.md).
 
-Use `composer lint:php` for WordPress coding standards and
-`composer lint:php:compat` for the supported PHP syntax. Existing per-file
-violation counts must not increase. New code must keep the package's minimum
-PHP version; push's PHP 8.1 client requirement is a runtime check.
+Use `composer lint:php` for WordPress coding standards and `composer lint:php:compat` for the supported PHP syntax. Existing per-file violation counts must not increase. New code must keep the package's minimum PHP version; push's PHP 8.1 client requirement is a runtime check.
 
 ## Prepare a pull request
 
-Choose one change that a reviewer can test on its own. Explain what a user or
-caller could do before and what they can do after the change. Include steps
-that reproduce the problem or demonstrate the new behavior.
+Choose one change that a reviewer can test on its own. Explain what a user or caller could do before and what they can do after the change. Include steps that reproduce the problem or demonstrate the new behavior.
 
-Add a test for the behavior you changed. For a resume change, stop the operation
-at the boundary you changed, start a new process, and check that it neither
-skips unfinished work nor applies completed work twice. The
-[architecture guide](https://developer.wordpress.org/reprint/contributing/architecture/) explains how files, indexes, and database
-progress fit together.
+Add a test for the behavior you changed. For a resume change, stop the operation at the boundary you changed, start a new process, and check that it neither skips unfinished work nor applies completed work twice. The [architecture guide](https://developer.wordpress.org/reprint/contributing/architecture/) explains how files, indexes, and database progress fit together.
 
-Update the relevant handbook page when command options, results, or limits
-change. Open the pull request in the
-[development repository](https://github.com/WordPress/reprint).
+Update the relevant handbook page when command options, results, or limits change. Open the pull request in the [development repository](https://github.com/WordPress/reprint).
 
 ## Change documentation
 
-Edit the Markdown source under `docs/`. Link to other handbook pages with their
-complete website URLs, including any section anchor. For a new handbook page,
-add its title, slug, source file, parent, and order to `docs/manifest.json`, and
-link it from the relevant section. Put content pages under one of the six
-chapter groups. Their URLs use `/reprint/SECTION/SLUG/` on developer.wordpress.org;
-the handbook home and section pages have no parent.
+Edit the Markdown source under `docs/`. Link to other handbook pages with their complete website URLs, including any section anchor. For a new handbook page, add its title, slug, source file, parent, and order to `docs/manifest.json`, and link it from the relevant section. Put content pages under one of the six chapter groups. Their URLs use `/reprint/SECTION/SLUG/` on developer.wordpress.org; the handbook home and section pages have no parent.
 
-Keep links to repository-only files and external resources as complete HTTPS
-URLs. The root README and CONTRIBUTING links stay relative for GitHub.
+Keep links to repository-only files and external resources as complete HTTPS URLs. The root README and CONTRIBUTING links stay relative for GitHub.
 
-Run `HandbookManifestTest.php` after changing links or page structure. It checks
-that links name published pages, contributor pages are included, and every page
-can be reached from the handbook home. For importer registration and deployment,
-see the [publishing plan](https://github.com/WordPress/reprint/blob/trunk/docs/contributing/publishing.md).
+Run `HandbookManifestTest.php` after changing links or page structure. It checks that links name published pages, contributor pages are included, and every page can be reached from the handbook home. For importer registration and deployment, see the [publishing plan](https://github.com/WordPress/reprint/blob/trunk/docs/contributing/publishing.md).
 
 ## Prepare a release
 
-Follow [Releasing Reprint](https://developer.wordpress.org/reprint/contributing/releases/) when publishing a stable version or
-updating plugin-directory screenshots.
+Follow [Releasing Reprint](https://developer.wordpress.org/reprint/contributing/releases/) when publishing a stable version or updating plugin-directory screenshots.
