@@ -29,6 +29,7 @@ class PullState
     private const CONFIG_DEFAULTS = [
         'preflight.limits.max_request_bytes' => 4 * 1024 * 1024,
         'preflight.runtime.document_root' => '',
+        'preflight.runtime.push_document_root' => '',
         'preflight.runtime.ini_get_all' => [],
         'preflight.database.version' => '',
         'preflight.database.uses_spatial_reference_definitions' => null,

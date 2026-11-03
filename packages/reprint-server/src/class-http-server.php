@@ -52,8 +52,12 @@ final class HTTPServer {
     /** @var array|null Trusted WordPress source metadata, never read from the request. */
     private $multisite;
 
+    /** @var string|null Effective host-configured push document root. */
+    private $push_document_root;
+
     public function __construct(array $options = []) {
         $this->multisite = $options['multisite'] ?? null;
+        $this->push_document_root = $options['push_document_root'] ?? $options['push']['docroot'] ?? null;
         $this->budget_factory = $options['budget_factory'] ?? [$this, 'default_budget_factory'];
         $this->body_reader = $options['body_reader'] ?? static function (): string {
             $body = file_get_contents('php://input');
@@ -423,6 +427,10 @@ final class HTTPServer {
             return;
         }
         if ($endpoint === 'preflight') {
+            unset($config['_push_document_root']);
+            if ($this->push_document_root !== null) {
+                $config['_push_document_root'] = $this->push_document_root;
+            }
             call_user_func($handler, $config);
             return;
         }

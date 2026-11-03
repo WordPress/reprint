@@ -2679,6 +2679,9 @@ function endpoint_preflight(array $config): array
         "wp_content" => $wp_content,
         "database" => $db,
     ];
+    if (isset($config['_push_document_root'])) {
+        $response['runtime']['push_document_root'] = $config['_push_document_root'];
+    }
 
     // Hosts such as Hostinger rewrite domains so links and assets stay on a
     // preview domain while the stored site URL still uses the real domain.

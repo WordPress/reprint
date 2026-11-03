@@ -1740,7 +1740,7 @@ class ImportClient
             // files-diff covers the whole filesystem root, so prepend the
             // remote document root to the runtime's document-root-relative paths.
             $excluded_paths = [];
-            $document_root = $this->get_state()->preflight_record()['data']['runtime']['document_root'] ?? '/';
+            $document_root = !empty($options['flat_document_root']) ? '/' : $this->push_document_root();
             foreach ($this->get_state()->apply->remote_paths_removed_from_local_site as $document_root_relative_path) {
                 $excluded_paths[] = base64_encode(ltrim(wp_join_unix_paths($document_root, $document_root_relative_path), '/'));
             }
@@ -1971,6 +1971,13 @@ class ImportClient
     }
     // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
+    /** Returns the push document root without changing pull layout. */
+    private function push_document_root(): string
+    {
+        $state = $this->get_state();
+        return $state->get('preflight.runtime.push_document_root') ?: $state->get('preflight.runtime.document_root');
+    }
+
     /**
      * Runs one caller-bounded files-push lifecycle.
      *
@@ -2007,7 +2014,7 @@ class ImportClient
         if (!is_array($context)) {
             throw new InvalidArgumentException('files-push requires its validated command context.');
         }
-        $document_root = $this->get_state()->get('preflight.runtime.document_root');
+        $document_root = $this->push_document_root();
         if ($document_root === '' || $document_root[0] !== '/') {
             throw new RuntimeException(
                 "Preflight did not report an absolute document root. Run 'preflight' or 'preflight-assert' again."
@@ -2029,7 +2036,9 @@ class ImportClient
             ? -1
             : Utils::parse_size($memory_limit_value);
         $excluded_paths = $this->get_state()->apply->remote_paths_removed_from_local_site;
-        $local_document_root = $this->path_mapper()->remote_path_to_local_path($document_root);
+        $local_document_root = !empty($options['flat_document_root'])
+            ? $context['filesystem_root']
+            : $this->path_mapper()->remote_path_to_local_path($document_root);
         foreach ($this->local_sqlite_artifact_paths() as $local_absolute_path) {
             $document_root_relative_path = Utils::relative_path_under($local_absolute_path, $local_document_root);
             if ($document_root_relative_path !== null) {
@@ -2038,7 +2047,7 @@ class ImportClient
         }
         $sender_options = [
             'filesystem_root' => $context['filesystem_root'],
-            'document_root' => $document_root,
+            'document_root' => !empty($options['flat_document_root']) ? '/' : $document_root,
             'push_state_directory' => $context['push_state_directory'],
             'remote_reprint_api_url' => $context['remote_reprint_api_url'],
             'request_context_headers' => $this->request_context_headers,
@@ -14876,7 +14885,7 @@ class ImportClient
         }
 
         if (isset($data["runtime"]) && is_array($data["runtime"])) {
-            foreach (["temp_dir", "document_root", "script_filename", "cwd"] as $key) {
+            foreach (["temp_dir", "document_root", "push_document_root", "script_filename", "cwd"] as $key) {
                 if (array_key_exists($key, $data["runtime"])) {
                     $data["runtime"][$key] = $this->encode_state_path_value($data["runtime"][$key]);
                 }
@@ -14942,7 +14951,7 @@ class ImportClient
         }
 
         if (isset($data["runtime"]) && is_array($data["runtime"])) {
-            foreach (["temp_dir", "document_root", "script_filename", "cwd"] as $key) {
+            foreach (["temp_dir", "document_root", "push_document_root", "script_filename", "cwd"] as $key) {
                 if (array_key_exists($key, $data["runtime"])) {
                     $data["runtime"][$key] = $this->decode_state_path_value($data["runtime"][$key]);
                 }
@@ -16031,7 +16040,7 @@ if (
             'target' => 'flat_document_root',
             'placeholder' => 'DIR',
             'help' => 'Flattened layout directory (used as-is)',
-            'commands' => ['apply-runtime'],
+            'commands' => ['apply-runtime', 'files-push', 'files-diff'],
             'aliases' => ['flattened-docroot'],
         ],
         [
@@ -16720,8 +16729,10 @@ if (
         "files-diff" => [
             "level" => "low",
             "short" => "Compare local files with the local index",
-            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [--progress=auto|tty|jsonl|compact]",
+            "usage" => "reprint files-diff <remote-reprint-api-url> --state-dir=DIR (--fs-root=DIR|--flat-document-root=DIR) [--progress=auto|tty|jsonl|compact]",
             "description" =>
+                "Use --fs-root for the reconstructed filesystem, or the mutually exclusive\n" .
+                "--flat-document-root for a plain document root directory.\n" .
                 "Shows which local paths a files-push would send or delete, comparing\n" .
                 "the filesystem root at --fs-root with the local index for this remote\n" .
                 "Reprint API URL. files-pull advances that index after completed local\n" .
@@ -16746,9 +16757,11 @@ if (
         "files-push" => [
             "level" => "low",
             "short" => "Push one local file tree without database work",
-            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR (--secret=TOKEN or --private-key-path=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]\nreprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --abort",
+            "usage" => "reprint files-push <remote-reprint-api-url> --state-dir=DIR (--fs-root=DIR|--flat-document-root=DIR) (--secret=TOKEN or --private-key-path=PATH, or a key from `reprint keygen`) [--insecure] [--progress=MODE] [--verbose]\nreprint files-push <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR --abort",
             "description" =>
-                "Sends the remote document root's local tree beneath --fs-root.\n" .
+                "Sends the push document root's local tree beneath --fs-root, or uses\n" .
+                "--flat-document-root=DIR as its contents (mutually exclusive).\n" .
+                "Uses preflight push_document_root, falling back to document_root.\n" .
                 "This is a low-level, files-only command: it performs no database work,\n" .
                 "plan display, confirmation prompt, automatic retry, or automatic restart.\n" .
                 "It requires saved preflight data for the remote document root.\n" .
@@ -17137,6 +17150,7 @@ if (
             )
                 || strpos($reprint_files_push_command_argument, '--state-dir=') === 0
                 || strpos($reprint_files_push_command_argument, '--fs-root=') === 0
+                || strpos($reprint_files_push_command_argument, '--flat-document-root=') === 0
                 || strpos($reprint_files_push_command_argument, '--secret=') === 0
                 || strpos($reprint_files_push_command_argument, '--private-key-path=') === 0
                 || strpos($reprint_files_push_command_argument, '--progress=') === 0;
@@ -17152,7 +17166,8 @@ if (
                 in_array($reprint_files_diff_command_argument, ['--insecure', '--allow-unsafe-http', '--force-http'], true)
                 || strpos($reprint_files_diff_command_argument, '--progress=') === 0
                 || strpos($reprint_files_diff_command_argument, '--state-dir=') === 0
-                || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0;
+                || strpos($reprint_files_diff_command_argument, '--fs-root=') === 0
+                || strpos($reprint_files_diff_command_argument, '--flat-document-root=') === 0;
             if (!$reprint_files_diff_option_allowed) {
                 $reprint_files_diff_option_name = explode('=', $reprint_files_diff_command_argument, 2)[0];
                 fwrite(STDERR, "Error: files-diff does not accept {$reprint_files_diff_option_name}.\n");

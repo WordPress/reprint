@@ -92,6 +92,121 @@ final class PushEndpointsTest extends TestCase {
         parent::tearDown();
     }
 
+    /** @dataProvider pushDocumentRoots */
+    public function testPreflightPushDocumentRootMapsClientPaths(bool $configured, bool $older_server, bool $push_enabled): void
+    {
+        $push_document_root = $configured ? $this->docroot . '/wp-content' : $this->docroot;
+        if ($configured) {
+            mkdir($push_document_root);
+        }
+        $configuration = ['document_root' => $this->docroot];
+        if ($configured) {
+            $configuration['docroot'] = $push_document_root;
+        }
+        $this->writeDocrootConfiguration($configuration);
+        if (!$push_enabled) {
+            file_put_contents($this->reprint_configuration_path, '');
+        }
+        $response = $this->sendPushRequestWithHeaders('GET', 'preflight', [], self::SECRET);
+        $this->assertSame(200, $response['http_code'], $response['body']);
+        $preflight = json_decode($response['body'], true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame($this->docroot, $preflight['runtime']['document_root']);
+        if (!$push_enabled) {
+            $this->assertArrayNotHasKey('push_document_root', $preflight['runtime']);
+            return;
+        }
+        $this->assertSame($push_document_root, $preflight['runtime']['push_document_root']);
+        if ($older_server) {
+            unset($preflight['runtime']['push_document_root']);
+        }
+        $filesystem_root = $this->root . '/local';
+        $state_directory = $this->root . '/state';
+        $remote_document_root = $older_server ? $this->docroot : $push_document_root;
+        mkdir($filesystem_root . $remote_document_root, 0700, true);
+        file_put_contents($filesystem_root . $remote_document_root . '/value.txt', 'new');
+        $client = new ImportClient($this->remote_reprint_api_url, $state_directory, $filesystem_root, ['allow_http' => true]);
+        $client->get_state()->set_preflight_record(['http_code' => 200, 'data' => $preflight]);
+        $client->save_state();
+        $result = $this->runFilesPushCli($filesystem_root, $state_directory);
+        $this->assertSame(0, $result['exit'], $result['output']);
+        $this->assertSame('new', file_get_contents($push_document_root . '/value.txt'));
+        $this->assertFileDoesNotExist($push_document_root . '/wp-content/value.txt');
+    }
+
+    public static function pushDocumentRoots(): array
+    {
+        return [
+            'host push root' => [true, false, true],
+            'default push root' => [false, false, true],
+            'older server fallback' => [false, true, true],
+            'older server fallback with host push root' => [true, true, true],
+            'push not configured' => [true, false, false],
+        ];
+    }
+
+    public function testFlatDocumentRootPushRetainsTheLocalIndexAcrossChanges(): void
+    {
+        $this->writeDocrootConfiguration(['document_root' => $this->docroot, 'maximum_part_bytes' => 64]);
+        $filesystem_root = $this->root . '/plain-wordpress';
+        $state_directory = $this->root . '/state';
+        mkdir($filesystem_root);
+        file_put_contents($filesystem_root . '/index.php', 'original');
+        file_put_contents($filesystem_root . '/keep.txt', 'keep');
+        mkdir($filesystem_root . '/wp-content');
+        file_put_contents($filesystem_root . '/wp-content/value.txt', 'nested');
+        $this->writeFilesPushPreflight($state_directory, $this->docroot);
+
+        // An empty local index represents a site with no completed local mutations.
+        file_put_contents(dirname($this->filesPushStateDirectory($state_directory)) . '/local_index.jsonl', '');
+
+        // One state directory must retain the local index through all four runs.
+        $cases = [
+            'first' => [['index.php', 'keep.txt', 'wp-content/value.txt'], [], 'original'],
+            'unchanged' => [[], [], 'original'],
+            'edited' => [['index.php'], [], 'edited contents'],
+            'deleted' => [[], ['index.php'], null],
+        ];
+        foreach ($cases as $step => [$expected_push_paths, $expected_delete_paths, $contents]) {
+            if ($step === 'deleted') {
+                unlink($filesystem_root . '/index.php');
+            } elseif ($step === 'edited') {
+                file_put_contents($filesystem_root . '/index.php', $contents);
+            }
+            $local_index_file = dirname($this->filesPushStateDirectory($state_directory)) . '/local_index.jsonl';
+            $local_index_before_diff = file_get_contents($local_index_file);
+            $diff = $this->runFilesDiffCli($filesystem_root, $state_directory, true);
+            $this->assertSame($local_index_before_diff, file_get_contents($local_index_file), $step);
+            $this->assertSame(0, $diff['exit'], $step . ': ' . $diff['output']);
+            $planned_paths = ['push' => [], 'delete' => []];
+            foreach ($this->cliJsonLines($diff['stdout']) as $record) {
+                if (isset($record['action'])) {
+                    $planned_paths[$record['action']][] = base64_decode($record['path_b64'], true);
+                }
+            }
+            sort($planned_paths['push']);
+            $this->assertSame($expected_push_paths, $planned_paths['push'], $step);
+            $this->assertSame($expected_delete_paths, $planned_paths['delete'], $step);
+
+            $result = $this->runFilesPushCli($filesystem_root, $state_directory, [], $this->docroot, ['--flat-document-root=' . $filesystem_root]);
+            $this->assertSame(0, $result['exit'], $step . ': ' . $result['output']);
+            if ($contents === null) {
+                $this->assertFileDoesNotExist($this->docroot . '/index.php');
+            } else {
+                $this->assertSame($contents, file_get_contents($this->docroot . '/index.php'));
+            }
+            $this->assertSame('keep', file_get_contents($this->docroot . '/keep.txt'));
+            $this->assertSame('nested', file_get_contents($this->docroot . '/wp-content/value.txt'));
+            $this->assertDirectoryDoesNotExist($this->docroot . $filesystem_root);
+            $this->assertSame('old', file_get_contents($this->docroot . '/remove.txt'));
+            $results = array_values(array_filter($this->cliJsonLines($result['stdout']), static function (array $record): bool {
+                return isset($record['files_total']);
+            }));
+            $last = end($results);
+            $this->assertSame(count($expected_push_paths), $last['files_total'], $step . ': ' . $result['output']);
+            $this->assertSame(count($expected_push_paths), $last['files_done'], $step . ': ' . $result['output']);
+        }
+    }
+
     public function testExistingTokenCannotUsePushEndpointsWithoutAuthorization(): void
     {
         file_put_contents($this->push_authorization_configuration_path, '');
@@ -3237,7 +3352,7 @@ final class PushEndpointsTest extends TestCase {
      *
      * @return array{exit:int,stdout:string,stderr:string,output:string}
      */
-    private function runFilesDiffCli(string $local_docroot, string $state_directory): array
+    private function runFilesDiffCli(string $local_docroot, string $state_directory, bool $flat_document_root = false): array
     {
         $process = proc_open(
             [
@@ -3247,7 +3362,7 @@ final class PushEndpointsTest extends TestCase {
                 $this->remote_reprint_api_url,
                 '--allow-unsafe-http',
                 '--state-dir=' . $state_directory,
-                '--fs-root=' . $local_docroot,
+                ( $flat_document_root ? '--flat-document-root=' : '--fs-root=' ) . $local_docroot,
                 '--progress=jsonl',
             ],
             [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
@@ -3989,7 +4104,7 @@ final class PushEndpointsTest extends TestCase {
             'files-push',
             $this->remote_reprint_api_url,
             '--state-dir=' . $state_directory,
-            '--fs-root=' . $filesystem_root,
+            ( in_array('--flat-document-root=' . $filesystem_root, $extra_options, true) ? '--flat-document-root=' : '--fs-root=' ) . $filesystem_root,
             '--force-http',
         ], $this->credential_options, $extra_options);
         $process = proc_open(

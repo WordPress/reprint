@@ -758,6 +758,9 @@ function handle_api_request(array $options = []): void {
             ) {
                 push_error(403, 'push_disabled', 'Full database push requires a host-configured standalone API route; multisite is not supported.');
             }
+        }
+        $is_push_endpoint = HTTPServer::is_push_endpoint($endpoint);
+        if ($is_push_endpoint || ( $endpoint === 'preflight' && isset($options['reprint_directory']) )) {
             // Push changes the web server's document root. ABSPATH remains the
             // pull default because it may point at a separate shared core tree.
             if (array_key_exists('docroot', $options)) {
@@ -780,6 +783,10 @@ function handle_api_request(array $options = []): void {
                 );
             }
             $docroot = $canonical_docroot === '/' ? '/' : rtrim($canonical_docroot, '/\\');
+            $server_options['push_document_root'] = $docroot;
+        }
+        if ($is_push_endpoint) {
+            assert(isset($docroot, $configured_docroot));
             $lexical_docroot = normalize_path(str_replace('\\', '/', $configured_docroot));
             $reprint_directory = $options['reprint_directory'] ?? null;
             if (!is_string($reprint_directory) || $reprint_directory === '') {
