@@ -27,7 +27,7 @@ cd try-reprint
 curl -fL https://github.com/WordPress/reprint/releases/latest/download/reprint.phar -o reprint.phar
 php reprint.phar pull https://reprint-demo.wordpress.net \
   --state-dir=./state --fs-root=./files \
-  --secret=public-demo
+  --secret=public-demo --new-site-url=http://localhost:8881
 ```
 
 `public-demo` is a placeholder for the CLI. The demo server ignores it.
