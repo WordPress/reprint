@@ -174,6 +174,8 @@ async function checkRequests(plugin, target, root) {
     const docroot = join(root, `${target}-docroot`);
     await mkdir(docroot);
     await writeFile(join(docroot, 'keep.txt'), 'original');
+    const excludedFile = join(docroot, 'wp-config.php');
+    await writeFile(excludedFile, 'private config marker');
     const listener = createServer();
     await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
     const port = listener.address().port;
@@ -205,6 +207,11 @@ async function checkRequests(plugin, target, root) {
         const downloaded = await request(url + 'file_fetch', { method: 'POST', body: form });
         assert.equal(downloaded.status, 200);
         assert.match(await downloaded.text(), /original/);
+        form.set('file_list', new Blob([JSON.stringify([{ path: Buffer.from(excludedFile).toString('base64') }])]), 'paths.json');
+        const excluded = await request(url + 'file_fetch', { method: 'POST', body: form });
+        const excludedBody = await excluded.text();
+        assert.match(excludedBody, /excluded from pull/);
+        assert.doesNotMatch(excludedBody, /private config marker/);
         for (const scheme of ['key', 'hmac']) {
             const response = await fetch(`http://127.0.0.1:${port}/?admin_probe=${scheme}`);
             const text = await response.text();

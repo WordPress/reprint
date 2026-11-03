@@ -372,6 +372,7 @@ class FileTreeProducer
                 return null;
             }
 
+            $this->assert_pull_file_allowed($resolved_path);
             $info = $this->lstat_path($resolved_path);
             if ($info === null) {
                 continue;
@@ -464,6 +465,7 @@ class FileTreeProducer
                 $this->multisite_selection->assert_path_allowed($file["path"]);
             }
             clearstatcache(true, $file["path"]);
+            $this->assert_pull_file_allowed($file["path"]);
             $pre_stat = @Utils::source_lstat($file["path"]);
             if ($pre_stat === false || (($pre_stat["mode"] & 0170000) !== 0100000)) {
                 $this->streaming_file_handle = null;
@@ -606,6 +608,14 @@ class FileTreeProducer
             $this->last_emitted_path = $file["path"];
             $this->last_emitted_ctime = $file["ctime"];
             $this->current_file_meta = null;
+        }
+    }
+
+    private function assert_pull_file_allowed(string $path): void
+    {
+        if (Utils::is_pull_file_excluded($path)) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Protocol error, not HTML.
+            throw new InvalidArgumentException('Source file is excluded from pull: ' . $path);
         }
     }
 

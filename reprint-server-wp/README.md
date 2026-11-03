@@ -336,3 +336,20 @@ fires — and early enough that the settings page has not yet registered its
 option listeners, so moving the token does not read as a rotation and does not
 revoke push authorization. Once no site carries the legacy options,
 `compat.php` can be deleted outright.
+
+### Exclude a file from pulls
+
+Define this function in an MU plugin, or load it before dispatching the Reprint
+API in a standalone PHP entry point. WordPress is not required.
+
+```php
+function reprint_exclude_pull_file( $path ) {
+    return $path === '/srv/htdocs/wp-config.php';
+}
+```
+
+Return `true` to omit the file from the pull index and refuse downloads,
+including resumed downloads. Reprint checks both the path and its resolved
+spelling, so a symlink to an excluded file does not let a caller fetch it.
+Use the file's actual absolute path. This does not prune directory trees,
+exclude separate copies or hard links, or change the database export.

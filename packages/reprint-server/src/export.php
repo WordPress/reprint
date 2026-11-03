@@ -3279,6 +3279,9 @@ function endpoint_file_index(
             switch ($file_index->get_step_status()) {
                 case FileIndexProcessor::STATUS_INDEXED:
                     foreach ($file_index->get_index_entries() as $index_entry) {
+                        if ($index_entry['type'] !== 'dir' && Utils::is_pull_file_excluded($index_entry['path'])) {
+                            continue;
+                        }
                         $batch_items[] = $index_entry;
                     }
                     if (count($batch_items) >= $batch_size) {

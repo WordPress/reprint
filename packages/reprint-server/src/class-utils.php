@@ -1016,6 +1016,18 @@ final class Utils
         return $stat;
     }
 
+    /** Applies the optional source hook to a file and its resolved spelling. */
+    public static function is_pull_file_excluded(string $path): bool {
+        if (!function_exists('reprint_exclude_pull_file')) {
+            return false;
+        }
+        if (\reprint_exclude_pull_file($path) === true) {
+            return true;
+        }
+        $resolved = self::source_realpath($path);
+        return $resolved !== false && $resolved !== $path && \reprint_exclude_pull_file($resolved) === true;
+    }
+
     /**
      * Resolves source paths through PHP and returns the shared index spelling.
      *
