@@ -18,19 +18,19 @@ an interrupted transfer can continue.
 ## Try it with the demo site
 
 You need PHP with the extensions listed in
-[Requirements and downloads](docs/handbook/requirements.md). The demo supplies
-a shared access key, so you can copy it without connecting your own site:
+[Requirements and downloads](docs/handbook/requirements.md). You can copy the demo without
+an account, a key download, or a site of your own:
 
 ```sh
 mkdir try-reprint
 cd try-reprint
-curl -fL https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar -o reprint.phar
-curl -fL https://reprint-demo.wordpress.net/public.key -o demo.key
-php reprint.phar pull https://reprint-demo.wordpress.net/ \
-  --private-key-path=./demo.key \
+curl -fL https://github.com/WordPress/reprint/releases/latest/download/reprint.phar -o reprint.phar
+php reprint.phar pull https://reprint-demo.wordpress.net \
   --state-dir=./state --fs-root=./files \
-  --target-engine=sqlite --new-site-url=http://localhost:8881
+  --secret=public-demo
 ```
+
+`public-demo` is a placeholder for the CLI. The demo server ignores it.
 
 When the local server starts, open http://localhost:8881.
 [Check, stop, or reopen your copy](docs/handbook/try-reprint.md).
