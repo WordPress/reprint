@@ -16,7 +16,7 @@ cd try-reprint
 Download Reprint into that folder:
 
 ```sh
-curl -fL https://github.com/WordPress/reprint/releases/latest/download/reprint.phar -o reprint.phar
+curl -fL https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar -o reprint.phar
 php reprint.phar --version
 ```
 
