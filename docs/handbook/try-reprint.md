@@ -29,10 +29,11 @@ In the same folder, run:
 ```sh
 php reprint.phar pull https://reprint-demo.wordpress.net \
   --state-dir=./state --fs-root=./files \
+  --port=8881 --new-site-url=http://localhost:8881 \
   --secret=public-demo
 ```
 
-`public-demo` is a placeholder for the CLI. The demo server ignores it. Reprint downloads the files and database, then starts your local copy. Keep the terminal open while it runs.
+`public-demo` is a placeholder for the CLI. The demo server ignores it. The `--new-site-url` option rewrites links to the demo so they stay on your local copy. Reprint downloads the files and database, then starts your local copy. Keep the terminal open while it runs. If port 8881 is already in use, pick another port and change it in both options.
 
 ## 3. Open your copy
 

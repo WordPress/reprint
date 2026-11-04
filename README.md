@@ -27,6 +27,7 @@ cd try-reprint
 curl -fL https://github.com/WordPress/reprint/releases/latest/download/reprint.phar -o reprint.phar
 php reprint.phar pull https://reprint-demo.wordpress.net \
   --state-dir=./state --fs-root=./files \
+  --port=8881 --new-site-url=http://localhost:8881 \
   --secret=public-demo
 ```
 
