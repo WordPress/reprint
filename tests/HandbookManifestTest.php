@@ -153,6 +153,18 @@ final class HandbookManifestTest extends TestCase {
         }
     }
 
+    public function testDemoExamplesDownloadTheClientFromWordPressOrg(): void
+    {
+        $root = dirname(__DIR__);
+        foreach (['README.md', 'docs/handbook/try-reprint.md'] as $file) {
+            $this->assertStringContainsString(
+                'curl -fL https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar -o reprint.phar',
+                file_get_contents($root . '/' . $file),
+                $file
+            );
+        }
+    }
+
     public function testRuntimePullOptionsKeepTheirLinkedHeadingId(): void
     {
         // The Handbook TOC leaves a one-heading body unchanged. Keep the ID
