@@ -178,22 +178,70 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertTrue(is_link($this->flattenTo . '/index.php'));
     }
 
-    public function testRemovesLeftoversFromAnInterruptedCopy(): void
+    public function testSkipsFilesWithMatchingSizeAndMtime(): void
     {
         $this->createWpCloudLayout();
         $this->flatten(['core_files' => 'copy']);
-        mkdir($this->flattenTo . '/wp-includes.reprint-tmp');
-        file_put_contents($this->flattenTo . '/wp-includes.reprint-tmp/partial.php', '<?php // partial');
-        mkdir($this->flattenTo . '/wp-admin.reprint-old');
-        file_put_contents($this->flattenTo . '/index.php.reprint-tmp', '<?php // partial');
+        $source = $this->fsRoot . '/wordpress/core/7.1.3/wp-admin/admin.php';
+        $copy = $this->flattenTo . '/wp-admin/admin.php';
+        $this->assertSame(filemtime($source), filemtime($copy));
+
+        // Same size and mtime as the source, so the next run leaves it alone.
+        file_put_contents($copy, '<?php // ADMIN');
+        touch($copy, filemtime($source));
+        $this->flatten(['core_files' => 'copy']);
+        $this->assertSame('<?php // ADMIN', file_get_contents($copy));
+
+        // A different mtime alone is enough to copy it again.
+        touch($copy, filemtime($source) - 60);
+        clearstatcache();
+        $this->flatten(['core_files' => 'copy']);
+        $this->assertSame('<?php // admin', file_get_contents($copy));
+    }
+
+    public function testRemovesWhatPulledCoreNoLongerHas(): void
+    {
+        $this->createWpCloudLayout();
+        $this->flatten(['core_files' => 'copy']);
+        mkdir($this->flattenTo . '/wp-includes/stale/nested', 0755, true);
+        file_put_contents($this->flattenTo . '/wp-includes/stale/nested/old.php', '<?php // old');
+        symlink('/etc', $this->flattenTo . '/wp-admin/stale-link');
 
         $this->flatten(['core_files' => 'copy']);
 
-        $this->assertFileDoesNotExist($this->flattenTo . '/wp-includes.reprint-tmp');
-        $this->assertFileDoesNotExist($this->flattenTo . '/wp-admin.reprint-old');
-        $this->assertFileDoesNotExist($this->flattenTo . '/index.php.reprint-tmp');
-        $this->assertFileDoesNotExist($this->flattenTo . '/wp-includes/partial.php');
+        $this->assertDirectoryDoesNotExist($this->flattenTo . '/wp-includes/stale');
+        $this->assertFalse(is_link($this->flattenTo . '/wp-admin/stale-link'));
+        $this->assertDirectoryExists('/etc');
+    }
+
+    public function testReplacesTargetsOfTheWrongType(): void
+    {
+        $this->createWpCloudLayout();
+        mkdir($this->flattenTo . '/index.php/nested', 0755, true);
+        file_put_contents($this->flattenTo . '/wp-includes', 'a file where a directory belongs');
+
+        $this->flatten(['core_files' => 'copy']);
+
+        $this->assertSame('<?php // index', file_get_contents($this->flattenTo . '/index.php'));
         $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+    }
+
+    public function testCopyNeverWritesThroughLinksIntoThePulledTree(): void
+    {
+        $this->createWpCloudLayout();
+        $this->flatten(['core_files' => 'link']);
+        $pulledFile = $this->fsRoot . '/wordpress/core/7.1.3/wp-load.php';
+        $pulledDirectory = $this->fsRoot . '/wordpress/core/7.1.3/wp-includes';
+        unlink($this->flattenTo . '/wp-load.php');
+        symlink($this->fsRoot . '/wordpress/core/7.1.3/license.txt', $this->flattenTo . '/wp-load.php');
+        file_put_contents($pulledDirectory . '/pulled-only.php', '<?php // pulled');
+
+        $this->flatten(['core_files' => 'copy']);
+
+        $this->assertSame('GPL', file_get_contents($this->fsRoot . '/wordpress/core/7.1.3/license.txt'));
+        $this->assertSame('<?php // wp-load', file_get_contents($pulledFile));
+        $this->assertFileExists($pulledDirectory . '/pulled-only.php');
+        $this->assertFalse(is_link($this->flattenTo . '/wp-load.php'));
     }
 
     public function testCopyRefusesToFlattenIntoThePulledAbspath(): void

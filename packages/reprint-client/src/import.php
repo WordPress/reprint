@@ -7077,41 +7077,15 @@ class ImportClient
     }
 
     /**
-     * Replace $target with a fresh copy of the core entry at $source.
+     * Bring $target in line with the core entry at $source.
      *
-     * The copy is assembled next to the target and renamed into place, so
-     * an interrupted run never leaves a partially copied or partially
-     * deleted core directory. Whatever was at the target before — a symlink
-     * from an earlier --core-files=link run, or an earlier copy — is
-     * replaced. Leftovers from an interrupted run are removed first.
+     * Like the WordPress core updater, this overwrites in place, so an
+     * interrupted run can leave core versions mixed. The next run repairs
+     * that, because every run compares all of core with the pulled tree.
      */
     private function flatten_place_copy(string $source, string $target, int &$copied): void
     {
-        $temporary_target = $target . ".reprint-tmp";
-        $previous_target = $target . ".reprint-old";
-        $this->flatten_remove_entry($temporary_target);
-        $this->flatten_remove_entry($previous_target);
-
-        $this->flatten_copy_core_tree($source, $temporary_target);
-
-        // rename() replaces a file or symlink in one step, but it cannot
-        // replace a directory or put a directory where a file is. Such a
-        // target moves aside and is deleted once the copy is in place.
-        $target_is_directory = is_dir($target) && !is_link($target);
-        $target_exists = $target_is_directory || is_link($target) || file_exists($target);
-        if ($target_exists && ($target_is_directory || is_dir($temporary_target))) {
-            if (!rename($target, $previous_target)) {
-                throw new RuntimeException(
-                    "Failed to move the previous core entry aside: {$target}",
-                );
-            }
-        }
-        if (!rename($temporary_target, $target)) {
-            throw new RuntimeException(
-                "Failed to move copied core entry into place: {$target}",
-            );
-        }
-        $this->flatten_remove_entry($previous_target);
+        $this->flatten_copy_core_tree($source, $target);
         $this->audit_log("FLAT-DOCUMENT-ROOT | Copied core entry: {$target}");
         ++$copied;
     }
@@ -7127,7 +7101,11 @@ class ImportClient
     }
 
     /**
-     * Recursively copy a core file or directory.
+     * Recursively copy a core file or directory over $destination.
+     *
+     * Files with the source's size and mtime are skipped, so a run with
+     * unchanged core writes nothing. Anything in a copied directory that
+     * the source does not have is removed.
      *
      * WordPress core contains no symlinks. Following one could copy files
      * from outside core or loop on a cycle, so a symlink stops the copy.
@@ -7139,31 +7117,51 @@ class ImportClient
                 "Cannot copy core: found a symlink inside WordPress core at {$source}",
             );
         }
-        if (!is_dir($source)) {
-            if (!copy($source, $destination)) {
+
+        // copy() writes through a symlink, which would change the pulled
+        // tree when the link comes from an earlier --core-files=link run.
+        $source_is_directory = is_dir($source);
+        if (is_link($destination)
+            || (file_exists($destination) && is_dir($destination) !== $source_is_directory)
+        ) {
+            $this->flatten_remove_entry($destination);
+        }
+
+        if (!$source_is_directory) {
+            if (is_file($destination)
+                && filesize($destination) === filesize($source)
+                && filemtime($destination) === filemtime($source)
+            ) {
+                return;
+            }
+            // The mtime is set last, so a file cut short by an interrupted
+            // copy never matches the source on the next run.
+            if (!copy($source, $destination) || !touch($destination, filemtime($source))) {
                 throw new RuntimeException(
                     "Failed to copy core file: {$source} to {$destination}",
                 );
             }
             return;
         }
-        if (!mkdir($destination, 0755)) {
+
+        if (!is_dir($destination) && !mkdir($destination, 0755)) {
             throw new RuntimeException(
                 "Failed to create core directory copy: {$destination}",
             );
         }
-        $entries = @scandir($source);
-        if ($entries === false) {
+        $source_entries = @scandir($source);
+        $destination_entries = @scandir($destination);
+        if ($source_entries === false || $destination_entries === false) {
             throw new RuntimeException("Failed to scan core directory: {$source}");
         }
-        foreach ($entries as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
+        foreach (array_diff($source_entries, [".", ".."]) as $entry) {
             $this->flatten_copy_core_tree(
                 wp_join_unix_paths($source, $entry),
                 wp_join_unix_paths($destination, $entry),
             );
+        }
+        foreach (array_diff($destination_entries, $source_entries) as $entry) {
+            $this->flatten_remove_entry(wp_join_unix_paths($destination, $entry));
         }
     }
 
@@ -17070,8 +17068,9 @@ if (
                 "--core-files=copy copies WordPress core (wp-admin, wp-includes,\n" .
                 "index.php, xmlrpc.php, license.txt, readme.html, and wp-*.php\n" .
                 "other than wp-config*.php, though wp-config-sample.php is core)\n" .
-                "instead of linking it. Every run replaces the copy, so local\n" .
-                "edits to core are discarded and never reach --fs-root.\n" .
+                "instead of linking it. Every run brings the copy back in line\n" .
+                "with the pulled core, so local edits to core are discarded and\n" .
+                "never reach --fs-root.\n" .
                 "wp-content, wp-config.php and files like wp-config-local.php,\n" .
                 "other site files, and core entries that are symlinks on the\n" .
                 "source stay linked.\n",
