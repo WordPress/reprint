@@ -107,7 +107,8 @@ Each command's `--help` lists its complete options. These are the ones the handb
 | `--exclude-host-plugins`, `--include-host-plugins` | Skip or keep host platform plugins; the choice is saved in state. On `apply-runtime`, they control local cleanup only. | `pull`, `pull-files`, `pull-db`, `files-pull`, `db-apply`, `apply-runtime` |
 | `--sql-output=MODE` with `--mysql-host`, `--mysql-port`, `--mysql-user`, `--mysql-password`, `--mysql-database` | Where `db-pull` writes SQL: `file` (default), `stdout`, or `mysql`. | `db-pull` |
 | `--site-admin=LOGIN` | Imported user who administers a site copied out of a network. | `pull`, `pull-db`, `db-apply` |
-| `--flatten-to=PATH` | Assemble a standard WordPress layout at PATH with symlinks to the downloaded tree. | `pull`, `flat-docroot` |
+| `--flatten-to=PATH` | Assemble a standard WordPress layout at PATH with symlinks to the downloaded tree. `--core-files=copy` copies WordPress core instead. | `pull`, `flat-docroot` |
+| `--core-files=MODE` | Place WordPress core in that layout as `link` (default) or `copy`. | `pull`, `flat-docroot` |
 | `--runtime=RUNTIME` | Server configuration to generate: `php-builtin`, `nginx-fpm`, `playground-cli`, or `none`. | `pull`, `apply-runtime` |
 | `--start-runtime=RUNTIME` | Runtime to launch after `pull` finishes; `none` starts nothing. | `pull` |
 | `--output-dir=DIR` | Directory for generated runtime files. | `pull`, `apply-runtime` |
