@@ -229,19 +229,56 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
     public function testCopyNeverWritesThroughLinksIntoThePulledTree(): void
     {
         $this->createWpCloudLayout();
-        $this->flatten(['core_files' => 'link']);
-        $pulledFile = $this->fsRoot . '/wordpress/core/7.1.3/wp-load.php';
-        $pulledDirectory = $this->fsRoot . '/wordpress/core/7.1.3/wp-includes';
-        unlink($this->flattenTo . '/wp-load.php');
-        symlink($this->fsRoot . '/wordpress/core/7.1.3/license.txt', $this->flattenTo . '/wp-load.php');
-        file_put_contents($pulledDirectory . '/pulled-only.php', '<?php // pulled');
+        $previousCore = $this->fsRoot . '/wordpress/core/7.0.7';
+        $this->createCoreTree($previousCore, '7.0.7');
+        file_put_contents($previousCore . '/wp-includes/only-in-7.0.7.php', '<?php // old');
+        mkdir($this->flattenTo, 0755, true);
+        symlink($previousCore . '/wp-includes', $this->flattenTo . '/wp-includes');
+        symlink($previousCore . '/license.txt', $this->flattenTo . '/license.txt');
+        file_put_contents($this->fsRoot . '/wordpress/core/7.1.3/license.txt', 'GPL 7.1.3');
 
         $this->flatten(['core_files' => 'copy']);
 
-        $this->assertSame('GPL', file_get_contents($this->fsRoot . '/wordpress/core/7.1.3/license.txt'));
-        $this->assertSame('<?php // wp-load', file_get_contents($pulledFile));
-        $this->assertFileExists($pulledDirectory . '/pulled-only.php');
-        $this->assertFalse(is_link($this->flattenTo . '/wp-load.php'));
+        $this->assertSame('<?php // version 7.0.7', file_get_contents($previousCore . '/wp-includes/version.php'));
+        $this->assertFileExists($previousCore . '/wp-includes/only-in-7.0.7.php');
+        $this->assertSame('GPL', file_get_contents($previousCore . '/license.txt'));
+        $this->assertFalse(is_link($this->flattenTo . '/wp-includes'));
+        $this->assertFalse(is_link($this->flattenTo . '/license.txt'));
+        $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+        $this->assertSame('GPL 7.1.3', file_get_contents($this->flattenTo . '/license.txt'));
+    }
+
+    public function testCopyHandlesCaseOnlyRenameInCore(): void
+    {
+        $this->createWpCloudLayout();
+        $this->flatten(['core_files' => 'copy']);
+        $pulledIncludes = $this->fsRoot . '/wordpress/core/7.1.3/wp-includes';
+        if (file_exists(strtoupper($this->tempDir) . '/FS-ROOT') === false) {
+            $this->markTestSkipped('The filesystem is case-sensitive.');
+        }
+        file_put_contents($this->flattenTo . '/wp-includes/renamed.php', '<?php // old name');
+        file_put_contents($pulledIncludes . '/Renamed.php', '<?php // new name');
+
+        $this->flatten(['core_files' => 'copy']);
+
+        $this->assertContains('Renamed.php', scandir($this->flattenTo . '/wp-includes'));
+        $this->assertSame('<?php // new name', file_get_contents($this->flattenTo . '/wp-includes/Renamed.php'));
+    }
+
+    public function testCopyRejectsSymlinkedDetachedCoreDirectory(): void
+    {
+        $this->createCoreTree($this->fsRoot . '/wordpress/core/7.1.3', '7.1.3');
+        mkdir($this->fsRoot . '/srv/htdocs/wp-content', 0755, true);
+        symlink($this->fsRoot . '/wordpress/core/7.1.3/wp-admin', $this->fsRoot . '/wordpress/wp-admin');
+        $this->writePreflight([
+            'abspath' => '/srv/htdocs',
+            'wp_admin_path' => '/wordpress/wp-admin',
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('symlink');
+
+        $this->flatten(['core_files' => 'copy']);
     }
 
     public function testCopyRefusesToFlattenIntoThePulledAbspath(): void

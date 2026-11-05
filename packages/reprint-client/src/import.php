@@ -5946,7 +5946,7 @@ class ImportClient
             if ($wordpress_index_php === '') {
                 throw new InvalidArgumentException('The selected multisite runtime requires its imported WordPress files.');
             }
-            // flat-docroot links core files to the raw download. Without an
+            // flat-docroot may link core files to the raw download. Without an
             // explicit ABSPATH, wp-load.php looks beside that link's target,
             // where the source wp-config.php was deliberately not copied.
             $manifest->constants['ABSPATH'] = dirname($wordpress_index_php) . '/';
@@ -6499,7 +6499,8 @@ class ImportClient
      *
      * Creates a directory at the specified --flatten-to path that mirrors
      * a vanilla WordPress installation layout by symlinking entries from
-     * the filesystem root. Uses preflight data (paths_urls) to determine
+     * the filesystem root, or copying WordPress core with --core-files=copy.
+     * Uses preflight data (paths_urls) to determine
      * where each WordPress component actually lives, rather than blindly
      * scanning filesystem root top-level entries.
      *
@@ -6508,7 +6509,8 @@ class ImportClient
      * and the target needs a conventional wp-admin/, wp-includes/,
      * wp-content/, wp-load.php structure.
      *
-     * The command is idempotent: re-running refreshes all symlinks.
+     * The command is idempotent: re-running refreshes all symlinks and
+     * brings copied core back in line with the pulled core.
      * If a path that should be a symlink is a regular file/directory,
      * the command stops with an error unless --force is specified.
      */
@@ -6675,7 +6677,8 @@ class ImportClient
             $skip_from_abspath["wp-includes"] = true;
         }
 
-        // Phase 1: Symlink all entries from ABSPATH into flatten-to.
+        // Phase 1: Symlink all entries from ABSPATH into flatten-to, or copy
+        // the core entries among them with --core-files=copy.
         // This covers core files (index.php, wp-load.php, wp-config.php, etc.)
         // and wp-admin/wp-includes when they're directly under ABSPATH.
         $entries = @scandir($local_abspath);
@@ -6715,7 +6718,7 @@ class ImportClient
             );
         }
 
-        // Phase 1b: Symlink detached wp-admin and wp-includes from their
+        // Phase 1b: Symlink or copy detached wp-admin and wp-includes from their
         // resolved physical locations (e.g. /wordpress/wp-admin on WP Cloud).
         $detached_core_directories = [];
         if ($wp_admin_detached && $local_wp_admin !== null && is_dir($local_wp_admin)) {
@@ -6726,7 +6729,7 @@ class ImportClient
         }
         foreach ($detached_core_directories as $entry => $source) {
             $target = wp_join_unix_paths($flatten_to, $entry);
-            if ($copy_core_files && !is_link($source)) {
+            if ($copy_core_files) {
                 $this->flatten_place_copy($source, $target, $copied);
                 continue;
             }
@@ -7152,16 +7155,18 @@ class ImportClient
         $source_entries = @scandir($source);
         $destination_entries = @scandir($destination);
         if ($source_entries === false || $destination_entries === false) {
-            throw new RuntimeException("Failed to scan core directory: {$source}");
+            throw new RuntimeException("Failed to scan core directories: {$source}, {$destination}");
+        }
+        // Remove first. On a case-insensitive filesystem, copying Foo.php
+        // writes into an existing foo.php, which would then look stale.
+        foreach (array_diff($destination_entries, $source_entries) as $entry) {
+            $this->flatten_remove_entry(wp_join_unix_paths($destination, $entry));
         }
         foreach (array_diff($source_entries, [".", ".."]) as $entry) {
             $this->flatten_copy_core_tree(
                 wp_join_unix_paths($source, $entry),
                 wp_join_unix_paths($destination, $entry),
             );
-        }
-        foreach (array_diff($destination_entries, $source_entries) as $entry) {
-            $this->flatten_remove_entry(wp_join_unix_paths($destination, $entry));
         }
     }
 
@@ -17068,8 +17073,8 @@ if (
                 "--core-files=copy copies WordPress core instead of linking it.\n" .
                 "Every run brings the copy back in line with the pulled core, so\n" .
                 "local edits to core are discarded and never reach --fs-root.\n" .
-                "wp-content, wp-config*.php, other site files, and entries that\n" .
-                "are symlinks on the source stay linked.\n",
+                "wp-content, wp-config.php and similar config files, other site\n" .
+                "files, and entries that are symlinks on the source stay linked.\n",
             "extra" => null,
         ],
         "merge-wp-content" => [
