@@ -7093,13 +7093,22 @@ class ImportClient
         ++$copied;
     }
 
-    /** Remove a file, symlink, or directory tree if it exists. */
+    /**
+     * Remove a file, symlink, or directory tree if it exists.
+     *
+     * A failure stops the run: copying over a symlink that is still there
+     * would write through it into the pulled tree.
+     */
     private function flatten_remove_entry(string $path): void
     {
         if (is_link($path) || is_file($path)) {
-            unlink($path);
+            @unlink($path);
         } elseif (is_dir($path)) {
-            $this->remove_directory_recursive($path);
+            @$this->remove_directory_recursive($path);
+        }
+        clearstatcache();
+        if (is_link($path) || file_exists($path)) {
+            throw new RuntimeException("Failed to remove: {$path}");
         }
     }
 

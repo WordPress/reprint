@@ -248,6 +248,45 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertSame('GPL 7.1.3', file_get_contents($this->flattenTo . '/license.txt'));
     }
 
+    public function testStopsWhenALinkCannotBeRemoved(): void
+    {
+        $this->createWpCloudLayout();
+        $previousCore = $this->fsRoot . '/wordpress/core/7.0.7';
+        $this->createCoreTree($previousCore, '7.0.7');
+        $this->flatten(['core_files' => 'copy']);
+        $this->recursiveDelete($this->flattenTo . '/wp-includes');
+        symlink($previousCore . '/wp-includes', $this->flattenTo . '/wp-includes');
+        chmod($this->flattenTo, 0555);
+
+        try {
+            $this->flatten(['core_files' => 'copy']);
+            $this->fail('A link which cannot be removed should stop the run');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('wp-includes', $exception->getMessage());
+        } finally {
+            chmod($this->flattenTo, 0755);
+        }
+
+        $this->assertSame('<?php // version 7.0.7', file_get_contents($previousCore . '/wp-includes/version.php'));
+    }
+
+    public function testStopsWhenAStaleFileCannotBeRemoved(): void
+    {
+        $this->createWpCloudLayout();
+        $this->flatten(['core_files' => 'copy']);
+        file_put_contents($this->flattenTo . '/wp-includes/stale.php', '<?php // stale');
+        chmod($this->flattenTo . '/wp-includes', 0555);
+
+        try {
+            $this->flatten(['core_files' => 'copy']);
+            $this->fail('A stale file which cannot be removed should stop the run');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('stale.php', $exception->getMessage());
+        } finally {
+            chmod($this->flattenTo . '/wp-includes', 0755);
+        }
+    }
+
     public function testCopyHandlesCaseOnlyRenameInCore(): void
     {
         $this->createWpCloudLayout();
