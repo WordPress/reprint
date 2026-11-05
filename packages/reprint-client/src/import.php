@@ -17065,15 +17065,11 @@ if (
                 "or directory, the command stops with an error unless --force is\n" .
                 "specified.\n" .
                 "\n" .
-                "--core-files=copy copies WordPress core (wp-admin, wp-includes,\n" .
-                "index.php, xmlrpc.php, license.txt, readme.html, and wp-*.php\n" .
-                "other than wp-config*.php, though wp-config-sample.php is core)\n" .
-                "instead of linking it. Every run brings the copy back in line\n" .
-                "with the pulled core, so local edits to core are discarded and\n" .
-                "never reach --fs-root.\n" .
-                "wp-content, wp-config.php and files like wp-config-local.php,\n" .
-                "other site files, and core entries that are symlinks on the\n" .
-                "source stay linked.\n",
+                "--core-files=copy copies WordPress core instead of linking it.\n" .
+                "Every run brings the copy back in line with the pulled core, so\n" .
+                "local edits to core are discarded and never reach --fs-root.\n" .
+                "wp-content, wp-config*.php, other site files, and entries that\n" .
+                "are symlinks on the source stay linked.\n",
             "extra" => null,
         ],
         "merge-wp-content" => [
