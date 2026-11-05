@@ -240,7 +240,7 @@ Every command run by `ImportClient` accepts `--progress=auto|tty|jsonl` for that
   - index.php: WordPress plugin entry point — intercepts `?reprint-api` requests (and the legacy `?site-export-api` alias) during plugin load, requires lib.php
   - lib.php: Standalone library — constants, auth functions, and request handler. Can be required without index.php by projects that want to embed the export engine with their own URL routing and authentication (pass a custom `authenticate` callable in the `$options` array to `_site_export_handle_api_request()`)
   - wordpress/: Namespaced WordPress configuration adapter and native administrator UI (`configuration.php`, `reprint-server.php`)
-- docs/: Architecture documentation (read these for deep understanding) and project logos (docs/assets/)
+- docs/: Public handbook (docs/handbook/), contributor notes (docs/contributing/), and project logos (docs/assets/)
 - tests/: PHPUnit test suite organized by component
 - tests/e2e/: End-to-end Docker-based integration tests
 - exports/: Git-ignored directory for test exports
@@ -281,8 +281,8 @@ The exporter must scan both roots (document root + ABSPATH) without infinite loo
 ## Documentation
 
 Architecture docs are in docs/:
-- PUSH-SYNC.md: Push synchronization delivery plan
-- PUSH-TERMINOLOGY.md: Push language contract (see AGENTS.md — read before push work)
+- docs/contributing/push.md: File push implementation and durable lifecycle
+- docs/contributing/push-terminology.md: Push language contract (see AGENTS.md — read before push work)
 
 Always consult these when working on the respective components.
 

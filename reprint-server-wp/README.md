@@ -4,9 +4,9 @@ When working from this monorepo checkout, run `composer install` in
 `reprint-server-wp/` to populate the bundled `vendor/` directory used by the
 plugin runtime. GitHub release ZIPs already include that vendor tree.
 
-The maintained source keeps its PHP 7.2 type declarations. The GitHub release build
-copies that source to a temporary directory and removes unsupported syntax from
-the copy. The resulting plugin ZIP supports pull endpoints on PHP 5.6.20 or
+The maintained source keeps its PHP 7.2 type declarations. Both release builds
+copy that source to a temporary directory and remove unsupported syntax from
+the copy. Both plugin ZIPs support pull endpoints on PHP 5.6.20 or
 newer. Push endpoints require PHP 7.2 or newer.
 
 ## Release package
@@ -43,10 +43,10 @@ site.
 `bin/stamp-plugin-version.sh` stamps the plugin header, runtime version, and
 readme stable tag before the release build. Development branches keep a `-dev`
 version; publish a ZIP built from a numbered release tag for directory review.
-The GitHub build sets the generated readme and plugin header to PHP 5.6.20.
-The WordPress.org build keeps the maintained PHP 7.2 source and declares PHP
-7.2 in both places and in its Composer manifests. It does not need the PHP 5.6
-downgrade tool. CI parses and smoke-tests that package on PHP 7.2.
+Both builds set the generated readme, plugin header, and Composer manifests to
+PHP 5.6.20. Install the Composer dependencies in `tools/php56-build` before
+building either target. CI parses both packages on PHP 5.6 and tests signed
+downloads and push rejection through the WordPress.org entry point on that runtime.
 
 `tests/server-plugin-package.php` checks the staged package and the ZIP
 extracted by the release workflow. It checks the maintained PHP files and admin
@@ -138,7 +138,7 @@ Every authentication error body carries `auth_version`. Embedders that write the
 
 ### Migration Tokens
 
-A Migration Token is the public key printed by your tool. The settings page has
+A Migration Token is the public key printed by your client. The settings page has
 an enrollment form which takes it as a PEM block or one line, and a table of
 enrolled Migration Tokens with each token's ID, the date it was added,
 and a per-key push grant. Enrolled keys live in the `reprint_server_public_keys`
@@ -186,30 +186,30 @@ rules.
 
 ## Administrator page
 
-For example, a tool prints a Migration Token and asks you to authorize it. Paste that
-token into **Authorize a tool to copy this site** and choose **Authorize tool**.
-The form becomes a confirmation telling you to return to your tool to start or
+For example, a client prints a Migration Token and asks you to authorize it. Paste that
+token into **Authorize a client to copy this site** and choose **Authorize client**.
+The form becomes a confirmation telling you to return to your client to start or
 resume the copy. This page saves access. It does not start a transfer, show
-transfer progress, or confirm that a tool connected.
+transfer progress, or confirm that a client connected.
 
 The Migration Token form stays visible on normal visits, even when other tokens are
 already saved. An existing token does not tell this page whether your current
-tool has access. **I don’t have a Migration Token yet** gives the steps to get one,
+client has access. **I don’t have a Migration Token yet** gives the steps to get one,
 with Reprint CLI help inside it. For HTTP sites, that help includes the required
 `--insecure` flag and warns that transfers are unencrypted. The remote Reprint
 API URL stays below the form. Existing Migration Tokens, push permissions, and unused credentials stay in the
-closed **Manage tool access** section. Results from those controls reopen it.
+closed **Manage client access** section. Results from those controls reopen it.
 There is no separate server-details section or routine status badge.
 
 | Visit or host state | Next action on the page |
 | --- | --- |
-| The tool already printed a Migration Token | Paste that Migration Token and choose **Authorize tool**. |
-| No Migration Token printed yet | Open **I don’t have a Migration Token yet**. Copy the API URL into the tool, then paste the Migration Token it gives you. The CLI help shows how to generate one. |
-| Other Migration Tokens are saved; another tool needs access | Paste its Migration Token into the same visible form. After authorization, return to the tool. |
-| A Migration Token should stop working | Open **Manage tool access**, match its Migration Token ID to the tool, and choose **Remove Migration Token**. |
-| A tool must change files on this site | Open **Manage tool access**, check **Allow push** for its Migration Token, and choose **Save push access**. Checking alone changes nothing. Token hosts have their push controls here too. |
-| OpenSSL is missing | Save a connection token and use the same token in the tool. Migration Token enrollment is not offered. Changing a saved token disconnects tools using the old token and revokes its push access. |
-| A token remains after moving to an OpenSSL host | **Manage tool access** explains that it is unused and offers removal for an option-stored token. |
+| The client already printed a Migration Token | Paste that Migration Token and choose **Authorize client**. |
+| No Migration Token printed yet | Open **I don’t have a Migration Token yet**. Copy the API URL into the client, then paste the Migration Token it gives you. The CLI help shows how to generate one. |
+| Other Migration Tokens are saved; another client needs access | Paste its Migration Token into the same visible form. After authorization, return to the client. |
+| A Migration Token should stop working | Open **Manage client access**, match its Migration Token ID to the client, and choose **Remove Migration Token**. |
+| A client must change files on this site | Open **Manage client access**, check **Allow push** for its Migration Token, and choose **Save push access**. Checking alone changes nothing. Token hosts have their push controls here too. |
+| OpenSSL is missing | Save a connection token and use the same token in the client. Migration Token enrollment is not offered. Changing a saved token disconnects clients using the old token and revokes its push access. |
+| A token remains after moving to an OpenSSL host | **Manage client access** explains that it is unused and offers removal for an option-stored token. |
 | `public-keys.php` supplies keys | Edit that file. The page lists its keys without enrollment or removal forms. |
 | `secret.php` supplies a token on a token host | Use the file's token. Editing the stored option does not replace the file. |
 | The hosting provider controls push access | Read the effective permission. Per-key push forms are not offered. The authorization confirmation uses that permission too. |
@@ -336,3 +336,29 @@ fires — and early enough that the settings page has not yet registered its
 option listeners, so moving the token does not read as a rotation and does not
 revoke push authorization. Once no site carries the legacy options,
 `compat.php` can be deleted outright.
+
+### Exclude or replace a file in pulls
+
+Define this function in an MU plugin, or load it before dispatching the Reprint
+API in a standalone PHP entry point. WordPress is not required.
+
+```php
+function reprint_pull_file_override( $path ) {
+    if ( $path === '/srv/htdocs/wp-config.php' ) {
+        return '/srv/reprint-export/demo-wp-config.php';
+    }
+    return false;
+}
+```
+
+Return `false` to leave a path alone, `true` to exclude it, or an absolute
+path to a separate, readable regular file to serve in its place. Keep the
+replacement stable during a pull. The index reports the replacement's size and
+change time under the original name. If the replacement is unavailable,
+Reprint does not fall back to the live file.
+
+Use the live file's actual absolute path. Reprint also checks resolved paths:
+a symlink to an overridden file is omitted from the listing and a direct
+download through it cannot return the original bytes. This hook does not
+prune directory trees, protect separate copies or hard links, or change the
+database export. Never use a copy of the live config as the replacement.

@@ -1,43 +1,27 @@
 # Reprint handbook
 
-Reprint copies a WordPress site's database and files over HTTP. Use it to
-prepare a local copy for testing, or as part of a migration to another host.
-Transfers stream in chunks and can resume after interruption, without first
-building one large archive on the source host.
+Reprint copies a WordPress site's files and database over HTTP.
 
-## Choose your starting point
+## Choose your goal
 
-- **Explore a demo site:** visit [reprint-demo.wordpress.net](https://reprint-demo.wordpress.net/),
-  a sample WordPress journal with posts, photos, and block templates.
-- **Copy your site to your computer:** follow
-  [Copy a site to your computer](copy-a-site/). This tutorial uses the Reprint
-  client, SQLite, and PHP's local development server.
-- **Connect the Reprint client to your site:** follow
-  [Authorize the Reprint client](authorize-client/) to save its Migration Token
-  in WordPress admin.
-- **Integrate Reprint in your product:** start with
-  [Build with Reprint](build-with-reprint/).
+- [Try Reprint now](https://developer.wordpress.org/reprint/getting-started/try-reprint/)
+- [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/)
+- [Integrate Reprint into your product](https://developer.wordpress.org/reprint/build-with-reprint/)
 
-## The two parts
+The Reprint Server plugin runs on the source site. The client runs on the computer receiving the copy. For your own site, an administrator authorizes the client before copying.
 
-The **Reprint Server plugin** runs on the WordPress site being copied. The
-**Reprint client** runs on the computer or host receiving the copy.
+The plugin from WordPress.org serves downloads. Push, which sends local changes back to a site, needs a server build configured by the site's host. [What Reprint does not do](https://developer.wordpress.org/reprint/understand-reprint/limitations/) lists this and the other limits.
 
-```text
-Existing WordPress site                   Your computer or destination host
-Reprint Server plugin  -- HTTPS data -->  Reprint client
-```
+## Browse the handbook
 
-Installing the plugin does not start a copy. You authorize a client, then
-start the transfer from that client.
+- [Get started](https://developer.wordpress.org/reprint/getting-started/) with your first copy and client access.
+- [Copy sites with Reprint](https://developer.wordpress.org/reprint/guides/) for selected data, other hosts, Windows, and multisite.
+- [Build with Reprint](https://developer.wordpress.org/reprint/build-with-reprint/) to add the client to your product.
+- [Reference](https://developer.wordpress.org/reprint/reference/) for commands, options, transfers, and results.
+- [Reprint internals](https://developer.wordpress.org/reprint/understand-reprint/) for how copying works and its limits.
+- [Contribute to Reprint](https://developer.wordpress.org/reprint/contributing/) with development, protocols, and releases.
 
-The WordPress.org plugin provides downloads only. These getting-started
-instructions do not enable changes to the source site's files or database.
+## Get help
 
-## More information
-
-- [Requirements and downloads](requirements/)
-- [Troubleshooting](troubleshooting/)
-- [How Reprint works](how-it-works/)
-- [Reprint on WordPress.org](https://wordpress.org/plugins/reprint/)
-- [Development and contributions](https://github.com/WordPress/reprint)
+- [Support forum](https://wordpress.org/support/plugin/reprint/)
+- [Development repository](https://github.com/WordPress/reprint)

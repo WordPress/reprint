@@ -106,6 +106,9 @@ jobs:
             exit 1
           fi
 
+      - name: Install plugin build dependencies
+        run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
+
       - name: Stamp plugin version from git tag
         env:
           VERSION: ${{ steps.resolve.outputs.version }}

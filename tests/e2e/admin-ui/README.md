@@ -25,7 +25,7 @@ The browser covers first authorization, invalid and duplicate keys, multiple
 keys, explicit per-key push consent, and key removal. The authorization form
 stays visible on normal visits; the API URL stays below it. Successful
 authorization replaces the form with the next action. Existing keys and push
-controls stay behind **Manage tool access**. Key-generation help stays behind
+controls stay behind **Manage client access**. Key-generation help stays behind
 **I don’t have a Migration Token yet**. Native disclosures and forms are exercised
 with JavaScript disabled, including keyboard activation. Mobile access
 controls and the URL's clipboard success and permission failure are also

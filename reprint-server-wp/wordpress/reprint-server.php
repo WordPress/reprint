@@ -240,7 +240,7 @@ class SettingsPage {
             $notice = sanitize_key(wp_unslash($_GET['reprint_server_notice']));
         }
         $authorized_key_id = null;
-        // Saved access does not confirm that a tool has connected.
+        // Saved access does not confirm that a client has connected.
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The key id selects a read-only confirmation for a saved key.
         if ($key_host && $notice === 'enrolled' && isset($_GET['reprint_server_key_id']) && is_string($_GET['reprint_server_key_id'])) {
             foreach ($configuration['enrolled_keys'] as $entry) {
@@ -257,14 +257,18 @@ class SettingsPage {
         ?>
         <div class="wrap reprint-server-page">
             <h1><?php echo esc_html__('Reprint Server', 'reprint'); ?></h1>
+            <p>
+                <?php echo esc_html__('To copy this site, run the Reprint command-line client on your computer or another server.', 'reprint'); ?>
+                <a href="https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar"><?php echo esc_html__('Download the Reprint client', 'reprint'); ?></a>
+            </p>
             <?php $this->render_settings_notices(); ?>
             <?php $this->render_push_access_notice(); ?>
 
             <section class="reprint-server-card reprint-server-authorization" aria-labelledby="reprint-server-access-heading">
                 <?php if ($authorized_key_id !== null): ?>
                     <div role="status">
-                        <h2 id="reprint-server-access-heading"><?php echo esc_html__('Tool authorized', 'reprint'); ?></h2>
-                        <p><?php echo esc_html__('Return to your tool to start or resume the copy.', 'reprint'); ?></p>
+                        <h2 id="reprint-server-access-heading"><?php echo esc_html__('Client authorized', 'reprint'); ?></h2>
+                        <p><?php echo esc_html__('Return to your client to start or resume the copy.', 'reprint'); ?></p>
                         <p class="description">
                         <?php
                         echo esc_html($configuration['push_supported'] && get_push_authorization_error($authorized_key_id) === null
@@ -274,28 +278,28 @@ class SettingsPage {
                         ?>
                         </p>
                     </div>
-                    <a class="button" href="<?php echo esc_url($page_url); ?>"><?php echo esc_html__('Authorize another tool', 'reprint'); ?></a>
+                    <a class="button" href="<?php echo esc_url($page_url); ?>"><?php echo esc_html__('Authorize another client', 'reprint'); ?></a>
                 <?php else: ?>
-                    <h2 id="reprint-server-access-heading"><?php echo esc_html__('Authorize a tool to copy this site', 'reprint'); ?></h2>
+                    <h2 id="reprint-server-access-heading"><?php echo esc_html__('Authorize a client to copy this site', 'reprint'); ?></h2>
                     <?php if ($key_host && $configuration['has_public_keys_file']): ?>
-                        <p><strong><code>public-keys.php</code> <?php echo esc_html__('override is active.', 'reprint'); ?></strong> <?php echo esc_html__('Edit that file to authorize a tool or remove a Migration Token. This page cannot change its Migration Tokens.', 'reprint'); ?></p>
+                        <p><strong><code>public-keys.php</code> <?php echo esc_html__('override is active.', 'reprint'); ?></strong> <?php echo esc_html__('Edit that file to authorize a client or remove a Migration Token. This page cannot change its Migration Tokens.', 'reprint'); ?></p>
                     <?php elseif ($key_host): ?>
                         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
                             <input type="hidden" name="action" value="reprint_server_enroll_public_key" />
                             <?php wp_nonce_field('reprint_server_enroll_public_key'); ?>
-                            <p id="reprint-server-public-key-help"><?php echo esc_html__('Paste the Migration Token shown by the tool you want to use.', 'reprint'); ?></p>
+                            <p id="reprint-server-public-key-help"><?php echo esc_html__('Paste the Migration Token shown by the client you want to use.', 'reprint'); ?></p>
                             <p>
                                 <label for="reprint_server_public_key"><?php echo esc_html__('Migration Token', 'reprint'); ?></label>
                                 <textarea id="reprint_server_public_key" name="reprint_server_public_key" rows="3" class="large-text code" aria-describedby="reprint-server-public-key-help reprint-server-public-key-permission" spellcheck="false" required></textarea>
                             </p>
-                            <p id="reprint-server-public-key-permission" class="description"><?php echo esc_html__('Allows downloads of your database and files. Only authorize a tool you trust. Never paste a private key.', 'reprint'); ?></p>
-                            <?php submit_button(__('Authorize tool', 'reprint')); ?>
+                            <p id="reprint-server-public-key-permission" class="description"><?php echo esc_html__('Allows downloads of your database and files. Only authorize a client you trust. Never paste a private key.', 'reprint'); ?></p>
+                            <?php submit_button(__('Authorize client', 'reprint')); ?>
                             <details class="reprint-server-help">
                                 <summary><?php echo esc_html__('I don’t have a Migration Token yet', 'reprint'); ?></summary>
                                 <ol>
-                                    <li><?php echo esc_html(is_multisite() ? __('Choose a site below and use its Reprint API URL in your tool.', 'reprint') : __('Copy the Reprint API URL below into your tool.', 'reprint')); ?></li>
+                                    <li><?php echo esc_html(is_multisite() ? __('Choose a site below and use its Reprint API URL in your client.', 'reprint') : __('Copy the Reprint API URL below into your client.', 'reprint')); ?></li>
                                     <li><?php echo esc_html__('Copy the Migration Token it gives you.', 'reprint'); ?></li>
-                                    <li><?php echo esc_html__('Paste it here and choose Authorize tool.', 'reprint'); ?></li>
+                                    <li><?php echo esc_html__('Paste it here and choose Authorize client.', 'reprint'); ?></li>
                                 </ol>
                                 <p><?php echo esc_html__('A PEM block or a single line is accepted.', 'reprint'); ?></p>
                                 <?php if (!is_multisite()): ?>
@@ -303,7 +307,7 @@ class SettingsPage {
                                         <summary><?php echo esc_html__('Using the Reprint CLI?', 'reprint'); ?></summary>
                                         <p><?php echo esc_html__('Generate a Migration Token in your terminal:', 'reprint'); ?></p>
                                         <pre><code><?php echo esc_html('reprint keygen ' . escapeshellarg($remote_reprint_api_url) . ' --state-dir=./reprint-state' . ( $uses_http ? ' --insecure' : '' )); ?></code></pre>
-                                        <p><?php echo esc_html__('Use the same --state-dir when you run reprint pull. Keep the private key in your tool; paste only the Migration Token here.', 'reprint'); ?></p>
+                                        <p><?php echo esc_html__('Use the same --state-dir when you run reprint pull. Keep the private key in your client; paste only the Migration Token here.', 'reprint'); ?></p>
                                         <?php if ($uses_http): ?>
                                             <p><?php echo esc_html__('This site uses HTTP. Prefer an HTTPS URL for transfers. If you use HTTP, pass --insecure to reprint pull too; site data, including passwords, travels unencrypted.', 'reprint'); ?></p>
                                         <?php endif; ?>
@@ -313,15 +317,15 @@ class SettingsPage {
                             </details>
                         </form>
                     <?php elseif ($configuration['has_connection_token_file']): ?>
-                        <p><strong><code>secret.php</code> <?php echo esc_html__('override is active.', 'reprint'); ?></strong> <?php echo esc_html__('Use the connection token from that file in your tool. This page cannot change it.', 'reprint'); ?></p>
+                        <p><strong><code>secret.php</code> <?php echo esc_html__('override is active.', 'reprint'); ?></strong> <?php echo esc_html__('Use the connection token from that file in your client. This page cannot change it.', 'reprint'); ?></p>
                     <?php else: ?>
                         <?php if ($configured): ?>
-                            <p><?php echo esc_html__('Use the saved connection token in your tool. Anyone with it can download your database and files.', 'reprint'); ?></p>
+                            <p><?php echo esc_html__('Use the saved connection token in your client. Anyone with it can download your database and files.', 'reprint'); ?></p>
                             <p>
                             <?php
                             echo esc_html($configuration['push_supported']
-                                ? __('Changing the token disconnects tools using the old token and revokes its push access.', 'reprint')
-                                : __('Changing the token disconnects tools using the old token.', 'reprint')
+                                ? __('Changing the token disconnects clients using the old token and revokes its push access.', 'reprint')
+                                : __('Changing the token disconnects clients using the old token.', 'reprint')
                             );
                             ?>
                             </p>
@@ -357,7 +361,7 @@ class SettingsPage {
                         </button>
                     </div>
                     <p class="description reprint-server-copy-status" role="status"></p>
-                    <noscript><p class="description"><?php echo esc_html__('Select the URL and copy it into your tool.', 'reprint'); ?></p></noscript>
+                    <noscript><p class="description"><?php echo esc_html__('Select the URL and copy it into your client.', 'reprint'); ?></p></noscript>
                 <?php endif; ?>
             </div>
 
@@ -367,7 +371,7 @@ class SettingsPage {
             if ($show_management):
             ?>
                 <details class="reprint-server-manage-access"<?php echo $notice !== '' && $notice !== 'enrolled' && strpos($notice, 'enroll_') !== 0 ? ' open' : ''; ?>>
-                    <summary><?php echo esc_html__('Manage tool access', 'reprint'); ?></summary>
+                    <summary><?php echo esc_html__('Manage client access', 'reprint'); ?></summary>
                     <?php if ($key_host): ?>
                         <?php $this->render_public_keys_section($configuration); ?>
                         <?php $this->render_stored_connection_token_section($configuration); ?>
@@ -405,7 +409,7 @@ class SettingsPage {
             <?php else: ?>
                 <?php settings_fields('reprint_server'); ?>
             <?php endif; ?>
-            <p><?php echo esc_html__('Paste the connection token supplied by your tool, or generate one here and copy it into your tool. Save the token to authorize downloads of your database and files.', 'reprint'); ?></p>
+            <p><?php echo esc_html__('Paste the connection token supplied by your client, or generate one here and copy it into your client. Save the token to authorize downloads of your database and files.', 'reprint'); ?></p>
             <p><label for="reprint_server_connection_token"><?php echo esc_html__('Connection token', 'reprint'); ?></label></p>
             <div class="reprint-server-token-row"><?php $this->render_connection_token_field(); ?></div>
             <?php submit_button(__('Save connection token', 'reprint')); ?>
@@ -487,19 +491,19 @@ class SettingsPage {
         if ($file_override) {
             echo '<p><strong><code>public-keys.php</code> '
                 . esc_html__('override is active.', 'reprint') . '</strong> '
-                . esc_html__('Edit that file to authorize a tool or remove a Migration Token. This page cannot change its Migration Tokens.', 'reprint') . '</p>';
+                . esc_html__('Edit that file to authorize a client or remove a Migration Token. This page cannot change its Migration Tokens.', 'reprint') . '</p>';
         }
         ?>
         <?php if ($configuration['enrolled_keys'] !== []): ?>
         <?php if ($show_push_access): ?>
-            <p><?php echo esc_html__('Allow push only if a tool needs to upload, replace, or delete files in this site’s document root, except excluded paths. Downloads do not need push access.', 'reprint'); ?></p>
+            <p><?php echo esc_html__('Allow push only if a client needs to upload, replace, or delete files in this site’s document root, except excluded paths. Downloads do not need push access.', 'reprint'); ?></p>
             <?php if (!$configuration['push_supported']): ?>
                 <p><?php echo esc_html__('Push access requires PHP 7.2 or newer. Downloads remain available.', 'reprint'); ?></p>
             <?php elseif ($configuration['managed_push_enabled'] !== null): ?>
                 <p><?php echo esc_html__('Push access is managed by your hosting provider.', 'reprint'); ?></p>
             <?php endif; ?>
         <?php endif; ?>
-        <p><?php echo esc_html__('Match the Migration Token ID shown by your tool. A tool with a removed Migration Token can no longer connect. Removing the last Migration Token stops all Migration Token access.', 'reprint'); ?></p>
+        <p><?php echo esc_html__('Match the Migration Token ID shown by your client. A client with a removed Migration Token can no longer connect. Removing the last Migration Token stops all Migration Token access.', 'reprint'); ?></p>
         <div class="reprint-server-key-table-wrapper">
         <table class="widefat striped reprint-server-key-table" role="table">
             <thead>
@@ -668,7 +672,7 @@ class SettingsPage {
         // phpcs:ignore WordPress.Security.NonceVerification.Recommended -- The fixed query value selects a read-only notice.
         $result = sanitize_key(wp_unslash($_GET['reprint_server_notice']));
         $notices = [
-            'enroll_invalid' => ['error', __('That is not a usable Migration Token. Copy the Migration Token from your tool and paste it here.', 'reprint')],
+            'enroll_invalid' => ['error', __('That is not a usable Migration Token. Copy the Migration Token from your client and paste it here.', 'reprint')],
             'enroll_no_openssl' => ['error', __('This host cannot read Migration Tokens because the OpenSSL extension is missing. Clients authenticate with the connection token here.', 'reprint')],
             'enroll_duplicate' => ['info', __('That Migration Token is already enrolled.', 'reprint')],
             'enroll_file_override' => ['error', __('public-keys.php is active. Edit that file to change enrolled Migration Tokens.', 'reprint')],

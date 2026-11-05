@@ -1,69 +1,120 @@
 # Build with Reprint
 
-Use the Reprint client to add WordPress copying to your product or hosting
-platform. Your product runs the client; a site administrator installs Reprint
-Server and authorizes it on the source site.
+Your product can run the Reprint client to prepare a WordPress copy. This example runs one copy, prints stage messages, and reports whether the copy completed or needs user action. It uses PHP, with no extra libraries.
 
-First complete [Copy a site to your computer](../copy-a-site/). It shows the
-access steps your users will also need. The WordPress.org server package
-provides downloads only; do not offer push using that package.
+## Prepare the source and working folder
 
-## Start with the high-level commands
+Download [reprint.phar](https://developer.wordpress.org/reprint/getting-started/requirements/) into a private working folder. Install the [Reprint plugin](https://wordpress.org/plugins/reprint/) on the source site. This example uses the normal Migration Token authorization shown in the plugin settings; [Authentication](https://developer.wordpress.org/reprint/reference/authentication/) covers token-only hosts.
 
-| Command | Work performed |
+Generate a key in the working folder:
+
+```sh
+php reprint.phar keygen https://example.com \
+  --state-dir=./state --out=./reprint-key.pem
+```
+
+Paste the printed Migration Token into **Tools → Reprint Server** on the source site and choose **Authorize client**. Use that same source address below. For connection-token access, replace the private-key argument in the script with `'--secret=TOKEN'`, using the saved connection token.
+
+## Authorize from your product
+
+A product usually cannot ask its user to run `keygen` in a terminal. Two options keep the authorization step inside your interface:
+
+- Run `keygen` yourself with `--progress=jsonl`. Its final `reprint_report` record carries `key_id`, `key_path`, and `public_key`, and its `message` holds the same instructions the terminal would print. Show the Migration Token, the `public_key` value, to the site administrator with a link to their site's **Tools → Reprint Server** page. When they confirm, start the copy with `--private-key-path` pointing at `key_path`.
+- Let `pull` do it. Run the copy command without `--private-key-path`. On the first run the client generates a key inside the state directory, writes a report with `status: "enrollment_needed"` and the same key fields, and exits with code `4`. Show its `message` to the administrator. After they authorize the token, run the same command again; later runs find the key in the state directory as long as that directory is kept.
+
+Treat exit code `4` as a request for user action, not as a failure to retry automatically. If the administrator removes the token later, the client reports `AUTH_UNKNOWN_KEY`. The same Migration Token can be enrolled again; `pull-metadata` prints it as `key.publicKey`.
+
+## Run a copy from your application
+
+Save this as `copy-site.php` beside `reprint.phar`:
+
+```php
+<?php
+if (!isset($argv[1])) {
+    fwrite(STDERR, "Usage: php copy-site.php https://example.com\n");
+    exit(1);
+}
+
+$process = proc_open(
+    [PHP_BINARY, __DIR__ . '/reprint.phar', 'pull', $argv[1],
+        '--private-key-path=' . __DIR__ . '/reprint-key.pem',
+        '--state-dir=' . __DIR__ . '/state', '--fs-root=' . __DIR__ . '/files',
+        '--target-engine=sqlite', '--new-site-url=http://localhost:8881',
+        '--start-runtime=none', '--progress=compact'],
+    [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => STDERR],
+    $pipes,
+    __DIR__
+);
+if ($process === false) {
+    fwrite(STDERR, "Could not start the client.\n");
+    exit(1);
+}
+fclose($pipes[0]);
+
+$report = null;
+while (($line = fgets($pipes[1])) !== false) {
+    $record = json_decode($line, true);
+    if (!is_array($record)) {
+        continue;
+    }
+    if (($record['type'] ?? null) === 'reprint_report') {
+        if (($record['schema_version'] ?? null) === 1 && ($record['command'] ?? null) === 'pull') {
+            $report = $record;
+        }
+    } elseif (isset($record['message'])) {
+        echo $record['message'], "\n";
+    }
+}
+fclose($pipes[1]);
+$exit_code = proc_close($process);
+
+if ($report === null) {
+    fwrite(STDERR, "No supported final report. Check the client output.\n");
+    exit(1);
+}
+if ($exit_code === 0 && $report['status'] === 'complete') {
+    echo "Copy prepared. Run: bash state/runtime/start.sh\n";
+} elseif ($exit_code === 2) {
+    echo "Work is unfinished. Run this script again to continue.\n";
+} elseif ($exit_code === 3) {
+    fwrite(STDERR, "Temporary failure. Run this script again later.\n");
+} else {
+    fwrite(STDERR, ($report['error'] ?? 'The copy did not complete.') . "\n");
+    $exit_code = $exit_code === 0 ? 1 : $exit_code;
+}
+exit($exit_code);
+```
+
+Run it with your source address:
+
+```sh
+php copy-site.php https://example.com
+```
+
+During the copy, the script prints stage messages. After it reports **Copy prepared**, you can open the local result with:
+
+```sh
+bash state/runtime/start.sh
+```
+
+`--start-runtime=none` keeps the client from starting a server while the integration job runs; see [runtime options on pull](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull). The generated start script is only for local development.
+
+## Handle the next action
+
+| Result | What your product does |
 | --- | --- |
-| `pull` | Preflight, files, database download and apply, and runtime setup. |
-| `pull-files` | Preflight and file download, without database import or runtime setup. |
-| `pull-db` | Preflight, database download, and database apply. |
-| `pull-metadata` | Read saved pull lifecycle and source-site details without a network request. |
+| Copy prepared | Offer the prepared copy to your product's next step. |
+| Unfinished work | Run again with the same folder and source address. |
+| Temporary failure | Let the caller decide when to try again. |
+| Failure or missing final report | Show the error and stop; do not report a successful copy. |
 
-Use one state directory for each local filesystem root. Reuse the same source
-address and state directory to resume that transfer. Keep state and credentials
-outside the downloaded site and outside web-served directories.
+Keep each copy's working folder, including `reprint-key.pem`, `state/`, and `files/`, between runs. State contains credentials and transfer progress; keep it private and outside web-served directories. Use a separate folder for a different local copy. The script checks both the process result and the final command report rather than treating the last progress message as success.
 
-For a MySQL destination, choose a dedicated empty database and supply the
-target connection options. Database apply can replace existing target data.
-Check the options supported by the client you ship:
+## Go further when needed
 
-```bash
-php reprint.phar pull --help
-php reprint.phar pull-db --help
-php reprint.phar pull-metadata --help
-```
+- [Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/) documents the full output contract, including numeric counters for your UI.
+- [Copy selected files or the database](https://developer.wordpress.org/reprint/guides/copy-selected-data/) covers partial copies.
+- [Control each migration step](https://developer.wordpress.org/reprint/build-with-reprint/integration-pipeline/) is for products that need separate indexing, transfer, and import stages.
+- [Prepare a hosting destination](https://developer.wordpress.org/reprint/build-with-reprint/hosting/) covers production-server setup and cleanup. This example deliberately uses a local SQLite destination.
 
-## Run without starting a development server
-
-To prepare the same local SQLite copy as the tutorial, but return control to
-your product instead of starting the server:
-
-```bash
-php reprint.phar pull https://example.com \
-  --state-dir=./state --fs-root=./files \
-  --target-engine=sqlite --new-site-url=http://localhost:8881 \
-  --start-runtime=none --progress=jsonl
-```
-
-Handle the initial authorization stop as a request for user action. Show the
-Migration Token, send the administrator to Reprint Server settings, and run the
-same command after authorization. Do not treat the settings confirmation as
-confirmation that a transfer completed.
-
-## Report progress and handle exits
-
-Use `--progress=jsonl` for structured progress. SQL or other command data may
-have its own output format; do not assume every command prints only progress.
-Use `pull-metadata` for saved lifecycle details rather than depending on private
-state-file layouts.
-
-Read the final result and exit status. A command may complete, need another
-bounded run, require user action, stop after a temporary failure, or fail.
-Do not treat every nonzero exit as permission to retry forever. Keep the
-command's state, show the reason, and let your caller decide when to run again.
-
-The smaller commands, such as `preflight`, `files-pull`, `db-pull`, `db-apply`,
-and `apply-runtime`, are available when your platform needs to control each
-stage. Consult each command's `--help` before building that pipeline.
-
-For package source, embedding details, tests, and contributions, use the
-[development repository](https://github.com/WordPress/reprint). Get user-facing
-downloads from [WordPress.org](../requirements/).
+For a first manual copy, use [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/). For PHP embedding and source contributions, use the [development repository](https://github.com/WordPress/reprint).

@@ -260,7 +260,7 @@ test('WordPress.org screenshot captions preserve the published readme and replac
     const command = step.split('        run: |\n')[1].replace(/^ {10}/gm, '');
     const directory = await mkdtemp(join(tmpdir(), 'reprint-screenshot-readme-'));
     const published = '=== Reprint ===\nStable tag: 0.11.3\nRequires PHP: 7.2\n\n== Description ==\nPublished description.\n\n== Changelog ==\nPublished changelog.\n';
-    const screenshots = '== Screenshots ==\n\n1. Authorize a tool to copy your site using a Migration Token.\n';
+    const screenshots = '== Screenshots ==\n\n1. Authorize a client to copy your site using a Migration Token.\n';
     try {
         await mkdir(join(directory, 'reprint-server-wp'));
         await writeFile(join(directory, 'reprint-server-wp/readme.txt'), 'Stable tag: 0.11.4-dev\n\n== Description ==\nUnreleased description.\n\n' + screenshots + '\n== Changelog ==\nUnreleased changelog.\n');
@@ -285,7 +285,7 @@ test('WordPress.org screenshot captions preserve the published readme and replac
 
 test('the first WordPress.org screenshot has a matching caption and is a PNG', async () => {
     const readme = await readFile(new URL('../../../reprint-server-wp/readme.txt', import.meta.url), 'utf8');
-    assert.match(readme, /== Screenshots ==\n\n1\. Authorize a tool to copy your site using a Migration Token\./);
+    assert.match(readme, /== Screenshots ==\n\n1\. Authorize a client to copy your site using a Migration Token\./);
     const image = await readFile(new URL('../../../.wordpress-org/screenshot-1.png', import.meta.url));
     assert.equal(image.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
     assert.ok(image.length < 10 * 1024 * 1024);

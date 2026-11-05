@@ -18,15 +18,18 @@ after(async () => {
     await browser?.close();
 });
 
-test('authorization, enrollment errors, adding tools, push consent, and removal work without JavaScript', async () => {
+test('authorization, enrollment errors, adding clients, push consent, and removal work without JavaScript', async () => {
     const context = await browser.newContext({ javaScriptEnabled: false });
     try {
         const page = await login(context);
         const adminUrl = `${siteUrl}/wp-admin/tools.php?page=reprint-server`;
         const publicKeyField = page.getByRole('textbox', { name: 'Migration Token', exact: true });
-        const authorizeButton = page.getByRole('button', { name: 'Authorize tool', exact: true });
+        const authorizeButton = page.getByRole('button', { name: 'Authorize client', exact: true });
         const management = page.locator('.reprint-server-manage-access');
-        assert.equal(await page.getByRole('heading', { name: 'Authorize a tool to copy this site', exact: true }).isVisible(), true);
+        const clientDownload = page.getByRole('link', { name: 'Download the Reprint client', exact: true });
+        assert.equal(await clientDownload.isVisible(), true);
+        assert.equal(await clientDownload.getAttribute('href'), 'https://plugins.svn.wordpress.org/reprint/downloads/reprint.phar');
+        assert.equal(await page.getByRole('heading', { name: 'Authorize a client to copy this site', exact: true }).isVisible(), true);
         assert.equal(await publicKeyField.isVisible(), true);
         assert.equal(await page.locator('.reprint-server-page .notice').count(), 0);
         assert.equal(await page.locator('#reprint-server-api-url').inputValue(), `${siteUrl}/?reprint-api`);
@@ -40,13 +43,13 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         const publicKey = generatePublicKey();
         await publicKeyField.fill(publicKey);
         await submit(page, authorizeButton);
-        assert.equal(await page.getByRole('heading', { name: 'Tool authorized', exact: true }).isVisible(), true);
-        assert.equal(await page.getByText('Return to your tool to start or resume the copy.', { exact: true }).isVisible(), true);
+        assert.equal(await page.getByRole('heading', { name: 'Client authorized', exact: true }).isVisible(), true);
+        assert.equal(await page.getByText('Return to your client to start or resume the copy.', { exact: true }).isVisible(), true);
         assert.equal(await page.getByText('This Migration Token allows downloads. It cannot change files on this site.', { exact: true }).isVisible(), true);
         assert.equal(await publicKeyField.count(), 0);
         assert.equal(await page.locator('.reprint-server-page .notice').count(), 0);
         const firstKeyId = await page.locator('.reprint-server-key-table tbody tr code').textContent();
-        await submit(page, page.getByRole('link', { name: 'Authorize another tool', exact: true }));
+        await submit(page, page.getByRole('link', { name: 'Authorize another client', exact: true }));
         assert.equal(page.url(), adminUrl, 'Another authorization starts without the previous result in the URL.');
         assert.equal(await publicKeyField.isVisible(), true);
         assert.equal(await management.getAttribute('open'), null);
@@ -80,7 +83,7 @@ test('authorization, enrollment errors, adding tools, push consent, and removal 
         await publicKeyField.fill(generatePublicKey());
         await submit(page, authorizeButton);
         assert.equal(await page.locator('.reprint-server-key-table tbody tr').count(), 2);
-        assert.equal(await page.getByRole('heading', { name: 'Tool authorized', exact: true }).isVisible(), true);
+        assert.equal(await page.getByRole('heading', { name: 'Client authorized', exact: true }).isVisible(), true);
         assert.equal(await publicKeyField.count(), 0);
         const secondKeyId = await page.locator('.reprint-server-key-table tbody tr code').nth(1).textContent();
         await page.goto(adminUrl);
@@ -128,7 +131,7 @@ test('configured URL copying reports success and falls back to manual selection 
     try {
         const page = await login(context);
         await page.getByRole('textbox', { name: 'Migration Token', exact: true }).fill(generatePublicKey());
-        await submit(page, page.getByRole('button', { name: 'Authorize tool', exact: true }));
+        await submit(page, page.getByRole('button', { name: 'Authorize client', exact: true }));
         const keyId = await page.locator('.reprint-server-key-table tbody tr code').textContent();
         assert.equal(await page.locator('#reprint-server-connection-heading').count(), 0);
         assert.equal(await page.locator('#reprint-server-api-url').isVisible(), true);

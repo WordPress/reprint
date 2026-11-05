@@ -26,7 +26,7 @@ test('WordPress.org excludes push while the GitHub package retains it', async ()
             const entry = target === 'wordpress-org' ? 'reprint.php' : 'index.php';
             assert.ok((await readdir(plugin)).includes(entry), `${target}: missing ${entry}`);
             if (target === 'wordpress-org') assert.ok(!(await readdir(plugin)).includes('index.php'));
-            const minimumPhp = target === 'wordpress-org' ? '7.2' : '5.6.20';
+            const minimumPhp = '5.6.20';
             const readme = await readFile(join(plugin, 'readme.txt'), 'utf8');
             assert.ok(readme.includes(`Requires PHP: ${minimumPhp}\n`), `${target}: wrong PHP requirement`);
             const manifest = JSON.parse(await readFile(join(plugin, 'composer.json'), 'utf8'));
@@ -74,10 +74,13 @@ test('WordPress.org deploy rebuilds rather than publishing a tampered release ZI
     const command = build.split('        run: |\n')[1].replace(/^ {10}/gm, '');
     const stamp = steps.find(step => step.includes('name: Stamp plugin version from git tag'));
     const stampCommand = stamp.match(/run: (.+)/)[1];
+    const install = steps.find(step => step.includes('name: Install plugin build dependencies'));
+    const installCommand = install.match(/run: (.+)/)[1];
+    assert.ok(steps.indexOf(install) < steps.indexOf(build), 'Deployment must install the downgrade tool before building.');
     const root = await mkdtemp(join(tmpdir(), 'reprint-deploy-build-'));
     try {
         // Use a separate checkout tree so version stamping cannot change maintained source.
-        for (const path of ['bin', 'packages/reprint-server', 'reprint-server-wp', 'LICENSE']) {
+        for (const path of ['bin', 'packages/reprint-server', 'reprint-server-wp', 'tools/php56-build', 'LICENSE']) {
             await cp(join(project, path), join(root, path), {
                 recursive: true,
                 filter: source => !source.includes('/vendor'),
@@ -87,6 +90,7 @@ test('WordPress.org deploy rebuilds rather than publishing a tampered release ZI
         await cp(join(project, 'tests/server-plugin-package.php'), join(root, 'tests/server-plugin-package.php'));
         await writeFile(join(root, 'reprint.phar'), 'The client is a separate download, not part of the plugin.');
         const env = { ...process.env, VERSION: '0.12.0' };
+        await run('bash', ['-e', '-o', 'pipefail', '-c', installCommand], { cwd: root, env });
         await run('bash', ['-e', '-o', 'pipefail', '-c', stampCommand], { cwd: root, env });
         await run('bash', ['-e', '-o', 'pipefail', '-c', command], { cwd: root, env });
         assert.doesNotMatch((await run('unzip', ['-Z1', 'reprint-wordpress-org.zip'], { cwd: root })).stdout, /\.phar$/m);
@@ -170,6 +174,9 @@ async function checkRequests(plugin, target, root) {
     const docroot = join(root, `${target}-docroot`);
     await mkdir(docroot);
     await writeFile(join(docroot, 'keep.txt'), 'original');
+    const liveConfig = join(docroot, 'wp-config.php');
+    await writeFile(liveConfig, 'private config marker');
+    await writeFile(docroot + '-demo-config.php', '<?php /* demo config marker */');
     const listener = createServer();
     await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
     const port = listener.address().port;
@@ -201,6 +208,12 @@ async function checkRequests(plugin, target, root) {
         const downloaded = await request(url + 'file_fetch', { method: 'POST', body: form });
         assert.equal(downloaded.status, 200);
         assert.match(await downloaded.text(), /original/);
+        form.set('file_list', new Blob([JSON.stringify([{ path: Buffer.from(liveConfig).toString('base64') }])]), 'paths.json');
+        const config = await request(url + 'file_fetch', { method: 'POST', body: form });
+        assert.equal(config.status, 200);
+        const configBody = await config.text();
+        assert.match(configBody, /demo config marker/);
+        assert.doesNotMatch(configBody, /private config marker/);
         for (const scheme of ['key', 'hmac']) {
             const response = await fetch(`http://127.0.0.1:${port}/?admin_probe=${scheme}`);
             const text = await response.text();

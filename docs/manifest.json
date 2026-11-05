@@ -6,46 +6,242 @@
         "parent": null,
         "order": 10
     },
+    "getting-started": {
+        "title": "Get started",
+        "slug": "getting-started",
+        "markdown_source": "handbook/getting-started.md",
+        "parent": null,
+        "order": 20
+    },
+    "try-reprint": {
+        "title": "Try Reprint",
+        "slug": "try-reprint",
+        "markdown_source": "handbook/try-reprint.md",
+        "parent": "getting-started",
+        "order": 10
+    },
     "copy-a-site": {
-        "title": "Copy a site to your computer",
+        "title": "Clone your site",
         "slug": "copy-a-site",
         "markdown_source": "handbook/copy-a-site.md",
-        "parent": "handbook",
-        "order": 10
+        "parent": "getting-started",
+        "order": 20
     },
     "authorize-client": {
         "title": "Authorize the Reprint client",
         "slug": "authorize-client",
         "markdown_source": "handbook/authorize-client.md",
-        "parent": "handbook",
-        "order": 20
+        "parent": "getting-started",
+        "order": 30
     },
     "requirements": {
         "title": "Requirements and downloads",
         "slug": "requirements",
         "markdown_source": "handbook/requirements.md",
-        "parent": "handbook",
+        "parent": "getting-started",
+        "order": 40
+    },
+    "guides": {
+        "title": "Copy sites with Reprint",
+        "slug": "guides",
+        "markdown_source": "handbook/guides.md",
+        "parent": null,
         "order": 30
+    },
+    "copy-selected-data": {
+        "title": "Copy selected files or the database",
+        "slug": "copy-selected-data",
+        "markdown_source": "handbook/copy-selected-data.md",
+        "parent": "guides",
+        "order": 10
+    },
+    "move-to-another-host": {
+        "title": "Move to another host",
+        "slug": "move-to-another-host",
+        "markdown_source": "handbook/move-to-another-host.md",
+        "parent": "guides",
+        "order": 20
+    },
+    "windows-sources": {
+        "title": "Copy a Windows-hosted site",
+        "slug": "windows-sources",
+        "markdown_source": "handbook/windows-sources.md",
+        "parent": "guides",
+        "order": 30
+    },
+    "multisite": {
+        "title": "Move one site out of a network",
+        "slug": "multisite",
+        "markdown_source": "handbook/multisite.md",
+        "parent": "guides",
+        "order": 40
+    },
+    "rewrite-urls": {
+        "title": "Rewrite URLs in a live database",
+        "slug": "rewrite-urls",
+        "markdown_source": "handbook/rewrite-urls.md",
+        "parent": "guides",
+        "order": 50
     },
     "troubleshooting": {
         "title": "Troubleshooting",
         "slug": "troubleshooting",
         "markdown_source": "handbook/troubleshooting.md",
-        "parent": "handbook",
-        "order": 40
-    },
-    "how-it-works": {
-        "title": "How Reprint works",
-        "slug": "how-it-works",
-        "markdown_source": "handbook/how-it-works.md",
-        "parent": "handbook",
-        "order": 50
+        "parent": "guides",
+        "order": 60
     },
     "build-with-reprint": {
         "title": "Build with Reprint",
         "slug": "build-with-reprint",
         "markdown_source": "handbook/build-with-reprint.md",
-        "parent": "handbook",
+        "parent": null,
+        "order": 40
+    },
+    "integration-pipeline": {
+        "title": "Control each migration step",
+        "slug": "integration-pipeline",
+        "markdown_source": "handbook/integration-pipeline.md",
+        "parent": "build-with-reprint",
+        "order": 10
+    },
+    "hosting": {
+        "title": "Prepare a hosting destination",
+        "slug": "hosting",
+        "markdown_source": "handbook/hosting.md",
+        "parent": "build-with-reprint",
+        "order": 20
+    },
+    "reference": {
+        "title": "Reference",
+        "slug": "reference",
+        "markdown_source": "handbook/reference.md",
+        "parent": null,
+        "order": 50
+    },
+    "commands": {
+        "title": "Command reference",
+        "slug": "commands",
+        "markdown_source": "handbook/commands.md",
+        "parent": "reference",
+        "order": 10
+    },
+    "authentication": {
+        "title": "Authentication reference",
+        "slug": "authentication",
+        "markdown_source": "handbook/authentication.md",
+        "parent": "reference",
+        "order": 20
+    },
+    "preflight": {
+        "title": "Preflight reference",
+        "slug": "preflight",
+        "markdown_source": "handbook/preflight.md",
+        "parent": "reference",
+        "order": 30
+    },
+    "file-transfers": {
+        "title": "File transfer reference",
+        "slug": "file-transfers",
+        "markdown_source": "handbook/file-transfers.md",
+        "parent": "reference",
+        "order": 40
+    },
+    "database-transfers": {
+        "title": "Database transfer reference",
+        "slug": "database-transfers",
+        "markdown_source": "handbook/database-transfers.md",
+        "parent": "reference",
+        "order": 50
+    },
+    "runtime": {
+        "title": "Runtime configuration reference",
+        "slug": "runtime",
+        "markdown_source": "handbook/runtime.md",
+        "parent": "reference",
+        "order": 60
+    },
+    "progress-and-results": {
+        "title": "Progress, results, and exit codes",
+        "slug": "progress-and-results",
+        "markdown_source": "handbook/progress-and-results.md",
+        "parent": "reference",
+        "order": 70
+    },
+    "temporary-failures": {
+        "title": "Temporary failures and retries",
+        "slug": "temporary-failures",
+        "markdown_source": "handbook/temporary-failures.md",
+        "parent": "reference",
+        "order": 80
+    },
+    "understand-reprint": {
+        "title": "Reprint internals",
+        "slug": "understand-reprint",
+        "markdown_source": "handbook/understand-reprint.md",
+        "parent": null,
+        "order": 60
+    },
+    "how-it-works": {
+        "title": "How Reprint works",
+        "slug": "how-it-works",
+        "markdown_source": "handbook/how-it-works.md",
+        "parent": "understand-reprint",
+        "order": 10
+    },
+    "limitations": {
+        "title": "What Reprint does not do",
+        "slug": "limitations",
+        "markdown_source": "handbook/limitations.md",
+        "parent": "understand-reprint",
+        "order": 20
+    },
+    "contributing": {
+        "title": "Contribute to Reprint",
+        "slug": "contributing",
+        "markdown_source": "contributing/contributing.md",
+        "parent": null,
+        "order": 70
+    },
+    "development": {
+        "title": "Set up Reprint development",
+        "slug": "development",
+        "markdown_source": "contributing/development.md",
+        "parent": "contributing",
+        "order": 10
+    },
+    "architecture": {
+        "title": "Architecture and durable state",
+        "slug": "architecture",
+        "markdown_source": "contributing/architecture.md",
+        "parent": "contributing",
+        "order": 20
+    },
+    "pull-http": {
+        "title": "Pull HTTP protocol",
+        "slug": "pull-http",
+        "markdown_source": "contributing/pull-http.md",
+        "parent": "contributing",
+        "order": 30
+    },
+    "push": {
+        "title": "File push implementation",
+        "slug": "push",
+        "markdown_source": "contributing/push.md",
+        "parent": "contributing",
+        "order": 40
+    },
+    "database-push": {
+        "title": "Database push implementation",
+        "slug": "database-push",
+        "markdown_source": "contributing/database-push.md",
+        "parent": "contributing",
+        "order": 50
+    },
+    "releases": {
+        "title": "Releasing Reprint",
+        "slug": "releases",
+        "markdown_source": "contributing/releases.md",
+        "parent": "contributing",
         "order": 60
     }
 }

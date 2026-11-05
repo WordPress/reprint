@@ -3,6 +3,9 @@
 
 // phpcs:disable WordPress.Security.NonceVerification.Recommended -- Isolated package fixture routes test requests, not WordPress form submissions.
 
+// Do not depend on the host's date.timezone setting when running older PHP.
+date_default_timezone_set('UTC');
+
 define('ABSPATH', getenv('REPRINT_TEST_DOCROOT') . '/');
 define('WordPress\\Reprint\\Server\\Plugin\\PLUGIN_DIR', getenv('REPRINT_TEST_PLUGIN') . '/');
 define('REPRINT_SERVER_PUSH_ENABLED', true);
@@ -68,6 +71,13 @@ function apply_filters($name, $value) {
         ];
     }
     return $value;
+}
+
+function reprint_pull_file_override($path) {
+    if ($path === getenv('REPRINT_TEST_DOCROOT') . '/wp-config.php') {
+        return getenv('REPRINT_TEST_DOCROOT') . '-demo-config.php';
+    }
+    return false;
 }
 
 /** Supply an enrolled key with a stored push grant through the normal option path. */
