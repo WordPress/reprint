@@ -250,6 +250,10 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
 
     public function testStopsWhenALinkCannotBeRemoved(): void
     {
+        if (function_exists('posix_getuid') && posix_getuid() === 0) {
+            $this->markTestSkipped('Directory permissions do not stop root from writing.');
+        }
+
         $this->createWpCloudLayout();
         $previousCore = $this->fsRoot . '/wordpress/core/7.0.7';
         $this->createCoreTree($previousCore, '7.0.7');
@@ -272,6 +276,10 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
 
     public function testStopsWhenAStaleFileCannotBeRemoved(): void
     {
+        if (function_exists('posix_getuid') && posix_getuid() === 0) {
+            $this->markTestSkipped('Directory permissions do not stop root from writing.');
+        }
+
         $this->createWpCloudLayout();
         $this->flatten(['core_files' => 'copy']);
         file_put_contents($this->flattenTo . '/wp-includes/stale.php', '<?php // stale');
@@ -320,6 +328,30 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->flatten(['core_files' => 'copy']);
     }
 
+    /**
+     * Core copied over the document root would replace pulled files and
+     * delete those it treats as stale, and --fs-root is what pull diffing reads.
+     */
+    public function testCopyRefusesToFlattenInsideTheFsRoot(): void
+    {
+        $this->createWpCloudLayout();
+        $documentRoot = $this->fsRoot . '/srv/htdocs';
+        mkdir($documentRoot . '/wp-admin', 0755, true);
+        file_put_contents($documentRoot . '/index.php', '<?php // pulled');
+        file_put_contents($documentRoot . '/wp-admin/custom.php', '<?php // pulled');
+        $this->flattenTo = $documentRoot;
+
+        try {
+            $this->flatten(['core_files' => 'copy']);
+            $this->fail('Flattening inside --fs-root should be refused');
+        } catch (\InvalidArgumentException $exception) {
+            $this->assertStringContainsString('--fs-root', $exception->getMessage());
+        }
+
+        $this->assertSame('<?php // pulled', file_get_contents($documentRoot . '/index.php'));
+        $this->assertSame('<?php // pulled', file_get_contents($documentRoot . '/wp-admin/custom.php'));
+    }
+
     public function testCopyRefusesToFlattenIntoThePulledAbspath(): void
     {
         $this->createWpCloudLayout();
@@ -329,7 +361,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
             $this->flatten(['core_files' => 'copy']);
             $this->fail('Copying core onto itself should be rejected');
         } catch (\InvalidArgumentException $exception) {
-            $this->assertStringContainsString('ABSPATH', $exception->getMessage());
+            $this->assertStringContainsString('--fs-root', $exception->getMessage());
         }
 
         $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));

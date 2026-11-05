@@ -6636,11 +6636,17 @@ class ImportClient
         }
 
         // Link mode refuses this through its existing-file check. Copying
-        // would instead replace the pulled core with copies of itself.
-        if ($copy_core_files && realpath($flatten_to) === realpath($local_abspath)) {
-            throw new InvalidArgumentException(
-                "--core-files=copy cannot flatten into the pulled ABSPATH itself: {$local_abspath}",
-            );
+        // would instead overwrite pulled files and delete those it treats as
+        // stale, so the next pull would see them as local changes.
+        if ($copy_core_files) {
+            $path_format = Utils::native_path_format();
+            $resolved_flatten_to = Utils::normalize_path_separators(realpath($flatten_to), $path_format);
+            $resolved_filesystem_root = Utils::normalize_path_separators(realpath($this->filesystem_root), $path_format);
+            if (Utils::path_is_same_as_or_descendant_of($resolved_flatten_to, $resolved_filesystem_root)) {
+                throw new InvalidArgumentException(
+                    "--core-files=copy cannot flatten inside --fs-root: {$flatten_to}",
+                );
+            }
         }
 
         $this->audit_log(
