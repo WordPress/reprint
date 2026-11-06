@@ -8,9 +8,9 @@
     "test:admin": "node --test admin-ui/*.test.js"
   },
   "dependencies": {
-    "@php-wasm/node": "3.1.29",
-    "@php-wasm/universal": "3.1.29",
-    "@wp-playground/cli": "3.1.29",
+    "@php-wasm/node": "3.1.60",
+    "@php-wasm/universal": "3.1.60",
+    "@wp-playground/cli": "3.1.60",
     "mysql2": "^3.9.0"
   },
   "devDependencies": {
