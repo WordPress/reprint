@@ -638,13 +638,63 @@ class OnlyFilesPathPrefixTest extends TestCase
         $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-core:/wp-admin')), false));
     }
 
-    public function testWpCoreCannotBeExcluded(): void
+    public function testExcludingWpCoreKeepsEverySiteFileOnAStandardHost(): void
+    {
+        $c = $this->standardLayout();
+        $this->call($c, 'prepare_files_pull_options', array(array('exclude' => array(':wp-core:')), false));
+
+        $this->assertSame(array(), $this->property($c, 'pull_only_files_with_path_prefixes'));
+        $this->assertSame(
+            array('/var/www/html/wp-admin', '/var/www/html/wp-includes'),
+            $this->property($c, 'pull_excluded_files_with_path_prefixes')
+        );
+        foreach (array('index.php', 'wp-load.php', 'xmlrpc.php', 'readme.html', 'license.txt', 'wp-config-sample.php', 'wp-admin/index.php', 'wp-includes/version.php') as $core_path) {
+            foreach (array(true, false) as $is_next_remote_index_entry) {
+                $this->assertFalse(
+                    $this->call($c, 'is_selected_for_pulling', array('/var/www/html/' . $core_path, $is_next_remote_index_entry, 'file')),
+                    $core_path
+                );
+            }
+        }
+        foreach (array('wp-config.php', '.htaccess', 'robots.txt', 'custom/index.php', 'custom/wp-load.php', 'wp-content/plugins/a/a.php', 'wp-admin.bak/index.php') as $site_path) {
+            foreach (array(true, false) as $is_next_remote_index_entry) {
+                $this->assertTrue(
+                    $this->call($c, 'is_selected_for_pulling', array('/var/www/html/' . $site_path, $is_next_remote_index_entry, 'file')),
+                    $site_path
+                );
+            }
+        }
+    }
+
+    public function testExcludingWpCoreOnWpCloudLeavesOtherCoreVersionsSelected(): void
+    {
+        $c = $this->wpCloudLayout();
+        $this->call($c, 'prepare_files_pull_options', array(array('exclude' => array(':wp-core:')), false));
+
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/wordpress/core/7.1.4/wp-settings.php', true, 'file')));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/wordpress/core/7.1.4/wp-includes/version.php', true, 'file')));
+        // Only the core the site runs is excluded, as only it is included.
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/wordpress/core/7.0.8/wp-settings.php', true, 'file')));
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/wordpress/core/wp-config.php', true, 'file')));
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/srv/htdocs/wp-content/themes/t/style.css', true, 'file')));
+    }
+
+    public function testWpCoreCannotBeBothIncludedAndExcluded(): void
     {
         $c = $this->standardLayout();
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('--exclude does not accept :wp-core:');
-        $this->call($c, 'prepare_files_pull_options', array(array('exclude' => array(':wp-core:')), false));
+        $this->expectExceptionMessage(':wp-core: cannot be both included and excluded');
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-core:'), 'exclude' => array(':wp-core:')), false));
+    }
+
+    public function testExcludedWpCoreMustBeTheWholeSource(): void
+    {
+        $c = $this->standardLayout();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('received ":wp-core:/wp-admin"');
+        $this->call($c, 'prepare_files_pull_options', array(array('exclude' => array(':wp-core:/wp-admin')), false));
     }
 
     public function testWpCoreRequiresAbspathFromPreflight(): void
@@ -666,5 +716,16 @@ class OnlyFilesPathPrefixTest extends TestCase
         // Both selections index ABSPATH, but only one pulls all of it.
         $this->assertSame(array('/var/www/html'), $this->property($c, 'pull_only_files_with_path_prefixes'));
         $this->assertNotSame($abspath_fingerprint, $this->call($c, 'files_pull_path_selection_fingerprint'));
+    }
+
+    public function testExcludingWpCoreChangesTheFilesPullPathSelectionFingerprint(): void
+    {
+        $c = $this->standardLayout();
+        $this->call($c, 'prepare_files_pull_options', array(array('exclude' => array('/var/www/html/wp-admin', '/var/www/html/wp-includes')), false));
+        $prefixes_fingerprint = $this->call($c, 'files_pull_path_selection_fingerprint');
+        $this->call($c, 'prepare_files_pull_options', array(array('exclude' => array(':wp-core:')), false));
+
+        // Same exclude prefixes, but :wp-core: also omits the files directly under ABSPATH.
+        $this->assertNotSame($prefixes_fingerprint, $this->call($c, 'files_pull_path_selection_fingerprint'));
     }
 }

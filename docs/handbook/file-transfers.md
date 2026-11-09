@@ -92,7 +92,17 @@ php reprint.phar pull-files "$URL" \
   --include=:wp-content: --include=:wp-core:
 ```
 
-`:wp-core:` selects `wp-admin`, `wp-includes`, and the core files directly in ABSPATH, such as `index.php`, `wp-load.php`, and `xmlrpc.php`. It leaves out `wp-config.php` and every other site file next to core, such as `.htaccess` or `robots.txt`. On hosts that keep several WordPress versions side by side, such as WP Cloud, only the version the site runs is downloaded. The source still indexes all of ABSPATH, so a core file the source removed, such as `readme.html`, needs no special handling. `:wp-core:` must be used whole, and it works only with `--include`. A selected symlink that points to another directory in ABSPATH, such as a plugin linked to a shared folder next to core, pulls that directory too, along with any symlinks it passes through on the way. A symlink to ABSPATH itself, or to a directory that contains it, pulls nothing more, so it never brings in `wp-config.php`. Symlinks in directories outside the selection are not followed.
+`:wp-core:` selects `wp-admin`, `wp-includes`, and the core files directly in ABSPATH, such as `index.php`, `wp-load.php`, and `xmlrpc.php`. It leaves out `wp-config.php` and every other site file next to core, such as `.htaccess` or `robots.txt`. On hosts that keep several WordPress versions side by side, such as WP Cloud, only the version the site runs is downloaded. The source still indexes all of ABSPATH, so a core file the source removed, such as `readme.html`, needs no special handling. `:wp-core:` must be used whole. A selected symlink that points to another directory in ABSPATH, such as a plugin linked to a shared folder next to core, pulls that directory too, along with any symlinks it passes through on the way. A symlink to ABSPATH itself, or to a directory that contains it, pulls nothing more, so it never brings in `wp-config.php`. Symlinks in directories outside the selection are not followed.
+
+If you supply WordPress core yourself, download everything except the core the site runs:
+
+```bash
+php reprint.phar pull-files "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
+  --exclude=:wp-core:
+```
+
+This keeps `wp-config.php`, `.htaccess`, and every other site file next to core. With `--mode=mirror`, core files you placed locally are neither replaced nor deleted. On WP Cloud, other WordPress versions installed next to the one the site runs are still downloaded; add `--include=:wp-content:` to skip them. `:wp-core:` can't be both included and excluded.
 
 Low-level `files-pull` needs a completed operation cleared with `--abort` before starting another delta. Use `pull-files` if you want the client to handle repeat runs without that manual reset.
 

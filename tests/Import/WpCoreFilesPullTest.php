@@ -198,6 +198,67 @@ final class WpCoreFilesPullTest extends TestCase
         $this->assertFileDoesNotExist($local . '/shared/linked/stray.php');
     }
 
+    public function testExcludingWpCorePullsEverySiteFileButNoCore(): void
+    {
+        $abspath = $this->source . '/html';
+        $this->writeCore($abspath, '7.1.4');
+        $this->writeFiles($abspath, array(
+            'wp-config.php' => 'site config',
+            '.htaccess' => 'rules',
+            'custom/wp-load.php' => 'not core here',
+            'wp-content/plugins/a/a.php' => 'plugin',
+        ));
+        $this->writePreflight(array(
+            'abspath' => $abspath,
+            'content_dir' => $abspath . '/wp-content',
+        ));
+
+        $this->pull(array('--exclude=:wp-core:'));
+
+        $local = $this->fsRoot . $abspath;
+        $this->assertSame('site config', file_get_contents($local . '/wp-config.php'));
+        $this->assertSame('rules', file_get_contents($local . '/.htaccess'));
+        $this->assertSame('not core here', file_get_contents($local . '/custom/wp-load.php'));
+        $this->assertSame('plugin', file_get_contents($local . '/wp-content/plugins/a/a.php'));
+        foreach (array('wp-admin', 'wp-includes', 'index.php', 'wp-load.php', 'wp-login.php', 'xmlrpc.php', 'readme.html', 'wp-config-sample.php') as $core_path) {
+            $this->assertFileDoesNotExist($local . '/' . $core_path);
+        }
+    }
+
+    public function testMirrorWithoutWpCoreLeavesLocallySuppliedCoreAlone(): void
+    {
+        $abspath = $this->source . '/html';
+        $this->writeCore($abspath, '7.1.4');
+        $this->writeFiles($abspath, array(
+            '.htaccess' => 'rules',
+            'wp-content/plugins/a/a.php' => 'plugin',
+        ));
+        $this->writePreflight(array(
+            'abspath' => $abspath,
+            'content_dir' => $abspath . '/wp-content',
+        ));
+        $arguments = array('--exclude=:wp-core:', '--mode=mirror');
+        $this->pull($arguments);
+
+        // The client supplies its own core, and adds a stray site file.
+        $local = $this->fsRoot . $abspath;
+        $this->writeCore($local, 'local 7.1.4');
+        $this->writeFiles($local, array('stray.txt' => 'stray'));
+        $this->writeFiles($abspath, array(
+            'wp-includes/version.php' => '7.2-beta4',
+            '.htaccess' => 'changed rules',
+        ));
+        unlink($abspath . '/wp-links-opml.php');
+
+        $this->pull(array('--abort'));
+        $this->pull($arguments);
+
+        $this->assertSame('local 7.1.4', file_get_contents($local . '/wp-includes/version.php'));
+        $this->assertFileExists($local . '/wp-links-opml.php');
+        $this->assertSame('changed rules', file_get_contents($local . '/.htaccess'));
+        $this->assertFileDoesNotExist($local . '/stray.txt');
+    }
+
     public function testPullsOnlyTheActiveCoreVersionFromASharedCoreDirectory(): void
     {
         $active_abspath = $this->source . '/wordpress/core/7.1.4';
