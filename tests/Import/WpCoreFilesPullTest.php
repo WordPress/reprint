@@ -320,6 +320,48 @@ final class WpCoreFilesPullTest extends TestCase
         $this->assertSame('local', file_get_contents($local . '/local-only.txt'));
     }
 
+    public function testMirrorPullsCanSwitchWpCoreOnAndOff(): void
+    {
+        $abspath = $this->source . '/html';
+        $this->writeCore($abspath, '7.1.4');
+        $this->writeFiles($abspath, array('wp-content/plugins/a/a.php' => 'plugin'));
+        $this->writePreflight(array(
+            'abspath' => $abspath,
+            'content_dir' => $abspath . '/wp-content',
+        ));
+        $local = $this->fsRoot . $abspath;
+        $without_core = array('--include=:wp-content:', '--mode=mirror');
+        $with_core = array('--include=:wp-content:', '--include=:wp-core:', '--mode=mirror');
+
+        $this->pull($without_core);
+        $this->assertFileDoesNotExist($local . '/wp-includes/version.php');
+
+        $this->pull(array('--abort'));
+        $this->pull($with_core);
+        $this->assertSame('7.1.4', file_get_contents($local . '/wp-includes/version.php'));
+
+        // A pull without core leaves the core an earlier pull downloaded.
+        $this->writeFiles($abspath, array('wp-content/plugins/a/a.php' => 'plugin, updated'));
+        $this->pull(array('--abort'));
+        $this->pull($without_core);
+        $this->assertSame('plugin, updated', file_get_contents($local . '/wp-content/plugins/a/a.php'));
+        $this->assertSame('7.1.4', file_get_contents($local . '/wp-includes/version.php'));
+        $this->assertFileExists($local . '/wp-links-opml.php');
+
+        // Selecting core again brings that copy in line with the source's.
+        $this->writeFiles($abspath, array(
+            'wp-includes/version.php' => '7.2',
+            'wp-includes/new.php' => 'new in 7.2',
+        ));
+        unlink($abspath . '/wp-links-opml.php');
+        $this->pull(array('--abort'));
+        $this->pull($with_core);
+        $this->assertSame('7.2', file_get_contents($local . '/wp-includes/version.php'));
+        $this->assertSame('new in 7.2', file_get_contents($local . '/wp-includes/new.php'));
+        $this->assertFileDoesNotExist($local . '/wp-links-opml.php');
+        $this->assertSame('plugin, updated', file_get_contents($local . '/wp-content/plugins/a/a.php'));
+    }
+
     /**
      * Writes a small WordPress core tree. Every top-level core entry the
      * classification knows about is present unless listed in $omitted.
