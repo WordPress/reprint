@@ -79,6 +79,73 @@ final class WpCoreFilesPullTest extends TestCase
         }
     }
 
+    public function testPullsSymlinkTargetsUnderAbspathOnlyForSelectedSymlinks(): void
+    {
+        $abspath = $this->source . '/html';
+        $this->writeCore($abspath, '7.1.4');
+        $this->writeFiles($abspath, array(
+            'shared/linked/p.php' => 'linked plugin',
+            'chained/c.php' => 'chained',
+            'unselected/u.php' => 'unselected',
+            'custom/data.txt' => 'custom',
+            'wp-content/plugins/a/a.php' => 'plugin',
+        ));
+        $this->writeFiles($this->source, array('outside/o.php' => 'outside'));
+        // A chain: wp-content -> shared/linked -> chained.
+        symlink('../../shared/linked', $abspath . '/wp-content/plugins/linked');
+        symlink('../../chained', $abspath . '/shared/linked/chained');
+        // Symlinks in an unselected directory select nothing, under ABSPATH or outside it.
+        symlink('../unselected', $abspath . '/custom/unselected');
+        symlink('../../outside', $abspath . '/custom/outside');
+        $this->writePreflight(array(
+            'abspath' => $abspath,
+            'content_dir' => $abspath . '/wp-content',
+        ));
+
+        $this->pull(array('--include=:wp-content:', '--include=:wp-core:'));
+
+        $local = $this->fsRoot . $abspath;
+        $this->assertSame('linked plugin', file_get_contents($local . '/wp-content/plugins/linked/p.php'));
+        $this->assertSame('chained', file_get_contents($local . '/wp-content/plugins/linked/chained/c.php'));
+        $this->assertSame('linked plugin', file_get_contents($local . '/shared/linked/p.php'));
+        $this->assertSame('chained', file_get_contents($local . '/chained/c.php'));
+        $this->assertSame('7.1.4', file_get_contents($local . '/wp-includes/version.php'));
+        $this->assertFileDoesNotExist($local . '/custom');
+        $this->assertFileDoesNotExist($local . '/unselected');
+        $this->assertFileDoesNotExist($this->fsRoot . $this->source . '/outside');
+    }
+
+    public function testMirrorKeepsAndUpdatesSymlinkTargetsUnderAbspath(): void
+    {
+        $abspath = $this->source . '/html';
+        $this->writeCore($abspath, '7.1.4');
+        $this->writeFiles($abspath, array(
+            'shared/linked/p.php' => 'linked plugin',
+            'wp-content/plugins/a/a.php' => 'plugin',
+        ));
+        symlink('../../shared/linked', $abspath . '/wp-content/plugins/linked');
+        $this->writePreflight(array(
+            'abspath' => $abspath,
+            'content_dir' => $abspath . '/wp-content',
+        ));
+        $arguments = array('--include=:wp-content:', '--include=:wp-core:', '--mode=mirror');
+        $this->pull($arguments);
+
+        $local = $this->fsRoot . $abspath;
+        $this->writeFiles($abspath, array(
+            'shared/linked/p.php' => 'linked plugin, updated',
+            'shared/linked/new.php' => 'new',
+        ));
+        $this->writeFiles($local, array('shared/linked/stray.php' => 'stray'));
+
+        $this->pull(array('--abort'));
+        $this->pull($arguments);
+
+        $this->assertSame('linked plugin, updated', file_get_contents($local . '/shared/linked/p.php'));
+        $this->assertSame('new', file_get_contents($local . '/shared/linked/new.php'));
+        $this->assertFileDoesNotExist($local . '/shared/linked/stray.php');
+    }
+
     public function testPullsOnlyTheActiveCoreVersionFromASharedCoreDirectory(): void
     {
         $active_abspath = $this->source . '/wordpress/core/7.1.4';

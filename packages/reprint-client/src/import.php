@@ -4677,7 +4677,7 @@ class ImportClient
             $this->path_mapper()->remote_path_prefixes_to_local_path_prefixes(
                 $this->pull_wp_core_abspath === null
                     ? $this->pull_only_files_with_path_prefixes
-                    : $this->pull_only_files_with_path_prefixes_selected_in_full
+                    : $this->wp_core_path_prefixes_selected_in_full()
             );
         $local_wp_core_abspath = $this->pull_wp_core_abspath === null
             ? null
@@ -4975,9 +4975,19 @@ class ImportClient
      * Scans the next remote index for symlink entries with a "target" field,
      * resolves relative targets to absolute paths, and indexes each target
      * directory. Repeats until the queue is drained, with cycle detection.
+     *
+     * With `--include=:wp-core:`, the server has already indexed all of
+     * ABSPATH, but only part of it is selected. A selected symlink targeting
+     * an unselected directory under ABSPATH selects that directory instead of
+     * queueing it for indexing.
      */
     private function discover_symlink_targets(): void
     {
+        // Recomputed from the whole next remote index, so a resumed index
+        // stage arrives at the same prefixes.
+        $this->get_state()->index->wp_core_followed_target_path_prefixes = [];
+        $this->save_state();
+
         // Seed "already covered" from the dirs actually enumerated this run (the
         // --include prefixes when scoped), not the full preflight roots — otherwise a
         // narrow --include skips a target under a root but outside its scope.
@@ -5105,6 +5115,11 @@ class ImportClient
      * Skips entries marked as "intermediate" — those are path-component
      * symlinks (e.g. /srv/wordpress -> /wordpress) emitted by the server's
      * discover_path_symlinks() for local recreation only, not for indexing.
+     *
+     * With `--include=:wp-core:`, only selected symlinks are followed. A
+     * target under ABSPATH is already indexed, so it is added to the followed
+     * target prefixes instead of being returned. That can select further
+     * symlinks inside the target, so the scan repeats until it adds none.
      */
     private function extract_symlink_directories_from_next_remote_index(array $visited): array
     {
@@ -5113,9 +5128,29 @@ class ImportClient
             return $symlink_targets;
         }
 
+        do {
+            $added_wp_core_followed_target = $this->scan_next_remote_index_for_symlink_targets(
+                $visited,
+                $symlink_targets
+            );
+        } while ($added_wp_core_followed_target);
+
+        return array_values(array_unique($symlink_targets));
+    }
+
+    /**
+     * One pass of extract_symlink_directories_from_next_remote_index().
+     *
+     * @param array<string,bool> $visited         Directories already indexed.
+     * @param list<string>       $symlink_targets Targets to index; appended to.
+     * @return bool Whether a followed target prefix under ABSPATH was added.
+     */
+    private function scan_next_remote_index_for_symlink_targets(array $visited, array &$symlink_targets): bool
+    {
+        $added_wp_core_followed_target = false;
         $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
         if (!$next_remote_index_file_handle) {
-            return $symlink_targets;
+            return false;
         }
 
         while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
@@ -5138,6 +5173,34 @@ class ImportClient
                 continue;
             }
 
+            if ($this->pull_wp_core_abspath !== null) {
+                // ABSPATH is indexed whole, so a symlink there may lie
+                // outside the selection. Its target must not be pulled.
+                $path_encoded = $next_remote_index_entry["path"] ?? null;
+                $symlink_path = is_string($path_encoded) ? base64_decode($path_encoded, true) : false;
+                if (!is_string($symlink_path) || $symlink_path === "") {
+                    continue;
+                }
+                $symlink_path = Utils::normalize_path_separators($symlink_path, $this->get_state()->remote_path_format());
+                if (!$this->is_selected_for_pulling($symlink_path, true, "link")) {
+                    continue;
+                }
+                if (Utils::path_is_same_as_or_descendant_of($symlink_target, $this->pull_wp_core_abspath)) {
+                    if (!Utils::path_is_same_as_or_descendant_of(
+                        $symlink_target,
+                        $this->wp_core_path_prefixes_selected_in_full()
+                    )) {
+                        $this->get_state()->index->wp_core_followed_target_path_prefixes[] = $symlink_target;
+                        $added_wp_core_followed_target = true;
+                        $this->audit_log(
+                            "FOLLOW SYMLINK | selecting {$symlink_target} under ABSPATH, targeted by {$symlink_path}",
+                            true,
+                        );
+                    }
+                    continue;
+                }
+            }
+
             // If we've seen this symlink target already, we can move on
             // to the next one.
             if (isset($visited[$symlink_target])) {
@@ -5153,7 +5216,10 @@ class ImportClient
         }
         fclose($next_remote_index_file_handle);
 
-        return array_values(array_unique($symlink_targets));
+        if ($added_wp_core_followed_target) {
+            $this->save_state();
+        }
+        return $added_wp_core_followed_target;
     }
 
     /**
@@ -12119,6 +12185,21 @@ class ImportClient
     }
 
     /**
+     * With `--include=:wp-core:`, the remote path prefixes pulled in full: the
+     * include prefixes selected in full plus the directories under ABSPATH
+     * that a selected symlink targets.
+     *
+     * @return list<string>
+     */
+    private function wp_core_path_prefixes_selected_in_full(): array
+    {
+        return array_merge(
+            $this->pull_only_files_with_path_prefixes_selected_in_full,
+            $this->get_state()->index->wp_core_followed_target_path_prefixes
+        );
+    }
+
+    /**
      * Checks whether a remote or local path passes --include and --exclude.
      *
      * The server has already applied --include to current remote index entries,
@@ -12162,7 +12243,7 @@ class ImportClient
             $wp_core_abspath = $this->pull_wp_core_abspath;
             $included_path_prefixes = $wp_core_abspath === null
                 ? $this->pull_only_files_with_path_prefixes
-                : $this->pull_only_files_with_path_prefixes_selected_in_full;
+                : $this->wp_core_path_prefixes_selected_in_full();
         }
         $excluded_path_prefixes ??=
             $this->pull_excluded_files_with_path_prefixes;

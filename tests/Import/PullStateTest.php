@@ -46,6 +46,24 @@ class PullStateTest extends TestCase
         $this->assertSame(1234, \PullState::from_array($state->to_array())->index->bytes_written);
     }
 
+    public function testWpCoreFollowedTargetPrefixesRoundTripAndDefaultToNone(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        $data['index'] = ['cursor' => null, 'bytes_written' => null];
+        $this->assertSame([], \PullState::from_array($data)->index->wp_core_followed_target_path_prefixes);
+
+        $state = new \PullState();
+        $state->index->wp_core_followed_target_path_prefixes = ['/var/www/html/shared/linked'];
+        $this->assertSame(
+            ['/var/www/html/shared/linked'],
+            \PullState::from_array($state->to_array())->index->wp_core_followed_target_path_prefixes
+        );
+
+        $data['index']['wp_core_followed_target_path_prefixes'] = [1];
+        $this->expectException(\UnexpectedValueException::class);
+        \PullState::from_array($data);
+    }
+
     public function testStateRoundTripsToPersistedArraySchema(): void
     {
         $state = new \PullState();
