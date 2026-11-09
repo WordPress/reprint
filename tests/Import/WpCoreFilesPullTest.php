@@ -115,6 +115,58 @@ final class WpCoreFilesPullTest extends TestCase
         $this->assertFileDoesNotExist($this->fsRoot . $this->source . '/outside');
     }
 
+    public function testPullsSymlinksThatASelectedSymlinkReachesThrough(): void
+    {
+        $abspath = $this->source . '/html';
+        $this->writeCore($abspath, '7.1.4');
+        $this->writeFiles($abspath, array(
+            'hopped/h.php' => 'hopped',
+            'wp-content/plugins/a/a.php' => 'plugin',
+        ));
+        // wp-content/plugins/hop -> link1 -> link2 -> hopped, every hop in ABSPATH.
+        symlink('hopped', $abspath . '/link2');
+        symlink('link2', $abspath . '/link1');
+        symlink('../../link1', $abspath . '/wp-content/plugins/hop');
+        $this->writePreflight(array(
+            'abspath' => $abspath,
+            'content_dir' => $abspath . '/wp-content',
+        ));
+
+        $this->pull(array('--include=:wp-content:', '--include=:wp-core:'));
+
+        $local = $this->fsRoot . $abspath;
+        $this->assertSame('hopped', file_get_contents($local . '/wp-content/plugins/hop/h.php'));
+        $this->assertSame('link2', readlink($local . '/link1'));
+        $this->assertSame('hopped', readlink($local . '/link2'));
+    }
+
+    public function testSymlinksToAbspathOrItsParentSelectNoSiteFiles(): void
+    {
+        $abspath = $this->source . '/html';
+        $this->writeCore($abspath, '7.1.4');
+        $this->writeFiles($abspath, array(
+            'wp-config.php' => 'site config',
+            'custom/data.txt' => 'custom',
+            'wp-content/plugins/a/a.php' => 'plugin',
+        ));
+        $this->writeFiles($this->source, array('beside/b.txt' => 'beside'));
+        symlink('../..', $abspath . '/wp-content/plugins/root');
+        symlink('../../..', $abspath . '/wp-content/plugins/parent');
+        $this->writePreflight(array(
+            'abspath' => $abspath,
+            'content_dir' => $abspath . '/wp-content',
+        ));
+
+        $this->pull(array('--include=:wp-content:', '--include=:wp-core:'));
+
+        $local = $this->fsRoot . $abspath;
+        $this->assertTrue(is_link($local . '/wp-content/plugins/root'));
+        $this->assertSame('7.1.4', file_get_contents($local . '/wp-content/plugins/root/wp-includes/version.php'));
+        $this->assertFileDoesNotExist($local . '/wp-config.php');
+        $this->assertFileDoesNotExist($local . '/custom');
+        $this->assertFileDoesNotExist($this->fsRoot . $this->source . '/beside');
+    }
+
     public function testMirrorKeepsAndUpdatesSymlinkTargetsUnderAbspath(): void
     {
         $abspath = $this->source . '/html';
