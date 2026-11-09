@@ -5605,6 +5605,8 @@ class ImportClient
      *                                                    content directory.
      *         @type string|null $wordpressAbsolutePath   Remote WordPress
      *                                                    ABSPATH.
+     *         @type string|null $wordpressVersion        WordPress version
+     *                                                    the source runs.
      *         @type string[]    $wordpressRoots          WordPress roots
      *                                                    detected remotely.
      *         @type string[]    $extraDirectories        Remote directories
@@ -5625,6 +5627,7 @@ class ImportClient
      *         serverDatabaseCharset: string|null,
      *         contentDirectory: string|null,
      *         wordpressAbsolutePath: string|null,
+     *         wordpressVersion: string|null,
      *         wordpressRoots: string[],
      *         extraDirectories: string[]
      *     }
@@ -5668,6 +5671,7 @@ class ImportClient
                 "serverDatabaseCharset" => $database["server_charset"] ?? null,
                 "contentDirectory" => $paths_urls["content_dir"] ?? null,
                 "wordpressAbsolutePath" => $paths_urls["abspath"] ?? null,
+                "wordpressVersion" => is_string($wordpress["wp_version"] ?? null) ? $wordpress["wp_version"] : null,
                 "wordpressRoots" => array_column(
                     $preflight_data["wp_detect"]["roots"] ?? [],
                     "path"

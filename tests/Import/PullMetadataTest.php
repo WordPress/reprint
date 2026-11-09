@@ -131,6 +131,7 @@ class PullMetadataTest extends TestCase
             'serverDatabaseCharset' => null,
             'contentDirectory' => null,
             'wordpressAbsolutePath' => null,
+            'wordpressVersion' => null,
             'wordpressRoots' => [],
             'extraDirectories' => [],
         ], $metadata['sourceSite']);
@@ -151,6 +152,7 @@ class PullMetadataTest extends TestCase
                             'siteurl' => 'https://example.com/wordpress',
                             'table_prefix' => 'wp_4_',
                             'wpdb_charset' => 'utf8mb3',
+                            'wp_version' => '7.0.1',
                             'paths_urls' => [
                                 'content_dir' => '/srv/htdocs/wp-content',
                                 'abspath' => '/wordpress/core/7.0/',
@@ -185,6 +187,7 @@ class PullMetadataTest extends TestCase
             'serverDatabaseCharset' => 'latin1',
             'contentDirectory' => '/srv/htdocs/wp-content',
             'wordpressAbsolutePath' => '/wordpress/core/7.0/',
+            'wordpressVersion' => '7.0.1',
             'wordpressRoots' => [
                 '/wordpress/core/7.0',
                 '/wordpress/core',

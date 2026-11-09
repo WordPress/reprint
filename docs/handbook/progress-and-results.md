@@ -193,7 +193,7 @@ The JSONL presentation emits `push_progress` records. After planning completes, 
 php reprint.phar pull-metadata 'https://example.com/?reprint-api' --state-dir=./state
 ```
 
-This makes no network request. The source address selects the saved remote. The result includes `hasCompletedOnce`, artifact availability, `sourceSite`, and `key`. `sourceSite` contains the source WordPress home and site URLs, table prefix, and reported charsets; unavailable fields are null. `key` contains the stored key's `id`, private-key `path`, and enrollable `publicKey`, or is null when no key is stored.
+This makes no network request. The source address selects the saved remote. The result includes `hasCompletedOnce`, artifact availability, `sourceSite`, and `key`. `sourceSite` contains the source WordPress home and site URLs, table prefix, reported charsets, and the WordPress version it runs (`wordpressVersion`); unavailable fields are null. `key` contains the stored key's `id`, private-key `path`, and enrollable `publicKey`, or is null when no key is stored.
 
 `hasCompletedOnce` records a past completed pull. It does not prove that the current invocation completed. Check that invocation's exit code and report. Captured output can include the data object followed by a command report; do not decode all stdout as one JSON document.
 
