@@ -4,9 +4,9 @@ Use this guide to publish a stable client and plugin, retry a WordPress.org depl
 
 ## Before starting
 
-Choose a tested commit on `trunk` and the version you want to release. The WordPress.org publishing workflows currently allow the GitHub account `adamziel`. Being a repository administrator does not bypass that check. If you cannot start a deployment, ask the publishing maintainer.
+Choose a tested commit on `trunk` and the version you want to release. Anyone with write access to the repository can run the release and WordPress.org publishing workflows.
 
-The deployment needs the `svn` GitHub Actions environment with `SVN_USERNAME` and `SVN_PASSWORD`. The current SVN username is `zieladam`, with that exact case. Use its generated [SVN account password](https://profiles.wordpress.org/zieladam/profile/edit/group/3/?screen=svn-password), not its WordPress.org login password. The version-bump workflow also needs `GH_TOKEN` from an account allowed to bypass the `trunk` ruleset.
+The deployment needs the `svn` GitHub Actions environment with `SVN_USERNAME` and `SVN_PASSWORD`. The environment's deployment branch policy allows only `trunk`, so a workflow running on any other branch or tag cannot read those secrets. Keep that policy: it, not the workflow code, controls access to the SVN password. The current SVN username is `zieladam`, with that exact case. Use its generated [SVN account password](https://profiles.wordpress.org/zieladam/profile/edit/group/3/?screen=svn-password), not its WordPress.org login password. The version-bump workflow also needs `GH_TOKEN` from an account allowed to bypass the `trunk` ruleset.
 
 ## Publish a stable version
 
@@ -27,7 +27,7 @@ The unversioned WordPress.org URL points to the highest stable version already p
 
 ## Retry a deployment
 
-Run [Deploy to WordPress.org](https://github.com/WordPress/reprint/actions/workflows/release-wporg.yml) manually and enter the existing release tag. It rebuilds from that tag, so changing a GitHub release attachment will not change the deployment.
+Run [Deploy to WordPress.org](https://github.com/WordPress/reprint/actions/workflows/release-wporg.yml) manually on `trunk` and enter the existing release tag. It rebuilds from that tag, so changing a GitHub release attachment will not change the deployment.
 
 The client upload can run again. An already-published plugin version is left unchanged. Check the failing job before deciding whether you need a new version.
 

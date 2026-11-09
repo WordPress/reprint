@@ -12,7 +12,7 @@ permissions: {}
 jobs:
   screenshots:
     name: Publish screenshots and captions
-    if: github.repository == 'WordPress/reprint' && github.triggering_actor == 'adamziel' && github.ref == 'refs/heads/trunk'
+    if: github.repository == 'WordPress/reprint' && github.ref == 'refs/heads/trunk'
     runs-on: ubuntu-latest
     environment: svn
     timeout-minutes: 10

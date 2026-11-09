@@ -79,39 +79,6 @@ test('WordPress.org rebuilds the tagged downloads-only plugin after GitHub publi
     assert.match(source, /SVN_PASSWORD: \$\{\{ secrets\.SVN_PASSWORD \}\}/);
 });
 
-test('WordPress.org permits only adamziel for publishing and upstream reruns before release code runs', async () => {
-    const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
-    const step = source.split(/(?=^      - )/m)[1];
-    assert.match(step, /name: Check publishing user/);
-    assert.match(step, /TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}/);
-    assert.match(step, /UPSTREAM_TRIGGERING_ACTOR: \$\{\{ github\.event\.workflow_run\.triggering_actor\.login \}\}/);
-    const command = step.match(/run: \|\n((?: {10}[^\n]+\n?)+)/)[1].replace(/^ {10}/gm, '');
-    for (const [actor, upstreamActor, allowed] of [
-        ['akirk', '', false],
-        ['brandonpayton', '', false],
-        ['WPprodigy', '', false],
-        ['adamziel', '', true],
-        ['adamziel', 'adamziel', true],
-        ['akirk', 'adamziel', false],
-        ['adamziel', 'akirk', false],
-        ['other-user', '', false],
-        ['other-user', 'adamziel', false],
-        ['adamziel', 'other-user', false],
-        ['github-actions[bot]', '', false],
-        ['adamziel-other-user', '', false],
-        ['', '', false],
-    ]) {
-        const check = run('bash', ['-e', '-o', 'pipefail', '-c', command], {
-            env: { ...process.env, TRIGGERING_ACTOR: actor, UPSTREAM_TRIGGERING_ACTOR: upstreamActor },
-        });
-        if (allowed) {
-            await check;
-        } else {
-            await assert.rejects(check, /is not allowed to publish Reprint/);
-        }
-    }
-});
-
 test('WordPress.org builds and checks the tagged client before publishing the plugin', async () => {
     const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
     assert.match(source, /submodules: true/);
@@ -243,7 +210,7 @@ test('WordPress.org screenshot updates use the release queue and cannot publish 
     const release = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
     assert.match(source, /^  workflow_dispatch:$/m);
     assert.doesNotMatch(source, /^  (push|pull_request|workflow_call):/m);
-    assert.match(source, /github\.repository == 'WordPress\/reprint' && github\.triggering_actor == 'adamziel' && github\.ref == 'refs\/heads\/trunk'/);
+    assert.match(source, /if: github\.repository == 'WordPress\/reprint' && github\.ref == 'refs\/heads\/trunk'$/m);
     assert.match(source, /^    environment: svn$/m);
     assert.equal(source.match(/^  group: (.+)$/m)[1], release.match(/^  group: (.+)$/m)[1]);
     assert.match(source, /cancel-in-progress: false/);
