@@ -6572,16 +6572,6 @@ class ImportClient
 
         // Map remote absolute paths to local absolute paths within filesystem root
         $local_abspath = $this->path_mapper()->remote_path_to_local_path($abspath);
-        // A pull that leaves core out may not create ABSPATH at all, as on
-        // WP Cloud where ABSPATH holds only core. Keeping core needs nothing
-        // from it.
-        $abspath_was_pulled = is_dir($local_abspath);
-        if (!$abspath_was_pulled && !$keep_core_files) {
-            throw new RuntimeException(
-                "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
-                    "(remote ABSPATH: {$abspath}). Has the file sync completed?",
-            );
-        }
 
         $local_wp_admin = $wp_admin_path !== null
             ? $this->path_mapper()->remote_path_to_local_path($wp_admin_path)
@@ -6623,22 +6613,26 @@ class ImportClient
             && $content_dir !== null
             && !Utils::path_is_descendant_of($uploads_basedir, $content_dir);
 
+        // A pull that leaves core out may not create ABSPATH at all, as on
+        // WP Cloud where ABSPATH holds only core. Keeping core needs nothing
+        // from it, as long as wp-content lives elsewhere.
+        $abspath_was_pulled = is_dir($local_abspath);
+        $abspath_is_optional = $keep_core_files && $content_detached;
+        if (!$abspath_was_pulled && !$abspath_is_optional) {
+            throw new RuntimeException(
+                "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
+                    "(remote ABSPATH: {$abspath}). Has the file sync completed?",
+            );
+        }
+
         // If any sub-component is detached from content_dir, we need to
         // "explode" wp-content into a real directory with individual symlinks
         // rather than symlinking the content_dir wholesale.
         $need_exploded_content =
             $plugins_detached || $mu_plugins_detached || $uploads_detached;
 
-        // Without this check, a target without core would end up a layout
-        // that cannot run WordPress.
         if ($keep_core_files) {
-            $kept_version_file = wp_join_unix_paths($flatten_to, "wp-includes/version.php");
-            if (!is_file($kept_version_file)) {
-                throw new RuntimeException(
-                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error with a local path, never HTML.
-                    "--core-files=keep needs WordPress core at --flatten-to, but {$kept_version_file} does not exist.",
-                );
-            }
+            self::assert_flatten_target_has_own_core($flatten_to);
         }
 
         // Create the target directory if it doesn't exist
@@ -7081,6 +7075,33 @@ class ImportClient
             "FLAT-DOCUMENT-ROOT | Created symlink: {$target} -> {$link_value}",
         );
         $created++;
+    }
+
+    /**
+     * Stop --core-files=keep unless --flatten-to has WordPress core of its own.
+     *
+     * Without core the layout cannot run WordPress. Core linked into
+     * --fs-root by an earlier --core-files=link run is the pulled core, not
+     * the site's: keeping it would send local edits into --fs-root and leave
+     * dangling links once a pull leaves core out.
+     */
+    public static function assert_flatten_target_has_own_core(string $flatten_to): void
+    {
+        $wp_includes = wp_join_unix_paths($flatten_to, "wp-includes");
+        if (is_link($wp_includes)) {
+            $link_target = readlink($wp_includes);
+            throw new RuntimeException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error with local paths, never HTML.
+                "--core-files=keep needs the site's own WordPress core at --flatten-to, but {$wp_includes} is a symlink to {$link_target}. Run flat-docroot once with --core-files=copy to replace it.",
+            );
+        }
+        $version_file = wp_join_unix_paths($wp_includes, "version.php");
+        if (!is_file($version_file)) {
+            throw new RuntimeException(
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error with a local path, never HTML.
+                "--core-files=keep needs WordPress core at --flatten-to, but {$version_file} does not exist.",
+            );
+        }
     }
 
     /**
