@@ -84,6 +84,16 @@ php reprint.phar pull-files "$URL" \
   --include=:wp-uploads:
 ```
 
+To download WordPress content and only the WordPress core the site runs:
+
+```bash
+php reprint.phar pull-files "$URL" \
+  --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
+  --include=:wp-content: --include=:wp-core:
+```
+
+`:wp-core:` selects `wp-admin`, `wp-includes`, and the core files directly in ABSPATH, such as `index.php`, `wp-load.php`, and `xmlrpc.php`. It leaves out `wp-config.php` and every other site file next to core, such as `.htaccess` or `robots.txt`. On hosts that keep several WordPress versions side by side, such as WP Cloud, only the version the site runs is downloaded. The source still indexes all of ABSPATH, so a core file the source removed, such as `readme.html`, needs no special handling. `:wp-core:` must be used whole, and it works only with `--include`. When ABSPATH also holds site directories, as on most standard hosts, the target of a symlink elsewhere in the selection that points into one of them is not pulled; include that directory too.
+
 Low-level `files-pull` needs a completed operation cleared with `--abort` before starting another delta. Use `pull-files` if you want the client to handle repeat runs without that manual reset.
 
 Older callers can still use `--filter=essential-files` to omit uploads and low-level `--filter=skipped-earlier` to select only uploads. These are presets for the same path rules, not a separate skipped-file list. New integrations can use the explicit include and exclude options above.

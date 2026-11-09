@@ -531,4 +531,140 @@ class OnlyFilesPathPrefixTest extends TestCase
         $dirs = $this->call($c, 'get_export_directories');
         $this->assertSame(array('/var/www/html/wp-content'), $dirs);
     }
+
+    private function property($c, string $p)
+    {
+        $reflection = new \ReflectionClass($c);
+        return $reflection->getProperty($p)->getValue($c);
+    }
+
+    /** A standard host: ABSPATH is the document root and also holds the site's own files. */
+    private function standardLayout(): \ImportClient
+    {
+        return $this->withPaths(array(
+            'abspath' => '/var/www/html/',
+            'content_dir' => '/var/www/html/wp-content',
+        ));
+    }
+
+    /** A WP Cloud host: ABSPATH is one shared core version, outside the document root. */
+    private function wpCloudLayout(): \ImportClient
+    {
+        return $this->withPaths(array(
+            'abspath' => '/wordpress/core/7.1.4/',
+            'wp_admin_path' => '/wordpress/core/7.1.4/wp-admin',
+            'wp_includes_path' => '/wordpress/core/7.1.4/wp-includes',
+            'content_dir' => '/srv/htdocs/wp-content',
+        ));
+    }
+
+    public function testWpCoreIndexesAbspathAndSelectsOnlyCoreEntriesOnAStandardHost(): void
+    {
+        $c = $this->standardLayout();
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-core:')), false));
+
+        $this->assertSame(array('/var/www/html'), $this->property($c, 'pull_only_files_with_path_prefixes'));
+        foreach (array('index.php', 'wp-load.php', 'wp-login.php', 'xmlrpc.php', 'readme.html', 'license.txt', 'wp-config-sample.php', 'wp-admin/index.php', 'wp-includes/version.php', 'wp-includes/js/a.js') as $core_path) {
+            foreach (array(true, false) as $is_next_remote_index_entry) {
+                $this->assertTrue(
+                    $this->call($c, 'is_selected_for_pulling', array('/var/www/html/' . $core_path, $is_next_remote_index_entry, 'file')),
+                    $core_path
+                );
+            }
+        }
+        foreach (array('wp-config.php', 'wp-config-local.php', '.htaccess', 'robots.txt', 'custom/index.php', 'wp-content/plugins/a/a.php', 'wp-admin.bak/index.php') as $site_path) {
+            foreach (array(true, false) as $is_next_remote_index_entry) {
+                $this->assertFalse(
+                    $this->call($c, 'is_selected_for_pulling', array('/var/www/html/' . $site_path, $is_next_remote_index_entry, 'file')),
+                    $site_path
+                );
+            }
+        }
+    }
+
+    public function testWpCoreWithWpContentAlsoSelectsContentUnderAbspath(): void
+    {
+        $c = $this->standardLayout();
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-content:', ':wp-core:')), false));
+
+        $this->assertSame(array('/var/www/html'), $this->property($c, 'pull_only_files_with_path_prefixes'));
+        foreach (array(true, false) as $is_next_remote_index_entry) {
+            $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-content/plugins/a/a.php', $is_next_remote_index_entry, 'file')));
+            $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-includes/version.php', $is_next_remote_index_entry, 'file')));
+            $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/var/www/html/wp-config.php', $is_next_remote_index_entry, 'file')));
+        }
+    }
+
+    public function testWpCoreSelectsOnlyTheActiveCoreVersionOnWpCloud(): void
+    {
+        $c = $this->wpCloudLayout();
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-content:', ':wp-core:')), false));
+
+        $this->assertSame(
+            array('/srv/htdocs/wp-content', '/wordpress/core/7.1.4'),
+            $this->property($c, 'pull_only_files_with_path_prefixes')
+        );
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/wordpress/core/7.1.4/wp-settings.php', true, 'file')));
+        $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/wordpress/core/7.0.8/wp-settings.php', false, 'file')));
+        // A followed symlink target outside every selected root stays selected,
+        // as it is for any other include.
+        $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/wordpress/plugins/jetpack/16.4/jetpack.php', true, 'file')));
+    }
+
+    public function testWpCoreAddsWpAdminAndWpIncludesOutsideAbspath(): void
+    {
+        $c = $this->withPaths(array(
+            'abspath' => '/srv/htdocs/',
+            'wp_admin_path' => '/srv/htdocs/__wp__/wp-admin',
+            'wp_includes_path' => '/srv/htdocs/__wp__/wp-includes',
+            'content_dir' => '/srv/htdocs/wp-content',
+        ));
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-core:')), false));
+
+        $this->assertSame(array('/srv/htdocs'), $this->property($c, 'pull_only_files_with_path_prefixes'));
+        foreach (array(true, false) as $is_next_remote_index_entry) {
+            $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/srv/htdocs/__wp__/wp-includes/version.php', $is_next_remote_index_entry, 'file')));
+            $this->assertTrue($this->call($c, 'is_selected_for_pulling', array('/srv/htdocs/wp-load.php', $is_next_remote_index_entry, 'file')));
+            $this->assertFalse($this->call($c, 'is_selected_for_pulling', array('/srv/htdocs/__wp__/wp-config.php', $is_next_remote_index_entry, 'file')));
+        }
+    }
+
+    public function testWpCoreMustBeTheWholeSource(): void
+    {
+        $c = $this->standardLayout();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(':wp-core: selects WordPress core as a whole and cannot be followed by a path; received ":wp-core:/wp-admin"');
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-core:/wp-admin')), false));
+    }
+
+    public function testWpCoreCannotBeExcluded(): void
+    {
+        $c = $this->standardLayout();
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('--exclude does not accept :wp-core:');
+        $this->call($c, 'prepare_files_pull_options', array(array('exclude' => array(':wp-core:')), false));
+    }
+
+    public function testWpCoreRequiresAbspathFromPreflight(): void
+    {
+        $c = $this->withPaths(array('content_dir' => '/var/www/html/wp-content'));
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('Cannot resolve token ":wp-core:"');
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-core:')), false));
+    }
+
+    public function testWpCoreChangesTheFilesPullPathSelectionFingerprint(): void
+    {
+        $c = $this->standardLayout();
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':abspath:')), false));
+        $abspath_fingerprint = $this->call($c, 'files_pull_path_selection_fingerprint');
+        $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-core:')), false));
+
+        // Both selections index ABSPATH, but only one pulls all of it.
+        $this->assertSame(array('/var/www/html'), $this->property($c, 'pull_only_files_with_path_prefixes'));
+        $this->assertNotSame($abspath_fingerprint, $this->call($c, 'files_pull_path_selection_fingerprint'));
+    }
 }

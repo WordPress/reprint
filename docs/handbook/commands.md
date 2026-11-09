@@ -99,7 +99,7 @@ Each command's `--help` lists its complete options. These are the ones the handb
 | `--target-sqlite-path=PATH` | Destination SQLite file. Default: `wp-content/database/.ht.sqlite` under the copy. | Same as `--target-engine`. |
 | `--new-site-url=URL` | New site address. Creates the matching `--rewrite-url` from the source address. | `pull`, `pull-files`, `files-pull`, `pull-db`, `db-apply`, `db-rewrite-urls` |
 | `--rewrite-url FROM TO` | Replace FROM with TO in the database and CSS. Repeatable. | Same as `--new-site-url`, plus `db-push`. |
-| `--include=SOURCE`, `--exclude=SOURCE` | Restrict the file pull to, or omit, a source prefix: a token such as `:wp-content:` or an absolute source path. Exclusions win. | `pull-files`, `files-pull` |
+| `--include=SOURCE`, `--exclude=SOURCE` | Restrict the file pull to, or omit, a source prefix: a token such as `:wp-content:` or an absolute source path. `--include=:wp-core:` selects only the WordPress core the site runs. Exclusions win. | `pull-files`, `files-pull` |
 | `--remap SOURCE TARGET` | Place a selected source prefix at TARGET inside the filesystem root. | `pull-files`, `files-pull` |
 | `--mode=MODE` | File pull mode: `catch-up` (default) or `mirror`. | `pull`, `pull-files`, `files-pull` |
 | `--on-fs-root-nonempty=ACTION` | `error` (default) or `preserve-local` when the filesystem root already has files. | `pull`, `pull-files`, `files-pull` |
