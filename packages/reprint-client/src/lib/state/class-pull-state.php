@@ -75,14 +75,20 @@ class PullState
     /** @var string|null Files-pull path-selection fingerprint; guards resume. */
     public ?string $files_pull_path_selection_fingerprint = null;
     /**
-     * @var array{abspath: string, path_prefixes: list<string>}|null The
-     * WordPress core the latest completed files-pull with
-     * `--include=:wp-core:` placed in the filesystem root: its ABSPATH and its
-     * wp-admin and wp-includes directories. A later pull with `:wp-core:` removes those
-     * paths once the source no longer has them, such as an earlier versioned
-     * ABSPATH after a core upgrade on WP Cloud.
+     * WordPress core that files-pulls with `--include=:wp-core:` may have
+     * placed in the filesystem root. A pull with `:wp-core:` adds its own
+     * core when it starts and, once it completes, leaves only that. Until
+     * then, it removes the paths of the other entries that the source no
+     * longer has, such as an earlier versioned ABSPATH after a core upgrade
+     * on WP Cloud.
+     *
+     * @var array[] {
+     *     One entry per core location.
+     *     @type string   $abspath       Source ABSPATH.
+     *     @type string[] $path_prefixes Source wp-admin and wp-includes directories.
+     * }
      */
-    public ?array $wp_core_in_filesystem_root = null;
+    public array $wp_core_in_filesystem_root = [];
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
@@ -172,7 +178,7 @@ class PullState
             'include_host_plugins' => false,
             'css_url_mapping' => [],
             'current_css_cursor' => null,
-            'wp_core_in_filesystem_root' => null,
+            'wp_core_in_filesystem_root' => [],
         ];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
@@ -222,23 +228,27 @@ class PullState
 
     /**
      * @param mixed $data Saved wp_core_in_filesystem_root value.
-     * @return array{abspath: string, path_prefixes: list<string>}|null
+     * @return array[] Entries as documented on $wp_core_in_filesystem_root.
      */
-    private static function wp_core_in_filesystem_root_from_array($data): ?array
+    private static function wp_core_in_filesystem_root_from_array($data): array
     {
-        if ($data === null) {
-            return null;
-        }
-        if (
-            !is_array($data)
-            || array_keys($data) !== ['abspath', 'path_prefixes']
-            || !is_string($data['abspath'])
-            || !is_array($data['path_prefixes'])
-            || $data['path_prefixes'] !== array_values(array_filter($data['path_prefixes'], 'is_string'))
-        ) {
+        if (!is_array($data) || $data !== array_values($data)) {
             throw new UnexpectedValueException(
-                'PullState wp_core_in_filesystem_root must be null or an abspath string with a list of path prefixes.'
+                'PullState wp_core_in_filesystem_root must be a list.'
             );
+        }
+        foreach ($data as $entry) {
+            if (
+                !is_array($entry)
+                || array_keys($entry) !== ['abspath', 'path_prefixes']
+                || !is_string($entry['abspath'])
+                || !is_array($entry['path_prefixes'])
+                || $entry['path_prefixes'] !== array_values(array_filter($entry['path_prefixes'], 'is_string'))
+            ) {
+                throw new UnexpectedValueException(
+                    'PullState wp_core_in_filesystem_root entries must hold an abspath string and a list of path prefixes.'
+                );
+            }
         }
         return $data;
     }

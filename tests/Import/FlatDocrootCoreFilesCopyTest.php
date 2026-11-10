@@ -373,12 +373,14 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createCoreTree($abspath, '7.1.3');
         file_put_contents($abspath . '/wp-config-sample.php', '<?php // sample');
         file_put_contents($abspath . '/wp-config-local.php', '<?php // local settings');
+        file_put_contents($abspath . '/wp-salt.php', '<?php // salts');
         $this->writePreflight(['abspath' => '/var/www/html']);
 
         $this->flatten(['core_files' => 'copy']);
 
         $this->assertFalse(is_link($this->flattenTo . '/wp-config-sample.php'), 'wp-config-sample.php ships with core');
         $this->assertTrue(is_link($this->flattenTo . '/wp-config-local.php'), 'wp-config-local.php belongs to the site');
+        $this->assertTrue(is_link($this->flattenTo . '/wp-salt.php'), 'wp-salt.php is named like core but belongs to the site');
     }
 
     public function testKeepsCoreEntriesThatAreSymlinksOnTheSourceLinked(): void

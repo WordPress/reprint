@@ -11,7 +11,7 @@ php reprint.phar flat-docroot "$URL" --state-dir="$STATE_DIR" \
 
 By default this creates symlinks to the downloaded tree; it does not copy the files. Keep the download directory while using that layout.
 
-With `--core-files=copy`, WordPress core is copied instead of linked. Every run brings the copy back in line with the downloaded core, so local edits to core are discarded and never reach `--fs-root`. `wp-content`, `wp-config.php` and similar config files, and other site files stay linked. `--flatten-to` must be outside `--fs-root`, and a symlink inside core stops the run. To go back to links, run `flat-docroot` with `--force`.
+With `--core-files=copy`, WordPress core is copied instead of linked. Every run brings the copy back in line with the downloaded core, so local edits to core are discarded and never reach `--fs-root`. Core is the fixed set of files WordPress ships. `wp-content`, `wp-config.php` and similar config files, and other site files stay linked, including a `wp-*.php` file such as a `wp-salt.php` that `wp-config.php` requires. `--flatten-to` must be outside `--fs-root`, and a symlink inside core stops the run. To go back to links, run `flat-docroot` with `--force`.
 
 The downloaded files need server-specific configuration to actually work — PHP constants, INI directives, and request handlers that the source host relied on. `apply-runtime` reads the preflight data, detects the source hosting provider, and generates the configuration files your target server needs.
 
