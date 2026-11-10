@@ -46,24 +46,6 @@ class PullStateTest extends TestCase
         $this->assertSame(1234, \PullState::from_array($state->to_array())->index->bytes_written);
     }
 
-    public function testWpCoreFollowedTargetPrefixesRoundTripAndDefaultToNone(): void
-    {
-        $data = ( new \PullState() )->to_array();
-        $data['index'] = ['cursor' => null, 'bytes_written' => null];
-        $this->assertSame([], \PullState::from_array($data)->index->wp_core_followed_target_path_prefixes);
-
-        $state = new \PullState();
-        $state->index->wp_core_followed_target_path_prefixes = ['/var/www/html/shared/linked'];
-        $this->assertSame(
-            ['/var/www/html/shared/linked'],
-            \PullState::from_array($state->to_array())->index->wp_core_followed_target_path_prefixes
-        );
-
-        $data['index']['wp_core_followed_target_path_prefixes'] = [1];
-        $this->expectException(\UnexpectedValueException::class);
-        \PullState::from_array($data);
-    }
-
     public function testWpCoreInFilesystemRootRoundTripsAndDefaultsToNone(): void
     {
         $data = ( new \PullState() )->to_array();
@@ -91,20 +73,18 @@ class PullStateTest extends TestCase
         $filesystem_root = $state_directory . '/files';
         mkdir($filesystem_root, 0777, true);
         $abspath = "/srv/core-\xff";
-        $followed = "/srv/core-\xff/shared/linked-\xfe";
+        $wp_includes = "/srv/core-\xff/wp-includes";
         try {
             $client = new \ImportClient('https://source.example/', $state_directory, $filesystem_root);
             write_current_pull_state($client, [
-                'index' => ['wp_core_followed_target_path_prefixes' => [$followed]],
-                'wp_core_in_filesystem_root' => ['abspath' => $abspath, 'path_prefixes' => [$followed]],
+                'wp_core_in_filesystem_root' => ['abspath' => $abspath, 'path_prefixes' => [$wp_includes]],
             ]);
 
             $reloaded = new \ImportClient('https://source.example/', $state_directory, $filesystem_root);
             $load_state = ( new \ReflectionClass($reloaded) )->getMethod('load_state');
             $state = $load_state->invoke($reloaded);
 
-            $this->assertSame([$followed], $state->index->wp_core_followed_target_path_prefixes);
-            $this->assertSame(['abspath' => $abspath, 'path_prefixes' => [$followed]], $state->wp_core_in_filesystem_root);
+            $this->assertSame(['abspath' => $abspath, 'path_prefixes' => [$wp_includes]], $state->wp_core_in_filesystem_root);
         } finally {
             exec('rm -rf ' . escapeshellarg($state_directory));
         }

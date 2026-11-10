@@ -4554,10 +4554,7 @@ class ImportClient
         if ($this->pull_wp_core_abspath !== null) {
             $this->get_state()->wp_core_in_filesystem_root = [
                 "abspath" => $this->pull_wp_core_abspath,
-                "path_prefixes" => array_values(array_merge(
-                    $this->pull_wp_core_directory_prefixes,
-                    $this->get_state()->index->wp_core_followed_target_path_prefixes
-                )),
+                "path_prefixes" => $this->pull_wp_core_directory_prefixes,
             ];
         }
         $this->get_state()->active_resumable_command->completion_state = "complete";
@@ -4746,7 +4743,7 @@ class ImportClient
             $this->path_mapper()->remote_path_prefixes_to_local_path_prefixes(
                 $this->pull_wp_core_abspath === null
                     ? $this->pull_only_files_with_path_prefixes
-                    : $this->wp_core_path_prefixes_selected_in_full()
+                    : $this->pull_only_files_with_path_prefixes_selected_in_full
             );
         $local_wp_core_abspath = $this->pull_wp_core_abspath === null
             ? null
@@ -5057,21 +5054,9 @@ class ImportClient
      * Scans the next remote index for symlink entries with a "target" field,
      * resolves relative targets to absolute paths, and indexes each target
      * directory. Repeats until the queue is drained, with cycle detection.
-     *
-     * With `--include=:wp-core:`, the server has already indexed all of
-     * ABSPATH, but only part of it is selected. A selected symlink targeting
-     * an unselected directory under ABSPATH selects that directory instead of
-     * queueing it for indexing.
      */
     private function discover_symlink_targets(): void
     {
-        // Recomputed from the whole next remote index, so a resumed index
-        // stage arrives at the same prefixes.
-        if ($this->get_state()->index->wp_core_followed_target_path_prefixes !== []) {
-            $this->get_state()->index->wp_core_followed_target_path_prefixes = [];
-            $this->save_state();
-        }
-
         // Seed "already covered" from the dirs actually enumerated this run (the
         // --include prefixes when scoped), not the full preflight roots — otherwise a
         // narrow --include skips a target under a root but outside its scope.
@@ -5200,18 +5185,11 @@ class ImportClient
      * symlinks (e.g. /srv/wordpress -> /wordpress) emitted by the server's
      * discover_path_symlinks() for local recreation only, not for indexing.
      *
-     * With `--include=:wp-core:`, only selected symlinks are followed, and
-     * ABSPATH is already indexed whole. A target under ABSPATH is added to
-     * the followed target prefixes instead of being returned, and so are the
-     * intermediate symlinks under ABSPATH that lead to it. A target that
-     * contains ABSPATH is skipped: selecting it would select wp-config.php
-     * and every other site file next to core.
-     *
-     * Selecting a target or an intermediate symlink can select further
-     * symlinks, so the scan repeats until it selects nothing new. Each repeat
-     * streams the next remote index from disk again. Repeats are bounded by
-     * the length of the longest symlink chain, which is short in practice, and
-     * the scan runs once without :wp-core:.
+     * With `--include=:wp-core:`, ABSPATH is indexed whole, so only selected
+     * symlinks are followed. A target under ABSPATH is already indexed and
+     * is pulled only if the selection covers it; a target that contains
+     * ABSPATH is skipped, because indexing it would select wp-config.php and
+     * every other site file next to core.
      */
     private function extract_symlink_directories_from_next_remote_index(array $visited): array
     {
@@ -5219,117 +5197,66 @@ class ImportClient
         if (!file_exists($this->next_remote_index_file)) {
             return $symlink_targets;
         }
+        $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
+        if (!$next_remote_index_file_handle) {
+            return $symlink_targets;
+        }
 
         $wp_core_abspath = $this->pull_wp_core_abspath;
-        $index_state = $this->get_state()->index;
-        $followed_target_count_before = count($index_state->wp_core_followed_target_path_prefixes);
-        do {
-            $followed_target_count_before_scan = count($index_state->wp_core_followed_target_path_prefixes);
-            $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
-            if (!$next_remote_index_file_handle) {
-                break;
+        while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
+            $next_remote_index_entry = json_decode($next_remote_index_json_line, true);
+            if (!is_array($next_remote_index_entry)) {
+                continue;
             }
-            // The server emits a symlink's intermediate symlinks right before
-            // it, in the same indexing step, so they cannot be split from it.
-            $preceding_intermediate_symlink_paths = [];
-            while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
-                $next_remote_index_entry = json_decode($next_remote_index_json_line, true);
-                if (!is_array($next_remote_index_entry)) {
-                    continue;
-                }
-                if (($next_remote_index_entry["type"] ?? "") !== "link") {
-                    $preceding_intermediate_symlink_paths = [];
-                    continue;
-                }
-                $symlink_path = null;
-                if ($wp_core_abspath !== null) {
-                    $path_encoded = $next_remote_index_entry["path"] ?? null;
-                    $symlink_path = is_string($path_encoded) ? base64_decode($path_encoded, true) : false;
-                    if (!is_string($symlink_path) || $symlink_path === "") {
-                        $preceding_intermediate_symlink_paths = [];
-                        continue;
-                    }
-                    $symlink_path = Utils::normalize_path_separators($symlink_path, $this->get_state()->remote_path_format());
-                }
-                if (!empty($next_remote_index_entry["intermediate"])) {
-                    if ($symlink_path !== null) {
-                        $preceding_intermediate_symlink_paths[] = $symlink_path;
-                    }
-                    continue;
-                }
-                $intermediate_symlink_paths = $preceding_intermediate_symlink_paths;
-                $preceding_intermediate_symlink_paths = [];
-                $symlink_target_encoded = $next_remote_index_entry["target"] ?? null;
-                if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
-                    continue;
-                }
-                $symlink_target = base64_decode($symlink_target_encoded);
-                if ($symlink_target === false || $symlink_target === "") {
-                    continue;
-                }
-
-                if ($wp_core_abspath !== null) {
-                    // ABSPATH is indexed whole, so a symlink there may lie
-                    // outside the selection. Its target must not be pulled.
-                    if (!$this->is_selected_for_pulling($symlink_path, true, "link")) {
-                        continue;
-                    }
-                    if (Utils::path_is_same_as_or_descendant_of($wp_core_abspath, $symlink_target)) {
-                        $this->audit_log(
-                            "FOLLOW SYMLINK SKIP | {$symlink_path} targets {$symlink_target}, which contains ABSPATH; :wp-core: selects only core there",
-                            true,
-                        );
-                        continue;
-                    }
-                    // A chain such as wp-content/plugins/x -> ABSPATH/link1
-                    // -> ABSPATH/shared/x needs link1 as well as its target.
-                    foreach ($intermediate_symlink_paths as $intermediate_symlink_path) {
-                        if (
-                            Utils::path_is_descendant_of($intermediate_symlink_path, $wp_core_abspath)
-                            && !$this->is_selected_for_pulling($intermediate_symlink_path, true, "link")
-                        ) {
-                            $index_state->wp_core_followed_target_path_prefixes[] = $intermediate_symlink_path;
-                            $this->audit_log(
-                                "FOLLOW SYMLINK | selecting intermediate symlink {$intermediate_symlink_path} under ABSPATH, used by {$symlink_path}",
-                                true,
-                            );
-                        }
-                    }
-                    if (Utils::path_is_same_as_or_descendant_of($symlink_target, $wp_core_abspath)) {
-                        if (!Utils::path_is_same_as_or_descendant_of(
-                            $symlink_target,
-                            $this->wp_core_path_prefixes_selected_in_full()
-                        )) {
-                            $index_state->wp_core_followed_target_path_prefixes[] = $symlink_target;
-                            $this->audit_log(
-                                "FOLLOW SYMLINK | selecting {$symlink_target} under ABSPATH, targeted by {$symlink_path}",
-                                true,
-                            );
-                        }
-                        continue;
-                    }
-                }
-
-                // If we've seen this symlink target already, we can move on
-                // to the next one.
-                if (isset($visited[$symlink_target])) {
-                    continue;
-                }
-
-                // Check containment: skip if already under a visited root
-                if (Utils::path_is_same_as_or_descendant_of($symlink_target, array_keys($visited))) {
-                    continue;
-                }
-
-                $symlink_targets[] = $symlink_target;
+            if (($next_remote_index_entry["type"] ?? "") !== "link") {
+                continue;
             }
-            fclose($next_remote_index_file_handle);
-            $scan_selected_more = count($index_state->wp_core_followed_target_path_prefixes) > $followed_target_count_before_scan;
-        } while ($scan_selected_more);
+            if (!empty($next_remote_index_entry["intermediate"])) {
+                continue;
+            }
+            $symlink_target_encoded = $next_remote_index_entry["target"] ?? null;
+            if (!is_string($symlink_target_encoded) || $symlink_target_encoded === "") {
+                continue;
+            }
+            $symlink_target = base64_decode($symlink_target_encoded);
+            if ($symlink_target === false || $symlink_target === "") {
+                continue;
+            }
 
-        if (count($index_state->wp_core_followed_target_path_prefixes) > $followed_target_count_before) {
-            $this->save_state();
+            if ($wp_core_abspath !== null) {
+                $path_encoded = $next_remote_index_entry["path"] ?? null;
+                $symlink_path = is_string($path_encoded) ? base64_decode($path_encoded, true) : false;
+                if (!is_string($symlink_path) || $symlink_path === "") {
+                    continue;
+                }
+                $symlink_path = Utils::normalize_path_separators($symlink_path, $this->get_state()->remote_path_format());
+                if (!$this->is_selected_for_pulling($symlink_path, true, "link")) {
+                    continue;
+                }
+                if (Utils::path_is_descendant_of($wp_core_abspath, $symlink_target)) {
+                    $this->audit_log(
+                        "FOLLOW SYMLINK SKIP | {$symlink_path} targets {$symlink_target}, which contains ABSPATH; :wp-core: selects only core there",
+                        true,
+                    );
+                    continue;
+                }
+            }
+
+            // If we've seen this symlink target already, we can move on
+            // to the next one.
+            if (isset($visited[$symlink_target])) {
+                continue;
+            }
+
+            // Check containment: skip if already under a visited root
+            if (Utils::path_is_same_as_or_descendant_of($symlink_target, array_keys($visited))) {
+                continue;
+            }
+
+            $symlink_targets[] = $symlink_target;
         }
+        fclose($next_remote_index_file_handle);
+
         return array_values(array_unique($symlink_targets));
     }
 
@@ -12301,21 +12228,6 @@ class ImportClient
     }
 
     /**
-     * With `--include=:wp-core:`, the remote path prefixes pulled in full: the
-     * include prefixes selected in full plus the directories under ABSPATH
-     * that a selected symlink targets.
-     *
-     * @return list<string>
-     */
-    private function wp_core_path_prefixes_selected_in_full(): array
-    {
-        return array_merge(
-            $this->pull_only_files_with_path_prefixes_selected_in_full,
-            $this->get_state()->index->wp_core_followed_target_path_prefixes
-        );
-    }
-
-    /**
      * With `--include=:wp-core:`, the core the latest earlier pull with
      * :wp-core: placed in the filesystem root, so this pull can remove the
      * parts the source no longer has. Null without :wp-core: in this pull,
@@ -12345,8 +12257,7 @@ class ImportClient
      * Whether a path absent from the current remote index belonged to the
      * core an earlier pull placed. Such a path is removed even when this
      * pull's selection no longer covers it, as with an old versioned ABSPATH
-     * after a core upgrade, or a symlink target the source dropped.
-     * Exclusions still win.
+     * after a core upgrade. Exclusions still win.
      *
      * @param array{abspath: string, path_prefixes: list<string>}|null $earlier_wp_core
      *        From earlier_wp_core_selection(), in the path's coordinates.
@@ -12427,7 +12338,7 @@ class ImportClient
             $wp_core_abspath = $this->pull_wp_core_abspath;
             $included_path_prefixes = $wp_core_abspath === null
                 ? $this->pull_only_files_with_path_prefixes
-                : $this->wp_core_path_prefixes_selected_in_full();
+                : $this->pull_only_files_with_path_prefixes_selected_in_full;
         }
         if ($excluded_path_prefixes === null) {
             $excluded_path_prefixes = $this->pull_excluded_files_with_path_prefixes;
@@ -15340,10 +15251,6 @@ class ImportClient
             $state["db_index"]["file"] ?? null,
         );
         // Source paths are arbitrary bytes, which JSON cannot hold.
-        $state["index"]["wp_core_followed_target_path_prefixes"] = array_map(
-            [$this, "encode_state_path_value"],
-            $state["index"]["wp_core_followed_target_path_prefixes"] ?? []
-        );
         if (isset($state["wp_core_in_filesystem_root"])) {
             $state["wp_core_in_filesystem_root"] = [
                 "abspath" => $this->encode_state_path_value($state["wp_core_in_filesystem_root"]["abspath"]),
@@ -15389,12 +15296,6 @@ class ImportClient
         $state["db_index"]["file"] = $this->decode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
-        if (is_array($state["index"]["wp_core_followed_target_path_prefixes"] ?? null)) {
-            $state["index"]["wp_core_followed_target_path_prefixes"] = array_map(
-                [$this, "decode_state_path_value"],
-                $state["index"]["wp_core_followed_target_path_prefixes"]
-            );
-        }
         if (
             is_array($state["wp_core_in_filesystem_root"] ?? null)
             && is_array($state["wp_core_in_filesystem_root"]["path_prefixes"] ?? null)

@@ -77,9 +77,8 @@ class PullState
     /**
      * @var array{abspath: string, path_prefixes: list<string>}|null The
      * WordPress core the latest completed files-pull with
-     * `--include=:wp-core:` placed in the filesystem root: its ABSPATH and the
-     * directories it pulled in full (wp-admin, wp-includes, and symlink
-     * targets under ABSPATH). A later pull with `:wp-core:` removes those
+     * `--include=:wp-core:` placed in the filesystem root: its ABSPATH and its
+     * wp-admin and wp-includes directories. A later pull with `:wp-core:` removes those
      * paths once the source no longer has them, such as an earlier versioned
      * ABSPATH after a core upgrade on WP Cloud.
      */
