@@ -205,6 +205,7 @@ class ImportClient
         "files-push",
         "files-index",
         "files-stats",
+        "files-list",
         "db-pull",
         "db-push",
         "db-index",
@@ -1689,6 +1690,10 @@ class ImportClient
             return;
         }
 
+        if ($command === "files-list") {
+            $this->run_files_list($options["path"] ?? ":wp-content:");
+            return;
+        }
         if ($command === "files-stats") {
             $this->run_files_stats();
             return;
@@ -5751,6 +5756,73 @@ class ImportClient
             ],
         ];
         echo json_encode($result, JSON_PRETTY_PRINT) . "\n";
+    }
+
+    /**
+     * Lists one remote directory from the saved index without network calls.
+     */
+    private function run_files_list(string $path): void
+    {
+        $index_file = is_file($this->next_remote_index_file)
+            ? $this->next_remote_index_file
+            : $this->remote_index_file;
+        if (!is_file($index_file)) {
+            throw new RuntimeException("No remote index exists; run files-index first.");
+        }
+
+        $remote_path_format = $this->get_state()->remote_path_format();
+        $directory = $this->resolve_token_path($path, $this->remote_path_tokens(), $remote_path_format);
+        $inside_root = false;
+        foreach ($this->get_export_directories() as $root) {
+            if (Utils::path_is_same_as_or_descendant_of($directory, $root)) {
+                $inside_root = true;
+                break;
+            }
+        }
+        if (!$inside_root) {
+            throw new RuntimeException("Path \"{$path}\" resolves outside the indexed roots: {$directory}");
+        }
+
+        // As in files-stats, later entries replace earlier entries for a path.
+        // Keep only paths in the requested directory, not the complete index.
+        $entries_by_path = [];
+        $directory_type = null;
+        $reader = new RemoteIndexReader($index_file, $remote_path_format);
+        $reader->open();
+        try {
+            while (($entry = $reader->next_entry()) !== null) {
+                if ($entry["path"] === $directory) {
+                    $directory_type = $entry["type"];
+                } elseif (Utils::path_is_descendant_of($entry["path"], $directory)) {
+                    $entries_by_path[$entry["path"]] = $entry;
+                }
+            }
+        } finally {
+            $reader->close();
+        }
+        if (($directory_type !== null && $directory_type !== "dir")
+            || ($directory_type === null && $entries_by_path === [])) {
+            throw new RuntimeException("Path \"{$path}\" does not name a directory in the remote index: {$directory}");
+        }
+
+        $children = [];
+        $prefix = rtrim(Utils::normalize_path_separators($directory, $remote_path_format), "/") . "/";
+        foreach ($entries_by_path as $entry) {
+            $relative_path = substr(Utils::normalize_path_separators($entry["path"], $remote_path_format), strlen($prefix));
+            $name = explode("/", $relative_path, 2)[0];
+            $is_direct_child = $relative_path === $name;
+            if (!isset($children[$name])) {
+                $children[$name] = ["name" => $name, "type" => "dir", "size" => 0, "files" => 0];
+            }
+            if ($is_direct_child && $entry["type"] !== "dir") {
+                $children[$name] = ["name" => $name, "type" => $entry["type"], "size" => $entry["size"]];
+            } elseif ($entry["type"] === "file" && $children[$name]["type"] === "dir") {
+                $children[$name]["size"] += $entry["size"];
+                $children[$name]["files"]++;
+            }
+        }
+        ksort($children, SORT_STRING);
+        echo json_encode(["path" => $path, "entries" => array_values($children)], JSON_PRETTY_PRINT | JSON_THROW_ON_ERROR) . "\n";
     }
 
     /**
@@ -16020,8 +16092,9 @@ function reprint_write_command_report(
     ?Throwable $exception = null,
     array $details = []
 ): void {
-    $stream = !in_array($command, ['files-push', 'files-diff'], true)
-        && ( $options['sql_output'] ?? ( $client === null ? null : $client->get_state()->sql_output ) ) === 'stdout'
+    // files-list reserves stdout for its single JSON document.
+    $stream = $command === 'files-list' || (!in_array($command, ['files-push', 'files-diff'], true)
+        && ( $options['sql_output'] ?? ( $client === null ? null : $client->get_state()->sql_output ) ) === 'stdout')
         ? STDERR : STDOUT;
     $progress_output_mode = $options['progress'] ?? 'auto';
     if ($progress_output_mode === 'tty'
@@ -16562,6 +16635,14 @@ if (
             'help' => 'Place SOURCE (a :token: like :wp-uploads: or an absolute path) at TARGET ' .
                 '(a :fs-root: path or an absolute path within --fs-root); repeatable',
             'commands' => ['pull-files', 'files-pull'],
+        ],
+        [
+            'name' => 'path',
+            'type' => 'value-or-next',
+            'target' => 'path',
+            'placeholder' => 'PATH',
+            'help' => 'Remote directory token or absolute source path; defaults to :wp-content:',
+            'commands' => ['files-list'],
         ],
         [
             'name' => 'include',
@@ -17417,6 +17498,16 @@ if (
                 "Does not download any file contents.\n",
             "extra" => null,
         ],
+        "files-list" => [
+            "level" => "low",
+            "short" => "List direct children of one indexed remote directory",
+            "usage" => "reprint files-list <remote-reprint-api-url> --state-dir=DIR [--path=PATH]",
+            "description" =>
+                "Reads the next remote index, or the retained index after a completed pull, without network calls.\n" .
+                "Outputs JSON children sorted by name, with recursive file counts and sizes for directories.\n" .
+                "Requires a prior files-index or files-pull run.\n",
+            "extra" => null,
+        ],
         "files-stats" => [
             "level" => "low",
             "short" => "Show file counts and sizes from the next remote index",
@@ -17857,7 +17948,7 @@ if (
         fwrite(STDERR, "Use --fs-root for the raw download directory, or --flat-document-root for a flattened layout.\n");
         exit(1);
     }
-    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "keygen", "db-push"], true)) {
+    if (!$filesystem_root && !$flat_document_root && !in_array($command, ["pull-metadata", "keygen", "db-push", "files-list"], true)) {
         fwrite(STDERR, "Error: --fs-root=DIR is required\n");
         fwrite(STDERR, "Usage: reprint {$command} <remote-reprint-api-url> --state-dir=DIR --fs-root=DIR [options]\n");
         exit(1);
