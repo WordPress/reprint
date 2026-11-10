@@ -296,6 +296,44 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         }
     }
 
+    public function testAnInterruptedCopyLeavesThePreviousCoreVersion(): void
+    {
+        if (function_exists('posix_getuid') && posix_getuid() === 0) {
+            $this->markTestSkipped('Directory permissions do not stop root from writing.');
+        }
+
+        // On a standard layout wp-includes comes before wp-load.php,
+        // wp-settings.php and xmlrpc.php in the copy.
+        $abspath = $this->fsRoot . '/var/www/html';
+        $this->createCoreTree($abspath, '7.1.3');
+        $this->writePreflight(['abspath' => '/var/www/html']);
+        $this->flatten(['core_files' => 'copy']);
+
+        file_put_contents($abspath . '/wp-includes/version.php', '<?php // version 7.2');
+        file_put_contents($abspath . '/wp-includes/added.php', '<?php // added');
+        unlink($this->flattenTo . '/wp-settings.php');
+        mkdir($this->flattenTo . '/wp-settings.php/locked', 0755, true);
+        file_put_contents($this->flattenTo . '/wp-settings.php/locked/file', 'x');
+        chmod($this->flattenTo . '/wp-settings.php/locked', 0555);
+
+        try {
+            $this->flatten(['core_files' => 'copy']);
+            $this->fail('An entry which cannot be replaced should stop the run');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('wp-settings.php', $exception->getMessage());
+        } finally {
+            chmod($this->flattenTo . '/wp-settings.php/locked', 0755);
+        }
+
+        $this->assertFileExists($this->flattenTo . '/wp-includes/added.php');
+        $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+
+        $this->flatten(['core_files' => 'copy']);
+
+        $this->assertSame('<?php // version 7.2', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+        $this->assertSame('<?php // wp-settings', file_get_contents($this->flattenTo . '/wp-settings.php'));
+    }
+
     public function testCopyHandlesCaseOnlyRenameInCore(): void
     {
         $this->createWpCloudLayout();

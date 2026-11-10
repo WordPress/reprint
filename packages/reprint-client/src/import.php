@@ -6685,6 +6685,8 @@ class ImportClient
         $refreshed = 0;
         $forced = 0;
         $copied = 0;
+        // Copy mode places wp-includes/version.php after all other core.
+        $deferred_core_files = [];
 
         // Determine what to skip from ABSPATH enumeration.
         // Components with known detached locations are handled separately.
@@ -6732,7 +6734,7 @@ class ImportClient
             // A core entry that is itself a symlink on the source stays a
             // link, as in link mode.
             if ($copy_core_files && self::flatten_is_core_entry($entry) && !is_link($source)) {
-                $this->flatten_place_copy($source, $target, $copied);
+                $this->flatten_place_copy($source, $target, $copied, $deferred_core_files);
                 continue;
             }
             $this->flatten_place_symlink(
@@ -6757,7 +6759,7 @@ class ImportClient
         foreach ($detached_core_directories as $entry => $source) {
             $target = wp_join_unix_paths($flatten_to, $entry);
             if ($copy_core_files) {
-                $this->flatten_place_copy($source, $target, $copied);
+                $this->flatten_place_copy($source, $target, $copied, $deferred_core_files);
                 continue;
             }
             $this->flatten_place_symlink(
@@ -6768,6 +6770,10 @@ class ImportClient
                 $refreshed,
                 $forced,
             );
+        }
+
+        foreach ($deferred_core_files as $source => $target) {
+            $this->flatten_copy_core_tree($source, $target);
         }
 
         // Phase 1c: Symlink wp-config.php from ABSPATH's parent directory.
@@ -7139,10 +7145,23 @@ class ImportClient
      * Like the WordPress core updater, this overwrites in place, so an
      * interrupted run can leave core versions mixed. The next run repairs
      * that, because every run compares all of core with the pulled tree.
+     *
+     * wp-includes/version.php is left out and added to $deferred_files, for
+     * the caller to copy once the rest of core is in place. Until then the
+     * target reports its previous version, so a caller that compares
+     * versions to decide whether core needs copying never mistakes a
+     * partial copy for a complete one.
+     *
+     * @param array<string, string> $deferred_files Target paths keyed by source path.
      */
-    private function flatten_place_copy(string $source, string $target, int &$copied): void
+    private function flatten_place_copy(string $source, string $target, int &$copied, array &$deferred_files): void
     {
-        $this->flatten_copy_core_tree($source, $target);
+        $version_file = null;
+        if (basename($target) === "wp-includes") {
+            $version_file = wp_join_unix_paths($target, "version.php");
+            $deferred_files[wp_join_unix_paths($source, "version.php")] = $version_file;
+        }
+        $this->flatten_copy_core_tree($source, $target, $version_file);
         $this->audit_log("FLAT-DOCUMENT-ROOT | Copied core entry: {$target}");
         ++$copied;
     }
@@ -7175,9 +7194,17 @@ class ImportClient
      *
      * WordPress core contains no symlinks. Following one could copy files
      * from outside core or loop on a cycle, so a symlink stops the copy.
+     *
+     * $skipped_destination, if set, is neither copied nor removed.
      */
-    private function flatten_copy_core_tree(string $source, string $destination): void
-    {
+    private function flatten_copy_core_tree(
+        string $source,
+        string $destination,
+        ?string $skipped_destination = null
+    ): void {
+        if ($destination === $skipped_destination) {
+            return;
+        }
         if (is_link($source)) {
             throw new RuntimeException(
                 "Cannot copy core: found a symlink inside WordPress core at {$source}",
@@ -7229,6 +7256,7 @@ class ImportClient
             $this->flatten_copy_core_tree(
                 wp_join_unix_paths($source, $entry),
                 wp_join_unix_paths($destination, $entry),
+                $skipped_destination,
             );
         }
     }
