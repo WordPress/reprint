@@ -6504,7 +6504,7 @@ class ImportClient
      * Creates a directory at the specified --flatten-to path that mirrors
      * a vanilla WordPress installation layout by symlinking entries from
      * the filesystem root, or copying WordPress core with --core-files=copy.
-     * --core-files=keep leaves the core already at --flatten-to in place.
+     * --core-files=use-existing uses the core already at --flatten-to.
      * Uses preflight data (paths_urls) to determine
      * where each WordPress component actually lives, rather than blindly
      * scanning filesystem root top-level entries.
@@ -6531,13 +6531,13 @@ class ImportClient
         $flatten_to = Utils::trim_right_slash($flatten_to, Utils::native_path_format());
         $force = $options["force"] ?? false;
         $core_files = $options["core_files"] ?? "link";
-        if (!in_array($core_files, ["link", "copy", "keep"], true)) {
+        if (!in_array($core_files, ["link", "copy", "use-existing"], true)) {
             throw new InvalidArgumentException(
-                "Invalid --core-files value: {$core_files}. Expected link, copy or keep.",
+                "Invalid --core-files value: {$core_files}. Expected link, copy or use-existing.",
             );
         }
         $copy_core_files = $core_files === "copy";
-        $keep_core_files = $core_files === "keep";
+        $use_existing_core_files = $core_files === "use-existing";
 
         // Ensure the filesystem root exists
         if (!is_dir($this->filesystem_root)) {
@@ -6618,10 +6618,10 @@ class ImportClient
             && !Utils::path_is_descendant_of($uploads_basedir, $content_dir);
 
         // A pull that leaves core out may not create ABSPATH at all, as on
-        // WP Cloud where ABSPATH holds only core. Keeping core needs nothing
-        // from it, as long as wp-content lives elsewhere.
+        // WP Cloud where ABSPATH holds only core. Using the existing core needs
+        // nothing from it, as long as wp-content lives elsewhere.
         $abspath_was_pulled = is_dir($local_abspath);
-        $abspath_is_optional = $keep_core_files && $content_detached;
+        $abspath_is_optional = $use_existing_core_files && $content_detached;
         if (!$abspath_was_pulled && !$abspath_is_optional) {
             throw new RuntimeException(
                 "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
@@ -6635,7 +6635,7 @@ class ImportClient
         $need_exploded_content =
             $plugins_detached || $mu_plugins_detached || $uploads_detached;
 
-        if ($keep_core_files) {
+        if ($use_existing_core_files) {
             self::assert_flatten_target_has_own_core($flatten_to);
         }
 
@@ -6703,7 +6703,7 @@ class ImportClient
 
         // Phase 1: Symlink all entries from ABSPATH into flatten-to, or copy
         // the core entries among them with --core-files=copy, or leave the
-        // target's core entries alone with --core-files=keep.
+        // target's core entries alone with --core-files=use-existing.
         // This covers core files (index.php, wp-load.php, wp-config.php, etc.)
         // and wp-admin/wp-includes when they're directly under ABSPATH.
         $entries = $abspath_was_pulled ? @scandir($local_abspath) : [];
@@ -6725,8 +6725,8 @@ class ImportClient
                 continue;
             }
 
-            if ($keep_core_files && self::flatten_is_core_entry($entry)) {
-                $this->audit_log("FLAT-DOCUMENT-ROOT | Kept core entry: " . wp_join_unix_paths($flatten_to, $entry));
+            if ($use_existing_core_files && self::flatten_is_core_entry($entry)) {
+                $this->audit_log("FLAT-DOCUMENT-ROOT | Using existing core entry: " . wp_join_unix_paths($flatten_to, $entry));
                 continue;
             }
             $source = wp_join_unix_paths($local_abspath, $entry);
@@ -6750,10 +6750,10 @@ class ImportClient
         // Phase 1b: Symlink or copy detached wp-admin and wp-includes from their
         // resolved physical locations (e.g. /wordpress/wp-admin on WP Cloud).
         $detached_core_directories = [];
-        if (!$keep_core_files && $wp_admin_detached && $local_wp_admin !== null && is_dir($local_wp_admin)) {
+        if (!$use_existing_core_files && $wp_admin_detached && $local_wp_admin !== null && is_dir($local_wp_admin)) {
             $detached_core_directories["wp-admin"] = $local_wp_admin;
         }
-        if (!$keep_core_files && $wp_includes_detached && $local_wp_includes !== null && is_dir($local_wp_includes)) {
+        if (!$use_existing_core_files && $wp_includes_detached && $local_wp_includes !== null && is_dir($local_wp_includes)) {
             $detached_core_directories["wp-includes"] = $local_wp_includes;
         }
         foreach ($detached_core_directories as $entry => $source) {
@@ -7088,11 +7088,11 @@ class ImportClient
     }
 
     /**
-     * Stop --core-files=keep unless --flatten-to has WordPress core of its own.
+     * Stop --core-files=use-existing unless --flatten-to has WordPress core of its own.
      *
      * Without core the layout cannot run WordPress. Core linked into
      * --fs-root by an earlier --core-files=link run is the pulled core, not
-     * the site's: keeping it would send local edits into --fs-root and leave
+     * the site's: using it would send local edits into --fs-root and leave
      * dangling links once a pull leaves core out.
      */
     public static function assert_flatten_target_has_own_core(string $flatten_to): void
@@ -7102,14 +7102,14 @@ class ImportClient
             $link_target = readlink($wp_includes);
             throw new RuntimeException(
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error with local paths, never HTML.
-                "--core-files=keep needs the site's own WordPress core at --flatten-to, but {$wp_includes} is a symlink to {$link_target}. Run flat-docroot once with --core-files=copy to replace it.",
+                "--core-files=use-existing needs the site's own WordPress core at --flatten-to, but {$wp_includes} is a symlink to {$link_target}. Run flat-docroot once with --core-files=copy to replace it.",
             );
         }
         $version_file = wp_join_unix_paths($wp_includes, "version.php");
         if (!is_file($version_file)) {
             throw new RuntimeException(
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error with a local path, never HTML.
-                "--core-files=keep needs WordPress core at --flatten-to, but {$version_file} does not exist.",
+                "--core-files=use-existing needs WordPress core at --flatten-to, but {$version_file} does not exist.",
             );
         }
     }
@@ -16229,8 +16229,8 @@ if (
             'type' => 'value',
             'target' => 'core_files',
             'placeholder' => 'MODE',
-            'help' => 'How to place WordPress core in the flattened layout (link|copy|keep, default link)',
-            'valid_values' => ['link', 'copy', 'keep'],
+            'help' => 'How to place WordPress core in the flattened layout (link|copy|use-existing, default link)',
+            'valid_values' => ['link', 'copy', 'use-existing'],
             'commands' => ['pull', 'flat-docroot'],
         ],
 
@@ -17167,10 +17167,10 @@ if (
                 "wp-content, wp-config.php and similar config files, other site\n" .
                 "files, and entries that are symlinks on the source stay linked.\n" .
                 "\n" .
-                "--core-files=keep leaves the WordPress core already at\n" .
-                "--flatten-to in place and links everything else. It works\n" .
-                "without core in --fs-root, so a pull can leave core out. The\n" .
-                "caller decides whether the kept core matches the source.\n",
+                "--core-files=use-existing uses the WordPress core already at\n" .
+                "--flatten-to and links everything else. It works without\n" .
+                "core in --fs-root, so a pull can leave core out. The caller\n" .
+                "decides whether the existing core matches the source.\n",
             "extra" => null,
         ],
         "merge-wp-content" => [

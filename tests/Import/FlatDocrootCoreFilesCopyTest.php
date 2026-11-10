@@ -9,7 +9,7 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 /**
  * Verify run_flat_document_root() with --core-files=copy places real copies
  * of WordPress core entries in the flattened site and keeps every other
- * entry linked into the filesystem root, and that --core-files=keep leaves
+ * entry linked into the filesystem root, and that --core-files=use-existing leaves
  * the flattened site's own core in place.
  */
 class FlatDocrootCoreFilesCopyTest extends TestCase
@@ -441,12 +441,12 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createWpCloudLayout();
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('Invalid --core-files value: hardlink. Expected link, copy or keep.');
+        $this->expectExceptionMessage('Invalid --core-files value: hardlink. Expected link, copy or use-existing.');
 
         $this->flatten(['core_files' => 'hardlink']);
     }
 
-    public function testKeepLeavesTheSitesCoreAndLinksSiteFiles(): void
+    public function testUseExistingLeavesTheSitesCoreAndLinksSiteFiles(): void
     {
         $abspath = $this->fsRoot . '/var/www/html';
         $this->createCoreTree($abspath, '7.1.3');
@@ -456,7 +456,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createCoreTree($this->flattenTo, '7.1.4');
         file_put_contents($this->flattenTo . '/index.php', '<?php // edited index');
 
-        $this->flatten(['core_files' => 'keep']);
+        $this->flatten(['core_files' => 'use-existing']);
 
         // Core from an earlier pull in --fs-root must not replace the site's.
         $this->assertFalse(is_link($this->flattenTo . '/wp-includes'));
@@ -469,7 +469,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         }
     }
 
-    public function testKeepWorksWithoutAbspathInTheFsRoot(): void
+    public function testUseExistingWorksWithoutAbspathInTheFsRoot(): void
     {
         mkdir($this->fsRoot . '/srv/htdocs/wp-content/themes', 0755, true);
         file_put_contents($this->fsRoot . '/srv/htdocs/wp-content/themes/theme.txt', 'theme');
@@ -481,7 +481,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         ]);
         $this->createCoreTree($this->flattenTo, '7.1.3');
 
-        $this->flatten(['core_files' => 'keep']);
+        $this->flatten(['core_files' => 'use-existing']);
 
         $this->assertTrue(is_link($this->flattenTo . '/wp-content'));
         $this->assertSame('theme', file_get_contents($this->flattenTo . '/wp-content/themes/theme.txt'));
@@ -489,7 +489,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
     }
 
-    public function testKeepLeavesTheSitesWpAdminAndWpIncludesWhenDetached(): void
+    public function testUseExistingLeavesTheSitesWpAdminAndWpIncludesWhenDetached(): void
     {
         $this->createCoreTree($this->fsRoot . '/wordpress/core/7.1.3', '7.1.3');
         mkdir($this->fsRoot . '/srv/htdocs/wp-content', 0755, true);
@@ -500,7 +500,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         ]);
         $this->createCoreTree($this->flattenTo, '7.1.4');
 
-        $this->flatten(['core_files' => 'keep']);
+        $this->flatten(['core_files' => 'use-existing']);
 
         foreach (['wp-admin', 'wp-includes'] as $directory) {
             $this->assertFalse(is_link($this->flattenTo . '/' . $directory), "{$directory} should stay the site's own");
@@ -508,7 +508,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertSame('<?php // version 7.1.4', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
     }
 
-    public function testKeepNeedsCoreAtTheTarget(): void
+    public function testUseExistingNeedsCoreAtTheTarget(): void
     {
         $this->createWpCloudLayout();
         mkdir($this->flattenTo, 0755, true);
@@ -516,10 +516,10 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage($this->flattenTo . '/wp-includes/version.php does not exist');
 
-        $this->flatten(['core_files' => 'keep']);
+        $this->flatten(['core_files' => 'use-existing']);
     }
 
-    public function testKeepRejectsCoreLinkedByAnEarlierLinkModeRun(): void
+    public function testUseExistingRejectsCoreLinkedByAnEarlierLinkModeRun(): void
     {
         $this->createWpCloudLayout();
         $this->flatten(['core_files' => 'link']);
@@ -527,10 +527,10 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage($this->flattenTo . '/wp-includes is a symlink to ');
 
-        $this->flatten(['core_files' => 'keep']);
+        $this->flatten(['core_files' => 'use-existing']);
     }
 
-    public function testKeepWithForceLeavesTheSitesCore(): void
+    public function testUseExistingWithForceLeavesTheSitesCore(): void
     {
         $abspath = $this->fsRoot . '/var/www/html';
         $this->createCoreTree($abspath, '7.1.3');
@@ -539,7 +539,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createCoreTree($this->flattenTo, '7.1.4');
         mkdir($this->flattenTo . '/wp-content', 0755, true);
 
-        $this->flatten(['core_files' => 'keep', 'force' => true]);
+        $this->flatten(['core_files' => 'use-existing', 'force' => true]);
 
         $this->assertFalse(is_link($this->flattenTo . '/wp-includes'));
         $this->assertSame('<?php // version 7.1.4', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
@@ -547,7 +547,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertTrue(is_link($this->flattenTo . '/wp-content'), '--force replaces the real wp-content with a link');
     }
 
-    public function testKeepNeedsAbspathWhenWpContentLivesUnderIt(): void
+    public function testUseExistingNeedsAbspathWhenWpContentLivesUnderIt(): void
     {
         $this->writePreflight(['abspath' => '/var/www/html']);
         $this->createCoreTree($this->flattenTo, '7.1.3');
@@ -555,7 +555,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('WordPress ABSPATH directory not found');
 
-        $this->flatten(['core_files' => 'keep']);
+        $this->flatten(['core_files' => 'use-existing']);
     }
 
     /**

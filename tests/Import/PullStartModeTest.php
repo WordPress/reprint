@@ -128,7 +128,7 @@ class PullStartModeTest extends TestCase
         ]);
     }
 
-    public function testKeepingCoreWithoutCoreAtTheTargetIsRejectedWithTheOtherPullOptions(): void
+    public function testUsingExistingCoreWithoutCoreAtTheTargetIsRejectedWithTheOtherPullOptions(): void
     {
         $flattenTo = $this->tempDir . '/flat';
         mkdir($flattenTo, 0755, true);
@@ -142,7 +142,7 @@ class PullStartModeTest extends TestCase
         $method->invoke($pull, [
             'runtime' => 'none',
             'flatten_to' => $flattenTo,
-            'core_files' => 'keep',
+            'core_files' => 'use-existing',
         ]);
     }
 
