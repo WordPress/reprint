@@ -51460,6 +51460,223 @@
           "ok": true
         }
       ]
+    },
+    {
+      "sha": "115901add04c965dc1873b82830bd41d86dfc87a",
+      "shortSha": "115901a",
+      "date": "2026-11-10T14:40:37+01:00",
+      "message": "[PHP] Add `flat-docroot --core-files=use-existing` to use the site's own WordPress core (#982)",
+      "author": "Fredrik Rombach Ekelund",
+      "meta": {
+        "site": "large-directory",
+        "fileCount": "2,000+ plus targeted file-transfer scenarios",
+        "seedPosts": 320007,
+        "seedPostmeta": 720015,
+        "phpVersion": "8.5.12",
+        "importer": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "preflightImporter": "/home/runner/work/reprint/reprint/phars/trunk/reprint.phar",
+        "label": "trunk"
+      },
+      "results": [
+        {
+          "stage": "preflight",
+          "elapsedMs": 160.62903899999947,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull",
+          "elapsedMs": 11453.113629,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-pull",
+          "elapsedMs": 41617.18518099999,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "db-apply",
+          "elapsedMs": 54120.872879999995,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "apply-runtime",
+          "elapsedMs": 104.13682899999549,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-pull",
+          "elapsedMs": 61050.750436,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "playground-sqlite-db-apply",
+          "elapsedMs": 567249.235197,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-untuned-random",
+          "elapsedMs": 142.24725100002252,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "file-fetch-binary-compression",
+          "elapsedMs": 136.83961600007024,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "files-pull-large-part-peak-memory",
+          "elapsedMs": 4392.905095000053,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-html",
+          "elapsedMs": 127.593394,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-style-elements",
+          "elapsedMs": 39.219235,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-style-large-value",
+          "elapsedMs": 352.343959,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-literal-urls",
+          "elapsedMs": 47.611461,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-nested-html",
+          "elapsedMs": 49.207703,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-repeated-urls",
+          "elapsedMs": 49.091671,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-escaped-quotes",
+          "elapsedMs": 176.796583,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-encoded-shortcodes",
+          "elapsedMs": 337.977069,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-blocks-no-source-urls",
+          "elapsedMs": 1.554789,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-serialized-options",
+          "elapsedMs": 33.597766,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-html",
+          "elapsedMs": 80.615185,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-style-elements",
+          "elapsedMs": 108.377543,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-style-large-value",
+          "elapsedMs": 383.258439,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-literal-urls",
+          "elapsedMs": 55.530253,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-nested-html",
+          "elapsedMs": 118.900871,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-repeated-urls",
+          "elapsedMs": 94.918058,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-escaped-quotes",
+          "elapsedMs": 119.258673,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-encoded-shortcodes",
+          "elapsedMs": 268.506781,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-blocks-no-source-urls",
+          "elapsedMs": 1.645705,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-serialized-options",
+          "elapsedMs": 33.965661,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-style-elements",
+          "elapsedMs": 109.891649,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-blocks-nested-html",
+          "elapsedMs": 120.913771,
+          "attempts": 1,
+          "ok": true
+        },
+        {
+          "stage": "url-rewrite-selected-site-child-paths-blocks-repeated-urls",
+          "elapsedMs": 95.874729,
+          "attempts": 1,
+          "ok": true
+        }
+      ]
     }
   ]
 }
