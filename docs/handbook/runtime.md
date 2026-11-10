@@ -11,7 +11,9 @@ php reprint.phar flat-docroot "$URL" --state-dir="$STATE_DIR" \
 
 By default this creates symlinks to the downloaded tree; it does not copy the files. Keep the download directory while using that layout.
 
-With `--core-files=copy`, WordPress core is copied instead of linked. Every run brings the copy back in line with the downloaded core, so local edits to core are discarded and never reach `--fs-root`. Core is the fixed set of files WordPress ships. `wp-content`, `wp-config.php` and similar config files, and other site files stay linked, including a `wp-*.php` file such as a `wp-salt.php` that `wp-config.php` requires. `--flatten-to` must be outside `--fs-root`, and a symlink inside core stops the run. To go back to links, run `flat-docroot` with `--force`.
+With `--core-files=copy`, WordPress core is copied instead of linked. Every run brings the copy back in line with the downloaded core, so local edits to core are discarded and never reach `--fs-root`. Core is the fixed set of files WordPress ships. `wp-includes/version.php` is copied last, so a copy that stops partway still reports the previous WordPress version, and a caller comparing versions copies again. `wp-content`, `wp-config.php` and similar config files, and other site files stay linked, including a `wp-*.php` file such as a `wp-salt.php` that `wp-config.php` requires. `--flatten-to` must be outside `--fs-root`, and a symlink inside core stops the run. To go back to links, run `flat-docroot` with `--force`.
+
+With `--core-files=use-existing`, the WordPress core already at `--flatten-to` stays as it is, and everything else is linked as usual. The download tree does not need core, so a pull can leave it out, for example with `--include=:wp-content:` when the target already runs the source's WordPress version. Reprint does not check that core: the caller decides when using it is correct. A real `wp-content` directory or other site file at `--flatten-to` stops the run as in the other modes, and `--force` replaces it with a link, deleting what it contained.
 
 The downloaded files need server-specific configuration to actually work — PHP constants, INI directives, and request handlers that the source host relied on. `apply-runtime` reads the preflight data, detects the source hosting provider, and generates the configuration files your target server needs.
 
@@ -66,7 +68,7 @@ Playground previews serve downloaded files only. They do not proxy missing uploa
 
 The high-level `pull` command runs these stages itself. Four options control them:
 
-- `--flatten-to=PATH` assembles the standard layout at PATH, the same as running `flat-docroot`. Keep the download tree; the layout links to it. Add `--core-files=copy` to copy WordPress core instead of linking it.
+- `--flatten-to=PATH` assembles the standard layout at PATH, the same as running `flat-docroot`. Keep the download tree; the layout links to it. Add `--core-files=copy` to copy WordPress core instead of linking it, or `--core-files=use-existing` to use the core already at PATH.
 - `--runtime=RUNTIME` selects which server configuration `pull` generates after the database import: `php-builtin` by default, `nginx-fpm`, `playground-cli`, or `none` to generate nothing.
 - `--start-runtime=RUNTIME` selects which runtime `pull` launches when it finishes. Without it, `pull` starts a generated `php-builtin` or `playground-cli` runtime and leaves `nginx-fpm` for you to load. Pass `none` to prepare the copy without starting a server, for example on a destination with its own web server or inside a product's background job. Naming a runtime here also generates its configuration.
 - `--output-dir=DIR` chooses where the generated files go. The tutorials use the default, the `runtime` directory inside the state directory, which is why they start a finished copy with `bash state/runtime/start.sh`.

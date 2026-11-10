@@ -5804,6 +5804,8 @@ class ImportClient
      *                                                    content directory.
      *         @type string|null $wordpressAbsolutePath   Remote WordPress
      *                                                    ABSPATH.
+     *         @type string|null $wordpressVersion        WordPress version
+     *                                                    the source runs.
      *         @type string[]    $wordpressRoots          WordPress roots
      *                                                    detected remotely.
      *         @type string[]    $extraDirectories        Remote directories
@@ -5824,6 +5826,7 @@ class ImportClient
      *         serverDatabaseCharset: string|null,
      *         contentDirectory: string|null,
      *         wordpressAbsolutePath: string|null,
+     *         wordpressVersion: string|null,
      *         wordpressRoots: string[],
      *         extraDirectories: string[]
      *     }
@@ -5867,6 +5870,7 @@ class ImportClient
                 "serverDatabaseCharset" => $database["server_charset"] ?? null,
                 "contentDirectory" => $paths_urls["content_dir"] ?? null,
                 "wordpressAbsolutePath" => $paths_urls["abspath"] ?? null,
+                "wordpressVersion" => is_string($wordpress["wp_version"] ?? null) ? $wordpress["wp_version"] : null,
                 "wordpressRoots" => array_column(
                     $preflight_data["wp_detect"]["roots"] ?? [],
                     "path"
@@ -6699,6 +6703,7 @@ class ImportClient
      * Creates a directory at the specified --flatten-to path that mirrors
      * a vanilla WordPress installation layout by symlinking entries from
      * the filesystem root, or copying WordPress core with --core-files=copy.
+     * --core-files=use-existing uses the core already at --flatten-to.
      * Uses preflight data (paths_urls) to determine
      * where each WordPress component actually lives, rather than blindly
      * scanning filesystem root top-level entries.
@@ -6725,12 +6730,13 @@ class ImportClient
         $flatten_to = Utils::trim_right_slash($flatten_to, Utils::native_path_format());
         $force = $options["force"] ?? false;
         $core_files = $options["core_files"] ?? "link";
-        if (!in_array($core_files, ["link", "copy"], true)) {
+        if (!in_array($core_files, ["link", "copy", "use-existing"], true)) {
             throw new InvalidArgumentException(
-                "Invalid --core-files value: {$core_files}. Expected link or copy.",
+                "Invalid --core-files value: {$core_files}. Expected link, copy or use-existing.",
             );
         }
         $copy_core_files = $core_files === "copy";
+        $use_existing_core_files = $core_files === "use-existing";
 
         // Ensure the filesystem root exists
         if (!is_dir($this->filesystem_root)) {
@@ -6769,12 +6775,6 @@ class ImportClient
 
         // Map remote absolute paths to local absolute paths within filesystem root
         $local_abspath = $this->path_mapper()->remote_path_to_local_path($abspath);
-        if (!is_dir($local_abspath)) {
-            throw new RuntimeException(
-                "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
-                    "(remote ABSPATH: {$abspath}). Has the file sync completed?",
-            );
-        }
 
         $local_wp_admin = $wp_admin_path !== null
             ? $this->path_mapper()->remote_path_to_local_path($wp_admin_path)
@@ -6815,6 +6815,18 @@ class ImportClient
         $uploads_detached = $uploads_basedir !== null
             && $content_dir !== null
             && !Utils::path_is_descendant_of($uploads_basedir, $content_dir);
+
+        // A pull that leaves core out may not create ABSPATH at all, as on
+        // WP Cloud where ABSPATH holds only core. Using the existing core needs
+        // nothing from it, as long as wp-content lives elsewhere.
+        $abspath_was_pulled = is_dir($local_abspath);
+        $abspath_is_optional = $use_existing_core_files && $content_detached;
+        if (!$abspath_was_pulled && !$abspath_is_optional) {
+            throw new RuntimeException(
+                "WordPress ABSPATH directory not found in filesystem root: {$local_abspath} " .
+                    "(remote ABSPATH: {$abspath}). Has the file sync completed?",
+            );
+        }
 
         // If any sub-component is detached from content_dir, we need to
         // "explode" wp-content into a real directory with individual symlinks
@@ -6868,6 +6880,8 @@ class ImportClient
         $refreshed = 0;
         $forced = 0;
         $copied = 0;
+        // Copy mode places wp-includes/version.php after all other core.
+        $deferred_core_files = [];
 
         // Determine what to skip from ABSPATH enumeration.
         // Components with known detached locations are handled separately.
@@ -6883,10 +6897,11 @@ class ImportClient
         }
 
         // Phase 1: Symlink all entries from ABSPATH into flatten-to, or copy
-        // the core entries among them with --core-files=copy.
+        // the core entries among them with --core-files=copy, or leave the
+        // target's core entries alone with --core-files=use-existing.
         // This covers core files (index.php, wp-load.php, wp-config.php, etc.)
         // and wp-admin/wp-includes when they're directly under ABSPATH.
-        $entries = @scandir($local_abspath);
+        $entries = $abspath_was_pulled ? @scandir($local_abspath) : [];
         if ($entries === false) {
             throw new RuntimeException(
                 "Failed to scan ABSPATH directory: {$local_abspath}",
@@ -6905,12 +6920,16 @@ class ImportClient
                 continue;
             }
 
+            if ($use_existing_core_files && self::is_wp_core_entry($entry)) {
+                $this->audit_log("FLAT-DOCUMENT-ROOT | Using existing core entry: " . wp_join_unix_paths($flatten_to, $entry));
+                continue;
+            }
             $source = wp_join_unix_paths($local_abspath, $entry);
             $target = wp_join_unix_paths($flatten_to, $entry);
             // A core entry that is itself a symlink on the source stays a
             // link, as in link mode.
             if ($copy_core_files && self::is_wp_core_entry($entry) && !is_link($source)) {
-                $this->flatten_place_copy($source, $target, $copied);
+                $this->flatten_place_copy($source, $target, $copied, $deferred_core_files);
                 continue;
             }
             $this->flatten_place_symlink(
@@ -6926,16 +6945,16 @@ class ImportClient
         // Phase 1b: Symlink or copy detached wp-admin and wp-includes from their
         // resolved physical locations (e.g. /wordpress/wp-admin on WP Cloud).
         $detached_core_directories = [];
-        if ($wp_admin_detached && $local_wp_admin !== null && is_dir($local_wp_admin)) {
+        if (!$use_existing_core_files && $wp_admin_detached && $local_wp_admin !== null && is_dir($local_wp_admin)) {
             $detached_core_directories["wp-admin"] = $local_wp_admin;
         }
-        if ($wp_includes_detached && $local_wp_includes !== null && is_dir($local_wp_includes)) {
+        if (!$use_existing_core_files && $wp_includes_detached && $local_wp_includes !== null && is_dir($local_wp_includes)) {
             $detached_core_directories["wp-includes"] = $local_wp_includes;
         }
         foreach ($detached_core_directories as $entry => $source) {
             $target = wp_join_unix_paths($flatten_to, $entry);
             if ($copy_core_files) {
-                $this->flatten_place_copy($source, $target, $copied);
+                $this->flatten_place_copy($source, $target, $copied, $deferred_core_files);
                 continue;
             }
             $this->flatten_place_symlink(
@@ -6946,6 +6965,10 @@ class ImportClient
                 $refreshed,
                 $forced,
             );
+        }
+
+        foreach ($deferred_core_files as $source => $target) {
+            $this->flatten_copy_core_tree($source, $target);
         }
 
         // Phase 1c: Symlink wp-config.php from ABSPATH's parent directory.
@@ -7285,10 +7308,23 @@ class ImportClient
      * Like the WordPress core updater, this overwrites in place, so an
      * interrupted run can leave core versions mixed. The next run repairs
      * that, because every run compares all of core with the pulled tree.
+     *
+     * wp-includes/version.php is left out and added to $deferred_files, for
+     * the caller to copy once the rest of core is in place. Until then the
+     * target reports its previous version, so a caller that compares
+     * versions to decide whether core needs copying never mistakes a
+     * partial copy for a complete one.
+     *
+     * @param array<string, string> $deferred_files Target paths keyed by source path.
      */
-    private function flatten_place_copy(string $source, string $target, int &$copied): void
+    private function flatten_place_copy(string $source, string $target, int &$copied, array &$deferred_files): void
     {
-        $this->flatten_copy_core_tree($source, $target);
+        $version_file = null;
+        if (basename($target) === "wp-includes") {
+            $version_file = wp_join_unix_paths($target, "version.php");
+            $deferred_files[wp_join_unix_paths($source, "version.php")] = $version_file;
+        }
+        $this->flatten_copy_core_tree($source, $target, $version_file);
         $this->audit_log("FLAT-DOCUMENT-ROOT | Copied core entry: {$target}");
         ++$copied;
     }
@@ -7321,9 +7357,17 @@ class ImportClient
      *
      * WordPress core contains no symlinks. Following one could copy files
      * from outside core or loop on a cycle, so a symlink stops the copy.
+     *
+     * $skipped_destination, if set, is neither copied nor removed.
      */
-    private function flatten_copy_core_tree(string $source, string $destination): void
-    {
+    private function flatten_copy_core_tree(
+        string $source,
+        string $destination,
+        ?string $skipped_destination = null
+    ): void {
+        if ($destination === $skipped_destination) {
+            return;
+        }
         if (is_link($source)) {
             throw new RuntimeException(
                 "Cannot copy core: found a symlink inside WordPress core at {$source}",
@@ -7375,6 +7419,7 @@ class ImportClient
             $this->flatten_copy_core_tree(
                 wp_join_unix_paths($source, $entry),
                 wp_join_unix_paths($destination, $entry),
+                $skipped_destination,
             );
         }
     }
@@ -16562,8 +16607,8 @@ if (
             'type' => 'value',
             'target' => 'core_files',
             'placeholder' => 'MODE',
-            'help' => 'How to place WordPress core in the flattened layout (link|copy, default link)',
-            'valid_values' => ['link', 'copy'],
+            'help' => 'How to place WordPress core in the flattened layout (link|copy|use-existing, default link)',
+            'valid_values' => ['link', 'copy', 'use-existing'],
             'commands' => ['pull', 'flat-docroot'],
         ],
 
@@ -17498,7 +17543,12 @@ if (
                 "Every run brings the copy back in line with the pulled core, so\n" .
                 "local edits to core are discarded and never reach --fs-root.\n" .
                 "wp-content, wp-config.php and similar config files, other site\n" .
-                "files, and entries that are symlinks on the source stay linked.\n",
+                "files, and entries that are symlinks on the source stay linked.\n" .
+                "\n" .
+                "--core-files=use-existing uses the WordPress core already at\n" .
+                "--flatten-to and links everything else. It works without\n" .
+                "core in --fs-root, so a pull can leave core out. The caller\n" .
+                "decides whether the existing core matches the source.\n",
             "extra" => null,
         ],
         "merge-wp-content" => [

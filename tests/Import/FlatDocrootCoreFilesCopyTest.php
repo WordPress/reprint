@@ -9,7 +9,8 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 /**
  * Verify run_flat_document_root() with --core-files=copy places real copies
  * of WordPress core entries in the flattened site and keeps every other
- * entry linked into the filesystem root.
+ * entry linked into the filesystem root, and that --core-files=use-existing leaves
+ * the flattened site's own core in place.
  */
 class FlatDocrootCoreFilesCopyTest extends TestCase
 {
@@ -295,6 +296,44 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         }
     }
 
+    public function testAnInterruptedCopyLeavesThePreviousCoreVersion(): void
+    {
+        if (function_exists('posix_getuid') && posix_getuid() === 0) {
+            $this->markTestSkipped('Directory permissions do not stop root from writing.');
+        }
+
+        // On a standard layout wp-includes comes before wp-load.php,
+        // wp-settings.php and xmlrpc.php in the copy.
+        $abspath = $this->fsRoot . '/var/www/html';
+        $this->createCoreTree($abspath, '7.1.3');
+        $this->writePreflight(['abspath' => '/var/www/html']);
+        $this->flatten(['core_files' => 'copy']);
+
+        file_put_contents($abspath . '/wp-includes/version.php', '<?php // version 7.2');
+        file_put_contents($abspath . '/wp-includes/added.php', '<?php // added');
+        unlink($this->flattenTo . '/wp-settings.php');
+        mkdir($this->flattenTo . '/wp-settings.php/locked', 0755, true);
+        file_put_contents($this->flattenTo . '/wp-settings.php/locked/file', 'x');
+        chmod($this->flattenTo . '/wp-settings.php/locked', 0555);
+
+        try {
+            $this->flatten(['core_files' => 'copy']);
+            $this->fail('An entry which cannot be replaced should stop the run');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('wp-settings.php', $exception->getMessage());
+        } finally {
+            chmod($this->flattenTo . '/wp-settings.php/locked', 0755);
+        }
+
+        $this->assertFileExists($this->flattenTo . '/wp-includes/added.php');
+        $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+
+        $this->flatten(['core_files' => 'copy']);
+
+        $this->assertSame('<?php // version 7.2', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+        $this->assertSame('<?php // wp-settings', file_get_contents($this->flattenTo . '/wp-settings.php'));
+    }
+
     public function testCopyHandlesCaseOnlyRenameInCore(): void
     {
         $this->createWpCloudLayout();
@@ -404,9 +443,123 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createWpCloudLayout();
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('--core-files');
+        $this->expectExceptionMessage('Invalid --core-files value: hardlink. Expected link, copy or use-existing.');
 
         $this->flatten(['core_files' => 'hardlink']);
+    }
+
+    public function testUseExistingLeavesTheSitesCoreAndLinksSiteFiles(): void
+    {
+        $abspath = $this->fsRoot . '/var/www/html';
+        $this->createCoreTree($abspath, '7.1.3');
+        mkdir($abspath . '/wp-content', 0755, true);
+        file_put_contents($abspath . '/.htaccess', '# rewrite rules');
+        file_put_contents($abspath . '/wp-salt.php', '<?php // salts');
+        $this->writePreflight(['abspath' => '/var/www/html']);
+        $this->createCoreTree($this->flattenTo, '7.1.4');
+        file_put_contents($this->flattenTo . '/index.php', '<?php // edited index');
+
+        $this->flatten(['core_files' => 'use-existing']);
+
+        // Core from an earlier pull in --fs-root must not replace the site's.
+        $this->assertFalse(is_link($this->flattenTo . '/wp-includes'));
+        $this->assertSame('<?php // version 7.1.4', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+        $this->assertFalse(is_link($this->flattenTo . '/index.php'));
+        $this->assertSame('<?php // edited index', file_get_contents($this->flattenTo . '/index.php'));
+        $this->assertSame('<?php // version 7.1.3', file_get_contents($abspath . '/wp-includes/version.php'));
+        // wp-salt.php is named like core, but the site's wp-config.php needs it.
+        foreach (['.htaccess', 'wp-content', 'wp-salt.php'] as $siteEntry) {
+            $this->assertTrue(is_link($this->flattenTo . '/' . $siteEntry), "{$siteEntry} should be a symlink");
+        }
+    }
+
+    public function testUseExistingWorksWithoutAbspathInTheFsRoot(): void
+    {
+        mkdir($this->fsRoot . '/srv/htdocs/wp-content/themes', 0755, true);
+        file_put_contents($this->fsRoot . '/srv/htdocs/wp-content/themes/theme.txt', 'theme');
+        $this->writePreflight([
+            'abspath' => '/wordpress/core/7.1.3',
+            'wp_admin_path' => '/wordpress/core/7.1.3/wp-admin',
+            'wp_includes_path' => '/wordpress/core/7.1.3/wp-includes',
+            'content_dir' => '/srv/htdocs/wp-content',
+        ]);
+        $this->createCoreTree($this->flattenTo, '7.1.3');
+
+        $this->flatten(['core_files' => 'use-existing']);
+
+        $this->assertTrue(is_link($this->flattenTo . '/wp-content'));
+        $this->assertSame('theme', file_get_contents($this->flattenTo . '/wp-content/themes/theme.txt'));
+        $this->assertFalse(is_link($this->flattenTo . '/wp-admin'));
+        $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+    }
+
+    public function testUseExistingLeavesTheSitesWpAdminAndWpIncludesWhenDetached(): void
+    {
+        $this->createCoreTree($this->fsRoot . '/wordpress/core/7.1.3', '7.1.3');
+        mkdir($this->fsRoot . '/srv/htdocs/wp-content', 0755, true);
+        $this->writePreflight([
+            'abspath' => '/srv/htdocs',
+            'wp_admin_path' => '/wordpress/core/7.1.3/wp-admin',
+            'wp_includes_path' => '/wordpress/core/7.1.3/wp-includes',
+        ]);
+        $this->createCoreTree($this->flattenTo, '7.1.4');
+
+        $this->flatten(['core_files' => 'use-existing']);
+
+        foreach (['wp-admin', 'wp-includes'] as $directory) {
+            $this->assertFalse(is_link($this->flattenTo . '/' . $directory), "{$directory} should stay the site's own");
+        }
+        $this->assertSame('<?php // version 7.1.4', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+    }
+
+    public function testUseExistingWithForceLeavesTheSitesCore(): void
+    {
+        $abspath = $this->fsRoot . '/var/www/html';
+        $this->createCoreTree($abspath, '7.1.3');
+        mkdir($abspath . '/wp-content', 0755, true);
+        $this->writePreflight(['abspath' => '/var/www/html']);
+        $this->createCoreTree($this->flattenTo, '7.1.4');
+        mkdir($this->flattenTo . '/wp-content', 0755, true);
+
+        $this->flatten(['core_files' => 'use-existing', 'force' => true]);
+
+        $this->assertFalse(is_link($this->flattenTo . '/wp-includes'));
+        $this->assertSame('<?php // version 7.1.4', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
+        $this->assertFalse(is_link($this->flattenTo . '/index.php'));
+        $this->assertTrue(is_link($this->flattenTo . '/wp-content'), '--force replaces the real wp-content with a link');
+    }
+
+    public function testUseExistingNeedsAbspathWhenWpContentLivesUnderIt(): void
+    {
+        $this->writePreflight(['abspath' => '/var/www/html']);
+        $this->createCoreTree($this->flattenTo, '7.1.3');
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('WordPress ABSPATH directory not found');
+
+        $this->flatten(['core_files' => 'use-existing']);
+    }
+
+    /**
+     * @dataProvider coreFilesModesThatPlaceCore
+     */
+    public function testModesThatPlaceCoreStillNeedAbspathInTheFsRoot(string $coreFiles): void
+    {
+        mkdir($this->fsRoot . '/srv/htdocs/wp-content', 0755, true);
+        $this->writePreflight([
+            'abspath' => '/wordpress/core/7.1.3',
+            'content_dir' => '/srv/htdocs/wp-content',
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('WordPress ABSPATH directory not found');
+
+        $this->flatten(['core_files' => $coreFiles]);
+    }
+
+    public static function coreFilesModesThatPlaceCore(): array
+    {
+        return ['link' => ['link'], 'copy' => ['copy']];
     }
 
     // ---- helpers ----
