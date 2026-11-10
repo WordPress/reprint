@@ -64,6 +64,52 @@ class PullStateTest extends TestCase
         \PullState::from_array($data);
     }
 
+    public function testWpCoreInFilesystemRootRoundTripsAndDefaultsToNone(): void
+    {
+        $data = ( new \PullState() )->to_array();
+        unset($data['wp_core_in_filesystem_root']);
+        $this->assertNull(\PullState::from_array($data)->wp_core_in_filesystem_root);
+
+        $state = new \PullState();
+        $state->wp_core_in_filesystem_root = [
+            'abspath' => '/wordpress/core/7.1.4',
+            'path_prefixes' => ['/wordpress/core/7.1.4/wp-admin', '/wordpress/core/7.1.4/wp-includes'],
+        ];
+        $this->assertSame(
+            $state->wp_core_in_filesystem_root,
+            \PullState::from_array($state->to_array())->wp_core_in_filesystem_root
+        );
+
+        $data['wp_core_in_filesystem_root'] = ['abspath' => '/wordpress/core/7.1.4'];
+        $this->expectException(\UnexpectedValueException::class);
+        \PullState::from_array($data);
+    }
+
+    public function testSavedWpCorePathsSurviveBytesJsonCannotHold(): void
+    {
+        $state_directory = sys_get_temp_dir() . '/reprint-pull-state-' . bin2hex(random_bytes(6));
+        $filesystem_root = $state_directory . '/files';
+        mkdir($filesystem_root, 0777, true);
+        $abspath = "/srv/core-\xff";
+        $followed = "/srv/core-\xff/shared/linked-\xfe";
+        try {
+            $client = new \ImportClient('https://source.example/', $state_directory, $filesystem_root);
+            write_current_pull_state($client, [
+                'index' => ['wp_core_followed_target_path_prefixes' => [$followed]],
+                'wp_core_in_filesystem_root' => ['abspath' => $abspath, 'path_prefixes' => [$followed]],
+            ]);
+
+            $reloaded = new \ImportClient('https://source.example/', $state_directory, $filesystem_root);
+            $load_state = ( new \ReflectionClass($reloaded) )->getMethod('load_state');
+            $state = $load_state->invoke($reloaded);
+
+            $this->assertSame([$followed], $state->index->wp_core_followed_target_path_prefixes);
+            $this->assertSame(['abspath' => $abspath, 'path_prefixes' => [$followed]], $state->wp_core_in_filesystem_root);
+        } finally {
+            exec('rm -rf ' . escapeshellarg($state_directory));
+        }
+    }
+
     public function testStateRoundTripsToPersistedArraySchema(): void
     {
         $state = new \PullState();

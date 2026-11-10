@@ -15,8 +15,8 @@ require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
  * it, so a source without an optional core file needs no special handling and
  * site files next to core stay untouched locally.
  */
-final class WpCoreFilesPullTest extends TestCase
-{
+final class WpCoreFilesPullTest extends TestCase {
+
     private string $root;
     private string $source;
     private string $stateDirectory;
@@ -57,6 +57,7 @@ final class WpCoreFilesPullTest extends TestCase
             'wp-config.php' => 'site config',
             '.htaccess' => 'rules',
             'robots.txt' => 'robots',
+            'wp-salt.php' => 'required by wp-config.php',
             'custom/data.txt' => 'custom',
             'wp-content/plugins/a/a.php' => 'plugin',
         ));
@@ -74,7 +75,7 @@ final class WpCoreFilesPullTest extends TestCase
             $this->assertFileExists($local . '/' . $core_file);
         }
         $this->assertSame('plugin', file_get_contents($local . '/wp-content/plugins/a/a.php'));
-        foreach (array('wp-config.php', '.htaccess', 'robots.txt', 'custom') as $site_path) {
+        foreach (array('wp-config.php', '.htaccess', 'robots.txt', 'wp-salt.php', 'custom') as $site_path) {
             $this->assertFileDoesNotExist($local . '/' . $site_path);
         }
     }
@@ -205,6 +206,7 @@ final class WpCoreFilesPullTest extends TestCase
         $this->writeFiles($abspath, array(
             'wp-config.php' => 'site config',
             '.htaccess' => 'rules',
+            'wp-salt.php' => 'required by wp-config.php',
             'custom/wp-load.php' => 'not core here',
             'wp-content/plugins/a/a.php' => 'plugin',
         ));
@@ -218,6 +220,7 @@ final class WpCoreFilesPullTest extends TestCase
         $local = $this->fsRoot . $abspath;
         $this->assertSame('site config', file_get_contents($local . '/wp-config.php'));
         $this->assertSame('rules', file_get_contents($local . '/.htaccess'));
+        $this->assertSame('required by wp-config.php', file_get_contents($local . '/wp-salt.php'));
         $this->assertSame('not core here', file_get_contents($local . '/custom/wp-load.php'));
         $this->assertSame('plugin', file_get_contents($local . '/wp-content/plugins/a/a.php'));
         foreach (array('wp-admin', 'wp-includes', 'index.php', 'wp-load.php', 'wp-login.php', 'xmlrpc.php', 'readme.html', 'wp-config-sample.php') as $core_path) {
@@ -285,6 +288,94 @@ final class WpCoreFilesPullTest extends TestCase
         $this->assertFileDoesNotExist($local . '/wordpress/core/wp-config.php');
     }
 
+    /**
+     * @dataProvider pullModes
+     * @param list<string> $mode_arguments
+     */
+    public function testRemovesTheEarlierCoreVersionAfterAnUpgrade(array $mode_arguments): void
+    {
+        $content_dir = $this->source . '/srv/htdocs/wp-content';
+        $this->writeFiles($content_dir, array('themes/t/style.css' => 'theme'));
+        $this->writeFiles($this->source, array('wordpress/core/wp-config.php' => 'site config'));
+        $old_abspath = $this->source . '/wordpress/core/7.1.4';
+        $new_abspath = $this->source . '/wordpress/core/7.1.5';
+        $this->writeCore($old_abspath, '7.1.4');
+        $this->writeSharedCorePreflight($old_abspath, $content_dir, true);
+        $arguments = array_merge(array('--include=:wp-content:', '--include=:wp-core:'), $mode_arguments);
+        $this->pull($arguments);
+
+        $local = $this->fsRoot . $this->source;
+        $this->assertSame('7.1.4', file_get_contents($local . '/wordpress/core/7.1.4/wp-includes/version.php'));
+
+        // The host installs 7.1.5 next to 7.1.4 and switches the site to it.
+        $this->writeCore($new_abspath, '7.1.5');
+        $this->writeSharedCorePreflight($new_abspath, $content_dir, false);
+        $this->pull(array('--abort'));
+        $this->pull($arguments);
+
+        $this->assertSame('7.1.5', file_get_contents($local . '/wordpress/core/7.1.5/wp-includes/version.php'));
+        $this->assertDirectoryDoesNotExist($local . '/wordpress/core/7.1.4');
+        $this->assertSame('theme', file_get_contents($local . '/srv/htdocs/wp-content/themes/t/style.css'));
+    }
+
+    /** @return array<string, array{list<string>}> */
+    public static function pullModes(): array
+    {
+        return array(
+            'catch-up' => array(array()),
+            'mirror' => array(array('--mode=mirror')),
+        );
+    }
+
+    public function testMirrorRemovesASymlinkTargetTheSourceDropped(): void
+    {
+        $abspath = $this->source . '/html';
+        $this->writeCore($abspath, '7.1.4');
+        $this->writeFiles($abspath, array(
+            'shared/linked/p.php' => 'linked plugin',
+            'wp-content/plugins/a/a.php' => 'plugin',
+        ));
+        symlink('../../shared/linked', $abspath . '/wp-content/plugins/linked');
+        $this->writePreflight(array(
+            'abspath' => $abspath,
+            'content_dir' => $abspath . '/wp-content',
+        ));
+        $arguments = array('--include=:wp-content:', '--include=:wp-core:', '--mode=mirror');
+        $this->pull($arguments);
+
+        $local = $this->fsRoot . $abspath;
+        $this->assertSame('linked plugin', file_get_contents($local . '/shared/linked/p.php'));
+
+        unlink($abspath . '/wp-content/plugins/linked');
+        $this->removeTree($abspath . '/shared');
+        $this->pull(array('--abort'));
+        $this->pull($arguments);
+
+        $this->assertFileDoesNotExist($local . '/wp-content/plugins/linked');
+        $this->assertFileDoesNotExist($local . '/shared/linked/p.php');
+        $this->assertSame('plugin', file_get_contents($local . '/wp-content/plugins/a/a.php'));
+    }
+
+    public function testAPullWithoutWpCoreLeavesTheEarlierCoreVersion(): void
+    {
+        $content_dir = $this->source . '/srv/htdocs/wp-content';
+        $this->writeFiles($content_dir, array('themes/t/style.css' => 'theme'));
+        $old_abspath = $this->source . '/wordpress/core/7.1.4';
+        $this->writeCore($old_abspath, '7.1.4');
+        $this->writeSharedCorePreflight($old_abspath, $content_dir, true);
+        $this->pull(array('--include=:wp-content:', '--include=:wp-core:', '--mode=mirror'));
+
+        $new_abspath = $this->source . '/wordpress/core/7.1.5';
+        $this->writeCore($new_abspath, '7.1.5');
+        $this->writeSharedCorePreflight($new_abspath, $content_dir, false);
+        $this->pull(array('--abort'));
+        $this->pull(array('--include=:wp-content:', '--mode=mirror'));
+
+        $local = $this->fsRoot . $this->source;
+        $this->assertSame('7.1.4', file_get_contents($local . '/wordpress/core/7.1.4/wp-includes/version.php'));
+        $this->assertDirectoryDoesNotExist($local . '/wordpress/core/7.1.5');
+    }
+
     public function testMirrorUpdatesCoreAndLeavesLocalSiteFilesNextToCore(): void
     {
         $abspath = $this->source . '/html';
@@ -301,7 +392,7 @@ final class WpCoreFilesPullTest extends TestCase
             'wp-config.php' => 'local config',
             'local-only.txt' => 'local',
             'wp-includes/local-only.php' => 'stray core file',
-            'wp-local-only.php' => 'stray top-level core file',
+            'wp-salt.php' => 'local site file named like core',
         ));
         $this->writeFiles($abspath, array(
             'wp-includes/version.php' => '7.2-beta4',
@@ -315,9 +406,9 @@ final class WpCoreFilesPullTest extends TestCase
         $this->assertSame('7.2-beta4', file_get_contents($local . '/wp-includes/version.php'));
         $this->assertFileDoesNotExist($local . '/wp-links-opml.php');
         $this->assertFileDoesNotExist($local . '/wp-includes/local-only.php');
-        $this->assertFileDoesNotExist($local . '/wp-local-only.php');
         $this->assertSame('local config', file_get_contents($local . '/wp-config.php'));
         $this->assertSame('local', file_get_contents($local . '/local-only.txt'));
+        $this->assertSame('local site file named like core', file_get_contents($local . '/wp-salt.php'));
     }
 
     public function testMirrorPullsCanSwitchWpCoreOnAndOff(): void
@@ -409,6 +500,34 @@ final class WpCoreFilesPullTest extends TestCase
                 ),
             ),
         ));
+    }
+
+    /**
+     * Points preflight at a versioned core directory, as on WP Cloud. Unless
+     * $fresh_state, the rest of the pull state stays as earlier pulls left it.
+     */
+    private function writeSharedCorePreflight(string $abspath, string $content_dir, bool $fresh_state): void
+    {
+        $paths_urls = array(
+            'abspath' => $abspath,
+            'wp_admin_path' => $abspath . '/wp-admin',
+            'wp_includes_path' => $abspath . '/wp-includes',
+            'content_dir' => $content_dir,
+        );
+        if ($fresh_state) {
+            $this->writePreflight($paths_urls);
+            return;
+        }
+        $client = new \ImportClient($this->url, $this->stateDirectory, $this->fsRoot, array('allow_http' => true));
+        $reflection = new \ReflectionClass($client);
+        $state = $reflection->getMethod('load_state')->invoke($client);
+        $preflight = $state->preflight_record();
+        $preflight['data']['runtime']['document_root'] = $abspath;
+        $preflight['data']['wp_detect']['roots'] = array(array('path' => $abspath));
+        $preflight['data']['database']['wp']['paths_urls'] = $paths_urls;
+        $state->set_preflight_record($preflight);
+        $reflection->getProperty('state')->setValue($client, $state);
+        $client->save_state();
     }
 
     /** @param list<string> $arguments Extra files-pull arguments. */

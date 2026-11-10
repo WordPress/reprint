@@ -634,7 +634,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $c = $this->standardLayout();
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage(':wp-core: selects WordPress core as a whole and cannot be followed by a path; received ":wp-core:/wp-admin"');
+        $this->expectExceptionMessage(':wp-core: selects WordPress core as a whole and cannot be followed by a path; received --include=:wp-core:/wp-admin.');
         $this->call($c, 'prepare_files_pull_options', array(array('include' => array(':wp-core:/wp-admin')), false));
     }
 
@@ -693,7 +693,7 @@ class OnlyFilesPathPrefixTest extends TestCase
         $c = $this->standardLayout();
 
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('received ":wp-core:/wp-admin"');
+        $this->expectExceptionMessage('received --exclude=:wp-core:/wp-admin.');
         $this->call($c, 'prepare_files_pull_options', array(array('exclude' => array(':wp-core:/wp-admin')), false));
     }
 
