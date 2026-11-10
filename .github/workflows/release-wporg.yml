@@ -48,6 +48,29 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # Anyone with write access can push a tag to a commit that never went
+      # through review. Build only tags on trunk, and check that from trunk's
+      # history before any code from the tag runs.
+      - name: Checkout trunk
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: trunk
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require release tag on trunk
+        env:
+          RELEASE_TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          if ! TAG_COMMIT="$(git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG^{commit}")"; then
+            echo "::error::Release tag $RELEASE_TAG does not exist."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$TAG_COMMIT" refs/remotes/origin/trunk; then
+            echo "::error::Release tag $RELEASE_TAG points to $TAG_COMMIT, which is not on trunk."
+            exit 1
+          fi
+
       - name: Check published release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
