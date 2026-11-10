@@ -79,39 +79,6 @@ test('WordPress.org rebuilds the tagged downloads-only plugin after GitHub publi
     assert.match(source, /SVN_PASSWORD: \$\{\{ secrets\.SVN_PASSWORD \}\}/);
 });
 
-test('WordPress.org permits only adamziel for publishing and upstream reruns before release code runs', async () => {
-    const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
-    const step = source.split(/(?=^      - )/m)[1];
-    assert.match(step, /name: Check publishing user/);
-    assert.match(step, /TRIGGERING_ACTOR: \$\{\{ github\.triggering_actor \}\}/);
-    assert.match(step, /UPSTREAM_TRIGGERING_ACTOR: \$\{\{ github\.event\.workflow_run\.triggering_actor\.login \}\}/);
-    const command = step.match(/run: \|\n((?: {10}[^\n]+\n?)+)/)[1].replace(/^ {10}/gm, '');
-    for (const [actor, upstreamActor, allowed] of [
-        ['akirk', '', false],
-        ['brandonpayton', '', false],
-        ['WPprodigy', '', false],
-        ['adamziel', '', true],
-        ['adamziel', 'adamziel', true],
-        ['akirk', 'adamziel', false],
-        ['adamziel', 'akirk', false],
-        ['other-user', '', false],
-        ['other-user', 'adamziel', false],
-        ['adamziel', 'other-user', false],
-        ['github-actions[bot]', '', false],
-        ['adamziel-other-user', '', false],
-        ['', '', false],
-    ]) {
-        const check = run('bash', ['-e', '-o', 'pipefail', '-c', command], {
-            env: { ...process.env, TRIGGERING_ACTOR: actor, UPSTREAM_TRIGGERING_ACTOR: upstreamActor },
-        });
-        if (allowed) {
-            await check;
-        } else {
-            await assert.rejects(check, /is not allowed to publish Reprint/);
-        }
-    }
-});
-
 test('WordPress.org builds and checks the tagged client before publishing the plugin', async () => {
     const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
     assert.match(source, /submodules: true/);
@@ -238,12 +205,60 @@ test('WordPress.org accepts only stable version tags', async () => {
     }
 });
 
+test('WordPress.org deploys only tags on trunk and checks them before running tagged code', async () => {
+    const source = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
+    const steps = source.split(/(?=^      - )/m);
+    const trunkCheckout = steps.findIndex((part) => part.includes('name: Checkout trunk'));
+    const tagCheck = steps.findIndex((part) => part.includes('name: Require release tag on trunk'));
+    const tagCheckout = steps.findIndex((part) => part.includes('name: Checkout release tag'));
+    assert.ok(trunkCheckout > 0 && trunkCheckout < tagCheck && tagCheck < tagCheckout);
+    assert.match(steps[trunkCheckout], /ref: trunk\n {10}fetch-depth: 0\n {10}persist-credentials: false/);
+    const command = steps[tagCheck].match(/run: \|\n((?: {10}[^\n]+\n?)+)/)[1].replace(/^ {10}/gm, '');
+
+    const directory = await mkdtemp(join(tmpdir(), 'reprint-release-tag-on-trunk-'));
+    const origin = join(directory, 'origin');
+    const clone = join(directory, 'clone');
+    const git = (cwd, ...args) => run('git', ['-c', 'user.name=Release Test', '-c', 'user.email=release-test@example.com', ...args], { cwd });
+    try {
+        await mkdir(origin);
+        await git(origin, 'init', '-q', '-b', 'trunk');
+        await git(origin, 'commit', '-q', '--allow-empty', '-m', 'Released version');
+        await git(origin, 'tag', 'v1.0.0');
+        await git(origin, 'tag', '-a', 'v1.0.1', '-m', 'Annotated release');
+        await git(origin, 'commit', '-q', '--allow-empty', '-m', 'Later trunk work');
+        await git(origin, 'checkout', '-q', '-b', 'unreviewed', 'v1.0.0');
+        await git(origin, 'commit', '-q', '--allow-empty', '-m', 'Unreviewed change');
+        await git(origin, 'tag', 'v9.9.9');
+        await git(origin, 'checkout', '-q', 'trunk');
+        await git(directory, 'clone', '-q', origin, clone);
+
+        for (const [tag, error] of [
+            ['v1.0.0', null],
+            ['v1.0.1', null],
+            ['v9.9.9', /Release tag v9\.9\.9 points to [0-9a-f]{40}, which is not on trunk/],
+            ['v1.2.3', /Release tag v1\.2\.3 does not exist/],
+        ]) {
+            const check = run('bash', ['-e', '-o', 'pipefail', '-c', command], {
+                cwd: clone,
+                env: { ...process.env, RELEASE_TAG: tag },
+            });
+            if (error) {
+                await assert.rejects(check, (failure) => error.test(failure.stdout), tag);
+            } else {
+                await check;
+            }
+        }
+    } finally {
+        await rm(directory, { recursive: true, force: true });
+    }
+});
+
 test('WordPress.org screenshot updates use the release queue and cannot publish plugin code', async () => {
     const source = await readFile(new URL('update-wporg-screenshots.yml', workflows), 'utf8');
     const release = await readFile(new URL('release-wporg.yml', workflows), 'utf8');
     assert.match(source, /^  workflow_dispatch:$/m);
     assert.doesNotMatch(source, /^  (push|pull_request|workflow_call):/m);
-    assert.match(source, /github\.repository == 'WordPress\/reprint' && github\.triggering_actor == 'adamziel' && github\.ref == 'refs\/heads\/trunk'/);
+    assert.match(source, /if: github\.repository == 'WordPress\/reprint' && github\.ref == 'refs\/heads\/trunk'$/m);
     assert.match(source, /^    environment: svn$/m);
     assert.equal(source.match(/^  group: (.+)$/m)[1], release.match(/^  group: (.+)$/m)[1]);
     assert.match(source, /cancel-in-progress: false/);

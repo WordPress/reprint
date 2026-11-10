@@ -74,6 +74,21 @@ class PullState
     public ?string $resolved_path_mappings_fingerprint = null;
     /** @var string|null Files-pull path-selection fingerprint; guards resume. */
     public ?string $files_pull_path_selection_fingerprint = null;
+    /**
+     * WordPress core that files-pulls with `--include=:wp-core:` may have
+     * placed in the filesystem root. A pull with `:wp-core:` adds its own
+     * core when it starts and, once it completes, leaves only that. Until
+     * then, it removes the paths of the other entries that the source no
+     * longer has, such as an earlier versioned ABSPATH after a core upgrade
+     * on WP Cloud.
+     *
+     * @var array[] {
+     *     One entry per core location.
+     *     @type string   $abspath       Source ABSPATH.
+     *     @type string[] $path_prefixes Source wp-admin and wp-includes directories.
+     * }
+     */
+    public array $wp_core_in_filesystem_root = [];
     public FilesPullSummaryState $files_pull_summary;
     public DatabaseTableIndexState $db_index;
     public FileDiffProgressState $diff;
@@ -163,6 +178,7 @@ class PullState
             'include_host_plugins' => false,
             'css_url_mapping' => [],
             'current_css_cursor' => null,
+            'wp_core_in_filesystem_root' => [],
         ];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
@@ -185,6 +201,7 @@ class PullState
         $state->max_allowed_packet = $data['max_allowed_packet'];
         $state->resolved_path_mappings_fingerprint = $data['resolved_path_mappings_fingerprint'];
         $state->files_pull_path_selection_fingerprint = $data['files_pull_path_selection_fingerprint'];
+        $state->wp_core_in_filesystem_root = self::wp_core_in_filesystem_root_from_array($data['wp_core_in_filesystem_root']);
         $state->files_pull_summary = FilesPullSummaryState::from_array($data['files_pull_summary']);
         $state->db_index = DatabaseTableIndexState::from_array($data['db_index']);
         $state->diff = FileDiffProgressState::from_array($data['diff']);
@@ -207,6 +224,33 @@ class PullState
         $state->tuning = AdaptiveTuningState::from_array($data['tuning']);
         $state->pull_pipeline = PullPipelineCheckpointState::from_array($data['pull_pipeline']);
         return $state;
+    }
+
+    /**
+     * @param mixed $data Saved wp_core_in_filesystem_root value.
+     * @return array[] Entries as documented on $wp_core_in_filesystem_root.
+     */
+    private static function wp_core_in_filesystem_root_from_array($data): array
+    {
+        if (!is_array($data) || $data !== array_values($data)) {
+            throw new UnexpectedValueException(
+                'PullState wp_core_in_filesystem_root must be a list.'
+            );
+        }
+        foreach ($data as $entry) {
+            if (
+                !is_array($entry)
+                || array_keys($entry) !== ['abspath', 'path_prefixes']
+                || !is_string($entry['abspath'])
+                || !is_array($entry['path_prefixes'])
+                || $entry['path_prefixes'] !== array_values(array_filter($entry['path_prefixes'], 'is_string'))
+            ) {
+                throw new UnexpectedValueException(
+                    'PullState wp_core_in_filesystem_root entries must hold an abspath string and a list of path prefixes.'
+                );
+            }
+        }
+        return $data;
     }
 
     /**
@@ -309,6 +353,7 @@ class PullState
             'max_allowed_packet' => $this->max_allowed_packet,
             'resolved_path_mappings_fingerprint' => $this->resolved_path_mappings_fingerprint,
             'files_pull_path_selection_fingerprint' => $this->files_pull_path_selection_fingerprint,
+            'wp_core_in_filesystem_root' => $this->wp_core_in_filesystem_root,
             'files_pull_summary' => $this->files_pull_summary->to_array(),
             'db_index' => $this->db_index->to_array(),
             'diff' => $this->diff->to_array(),

@@ -412,12 +412,14 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createCoreTree($abspath, '7.1.3');
         file_put_contents($abspath . '/wp-config-sample.php', '<?php // sample');
         file_put_contents($abspath . '/wp-config-local.php', '<?php // local settings');
+        file_put_contents($abspath . '/wp-salt.php', '<?php // salts');
         $this->writePreflight(['abspath' => '/var/www/html']);
 
         $this->flatten(['core_files' => 'copy']);
 
         $this->assertFalse(is_link($this->flattenTo . '/wp-config-sample.php'), 'wp-config-sample.php ships with core');
         $this->assertTrue(is_link($this->flattenTo . '/wp-config-local.php'), 'wp-config-local.php belongs to the site');
+        $this->assertTrue(is_link($this->flattenTo . '/wp-salt.php'), 'wp-salt.php is named like core but belongs to the site');
     }
 
     public function testKeepsCoreEntriesThatAreSymlinksOnTheSourceLinked(): void
@@ -452,6 +454,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createCoreTree($abspath, '7.1.3');
         mkdir($abspath . '/wp-content', 0755, true);
         file_put_contents($abspath . '/.htaccess', '# rewrite rules');
+        file_put_contents($abspath . '/wp-salt.php', '<?php // salts');
         $this->writePreflight(['abspath' => '/var/www/html']);
         $this->createCoreTree($this->flattenTo, '7.1.4');
         file_put_contents($this->flattenTo . '/index.php', '<?php // edited index');
@@ -464,7 +467,8 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertFalse(is_link($this->flattenTo . '/index.php'));
         $this->assertSame('<?php // edited index', file_get_contents($this->flattenTo . '/index.php'));
         $this->assertSame('<?php // version 7.1.3', file_get_contents($abspath . '/wp-includes/version.php'));
-        foreach (['.htaccess', 'wp-content'] as $siteEntry) {
+        // wp-salt.php is named like core, but the site's wp-config.php needs it.
+        foreach (['.htaccess', 'wp-content', 'wp-salt.php'] as $siteEntry) {
             $this->assertTrue(is_link($this->flattenTo . '/' . $siteEntry), "{$siteEntry} should be a symlink");
         }
     }

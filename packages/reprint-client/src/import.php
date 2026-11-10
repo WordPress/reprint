@@ -169,6 +169,31 @@ register_shutdown_function(function () {
 
 class ImportClient
 {
+    /**
+     * Entries WordPress core ships directly in ABSPATH. wp-config-sample.php
+     * is core; wp-config.php belongs to the site.
+     */
+    private const WP_CORE_ROOT_ENTRIES = [
+        "wp-admin",
+        "wp-includes",
+        "index.php",
+        "license.txt",
+        "readme.html",
+        "wp-activate.php",
+        "wp-blog-header.php",
+        "wp-comments-post.php",
+        "wp-config-sample.php",
+        "wp-cron.php",
+        "wp-links-opml.php",
+        "wp-load.php",
+        "wp-login.php",
+        "wp-mail.php",
+        "wp-settings.php",
+        "wp-signup.php",
+        "wp-trackback.php",
+        "xmlrpc.php",
+    ];
+
 
     /** Commands executed by ImportClient. */
     public const COMMANDS = [
@@ -432,10 +457,37 @@ class ImportClient
     private $pull_only_files_with_path_prefixes = [];
 
     /**
+     * @var string|null ABSPATH when `--include=:wp-core:` is used, otherwise null.
+     * The server indexes all of ABSPATH, but only its core entries are pulled
+     * unless another include selects them.
+     */
+    private $pull_wp_core_abspath = null;
+
+    /**
+     * @var array<int,string> With `--include=:wp-core:`, the include prefixes
+     * selected in full: the other includes plus wp-admin and wp-includes.
+     * Unused without :wp-core:.
+     */
+    private $pull_only_files_with_path_prefixes_selected_in_full = [];
+
+    /**
+     * @var array<int,string> With `--include=:wp-core:`, the resolved wp-admin
+     * and wp-includes directories. Unused without :wp-core:.
+     */
+    private $pull_wp_core_directory_prefixes = [];
+
+    /**
      * @var array<int,string> Resolved `--exclude` file paths: a list of real
      * source absolute path prefixes omitted from files-pull.
      */
     private $pull_excluded_files_with_path_prefixes = [];
+
+    /**
+     * @var string|null ABSPATH when `--exclude=:wp-core:` is used, otherwise
+     * null. wp-admin and wp-includes join the exclude prefixes; the core
+     * entries directly under ABSPATH are excluded by name.
+     */
+    private $pull_excluded_wp_core_abspath = null;
 
     /**
      * Plugins, MU plugins, and drop-ins omitted from this import.
@@ -837,9 +889,81 @@ class ImportClient
             $include_raw[] = ":wp-uploads:";
         }
 
+        foreach (["include" => $include_raw, "exclude" => $excluded_raw] as $option_name => $raw_sources) {
+            foreach ($raw_sources as $raw_source) {
+                if (!is_string($raw_source) || strpos($raw_source, ":wp-core:") !== 0) {
+                    continue;
+                }
+                if ($raw_source !== ":wp-core:") {
+                    throw new InvalidArgumentException(
+                        // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI option error, not HTML.
+                        ":wp-core: selects WordPress core as a whole and cannot be followed by a path; received --{$option_name}={$raw_source}."
+                    );
+                }
+            }
+        }
+
         $this->pull_only_files_with_path_prefixes = [];
+        $this->pull_wp_core_abspath = null;
+        $this->pull_only_files_with_path_prefixes_selected_in_full = [];
+        $this->pull_wp_core_directory_prefixes = [];
         $this->pull_excluded_files_with_path_prefixes = [];
-        if (!empty($include_raw)) {
+        $this->pull_excluded_wp_core_abspath = null;
+        $without_wp_core = static function (array $raw_sources): array {
+            return array_values(array_filter(
+                $raw_sources,
+                static function ($raw_source): bool {
+                    return $raw_source !== ":wp-core:";
+                }
+            ));
+        };
+        $include_raw_without_wp_core = $without_wp_core($include_raw);
+        $excluded_raw_without_wp_core = $without_wp_core($excluded_raw);
+        $includes_wp_core = count($include_raw_without_wp_core) !== count($include_raw);
+        $excludes_wp_core = count($excluded_raw_without_wp_core) !== count($excluded_raw);
+        if ($includes_wp_core && $excludes_wp_core) {
+            throw new InvalidArgumentException(
+                ":wp-core: cannot be both included and excluded; received --include=:wp-core: and --exclude=:wp-core:."
+            );
+        }
+        if ($includes_wp_core || $excludes_wp_core) {
+            $abspath = $this->remote_path_tokens()["abspath"];
+            if ($abspath === null) {
+                throw new InvalidArgumentException(
+                    "Cannot resolve token \":wp-core:\": ABSPATH is not available in preflight data. Run preflight first."
+                );
+            }
+            $state = $this->get_state();
+            $wp_admin_path = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.wp_admin_path'))
+                ?? wp_join_unix_paths($abspath, "wp-admin");
+            $wp_includes_path = $this->clean_preflight_path($state->get('preflight.database.wp.paths_urls.wp_includes_path'))
+                ?? wp_join_unix_paths($abspath, "wp-includes");
+            if ($excludes_wp_core) {
+                // Exclusions are applied by the client, so the server indexes
+                // core as usual. wp-admin and wp-includes are ordinary prefixes;
+                // is_selected_for_pulling() excludes the entries directly under
+                // ABSPATH by name.
+                $excluded_raw = array_merge($excluded_raw_without_wp_core, [$wp_admin_path, $wp_includes_path]);
+                $this->pull_excluded_wp_core_abspath = $abspath;
+            } else {
+                $this->pull_only_files_with_path_prefixes_selected_in_full = $this->resolve_remote_paths(
+                    array_merge($include_raw_without_wp_core, [$wp_admin_path, $wp_includes_path]),
+                    "include"
+                );
+                $this->pull_wp_core_directory_prefixes = $this->resolve_remote_paths(
+                    [$wp_admin_path, $wp_includes_path],
+                    "include"
+                );
+                // The server indexes ABSPATH whole; is_selected_for_pulling()
+                // pulls only its core entries.
+                $this->pull_wp_core_abspath = $abspath;
+                $this->pull_only_files_with_path_prefixes = $this->resolve_remote_paths(
+                    array_merge($this->pull_only_files_with_path_prefixes_selected_in_full, [$abspath]),
+                    "include"
+                );
+            }
+        }
+        if (!$includes_wp_core && !empty($include_raw)) {
             $this->pull_only_files_with_path_prefixes =
                 $this->resolve_remote_paths($include_raw, "include");
         }
@@ -4199,6 +4323,14 @@ class ImportClient
             $this->get_state()->active_resumable_command->current_stage = "index";
             $this->get_state()->files_pull_path_selection_fingerprint =
                 $this->files_pull_path_selection_fingerprint();
+            // Recorded before any core is downloaded, so a pull that is
+            // interrupted and aborted still leaves a record of its core.
+            if ($this->pull_wp_core_abspath !== null) {
+                $wp_core_entry = $this->current_wp_core_entry();
+                if (!in_array($wp_core_entry, $this->get_state()->wp_core_in_filesystem_root, true)) {
+                    $this->get_state()->wp_core_in_filesystem_root[] = $wp_core_entry;
+                }
+            }
             $this->get_state()->diff = new FileDiffProgressState();
             $this->get_state()->index = new RemoteFileIndexCursorState();
             $this->get_state()->fetch = new FetchListProgressState();
@@ -4427,6 +4559,29 @@ class ImportClient
         $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
 
         $this->ensure_local_index_exists();
+        if ($this->pull_wp_core_abspath !== null) {
+            // Earlier core leaves its directories behind: its ABSPATH, or
+            // the versioned directory holding wp-admin and wp-includes when
+            // they live outside ABSPATH. rmdir() removes one only once
+            // nothing is left in it.
+            $earlier_local_core_directories = [];
+            foreach ($this->earlier_wp_core_entries(true) as $earlier_local_wp_core) {
+                foreach ($earlier_local_wp_core["path_prefixes"] as $earlier_local_core_directory) {
+                    $earlier_local_core_directories[] = dirname($earlier_local_core_directory);
+                }
+                $earlier_local_core_directories[] = $earlier_local_wp_core["abspath"];
+            }
+            foreach (array_unique($earlier_local_core_directories) as $earlier_local_core_directory) {
+                if (
+                    is_dir($earlier_local_core_directory)
+                    && !is_link($earlier_local_core_directory)
+                    && @rmdir($earlier_local_core_directory)
+                ) {
+                    $this->audit_log("Deleted empty earlier core directory: {$earlier_local_core_directory}", false);
+                }
+            }
+            $this->get_state()->wp_core_in_filesystem_root = [$this->current_wp_core_entry()];
+        }
         $this->get_state()->active_resumable_command->completion_state = "complete";
         $this->get_state()->active_resumable_command->current_stage = null;
         $this->save_state();
@@ -4611,12 +4766,21 @@ class ImportClient
         );
         $included_local_absolute_path_prefixes =
             $this->path_mapper()->remote_path_prefixes_to_local_path_prefixes(
-                $this->pull_only_files_with_path_prefixes
+                $this->pull_wp_core_abspath === null
+                    ? $this->pull_only_files_with_path_prefixes
+                    : $this->pull_only_files_with_path_prefixes_selected_in_full
             );
+        $local_wp_core_abspath = $this->pull_wp_core_abspath === null
+            ? null
+            : $this->path_mapper()->remote_path_to_local_path($this->pull_wp_core_abspath);
         $excluded_local_absolute_path_prefixes =
             $this->path_mapper()->remote_path_prefixes_to_local_path_prefixes(
                 $this->pull_excluded_files_with_path_prefixes
             );
+        $excluded_local_wp_core_abspath = $this->pull_excluded_wp_core_abspath === null
+            ? null
+            : $this->path_mapper()->remote_path_to_local_path($this->pull_excluded_wp_core_abspath);
+        $earlier_local_wp_core_entries = $this->earlier_wp_core_entries(true);
         try {
             while ($changed_path_diff->next_path()) {
                 $local_entry = $changed_path_diff->get_entry_in_old_index();
@@ -4661,12 +4825,22 @@ class ImportClient
                         $local_relative_path,
                         $local_entry["type"]
                     )
-                    || !$this->is_selected_for_pulling(
-                        $local_absolute_path,
-                        false,
-                        $local_entry["type"],
-                        $included_local_absolute_path_prefixes,
-                        $excluded_local_absolute_path_prefixes
+                    || !(
+                        $this->is_selected_for_pulling(
+                            $local_absolute_path,
+                            false,
+                            $local_entry["type"],
+                            $included_local_absolute_path_prefixes,
+                            $excluded_local_absolute_path_prefixes,
+                            $local_wp_core_abspath,
+                            $excluded_local_wp_core_abspath
+                        )
+                        || $this->is_earlier_wp_core_path(
+                            $local_absolute_path,
+                            $local_entry["type"],
+                            $earlier_local_wp_core_entries,
+                            $excluded_local_absolute_path_prefixes
+                        )
                     )
                 ) {
                     continue;
@@ -5035,6 +5209,12 @@ class ImportClient
      * Skips entries marked as "intermediate" — those are path-component
      * symlinks (e.g. /srv/wordpress -> /wordpress) emitted by the server's
      * discover_path_symlinks() for local recreation only, not for indexing.
+     *
+     * With `--include=:wp-core:`, ABSPATH is indexed whole, so only selected
+     * symlinks are followed. A target under ABSPATH is already indexed and
+     * is pulled only if the selection covers it; a target that contains
+     * ABSPATH is skipped, because indexing it would select wp-config.php and
+     * every other site file next to core.
      */
     private function extract_symlink_directories_from_next_remote_index(array $visited): array
     {
@@ -5042,12 +5222,12 @@ class ImportClient
         if (!file_exists($this->next_remote_index_file)) {
             return $symlink_targets;
         }
-
         $next_remote_index_file_handle = fopen($this->next_remote_index_file, "r");
         if (!$next_remote_index_file_handle) {
             return $symlink_targets;
         }
 
+        $wp_core_abspath = $this->pull_wp_core_abspath;
         while (($next_remote_index_json_line = fgets($next_remote_index_file_handle)) !== false) {
             $next_remote_index_entry = json_decode($next_remote_index_json_line, true);
             if (!is_array($next_remote_index_entry)) {
@@ -5066,6 +5246,25 @@ class ImportClient
             $symlink_target = base64_decode($symlink_target_encoded);
             if ($symlink_target === false || $symlink_target === "") {
                 continue;
+            }
+
+            if ($wp_core_abspath !== null) {
+                $path_encoded = $next_remote_index_entry["path"] ?? null;
+                $symlink_path = is_string($path_encoded) ? base64_decode($path_encoded, true) : false;
+                if (!is_string($symlink_path) || $symlink_path === "") {
+                    continue;
+                }
+                $symlink_path = Utils::normalize_path_separators($symlink_path, $this->get_state()->remote_path_format());
+                if (!$this->is_selected_for_pulling($symlink_path, true, "link")) {
+                    continue;
+                }
+                if (Utils::path_is_descendant_of($wp_core_abspath, $symlink_target)) {
+                    $this->audit_log(
+                        "FOLLOW SYMLINK SKIP | {$symlink_path} targets {$symlink_target}, which contains ABSPATH; :wp-core: selects only core there",
+                        true,
+                    );
+                    continue;
+                }
             }
 
             // If we've seen this symlink target already, we can move on
@@ -6725,7 +6924,7 @@ class ImportClient
                 continue;
             }
 
-            if ($use_existing_core_files && self::flatten_is_core_entry($entry)) {
+            if ($use_existing_core_files && self::is_wp_core_entry($entry)) {
                 $this->audit_log("FLAT-DOCUMENT-ROOT | Using existing core entry: " . wp_join_unix_paths($flatten_to, $entry));
                 continue;
             }
@@ -6733,7 +6932,7 @@ class ImportClient
             $target = wp_join_unix_paths($flatten_to, $entry);
             // A core entry that is itself a symlink on the source stays a
             // link, as in link mode.
-            if ($copy_core_files && self::flatten_is_core_entry($entry) && !is_link($source)) {
+            if ($copy_core_files && self::is_wp_core_entry($entry) && !is_link($source)) {
                 $this->flatten_place_copy($source, $target, $copied, $deferred_core_files);
                 continue;
             }
@@ -7117,26 +7316,21 @@ class ImportClient
     /**
      * Whether a top-level ABSPATH entry is WordPress core.
      *
-     * With --core-files=copy, core entries are copied into the flattened
+     * --include=:wp-core: pulls these entries and leaves the other ABSPATH
+     * entries alone. With --core-files=copy, core entries are copied into the flattened
      * site and every other entry stays linked. The hosting platform decides
      * which core version a site runs, so local edits to core never need to
      * reach the filesystem root. Site files that share ABSPATH with core on
      * standard hosts (.htaccess, robots.txt, wp-config.php, wp-content) must
      * stay linked so their edits do.
+     *
+     * The names are listed rather than matched by pattern: sites put their
+     * own wp-*.php files next to core, such as a wp-salt.php that
+     * wp-config.php requires.
      */
-    private static function flatten_is_core_entry(string $entry): bool
+    private static function is_wp_core_entry(string $entry): bool
     {
-        if (in_array($entry, ["wp-admin", "wp-includes", "index.php", "xmlrpc.php", "license.txt", "readme.html"], true)) {
-            return true;
-        }
-        // wp-config-sample.php ships with core. wp-config.php and the files
-        // it often requires (wp-config-local.php, ...) belong to the site.
-        if ($entry === "wp-config-sample.php") {
-            return true;
-        }
-        return strncmp($entry, "wp-config", 9) !== 0
-            && strncmp($entry, "wp-", 3) === 0
-            && substr($entry, -4) === ".php";
+        return in_array($entry, self::WP_CORE_ROOT_ENTRIES, true);
     }
 
     /**
@@ -9911,6 +10105,8 @@ class ImportClient
                         }
                         // The remote index is a union across files-pull path
                         // selections. Keep paths outside this run's selection.
+                        $remote_deletion_root = null;
+                        $earlier_wp_core_entries = $this->earlier_wp_core_entries(false);
                         if (
                             $this->is_selected_for_pulling(
                                 $remote_absolute_path,
@@ -9925,6 +10121,50 @@ class ImportClient
                                     $index_diff->get_following_path_in_new_index(),
                                     $export_directories
                                 );
+                        } elseif (
+                            $this->is_earlier_wp_core_path(
+                                $remote_absolute_path,
+                                $remote_path_type,
+                                $earlier_wp_core_entries,
+                                $this->pull_excluded_files_with_path_prefixes
+                            )
+                        ) {
+                            // This path belongs to core that an earlier pull
+                            // downloaded, for example from
+                            // /wordpress/core/7.1.4 before the site moved to
+                            // 7.1.5. Only that core may be removed. The old
+                            // ABSPATH can also hold site files, such as
+                            // wp-config.php, that must stay.
+                            //
+                            // For other paths, the deletion root may climb to a
+                            // parent directory that has nothing left in the new
+                            // index. That climb normally stops at this pull's
+                            // export directories, but the old ABSPATH is not
+                            // one of them. Left unchecked, the climb would
+                            // remove the whole old ABSPATH.
+                            $earlier_wp_core_directories = array_merge(
+                                ...array_column($earlier_wp_core_entries, "path_prefixes")
+                            );
+                            $is_in_earlier_wp_core_directory = Utils::path_is_same_as_or_descendant_of(
+                                $remote_absolute_path,
+                                $earlier_wp_core_directories
+                            );
+                            if ($is_in_earlier_wp_core_directory) {
+                                // Inside the old wp-admin or wp-includes: the
+                                // climb may go up to that directory, no further.
+                                $remote_deletion_root = $this->derive_remote_deletion_root_from_sparse_index(
+                                    $remote_absolute_path,
+                                    $index_diff->get_preceding_path_in_new_index(),
+                                    $index_diff->get_following_path_in_new_index(),
+                                    $earlier_wp_core_directories
+                                );
+                            } else {
+                                // A core file directly in the old ABSPATH, such
+                                // as wp-load.php: remove just that file.
+                                $remote_deletion_root = $remote_absolute_path;
+                            }
+                        }
+                        if ($remote_deletion_root !== null) {
                             $local_absolute_path =
                                 $this->remove_remote_path_locally(
                                     $remote_deletion_root
@@ -11834,16 +12074,27 @@ class ImportClient
         ));
         sort($excluded_plugin_source_paths, SORT_STRING);
 
+        $selection = [
+            "only_path_prefixes" => $this->pull_only_files_with_path_prefixes,
+            "excluded_path_prefixes" => $excluded_path_prefixes,
+            "excluded_plugin_source_paths" => $excluded_plugin_source_paths,
+        ];
+        // Added only with :wp-core:, so fingerprints saved before it existed
+        // still match. Both selections can index the same roots.
+        if ($this->pull_wp_core_abspath !== null) {
+            $selection["wp_core_abspath"] = $this->pull_wp_core_abspath;
+            $selection["only_path_prefixes_selected_in_full"] =
+                $this->pull_only_files_with_path_prefixes_selected_in_full;
+        }
+        // Likewise only with --exclude=:wp-core:. wp-admin and wp-includes
+        // are already among the excluded prefixes.
+        if ($this->pull_excluded_wp_core_abspath !== null) {
+            $selection["excluded_wp_core_abspath"] = $this->pull_excluded_wp_core_abspath;
+        }
+
         return hash(
             "sha256",
-            json_encode(
-                [
-                    "only_path_prefixes" => $this->pull_only_files_with_path_prefixes,
-                    "excluded_path_prefixes" => $excluded_path_prefixes,
-                    "excluded_plugin_source_paths" => $excluded_plugin_source_paths,
-                ],
-                JSON_UNESCAPED_SLASHES
-            ),
+            json_encode($selection, JSON_UNESCAPED_SLASHES),
         );
     }
 
@@ -12118,6 +12369,91 @@ class ImportClient
     }
 
     /**
+     * The record of this pull's core, for wp_core_in_filesystem_root.
+     *
+     * @return array {
+     *     Core selected by --include=:wp-core:.
+     *     @type string   $abspath       Source ABSPATH.
+     *     @type string[] $path_prefixes Source wp-admin and wp-includes directories.
+     * }
+     */
+    private function current_wp_core_entry(): array
+    {
+        return [
+            "abspath" => $this->pull_wp_core_abspath,
+            "path_prefixes" => $this->pull_wp_core_directory_prefixes,
+        ];
+    }
+
+    /**
+     * With `--include=:wp-core:`, the core that earlier pulls with :wp-core:
+     * may have placed in the filesystem root, so this pull can remove the
+     * parts the source no longer has. Empty without :wp-core: in this pull,
+     * which leaves earlier core alone.
+     *
+     * @param bool $in_local_coordinates Map the paths to local paths.
+     * @return array[] Entries shaped like current_wp_core_entry(), in remote
+     *                 or local paths.
+     */
+    private function earlier_wp_core_entries(bool $in_local_coordinates): array
+    {
+        if ($this->pull_wp_core_abspath === null) {
+            return [];
+        }
+        $entries = $this->get_state()->wp_core_in_filesystem_root;
+        if (!$in_local_coordinates) {
+            return $entries;
+        }
+        return array_map(
+            function (array $entry): array {
+                return [
+                    "abspath" => $this->path_mapper()->remote_path_to_local_path($entry["abspath"]),
+                    "path_prefixes" => $this->path_mapper()->remote_path_prefixes_to_local_path_prefixes(
+                        $entry["path_prefixes"]
+                    ),
+                ];
+            },
+            $entries
+        );
+    }
+
+    /**
+     * Whether a path absent from the current remote index belongs to core an
+     * earlier pull may have placed. Such a path is removed even when this
+     * pull's selection no longer covers it, as with an old versioned ABSPATH
+     * after a core upgrade. Exclusions still win.
+     *
+     * @param array[]  $earlier_wp_core_entries From earlier_wp_core_entries(),
+     *                                          in the path's coordinates.
+     * @param string[] $excluded_path_prefixes  Exclude prefixes in the path's
+     *                                          coordinates.
+     */
+    private function is_earlier_wp_core_path(
+        string $path,
+        string $path_type,
+        array $earlier_wp_core_entries,
+        array $excluded_path_prefixes
+    ): bool {
+        foreach ($earlier_wp_core_entries as $earlier_wp_core_entry) {
+            // :wp-core: is included in this pull, so it is not also excluded.
+            if (
+                $this->is_selected_for_pulling(
+                    $path,
+                    false,
+                    $path_type,
+                    $earlier_wp_core_entry["path_prefixes"],
+                    $excluded_path_prefixes,
+                    $earlier_wp_core_entry["abspath"],
+                    null
+                )
+            ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Checks whether a remote or local path passes --include and --exclude.
      *
      * The server has already applied --include to current remote index entries,
@@ -12127,6 +12463,14 @@ class ImportClient
      * An included directory root itself is not selected because the current
      * remote index lists its contents, not the root entry. Exclusions always
      * win.
+     *
+     * With --include=:wp-core:, the server indexes all of ABSPATH, so remote
+     * index entries under ABSPATH get the include check too. Directly under
+     * ABSPATH, only core entries are selected, unless another include selects
+     * the path.
+     *
+     * With --exclude=:wp-core:, the core entries directly under ABSPATH are
+     * excluded by name; wp-admin and wp-includes are ordinary exclude prefixes.
      *
      * @param string $path Remote or local absolute path to check.
      * @param bool $is_next_remote_index_entry Whether the server already applied
@@ -12138,21 +12482,44 @@ class ImportClient
      * @param list<string>|null $excluded_path_prefixes Exclude prefixes in the
      *                                                   path's coordinates, or
      *                                                   null for the remote prefixes.
+     * @param string|null $wp_core_abspath ABSPATH selected by :wp-core: in the
+     *                                     path's coordinates. Read only when
+     *                                     $included_path_prefixes is given;
+     *                                     null there means no :wp-core:.
+     * @param string|null $excluded_wp_core_abspath ABSPATH excluded by
+     *                                              :wp-core: in the path's
+     *                                              coordinates. Read only when
+     *                                              $excluded_path_prefixes is
+     *                                              given.
      */
     private function is_selected_for_pulling(
         string $path,
         bool $is_next_remote_index_entry,
         string $path_type,
         ?array $included_path_prefixes = null,
-        ?array $excluded_path_prefixes = null
+        ?array $excluded_path_prefixes = null,
+        ?string $wp_core_abspath = null,
+        ?string $excluded_wp_core_abspath = null
     ): bool
     {
-        $included_path_prefixes ??=
-            $this->pull_only_files_with_path_prefixes;
-        $excluded_path_prefixes ??=
-            $this->pull_excluded_files_with_path_prefixes;
-        if (!$is_next_remote_index_entry) {
-            $selected = empty($included_path_prefixes);
+        if ($included_path_prefixes === null) {
+            $wp_core_abspath = $this->pull_wp_core_abspath;
+            $included_path_prefixes = $wp_core_abspath === null
+                ? $this->pull_only_files_with_path_prefixes
+                : $this->pull_only_files_with_path_prefixes_selected_in_full;
+        }
+        if ($excluded_path_prefixes === null) {
+            $excluded_path_prefixes = $this->pull_excluded_files_with_path_prefixes;
+            $excluded_wp_core_abspath = $this->pull_excluded_wp_core_abspath;
+        }
+        $remainder_under_wp_core_abspath = $wp_core_abspath === null
+            ? null
+            : Utils::path_remainder_under($path, $wp_core_abspath);
+        if (!$is_next_remote_index_entry || $remainder_under_wp_core_abspath !== null) {
+            $selected = empty($included_path_prefixes) && $wp_core_abspath === null;
+            if ($wp_core_abspath !== null && self::is_wp_core_entry_directly_under($path, $path_type, $wp_core_abspath)) {
+                $selected = true;
+            }
 
             foreach ($included_path_prefixes as $included_path_prefix) {
                 $remainder = Utils::path_remainder_under(
@@ -12177,6 +12544,12 @@ class ImportClient
             }
         }
 
+        if (
+            $excluded_wp_core_abspath !== null
+            && self::is_wp_core_entry_directly_under($path, $path_type, $excluded_wp_core_abspath)
+        ) {
+            return false;
+        }
         foreach ($excluded_path_prefixes as $excluded_path_prefix) {
             if (
                 Utils::path_remainder_under($path, $excluded_path_prefix)
@@ -12187,6 +12560,22 @@ class ImportClient
         }
 
         return true;
+    }
+
+    /**
+     * Whether $path is a WordPress core entry directly under $abspath, such as
+     * ABSPATH/wp-load.php. Directories are never core entries here; wp-admin
+     * and wp-includes are selected or excluded as prefixes instead.
+     */
+    private static function is_wp_core_entry_directly_under(string $path, string $path_type, string $abspath): bool
+    {
+        $remainder = Utils::path_remainder_under($path, $abspath);
+        // The remainder is "/name" with no further separator.
+        return $remainder !== null
+            && $remainder !== ""
+            && strpos($remainder, "/", 1) === false
+            && $path_type !== "dir"
+            && self::is_wp_core_entry(substr($remainder, 1));
     }
 
     /**
@@ -15000,6 +15389,7 @@ class ImportClient
         $this->state->user_agent = $previous_state->user_agent;
         $this->state->follow_symlinks = $previous_state->follow_symlinks;
         $this->state->include_host_plugins = $previous_state->include_host_plugins;
+        $this->state->wp_core_in_filesystem_root = $previous_state->wp_core_in_filesystem_root;
         $this->state->apply->remote_paths_removed_from_local_site = $previous_state->apply->remote_paths_removed_from_local_site;
         $this->state->fs_root_nonempty_behavior = $previous_state->fs_root_nonempty_behavior;
         $this->state->max_allowed_packet = $previous_state->max_allowed_packet;
@@ -15028,6 +15418,13 @@ class ImportClient
         $state["db_index"]["file"] = $this->encode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
+        // Source paths are arbitrary bytes, which JSON cannot hold.
+        foreach ($state["wp_core_in_filesystem_root"] ?? [] as $index => $entry) {
+            $state["wp_core_in_filesystem_root"][$index] = [
+                "abspath" => $this->encode_state_path_value($entry["abspath"]),
+                "path_prefixes" => array_map([$this, "encode_state_path_value"], $entry["path_prefixes"]),
+            ];
+        }
         // Host-plugin paths were plain UTF-8 strings. Renamed Reprint plugins
         // can have other filename bytes; tag those without changing old records.
         foreach ($state['apply']['remote_paths_removed_from_local_site'] ?? [] as $index => $path) {
@@ -15064,6 +15461,17 @@ class ImportClient
         $state["db_index"]["file"] = $this->decode_state_path_value(
             $state["db_index"]["file"] ?? null,
         );
+        if (is_array($state["wp_core_in_filesystem_root"] ?? null)) {
+            foreach ($state["wp_core_in_filesystem_root"] as $index => $entry) {
+                if (!is_array($entry) || !is_array($entry["path_prefixes"] ?? null)) {
+                    continue;
+                }
+                $state["wp_core_in_filesystem_root"][$index]["abspath"] =
+                    $this->decode_state_path_value($entry["abspath"] ?? null);
+                $state["wp_core_in_filesystem_root"][$index]["path_prefixes"] =
+                    array_map([$this, "decode_state_path_value"], $entry["path_prefixes"]);
+            }
+        }
         foreach ($state['apply']['remote_paths_removed_from_local_site'] ?? [] as $index => $path) {
             if (is_array($path)) {
                 $decoded = is_string($path['path_b64'] ?? null) ? base64_decode($path['path_b64'], true) : false;
@@ -16193,7 +16601,8 @@ if (
             'placeholder' => 'SOURCE',
             'repeatable' => true,
             'help' => 'Restrict the file pull to SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute ' .
-                'path to a directory or a single file); repeat for several. Default pulls everything',
+                'path to a directory or a single file); repeat for several. :wp-core: selects only the WordPress ' .
+                'core the site runs. Default pulls everything',
             'commands' => ['pull-files', 'files-pull'],
             'aliases' => ['only'],
         ],
@@ -16204,7 +16613,7 @@ if (
             'placeholder' => 'SOURCE',
             'repeatable' => true,
             'help' => 'Omit SOURCE (a :token: like :wp-content: or :wp-uploads:, or an absolute path) from the file pull; ' .
-                'repeat for several',
+                'repeat for several. :wp-core: omits the WordPress core the site runs',
             'commands' => ['pull-files', 'files-pull'],
         ],
 
