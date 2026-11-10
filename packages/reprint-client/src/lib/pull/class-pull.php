@@ -615,12 +615,6 @@ class Pull
             $options['flat_document_root'] = $options['flatten_to'];
         }
 
-        // Checked before any transfer, so a missing core does not surface
-        // only in the flat-docroot stage at the end of a long pull.
-        if (!empty($options['flatten_to']) && isset($options['core_files']) && $options['core_files'] === 'use-existing') {
-            \ImportClient::assert_flatten_target_has_own_core($options['flatten_to']);
-        }
-
         return $options;
     }
 

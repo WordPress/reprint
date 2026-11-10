@@ -6834,10 +6834,6 @@ class ImportClient
         $need_exploded_content =
             $plugins_detached || $mu_plugins_detached || $uploads_detached;
 
-        if ($use_existing_core_files) {
-            self::assert_flatten_target_has_own_core($flatten_to);
-        }
-
         // Create the target directory if it doesn't exist
         if (!is_dir($flatten_to)) {
             if (!mkdir($flatten_to, 0755, true)) {
@@ -7284,33 +7280,6 @@ class ImportClient
             "FLAT-DOCUMENT-ROOT | Created symlink: {$target} -> {$link_value}",
         );
         $created++;
-    }
-
-    /**
-     * Stop --core-files=use-existing unless --flatten-to has WordPress core of its own.
-     *
-     * Without core the layout cannot run WordPress. Core linked into
-     * --fs-root by an earlier --core-files=link run is the pulled core, not
-     * the site's: using it would send local edits into --fs-root and leave
-     * dangling links once a pull leaves core out.
-     */
-    public static function assert_flatten_target_has_own_core(string $flatten_to): void
-    {
-        $wp_includes = wp_join_unix_paths($flatten_to, "wp-includes");
-        if (is_link($wp_includes)) {
-            $link_target = readlink($wp_includes);
-            throw new RuntimeException(
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error with local paths, never HTML.
-                "--core-files=use-existing needs the site's own WordPress core at --flatten-to, but {$wp_includes} is a symlink to {$link_target}. Run flat-docroot once with --core-files=copy to replace it.",
-            );
-        }
-        $version_file = wp_join_unix_paths($wp_includes, "version.php");
-        if (!is_file($version_file)) {
-            throw new RuntimeException(
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error with a local path, never HTML.
-                "--core-files=use-existing needs WordPress core at --flatten-to, but {$version_file} does not exist.",
-            );
-        }
     }
 
     /**

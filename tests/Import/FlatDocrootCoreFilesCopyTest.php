@@ -512,28 +512,6 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertSame('<?php // version 7.1.4', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
     }
 
-    public function testUseExistingNeedsCoreAtTheTarget(): void
-    {
-        $this->createWpCloudLayout();
-        mkdir($this->flattenTo, 0755, true);
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage($this->flattenTo . '/wp-includes/version.php does not exist');
-
-        $this->flatten(['core_files' => 'use-existing']);
-    }
-
-    public function testUseExistingRejectsCoreLinkedByAnEarlierLinkModeRun(): void
-    {
-        $this->createWpCloudLayout();
-        $this->flatten(['core_files' => 'link']);
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage($this->flattenTo . '/wp-includes is a symlink to ');
-
-        $this->flatten(['core_files' => 'use-existing']);
-    }
-
     public function testUseExistingWithForceLeavesTheSitesCore(): void
     {
         $abspath = $this->fsRoot . '/var/www/html';

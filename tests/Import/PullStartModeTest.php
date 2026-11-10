@@ -128,24 +128,6 @@ class PullStartModeTest extends TestCase
         ]);
     }
 
-    public function testUsingExistingCoreWithoutCoreAtTheTargetIsRejectedWithTheOtherPullOptions(): void
-    {
-        $flattenTo = $this->tempDir . '/flat';
-        mkdir($flattenTo, 0755, true);
-
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage($flattenTo . '/wp-includes/version.php does not exist');
-
-        $pull = $this->makePull();
-        $reflection = new \ReflectionClass($pull);
-        $method = $reflection->getMethod('validate_and_default_pull_options');
-        $method->invoke($pull, [
-            'runtime' => 'none',
-            'flatten_to' => $flattenTo,
-            'core_files' => 'use-existing',
-        ]);
-    }
-
     public function testUnsupportedStartRuntimeIsRejected(): void
     {
         $this->expectException(\InvalidArgumentException::class);
