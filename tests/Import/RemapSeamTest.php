@@ -366,6 +366,10 @@ class RemapSeamTest extends TestCase
             Utils::realpath_with_missing_tail($symlink . '/missing-through-link')
         );
 
+        if (DIRECTORY_SEPARATOR === '\\') {
+            // Windows PHP cannot create a link to a missing target.
+            return;
+        }
         $broken_symlink = $this->tempDir . '/broken-link';
         symlink($this->tempDir . '/missing-target', $broken_symlink);
         $this->assertSame(

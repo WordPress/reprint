@@ -63,4 +63,6 @@ printf 'Uploaded on Linux\n' > /srv/htdocs/wp-content/uploads/2026/01/hello.txt
 
 (cd "$repository" && COMPOSER_ALLOW_SUPERUSER=1 composer install --working-dir=reprint-server-wp --no-dev --no-interaction --prefer-dist)
 cp -a "$repository/reprint-server-wp" /srv/htdocs/wp-content/plugins/reprint-server
-php "$repository/tests/e2e/windows/prepare-linux-source.php" /srv/htdocs "$private_key_path"
+# The Windows client reaches WSL through this address; WordPress redirects other hosts.
+source_url="http://$(hostname -I | cut -d ' ' -f 1):8082"
+php "$repository/tests/e2e/windows/prepare-linux-source.php" /srv/htdocs "$private_key_path" "$source_url"

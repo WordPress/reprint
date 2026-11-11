@@ -4,7 +4,7 @@
 if (PHP_OS_FAMILY !== 'Linux') {
     throw new RuntimeException('The source must run Linux PHP.');
 }
-[$script, $document_root, $private_key_path] = $argv;
+[$script, $document_root, $private_key_path, $site_url] = $argv;
 
 $plugin_directory = $document_root . '/wp-content/plugins/reprint-server';
 require $plugin_directory . '/vendor/autoload.php';
@@ -13,13 +13,13 @@ file_put_contents($plugin_directory . '/public-keys.php', "<?php return [\n    "
 file_put_contents($private_key_path, $private_key_pem);
 
 define('WP_INSTALLING', true);
-$_SERVER['HTTP_HOST'] = '127.0.0.1:8082';
+$_SERVER['HTTP_HOST'] = parse_url($site_url, PHP_URL_HOST) . ':' . parse_url($site_url, PHP_URL_PORT);
 require $document_root . '/wp-config.php';
 require_once ABSPATH . 'wp-admin/includes/upgrade.php';
 require_once ABSPATH . 'wp-admin/includes/plugin.php';
 wp_install('Linked Linux source', 'source', 'source@example.test', true, '', 'source-password');
-update_option('home', 'http://127.0.0.1:8082');
-update_option('siteurl', 'http://127.0.0.1:8082');
+update_option('home', $site_url);
+update_option('siteurl', $site_url);
 foreach (['reprint-server/index.php', 'managed-plugin/managed-plugin.php'] as $plugin) {
     $result = activate_plugin($plugin);
     if (is_wp_error($result)) {

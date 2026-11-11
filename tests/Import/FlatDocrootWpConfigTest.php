@@ -229,7 +229,11 @@ class FlatDocrootWpConfigTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path) || is_file($path)) {
+            if (is_link($path)) {
+                \LocalLink::remove_symlink($path);
+                continue;
+            }
+            if (is_file($path)) {
                 unlink($path);
                 continue;
             }

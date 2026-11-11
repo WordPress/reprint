@@ -96,7 +96,7 @@ class WpContentMerger
             return 0;
         }
 
-        foreach ($this->entries_with_links_last($this->source_wp_content) as $entry) {
+        foreach ($this->entries_with_links_last($this->source_wp_content) as [$entry, $link_value]) {
             $source_entry = wp_join_unix_paths($this->source_wp_content, $entry);
             $destination_entry = $this->routed_destinations[$entry]
                 ?? wp_join_unix_paths($this->destination_wp_content, $entry);
@@ -104,7 +104,7 @@ class WpContentMerger
             if (!file_exists($destination_entry) && !is_link($destination_entry)) {
                 // A detached component may not yet have a destination parent.
                 $this->create_parent_directory($destination_entry);
-                $this->move_entry($source_entry, $destination_entry);
+                $this->move_entry($source_entry, $destination_entry, $link_value);
                 continue;
             }
             $rule = $this->container_rules[$entry] ?? null;
@@ -127,12 +127,12 @@ class WpContentMerger
             return;
         }
 
-        foreach ($this->entries_with_links_last($source) as $entry) {
+        foreach ($this->entries_with_links_last($source) as [$entry, $link_value]) {
             $destination_entry = wp_join_unix_paths($destination, $entry);
             if (file_exists($destination_entry) || is_link($destination_entry)) {
                 continue;
             }
-            $this->move_entry(wp_join_unix_paths($source, $entry), $destination_entry);
+            $this->move_entry(wp_join_unix_paths($source, $entry), $destination_entry, $link_value);
         }
     }
 
@@ -143,12 +143,12 @@ class WpContentMerger
             return;
         }
 
-        foreach ($this->entries_with_links_last($source) as $entry) {
+        foreach ($this->entries_with_links_last($source) as [$entry, $link_value]) {
             $source_entry = wp_join_unix_paths($source, $entry);
             $destination_entry = wp_join_unix_paths($destination, $entry);
 
             if (!file_exists($destination_entry) && !is_link($destination_entry)) {
-                $this->move_entry($source_entry, $destination_entry);
+                $this->move_entry($source_entry, $destination_entry, $link_value);
                 continue;
             }
             $this->merge_file_tree($source_entry, $destination_entry);
@@ -164,18 +164,15 @@ class WpContentMerger
      * unchanged.
      *
      * Windows PHP reads a relative link back as its resolved absolute
-     * target, so there every moved link whose target exists gets a new
-     * relative value.
+     * target, so there every moved link gets a new relative value.
+     *
+     * @param string|null $link_value Value read from the source link before
+     *                                any sibling moved, or null for an entry
+     *                                which is not a link.
      */
-    private function move_entry(string $source_entry, string $destination_entry): void
+    private function move_entry(string $source_entry, string $destination_entry, ?string $link_value): void
     {
-        if (is_link($source_entry)) {
-            $link_value = readlink($source_entry);
-            if ($link_value === false) {
-                throw new RuntimeException(
-                    "Could not read the symlink value at {$source_entry}.",
-                );
-            }
+        if ($link_value !== null) {
             $path_format = Utils::native_path_format();
             if ($path_format === 'windows') {
                 $link_value = $this->windows_moved_link_value($source_entry, $destination_entry, $link_value);
@@ -306,26 +303,38 @@ class WpContentMerger
     }
 
     /**
-     * Lists a directory's entries with its symlinks last.
+     * Lists a directory's entries with its symlinks last, reading each link value first.
      *
      * Windows PHP can only create a symlink to an existing target, so a link
-     * to a sibling moves after the sibling has reached its destination.
+     * to a sibling moves after the sibling has reached its destination. It
+     * also cannot read a relative link whose target has gone, so every value
+     * is read before anything in the directory moves.
      *
-     * @return list<string> Entry names without "." and "..".
+     * @return list<array{0: string, 1: string|null}> Entry names without "." and
+     *                                                "..", each with its link value
+     *                                                or null.
      */
     private function entries_with_links_last(string $directory): array
     {
         $entries = [];
         $links = [];
         foreach (@scandir($directory) ?: [] as $entry) {
+            $entry = (string) $entry;
             if ($entry === "." || $entry === "..") {
                 continue;
             }
-            if (is_link(wp_join_unix_paths($directory, $entry))) {
-                $links[] = $entry;
-            } else {
-                $entries[] = $entry;
+            $path = wp_join_unix_paths($directory, $entry);
+            if (!is_link($path)) {
+                $entries[] = [$entry, null];
+                continue;
             }
+            $link_value = readlink($path);
+            if ($link_value === false) {
+                throw new RuntimeException(
+                    "Could not read the symlink value at {$path}.",
+                );
+            }
+            $links[] = [$entry, $link_value];
         }
         return array_merge($entries, $links);
     }

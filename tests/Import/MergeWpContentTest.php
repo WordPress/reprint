@@ -604,7 +604,7 @@ class MergeWpContentTest extends TestCase
     {
         if (!is_dir($dir) || is_link($dir)) {
             if (is_link($dir)) {
-                unlink($dir);
+                \LocalLink::remove_symlink($dir);
             }
             return;
         }
@@ -613,7 +613,11 @@ class MergeWpContentTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path) || is_file($path)) {
+            if (is_link($path)) {
+                \LocalLink::remove_symlink($path);
+                continue;
+            }
+            if (is_file($path)) {
                 unlink($path);
                 continue;
             }
