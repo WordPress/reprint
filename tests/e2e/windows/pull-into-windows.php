@@ -113,12 +113,16 @@ function describe_failure(string $site_directory, string $relative_path, string 
             var_export(realpath($path), true)
         );
     }
+    $searched_name = $names[count($names) - 2];
     foreach (file($audit_log_path) ?: [] as $line) {
-        foreach (array_slice($names, 1, -1) as $name) {
-            if (stripos($line, $name) !== false && stripos($line, 'link') !== false) {
-                echo $line;
-                break;
-            }
+        if (stripos($line, $searched_name) !== false) {
+            echo substr($line, 0, 600), "\n";
+        }
+    }
+    $pulled_tree = new RecursiveIteratorIterator(new RecursiveDirectoryIterator(dirname($site_directory) . '\\files', FilesystemIterator::SKIP_DOTS), RecursiveIteratorIterator::SELF_FIRST);
+    foreach ($pulled_tree as $pulled_path => $info) {
+        if (stripos($pulled_path, $searched_name) !== false) {
+            printf("pulled: %s link=%s\n", $pulled_path, var_export(is_link($pulled_path), true));
         }
     }
 }
