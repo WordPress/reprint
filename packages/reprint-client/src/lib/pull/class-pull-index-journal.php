@@ -311,7 +311,8 @@ class PullIndexJournal
                 is_file($local_absolute_path) && !LocalLink::is_link($local_absolute_path)
             );
         if ($local_relative_path !== null) {
-            $local_path_stat = lstat($local_absolute_path);
+            // Utils::source_lstat() gives a Windows junction the link type that lstat() leaves out.
+            $local_path_stat = Utils::source_lstat($local_absolute_path);
             if ($local_path_stat === false) {
                 throw new RuntimeException(
                     "Failed to inspect the pulled local absolute path: {$local_absolute_path}."

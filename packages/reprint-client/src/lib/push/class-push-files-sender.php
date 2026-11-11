@@ -1687,7 +1687,8 @@ final class PushFilesSender
     {
         $absolute_path = wp_join_unix_paths($this->filesystem_root, $path);
         clearstatcache(true, $absolute_path);
-        $path_stat = @lstat($absolute_path);
+        // Match the push plan's indexer, which reports a Windows junction as a link.
+        $path_stat = @Utils::source_lstat($absolute_path);
         if (!is_array($path_stat)) {
             return null;
         }

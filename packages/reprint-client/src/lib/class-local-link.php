@@ -99,9 +99,10 @@ final class LocalLink
      *
      * Creating a Windows symlink needs a privilege that standard accounts,
      * and administrators without elevation, do not hold. Any account may
-     * create a junction to a directory or a hard link to a file on the same
-     * volume. A file on another volume is copied, so it shows the target's
-     * contents as of this call.
+     * create a junction to a directory. A file is copied, so it shows the
+     * target's contents as of this call. A hard link would stay current, but
+     * PHP sees it as an ordinary file, so a later copy() or download over it
+     * would also rewrite the target.
      *
      * @param string $link_value Value the symlink would have had.
      * @param string $link_path  Path of the new entry.
@@ -130,7 +131,7 @@ final class LocalLink
             return proc_close($process) === 0 && self::is_link($link_path);
         }
         if (is_file($target_path)) {
-            return @link($target_path, $link_path) || @copy($target_path, $link_path);
+            return @copy($target_path, $link_path);
         }
         return false;
     }
@@ -188,7 +189,7 @@ final class LocalLink
     public static function has_value(string $link_path, string $link_value): bool
     {
         if (!self::is_link($link_path)) {
-            // A hard link or copy made in place of a file symlink has its target's contents.
+            // A copy made in place of a file symlink has its target's contents.
             $target_path = self::lexical_target($link_value, $link_path);
             return Utils::native_path_format() === 'windows'
                 && is_file($link_path)

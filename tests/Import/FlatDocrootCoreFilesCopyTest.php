@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+require_once __DIR__ . '/LinkOrCopyAssertions.php';
 
 /**
  * Verify run_flat_document_root() with --core-files=copy places real copies
@@ -14,6 +15,8 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
  */
 class FlatDocrootCoreFilesCopyTest extends TestCase
 {
+    use LinkOrCopyAssertions;
+
     private string $tempDir;
     private string $stateDir;
     private string $fsRoot;
@@ -52,7 +55,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertSame('<?php // admin', file_get_contents($this->flattenTo . '/wp-admin/admin.php'));
         $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
 
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-content'), 'wp-content should stay a symlink');
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-content', 'wp-content should stay a symlink');
         $this->assertSame('theme', file_get_contents($this->flattenTo . '/wp-content/themes/theme.txt'));
     }
 
@@ -72,7 +75,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertFalse(\LocalLink::is_link($this->flattenTo . '/index.php'));
         $this->assertFalse(\LocalLink::is_link($this->flattenTo . '/wp-load.php'));
         foreach (['.htaccess', 'robots.txt', 'wp-config.php', 'wp-content'] as $siteEntry) {
-            $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/' . $siteEntry), "{$siteEntry} should stay a symlink");
+            $this->assertLinkedOrCopied($this->flattenTo . '/' . $siteEntry, "{$siteEntry} should stay a symlink");
         }
     }
 
@@ -82,15 +85,15 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
 
         $this->flatten([]);
 
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-admin'));
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/index.php'));
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-admin');
+        $this->assertLinkedOrCopied($this->flattenTo . '/index.php');
     }
 
     public function testReplacesLinksFromAnEarlierLinkModeRun(): void
     {
         $this->createWpCloudLayout();
         $this->flatten(['core_files' => 'link']);
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-includes'));
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-includes');
 
         $this->flatten(['core_files' => 'copy']);
 
@@ -176,8 +179,8 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
 
         $this->flatten(['core_files' => 'link', 'force' => true]);
 
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-includes'));
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/index.php'));
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-includes');
+        $this->assertLinkedOrCopied($this->flattenTo . '/index.php');
     }
 
     public function testSkipsFilesWithMatchingSizeAndMtime(): void
@@ -429,8 +432,8 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->flatten(['core_files' => 'copy']);
 
         $this->assertFalse(\LocalLink::is_link($this->flattenTo . '/wp-config-sample.php'), 'wp-config-sample.php ships with core');
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-config-local.php'), 'wp-config-local.php belongs to the site');
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-salt.php'), 'wp-salt.php is named like core but belongs to the site');
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-config-local.php', 'wp-config-local.php belongs to the site');
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-salt.php', 'wp-salt.php is named like core but belongs to the site');
     }
 
     public function testKeepsCoreEntriesThatAreSymlinksOnTheSourceLinked(): void
@@ -444,7 +447,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
 
         $this->flatten(['core_files' => 'copy']);
 
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-load.php'), 'a symlinked core entry should stay a link');
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-load.php', 'a symlinked core entry should stay a link');
         $this->assertSame('<?php // wp-load', file_get_contents($this->flattenTo . '/wp-load.php'));
         $this->assertFalse(\LocalLink::is_link($this->flattenTo . '/index.php'));
     }
@@ -480,7 +483,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertSame('<?php // version 7.1.3', file_get_contents($abspath . '/wp-includes/version.php'));
         // wp-salt.php is named like core, but the site's wp-config.php needs it.
         foreach (['.htaccess', 'wp-content', 'wp-salt.php'] as $siteEntry) {
-            $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/' . $siteEntry), "{$siteEntry} should be a symlink");
+            $this->assertLinkedOrCopied($this->flattenTo . '/' . $siteEntry, "{$siteEntry} should be a symlink");
         }
     }
 
@@ -498,7 +501,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
 
         $this->flatten(['core_files' => 'use-existing']);
 
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-content'));
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-content');
         $this->assertSame('theme', file_get_contents($this->flattenTo . '/wp-content/themes/theme.txt'));
         $this->assertFalse(\LocalLink::is_link($this->flattenTo . '/wp-admin'));
         $this->assertSame('<?php // version 7.1.3', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
@@ -537,7 +540,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->assertFalse(\LocalLink::is_link($this->flattenTo . '/wp-includes'));
         $this->assertSame('<?php // version 7.1.4', file_get_contents($this->flattenTo . '/wp-includes/version.php'));
         $this->assertFalse(\LocalLink::is_link($this->flattenTo . '/index.php'));
-        $this->assertTrue(\LocalLink::is_link($this->flattenTo . '/wp-content'), '--force replaces the real wp-content with a link');
+        $this->assertLinkedOrCopied($this->flattenTo . '/wp-content', '--force replaces the real wp-content with a link');
     }
 
     public function testUseExistingNeedsAbspathWhenWpContentLivesUnderIt(): void

@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+require_once __DIR__ . '/LinkOrCopyAssertions.php';
 
 /**
  * Verify run_flat_document_root() picks up wp-config.php when it lives
@@ -12,6 +13,8 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
  */
 class FlatDocrootWpConfigTest extends TestCase
 {
+    use LinkOrCopyAssertions;
+
     private string $tempDir;
     private string $stateDir;
     private string $fsRoot;
@@ -84,7 +87,7 @@ class FlatDocrootWpConfigTest extends TestCase
 
         $wpConfigFlat = $flattenTo . '/wp-config.php';
         $this->assertFileExists($wpConfigFlat, 'wp-config.php should exist in flattened output');
-        $this->assertTrue(\LocalLink::is_link($wpConfigFlat), 'wp-config.php should be a symlink');
+        $this->assertLinkedOrCopied($wpConfigFlat, 'wp-config.php should be a symlink');
         $this->assertStringContainsString(
             'wp-config from parent',
             file_get_contents($wpConfigFlat),
@@ -185,10 +188,10 @@ class FlatDocrootWpConfigTest extends TestCase
             ['flatten_to' => $flattenTo, 'force' => false],
         ]);
 
-        $this->assertTrue(\LocalLink::is_link($flattenTo . '/wp-load.php'));
-        $this->assertTrue(\LocalLink::is_link($flattenTo . '/wp-admin'));
-        $this->assertTrue(\LocalLink::is_link($flattenTo . '/wp-includes'));
-        $this->assertTrue(\LocalLink::is_link($flattenTo . '/wp-content'));
+        $this->assertLinkedOrCopied($flattenTo . '/wp-load.php');
+        $this->assertLinkedOrCopied($flattenTo . '/wp-admin');
+        $this->assertLinkedOrCopied($flattenTo . '/wp-includes');
+        $this->assertLinkedOrCopied($flattenTo . '/wp-content');
         $this->assertSame('theme', file_get_contents($flattenTo . '/wp-content/theme.txt'));
     }
 

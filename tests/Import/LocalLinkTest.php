@@ -151,11 +151,11 @@ final class LocalLinkTest extends TestCase
         $this->assertSame('akismet', file_get_contents($target_path . '/akismet.php'), 'removing the junction keeps its target');
     }
 
-    /** An account without the symlink privilege gets a hard link for a file. */
-    public function testAHardLinkStandsInForAFileSymlink(): void
+    /** An account without the symlink privilege gets a copy of a file. */
+    public function testACopyStandsInForAFileSymlink(): void
     {
         if (Utils::native_path_format() !== 'windows') {
-            $this->markTestSkipped('Hard links are a Windows substitute.');
+            $this->markTestSkipped('Copies are a Windows substitute.');
         }
         $target_path = $this->root . '/files/wordpress/plugins/akismet/latest/akismet.php';
         $link_path = $this->root . '/files/wp-content/akismet.php';
@@ -166,9 +166,11 @@ final class LocalLinkTest extends TestCase
         $this->assertSame('akismet', file_get_contents($link_path));
         $this->assertTrue(LocalLink::has_value($link_path, $link_value));
         $this->assertFalse(LocalLink::has_value($link_path, LocalLink::link_value(dirname($link_path), $this->root . '/elsewhere')));
+        file_put_contents($link_path, 'changed');
+        $this->assertSame('akismet', file_get_contents($target_path), 'writing the stand-in leaves the target alone');
+        $this->assertFalse(LocalLink::has_value($link_path, $link_value));
         LocalLink::remove_without_following_links($link_path);
         $this->assertFileDoesNotExist($link_path);
-        $this->assertSame('akismet', file_get_contents($target_path));
     }
 
     /** Calls the substitute directly, so an administrator account covers it too. */
