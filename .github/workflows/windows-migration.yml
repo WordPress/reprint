@@ -48,6 +48,43 @@ jobs:
       - name: Check received entry paths on a native Windows client
         working-directory: tests
         run: php ../vendor/bin/phpunit --group received-paths Import/RuntimeFilesRootPathTest.php
+  windows-client:
+    name: Pull, merge, and flatten with a native Windows client (${{ matrix.account }})
+    strategy:
+      fail-fast: false
+      matrix:
+        account: [administrator, standard]
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, pdo_sqlite, curl, mbstring
+          coverage: none
+      - run: composer install --no-interaction --prefer-dist
+      - name: Run link-placing client tests
+        shell: pwsh
+        run: |
+          $tests = 'Import/FlatDocrootWpConfigTest.php Import/FlatDocrootCoreFilesCopyTest.php Import/MergeWpContentTest.php Import/PullFilterOptionTest.php Import/WpCoreFilesPullTest.php Import/FilesPullLocalIndexTest.php'
+          $php = (Get-Command php).Source
+          $failed = 0
+          foreach ($test in $tests.Split(' ')) {
+            Write-Output "::group::$test"
+            if ('${{ matrix.account }}' -eq 'standard') {
+              ./tests/e2e/windows/run-as-standard-user.ps1 -WorkingDirectory "$env:GITHUB_WORKSPACE\tests" -Command "`"$php`" ..\vendor\bin\phpunit $test"
+            } else {
+              Push-Location tests
+              & $php ../vendor/bin/phpunit $test
+              Pop-Location
+            }
+            if ($LASTEXITCODE -ne 0) { $failed++ }
+            Write-Output '::endgroup::'
+          }
+          exit $failed
   windows-to-linux:
     needs: php-reader
     name: Pull Windows WordPress into Linux (${{ matrix.source }})
@@ -124,7 +161,7 @@ jobs:
 
   ci-result:
     name: Windows migration result
-    needs: [php-reader, received-paths, windows-to-linux]
+    needs: [php-reader, received-paths, windows-client, windows-to-linux]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
