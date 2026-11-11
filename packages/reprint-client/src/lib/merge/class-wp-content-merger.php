@@ -188,10 +188,9 @@ class WpContentMerger
                         $this->source_wp_content
                     )
                 ) {
-                    $link_value = Utils::relative_link_target(
+                    $link_value = LocalLink::link_value(
                         Utils::realpath_with_missing_tail(dirname($destination_entry)),
-                        $resolved_target,
-                        $path_format
+                        $resolved_target
                     );
                 }
             }
@@ -396,11 +395,17 @@ class WpContentMerger
         );
         $resolved_source_wp_content = Utils::realpath_with_missing_tail($this->source_wp_content);
         $target_moves = Utils::path_is_same_as_or_descendant_of($resolved_target, $resolved_source_wp_content);
-        return Utils::relative_link_target(
-            Utils::realpath_with_missing_tail(dirname($target_moves ? $source_entry : $destination_entry)),
-            $resolved_target,
-            'windows'
-        );
+        if ($target_moves) {
+            // Keep the target's position relative to the link.
+            $resolved_target = Utils::normalize_path(
+                wp_join_unix_paths(
+                    Utils::realpath_with_missing_tail(dirname($destination_entry)),
+                    Utils::relative_link_target(Utils::realpath_with_missing_tail(dirname($source_entry)), $resolved_target, 'windows')
+                ),
+                'windows'
+            );
+        }
+        return LocalLink::link_value(dirname($destination_entry), $resolved_target);
     }
 }
 

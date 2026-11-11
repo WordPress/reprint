@@ -42,10 +42,10 @@ final class LocalLinkTest extends TestCase
         }
     }
 
-    public function testARelativeDirectoryLinkResolvesFromItsOwnDirectory(): void
+    public function testADirectoryLinkResolvesFromAnotherWorkingDirectory(): void
     {
         $link_path = $this->root . '/files/wp-content/plugins/akismet';
-        $link_value = Utils::relative_link_target(dirname($link_path), $this->root . '/files/wordpress/plugins/akismet/latest', Utils::native_path_format());
+        $link_value = LocalLink::link_value(dirname($link_path), $this->root . '/files/wordpress/plugins/akismet/latest');
 
         $this->assertTrue(LocalLink::create_symlink($link_value, $link_path));
 
@@ -53,13 +53,13 @@ final class LocalLinkTest extends TestCase
         $this->assertSame('akismet', file_get_contents($link_path . '/akismet.php'));
         $this->assertSame($this->root . '/elsewhere', Utils::normalize_path(getcwd(), Utils::native_path_format()), 'the working directory is restored');
         $this->assertTrue(LocalLink::has_value($link_path, $link_value));
-        $this->assertFalse(LocalLink::has_value($link_path, Utils::relative_link_target(dirname($link_path), $this->root . '/elsewhere', Utils::native_path_format())));
+        $this->assertFalse(LocalLink::has_value($link_path, LocalLink::link_value(dirname($link_path), $this->root . '/elsewhere')));
     }
 
-    public function testARelativeFileLinkResolvesFromItsOwnDirectory(): void
+    public function testAFileLinkResolvesFromAnotherWorkingDirectory(): void
     {
         $link_path = $this->root . '/files/wp-content/akismet.php';
-        $link_value = Utils::relative_link_target(dirname($link_path), $this->root . '/files/wordpress/plugins/akismet/latest/akismet.php', Utils::native_path_format());
+        $link_value = LocalLink::link_value(dirname($link_path), $this->root . '/files/wordpress/plugins/akismet/latest/akismet.php');
 
         $this->assertTrue(LocalLink::create_symlink($link_value, $link_path));
 
@@ -71,7 +71,7 @@ final class LocalLinkTest extends TestCase
     public function testASourceLinkValueResolvesOnThisFilesystem(): void
     {
         $link_path = $this->root . '/files/wp-content/plugins/akismet';
-        $link_value = LocalLink::native_link_value('../../wordpress/plugins/akismet/latest');
+        $link_value = LocalLink::native_link_value('../../wordpress/plugins/akismet/latest', $link_path);
 
         $this->assertTrue(LocalLink::create_symlink($link_value, $link_path));
 
@@ -82,7 +82,7 @@ final class LocalLinkTest extends TestCase
     public function testRemovingADirectoryLinkKeepsItsTarget(): void
     {
         $link_path = $this->root . '/files/wp-content/plugins/akismet';
-        $link_value = LocalLink::native_link_value('../../wordpress/plugins/akismet/latest');
+        $link_value = LocalLink::native_link_value('../../wordpress/plugins/akismet/latest', $link_path);
         $this->assertTrue(LocalLink::create_symlink($link_value, $link_path));
 
         $this->assertTrue(LocalLink::remove_symlink($link_path));
@@ -113,6 +113,28 @@ final class LocalLinkTest extends TestCase
             realpath($this->root . '/files/wordpress/plugins/akismet/latest'),
             readlink($this->root . '/files/wp-content/plugins/backward')
         );
+    }
+
+    /**
+     * Windows applies ".." in a relative value to the path used to reach the
+     * link, so a relative link inside a linked directory misses its target.
+     * flat-docroot reaches the pulled wp-content through such a link.
+     */
+    public function testWindowsResolvesARelativeValueThroughTheLinkedPath(): void
+    {
+        if (Utils::native_path_format() !== 'windows') {
+            $this->markTestSkipped('Windows link behavior.');
+        }
+        mkdir($this->root . '/site');
+        $this->assertTrue(symlink($this->root . '\files\wp-content', $this->root . '\site\wp-content'));
+        chdir($this->root . '/files/wp-content/plugins');
+        $this->assertTrue(symlink('..\..\wordpress\plugins\akismet\latest', 'relative'));
+        $absolute_link_path = $this->root . '/files/wp-content/plugins/absolute';
+        $this->assertTrue(LocalLink::create_symlink(LocalLink::native_link_value('../../wordpress/plugins/akismet/latest', $absolute_link_path), $absolute_link_path));
+
+        $this->assertFileExists($this->root . '/files/wp-content/plugins/relative/akismet.php');
+        $this->assertFileDoesNotExist($this->root . '/site/wp-content/plugins/relative/akismet.php');
+        $this->assertFileExists($this->root . '/site/wp-content/plugins/absolute/akismet.php');
     }
 
     private function can_create_symlinks(): bool

@@ -146,7 +146,7 @@ class MergeWpContentTest extends TestCase
         mkdir($this->localWpContent . '/plugins', 0755, true);
         // The destination parent is at a different depth.
         \LocalLink::create_symlink(
-            \LocalLink::native_link_value('../../shared-store/local-plugin'),
+            \LocalLink::native_link_value('../../shared-store/local-plugin', $this->localWpContent . '/plugins/linked-plugin'),
             $this->localWpContent . '/plugins/linked-plugin',
         );
 

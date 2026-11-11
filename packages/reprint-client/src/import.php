@@ -7200,7 +7200,7 @@ class ImportClient
             );
         }
 
-        $link_value = Utils::relative_link_target($target_parent_real, $abs_source, Utils::native_path_format());
+        $link_value = LocalLink::link_value($target_parent_real, $abs_source);
 
         // If the target is already a symlink, check if it resolves to the
         // same place. Refresh if not, skip if already correct.
@@ -11874,7 +11874,7 @@ class ImportClient
             !$this->follow_symlinks ||
             !$this->next_remote_index_contains_remote_absolute_path_prefix($remote_absolute_target)
         ) {
-            return LocalLink::native_link_value($target);
+            return LocalLink::native_link_value($target, $local_absolute_path);
         }
 
         // Repoint to where the target's content is placed by the same pull
@@ -11882,18 +11882,14 @@ class ImportClient
         $local_absolute_target = $this->path_mapper()->remote_path_to_local_path(
             $remote_absolute_target
         );
-        $local_relative_target = Utils::relative_link_target(
-            dirname($local_absolute_path),
-            $local_absolute_target,
-            Utils::native_path_format()
-        );
+        $local_link_value = LocalLink::link_value(dirname($local_absolute_path), $local_absolute_target);
 
         $this->audit_log(
-            "SYMLINK TARGET REMAP | {$remote_absolute_path}: {$target} -> {$local_relative_target}",
+            "SYMLINK TARGET REMAP | {$remote_absolute_path}: {$target} -> {$local_link_value}",
             false,
         );
 
-        return $local_relative_target;
+        return $local_link_value;
     }
 
     /**

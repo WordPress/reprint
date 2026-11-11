@@ -438,7 +438,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createCoreTree($this->fsRoot . '/srv/htdocs/__wp__', '7.1.3');
         $abspath = $this->fsRoot . '/srv/htdocs';
         unlink($abspath . '/__wp__/index.php');
-        \LocalLink::create_symlink(\LocalLink::native_link_value('__wp__/wp-load.php'), $abspath . '/wp-load.php');
+        \LocalLink::create_symlink(\LocalLink::native_link_value('__wp__/wp-load.php', $abspath . '/wp-load.php'), $abspath . '/wp-load.php');
         file_put_contents($abspath . '/index.php', '<?php // site index');
         $this->writePreflight(['abspath' => '/srv/htdocs']);
 
