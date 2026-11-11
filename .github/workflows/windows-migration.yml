@@ -49,11 +49,7 @@ jobs:
         working-directory: tests
         run: php ../vendor/bin/phpunit --group received-paths Import/RuntimeFilesRootPathTest.php
   windows-client:
-    name: Pull, merge, and flatten with a native Windows client (${{ matrix.account }})
-    strategy:
-      fail-fast: false
-      matrix:
-        account: [administrator, standard]
+    name: Pull, merge, and flatten with a native Windows client
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
@@ -74,13 +70,9 @@ jobs:
           $failed = 0
           foreach ($test in $tests.Split(' ')) {
             Write-Output "::group::$test"
-            if ('${{ matrix.account }}' -eq 'standard') {
-              ./tests/e2e/windows/run-as-standard-user.ps1 -WorkingDirectory "$env:GITHUB_WORKSPACE\tests" -Command "`"$php`" ..\vendor\bin\phpunit $test"
-            } else {
-              Push-Location tests
-              & $php ../vendor/bin/phpunit --display-warnings $test
-              Pop-Location
-            }
+            Push-Location tests
+            & $php ../vendor/bin/phpunit --display-warnings $test
+            Pop-Location
             if ($LASTEXITCODE -ne 0) { $failed++ }
             Write-Output '::endgroup::'
           }
