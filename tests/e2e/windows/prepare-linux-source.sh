@@ -29,6 +29,9 @@ ln -s __wp__/wp-admin /srv/htdocs/wp-admin
 ln -s __wp__/wp-includes /srv/htdocs/wp-includes
 cat > /srv/htdocs/index.php <<'PHP'
 <?php
+// Core's wp-load.php looks for wp-config.php beside its realpath unless
+// ABSPATH already names the link, whose parent holds wp-config.php.
+define('ABSPATH', __DIR__ . '/__wp__/');
 define('WP_USE_THEMES', true);
 require __DIR__ . '/__wp__/wp-blog-header.php';
 PHP
@@ -41,7 +44,7 @@ define('DB_HOST', '127.0.0.1');
 define('DB_CHARSET', 'utf8mb4');
 define('DB_COLLATE', '');
 define('DISABLE_WP_CRON', true);
-define('WP_CONTENT_DIR', '/srv/htdocs/wp-content');
+define('WP_CONTENT_DIR', __DIR__ . '/wp-content');
 $table_prefix = 'wp_';
 if (!defined('ABSPATH')) {
     define('ABSPATH', '/srv/htdocs/__wp__/');
