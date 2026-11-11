@@ -93,6 +93,30 @@ final class PullLinkBeforeTargetTest extends TestCase
         gc_collect_cycles();
     }
 
+    /** WP Cloud's wp-admin link reaches core through the __wp__ link, which may come later. */
+    public function testALinkThroughALaterLinkResolvesAfterTheFetch(): void
+    {
+        $client = $this->receive([
+            ['headers' => ['X-Chunk-Type' => 'symlink', 'X-Symlink-Path' => base64_encode('/srv/htdocs/wp-admin'),
+                'X-Symlink-Target' => base64_encode('__wp__/wp-admin'), 'X-Symlink-Ctime' => '7']],
+            ['headers' => ['X-Chunk-Type' => 'symlink', 'X-Symlink-Path' => base64_encode('/srv/htdocs/__wp__'),
+                'X-Symlink-Target' => base64_encode('../../wordpress/core/6.7'), 'X-Symlink-Ctime' => '7']],
+            ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/wordpress/core/6.7/wp-admin/index.php'),
+                'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '5'], 'body' => 'admin'],
+        ]);
+
+        ( new \ReflectionMethod($client, 'create_deferred_symlinks') )->invoke($client);
+
+        $this->assertTrue(is_link($this->root . '/files/srv/htdocs/wp-admin'));
+        $this->assertSame('admin', file_get_contents($this->root . '/files/srv/htdocs/wp-admin/index.php'));
+        $pull_state_directory = $this->root . '/state/remotes/' . md5(rtrim($this->url, '?&')) . '/pull';
+        $this->assertFileDoesNotExist($pull_state_directory . '/deferred-symlinks.jsonl');
+        $this->assertFileDoesNotExist($pull_state_directory . '/deferred-symlinks.jsonl.remaining');
+
+        unset($client);
+        gc_collect_cycles();
+    }
+
     /** Sends parts through the real multipart reader. */
     private function receive(array $parts): \ImportClient
     {

@@ -67,7 +67,8 @@ final class LocalLink
      *
      * Windows PHP resolves a relative value from the current directory to
      * choose between a file and a directory link, so a relative value is
-     * created from the link's own directory.
+     * created from the link's own directory. Failures return false without
+     * a PHP warning; callers report them.
      *
      * @param string $link_value Value to store in the link.
      * @param string $link_path  Path of the new link.
@@ -75,14 +76,14 @@ final class LocalLink
     public static function create_symlink(string $link_value, string $link_path): bool
     {
         if (Utils::native_path_format() !== 'windows' || Utils::is_absolute_path($link_value, 'windows')) {
-            return symlink($link_value, $link_path);
+            return @symlink($link_value, $link_path);
         }
         $working_directory = getcwd();
-        if ($working_directory === false || !chdir(dirname($link_path))) {
+        if ($working_directory === false || !@chdir(dirname($link_path))) {
             return false;
         }
         try {
-            return symlink($link_value, basename($link_path));
+            return @symlink($link_value, basename($link_path));
         } finally {
             chdir($working_directory);
         }
@@ -154,6 +155,91 @@ final class LocalLink
         }
         clearstatcache(true, $link_path);
         return !is_link($link_path) && !file_exists($link_path);
+    }
+
+    /**
+     * Removes $path and, for a directory, everything in it, without following links.
+     *
+     * A link is removed as a link, so its target is left alone.
+     *
+     * @param string $path Path to remove; nothing happens when it does not exist.
+     * @throws RuntimeException When an entry cannot be removed, naming that
+     *                          entry and PHP's reason.
+     */
+    public static function remove_without_following_links(string $path): void
+    {
+        if (is_link($path)) {
+            if (!self::remove_symlink($path)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
+                throw new RuntimeException("Could not remove the symlink at {$path}: " . self::last_php_error());
+            }
+            return;
+        }
+        if (is_dir($path)) {
+            $entries = @scandir($path);
+            if ($entries === false) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
+                throw new RuntimeException("Could not list the directory {$path} for removal: " . self::last_php_error());
+            }
+            foreach ($entries as $entry) {
+                if ($entry !== '.' && $entry !== '..') {
+                    self::remove_without_following_links(wp_join_unix_paths($path, $entry));
+                }
+            }
+            if (!@rmdir($path)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
+                throw new RuntimeException("Could not remove the directory {$path}: " . self::last_php_error());
+            }
+            return;
+        }
+        if (file_exists($path) && !@unlink($path)) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
+            throw new RuntimeException("Could not remove the file {$path}: " . self::last_php_error());
+        }
+    }
+
+    /**
+     * Returns the Windows value a link needs after it moves from $source_link_path
+     * to $destination_link_path.
+     *
+     * $read_link_value is what readlink() returned: the resolved absolute
+     * target of a relative link, or the stored value of an absolute one.
+     * A target inside $moving_tree moves with it, so the new value keeps the
+     * link's position relative to that target. Any other target stays where
+     * it is.
+     *
+     * @param string $source_link_path      Link path before the move.
+     * @param string $destination_link_path Link path after the move.
+     * @param string $read_link_value       readlink() of the link before the move.
+     * @param string $moving_tree           Directory whose contents move together.
+     */
+    public static function windows_moved_link_value(
+        string $source_link_path,
+        string $destination_link_path,
+        string $read_link_value,
+        string $moving_tree
+    ): string {
+        $resolved_target = Utils::realpath_with_missing_tail(
+            Utils::is_absolute_path($read_link_value, 'windows')
+                ? $read_link_value
+                : wp_join_unix_paths(dirname($source_link_path), $read_link_value)
+        );
+        if (Utils::path_is_same_as_or_descendant_of($resolved_target, Utils::realpath_with_missing_tail($moving_tree))) {
+            $resolved_target = Utils::normalize_path(
+                wp_join_unix_paths(
+                    Utils::realpath_with_missing_tail(dirname($destination_link_path)),
+                    Utils::relative_link_target(Utils::realpath_with_missing_tail(dirname($source_link_path)), $resolved_target, 'windows')
+                ),
+                'windows'
+            );
+        }
+        return self::link_value(dirname($destination_link_path), $resolved_target);
+    }
+
+    /** Returns PHP's message for the last suppressed failure. */
+    private static function last_php_error(): string
+    {
+        return error_get_last()['message'] ?? 'PHP reported no reason';
     }
 
     /** Returns the path $link_value names from the directory holding $link_path. */

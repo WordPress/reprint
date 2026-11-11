@@ -185,7 +185,7 @@ class MergeWpContentTest extends TestCase
         $this->assertTrue(is_link($moved));
         $this->assertTrue(
             \LocalLink::has_value($moved, 'parent-theme'),
-            'a value pointing inside the merged tree still names the sibling; observed ' . var_export(@readlink($moved), true),
+            'a value pointing inside the merged tree still names the sibling; observed ' . json_encode(@readlink($moved)),
         );
         $this->assertFileExists(
             $moved . '/style.css',
@@ -202,7 +202,7 @@ class MergeWpContentTest extends TestCase
         $this->merge();
 
         $moved = $this->pulledWpContent . '/themes/child-theme';
-        $this->assertTrue(\LocalLink::has_value($moved, 'parent-theme'), 'observed ' . var_export(@readlink($moved), true));
+        $this->assertTrue(\LocalLink::has_value($moved, 'parent-theme'), 'observed ' . json_encode(@readlink($moved)));
         $this->assertSame(
             '/* pulled parent */',
             file_get_contents($moved . '/style.css'),

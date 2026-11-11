@@ -175,7 +175,7 @@ class WpContentMerger
         if ($link_value !== null) {
             $path_format = Utils::native_path_format();
             if ($path_format === 'windows') {
-                $link_value = $this->windows_moved_link_value($source_entry, $destination_entry, $link_value);
+                $link_value = LocalLink::windows_moved_link_value($source_entry, $destination_entry, $link_value, $this->source_wp_content);
             } elseif (strpos($link_value, "/") !== 0) {
                 $resolved_target = Utils::normalize_path(
                     wp_join_unix_paths(dirname($source_entry), $link_value),
@@ -199,16 +199,11 @@ class WpContentMerger
                     "Failed to create symlink: {$destination_entry} -> {$link_value}",
                 );
             }
-            if (!LocalLink::remove_symlink($source_entry)) {
-                throw new RuntimeException(
-                    "Created {$destination_entry} but could not remove the original " .
-                        "symlink at {$source_entry}.",
-                );
-            }
+            LocalLink::remove_without_following_links($source_entry);
         } elseif (!@rename($source_entry, $destination_entry)) {
             // A sibling rename prevents a partial copy from occupying the destination.
             $staging_path = $destination_entry . self::STAGING_SUFFIX;
-            $this->remove_path_without_following_symlinks($staging_path);
+            LocalLink::remove_without_following_links($staging_path);
             try {
                 $this->copy_path($source_entry, $staging_path);
                 if (!@rename($staging_path, $destination_entry)) {
@@ -218,15 +213,15 @@ class WpContentMerger
                     );
                 }
             } catch (Throwable $copy_failure) {
-                $this->remove_path_without_following_symlinks($staging_path);
+                try {
+                    LocalLink::remove_without_following_links($staging_path);
+                } catch (RuntimeException $cleanup_failure) {
+                    // Report the copy failure first; the staging path is cleared again on the next run.
+                    $copy_failure = new RuntimeException($copy_failure->getMessage() . ' ' . $cleanup_failure->getMessage(), 0, $copy_failure);
+                }
                 throw $copy_failure;
             }
-            if (!$this->remove_path_without_following_symlinks($source_entry)) {
-                throw new RuntimeException(
-                    "Copied {$source_entry} to {$destination_entry} but could not remove " .
-                        "the original at {$source_entry}.",
-                );
-            }
+            LocalLink::remove_without_following_links($source_entry);
         }
 
         ++$this->moved;
@@ -342,70 +337,6 @@ class WpContentMerger
     private function is_real_directory(string $path): bool
     {
         return !is_link($path) && is_dir($path);
-    }
-
-    /** Remove a path without following symlinks. */
-    private function remove_path_without_following_symlinks(string $path): bool
-    {
-        if (!file_exists($path) && !is_link($path)) {
-            return true;
-        }
-
-        if (is_link($path)) {
-            return LocalLink::remove_symlink($path);
-        }
-        if (!is_dir($path)) {
-            return true === @unlink($path);
-        }
-
-        $entries = @scandir($path);
-        if ($entries === false) {
-            return false;
-        }
-        foreach ($entries as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
-            if (
-                !$this->remove_path_without_following_symlinks(
-                    wp_join_unix_paths($path, $entry)
-                )
-            ) {
-                return false;
-            }
-        }
-        return true === @rmdir($path);
-    }
-
-    /**
-     * Returns the value a moved link needs on Windows.
-     *
-     * $read_link_value is what readlink() returned: the resolved absolute
-     * target of a relative link, or the stored value of an absolute one.
-     * A target inside the source tree moves with it, so the new value keeps
-     * the link's position relative to that target. An external target stays
-     * where it is, so the new value reaches it from the destination.
-     */
-    private function windows_moved_link_value(string $source_entry, string $destination_entry, string $read_link_value): string
-    {
-        $resolved_target = Utils::realpath_with_missing_tail(
-            Utils::is_absolute_path($read_link_value, 'windows')
-                ? $read_link_value
-                : wp_join_unix_paths(dirname($source_entry), $read_link_value)
-        );
-        $resolved_source_wp_content = Utils::realpath_with_missing_tail($this->source_wp_content);
-        $target_moves = Utils::path_is_same_as_or_descendant_of($resolved_target, $resolved_source_wp_content);
-        if ($target_moves) {
-            // Keep the target's position relative to the link.
-            $resolved_target = Utils::normalize_path(
-                wp_join_unix_paths(
-                    Utils::realpath_with_missing_tail(dirname($destination_entry)),
-                    Utils::relative_link_target(Utils::realpath_with_missing_tail(dirname($source_entry)), $resolved_target, 'windows')
-                ),
-                'windows'
-            );
-        }
-        return LocalLink::link_value(dirname($destination_entry), $resolved_target);
     }
 }
 
