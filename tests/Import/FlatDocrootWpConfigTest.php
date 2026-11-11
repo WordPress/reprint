@@ -195,7 +195,69 @@ class FlatDocrootWpConfigTest extends TestCase
         $this->assertSame('theme', file_get_contents($flattenTo . '/wp-content/theme.txt'));
     }
 
+    public function testASecondRunWithoutForceKeepsItsLinksAndCopies(): void
+    {
+        $this->writeRootAbspathSite();
+        $flattenTo = $this->tempDir . '/flat';
+
+        for ($run = 1; $run <= 2; $run++) {
+            $client = $this->makeClient();
+            $this->loadClientState($client);
+            $this->callPrivate($client, 'run_flat_document_root', [
+                ['flatten_to' => $flattenTo, 'force' => false],
+            ]);
+        }
+
+        $this->assertLinkedOrCopied($flattenTo . '/wp-load.php');
+        $this->assertSame('<?php // wp-load at root', file_get_contents($flattenTo . '/wp-load.php'));
+    }
+
+    public function testAFileThatDiffersFromItsSourceStopsARunWithoutForce(): void
+    {
+        $this->writeRootAbspathSite();
+        $flattenTo = $this->tempDir . '/flat';
+        mkdir($flattenTo, 0755, true);
+        file_put_contents($flattenTo . '/wp-load.php', '<?php // edited in the flat layout');
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        try {
+            $this->callPrivate($client, 'run_flat_document_root', [
+                ['flatten_to' => $flattenTo, 'force' => false],
+            ]);
+            $this->fail('A file that differs from its source should stop the run.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('a non-symlink file already exists', $exception->getMessage());
+        }
+        $this->assertSame('<?php // edited in the flat layout', file_get_contents($flattenTo . '/wp-load.php'));
+    }
+
     // ---- helpers ----
+
+    private function writeRootAbspathSite(): void
+    {
+        mkdir($this->fsRoot . '/wp-admin', 0755, true);
+        mkdir($this->fsRoot . '/wp-includes', 0755, true);
+        mkdir($this->fsRoot . '/wp-content', 0755, true);
+        file_put_contents($this->fsRoot . '/wp-load.php', '<?php // wp-load at root');
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'wp' => [
+                            'table_prefix' => 'wp_',
+                            'paths_urls' => [
+                                'abspath' => '/',
+                                'wp_admin_path' => '/wp-admin',
+                                'wp_includes_path' => '/wp-includes',
+                                'content_dir' => '/wp-content',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+    }
 
     private function writeState(array $state): void
     {
