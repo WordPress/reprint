@@ -360,7 +360,7 @@ class RemapSeamTest extends TestCase
         }
 
         $symlink = $this->tempDir . '/existing-link';
-        symlink($existing_directory, $symlink);
+        symlink($canonical_existing_directory, $symlink);
         $this->assertSame(
             $canonical_existing_directory . '/missing-through-link',
             Utils::realpath_with_missing_tail($symlink . '/missing-through-link')

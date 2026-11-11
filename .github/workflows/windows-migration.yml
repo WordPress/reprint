@@ -78,7 +78,7 @@ jobs:
               ./tests/e2e/windows/run-as-standard-user.ps1 -WorkingDirectory "$env:GITHUB_WORKSPACE\tests" -Command "`"$php`" ..\vendor\bin\phpunit $test"
             } else {
               Push-Location tests
-              & $php ../vendor/bin/phpunit $test
+              & $php ../vendor/bin/phpunit --display-warnings $test
               Pop-Location
             }
             if ($LASTEXITCODE -ne 0) { $failed++ }
@@ -96,7 +96,7 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.3'
-          extensions: pdo_sqlite, sqlite3, curl, mbstring, zip, openssl
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, openssl
           coverage: none
       - run: composer install --no-dev --no-interaction --prefer-dist
       - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7

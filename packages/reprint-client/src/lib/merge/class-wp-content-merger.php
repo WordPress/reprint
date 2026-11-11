@@ -96,10 +96,7 @@ class WpContentMerger
             return 0;
         }
 
-        foreach (@scandir($this->source_wp_content) ?: [] as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
+        foreach ($this->entries_with_links_last($this->source_wp_content) as $entry) {
             $source_entry = wp_join_unix_paths($this->source_wp_content, $entry);
             $destination_entry = $this->routed_destinations[$entry]
                 ?? wp_join_unix_paths($this->destination_wp_content, $entry);
@@ -130,10 +127,7 @@ class WpContentMerger
             return;
         }
 
-        foreach (@scandir($source) ?: [] as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
+        foreach ($this->entries_with_links_last($source) as $entry) {
             $destination_entry = wp_join_unix_paths($destination, $entry);
             if (file_exists($destination_entry) || is_link($destination_entry)) {
                 continue;
@@ -149,10 +143,7 @@ class WpContentMerger
             return;
         }
 
-        foreach (@scandir($source) ?: [] as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
+        foreach ($this->entries_with_links_last($source) as $entry) {
             $source_entry = wp_join_unix_paths($source, $entry);
             $destination_entry = wp_join_unix_paths($destination, $entry);
 
@@ -312,6 +303,31 @@ class WpContentMerger
         if (!@mkdir($parent, 0755, true) && !is_dir($parent)) {
             throw new RuntimeException("Failed to create directory: {$parent}");
         }
+    }
+
+    /**
+     * Lists a directory's entries with its symlinks last.
+     *
+     * Windows PHP can only create a symlink to an existing target, so a link
+     * to a sibling moves after the sibling has reached its destination.
+     *
+     * @return list<string> Entry names without "." and "..".
+     */
+    private function entries_with_links_last(string $directory): array
+    {
+        $entries = [];
+        $links = [];
+        foreach (@scandir($directory) ?: [] as $entry) {
+            if ($entry === "." || $entry === "..") {
+                continue;
+            }
+            if (is_link(wp_join_unix_paths($directory, $entry))) {
+                $links[] = $entry;
+            } else {
+                $entries[] = $entry;
+            }
+        }
+        return array_merge($entries, $links);
     }
 
     /** Whether $path is a directory rather than a symlink to one. */

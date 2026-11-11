@@ -676,6 +676,7 @@ final class Utils
     {
         foreach (['Link directory' => $link_directory, 'Link target' => $target_path] as $label => $path) {
             if (!self::is_absolute_path($path, $path_format)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Path validation error, not HTML.
                 throw new InvalidArgumentException("{$label} must be an absolute {$path_format} path; received " . json_encode($path) . '.');
             }
         }
@@ -688,8 +689,11 @@ final class Utils
             return str_replace('/', $separator, $target_path);
         }
 
-        $link_directory_components = array_values(array_filter(explode('/', substr($link_directory, strlen($link_directory_root))), 'strlen'));
-        $target_components = array_values(array_filter(explode('/', substr($target_path, strlen($target_root))), 'strlen'));
+        $is_component = static function (string $component): bool {
+            return $component !== '';
+        };
+        $link_directory_components = array_values(array_filter(explode('/', substr($link_directory, strlen($link_directory_root))), $is_component));
+        $target_components = array_values(array_filter(explode('/', substr($target_path, strlen($target_root))), $is_component));
         $common_component_count = 0;
         $maximum_common_component_count = min(count($link_directory_components), count($target_components));
         while (
