@@ -792,7 +792,7 @@ final class FilesPullLocalIndexTest extends TestCase
             '--fs-root=' . $this->rawFileRoot, '--secret=test-secret',
         ]);
         $this->assertSame(0, $preflight['exit'], $preflight['output']);
-        symlink($this->rawFileRoot . '/child', $this->root . '/alias');
+        \LocalLink::create_symlink($this->rawFileRoot . '/child', $this->root . '/alias');
         $result = $this->runCli([
             'pull-files', $this->targetUrl,
             '--state-dir=' . $this->root . '/alias/../state-inside',
@@ -1928,7 +1928,7 @@ PHP,
 
     private function removeTree(string $path): void
     {
-        if (is_link($path) || is_file($path)) {
+        if (\LocalLink::is_link($path) || is_file($path)) {
             @unlink($path);
             return;
         }

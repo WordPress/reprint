@@ -153,7 +153,7 @@ class MergeWpContentTest extends TestCase
         $this->merge();
 
         $moved = $this->pulledWpContent . '/plugins/linked-plugin';
-        $this->assertTrue(is_link($moved), 'the entry is still a symlink, not a copy of its target');
+        $this->assertTrue(\LocalLink::is_link($moved), 'the entry is still a symlink, not a copy of its target');
         if (DIRECTORY_SEPARATOR === '/') {
             // Windows PHP reads a relative value back as its absolute target.
             $this->assertStringNotContainsString(
@@ -182,7 +182,7 @@ class MergeWpContentTest extends TestCase
         $this->merge();
 
         $moved = $this->pulledWpContent . '/themes/child-theme';
-        $this->assertTrue(is_link($moved));
+        $this->assertTrue(\LocalLink::is_link($moved));
         $this->assertTrue(
             \LocalLink::has_value($moved, 'parent-theme'),
             'a value pointing inside the merged tree still names the sibling; observed ' . json_encode(@readlink($moved)),
@@ -297,7 +297,7 @@ class MergeWpContentTest extends TestCase
 
         // flat-docroot replaces wp-content with a symlink into the pulled tree.
         $this->recursiveDelete($this->localWpContent);
-        symlink($this->pulledWpContent, $this->localWpContent);
+        \LocalLink::create_symlink($this->pulledWpContent, $this->localWpContent);
         $beforeSecondRun = $this->describeTree($this->filesystemRoot);
 
         $this->merge();
@@ -562,7 +562,7 @@ class MergeWpContentTest extends TestCase
                 }
                 $path = $current . '/' . $entry;
                 $relative = substr($path, strlen($dir));
-                if (is_link($path)) {
+                if (\LocalLink::is_link($path)) {
                     $described[] = 'link ' . $relative . ' -> ' . readlink($path);
                     continue;
                 }
@@ -602,8 +602,8 @@ class MergeWpContentTest extends TestCase
 
     private function recursiveDelete(string $dir): void
     {
-        if (!is_dir($dir) || is_link($dir)) {
-            if (is_link($dir)) {
+        if (!is_dir($dir) || \LocalLink::is_link($dir)) {
+            if (\LocalLink::is_link($dir)) {
                 \LocalLink::remove_symlink($dir);
             }
             return;
@@ -613,7 +613,7 @@ class MergeWpContentTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path)) {
+            if (\LocalLink::is_link($path)) {
                 \LocalLink::remove_symlink($path);
                 continue;
             }

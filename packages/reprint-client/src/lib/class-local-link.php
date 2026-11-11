@@ -75,18 +75,81 @@ final class LocalLink
      */
     public static function create_symlink(string $link_value, string $link_path): bool
     {
-        if (Utils::native_path_format() !== 'windows' || Utils::is_absolute_path($link_value, 'windows')) {
+        if (Utils::native_path_format() !== 'windows') {
             return @symlink($link_value, $link_path);
         }
-        $working_directory = getcwd();
-        if ($working_directory === false || !@chdir(dirname($link_path))) {
-            return false;
+        if (Utils::is_absolute_path($link_value, 'windows')) {
+            $created = @symlink($link_value, $link_path);
+        } else {
+            $working_directory = getcwd();
+            if ($working_directory === false || !@chdir(dirname($link_path))) {
+                return false;
+            }
+            try {
+                $created = @symlink($link_value, basename($link_path));
+            } finally {
+                chdir($working_directory);
+            }
         }
-        try {
-            return @symlink($link_value, basename($link_path));
-        } finally {
-            chdir($working_directory);
+        return $created || self::create_symlink_substitute($link_value, $link_path);
+    }
+
+    /**
+     * Stands in for a symlink that this Windows account may not create.
+     *
+     * Creating a Windows symlink needs a privilege that standard accounts,
+     * and administrators without elevation, do not hold. Any account may
+     * create a junction to a directory or a hard link to a file on the same
+     * volume. A file on another volume is copied, so it shows the target's
+     * contents as of this call.
+     *
+     * @param string $link_value Value the symlink would have had.
+     * @param string $link_path  Path of the new entry.
+     */
+    private static function create_symlink_substitute(string $link_value, string $link_path): bool
+    {
+        $target_path = str_replace('/', '\\', self::lexical_target($link_value, $link_path));
+        if (self::names_directory($target_path)) {
+            // PHP has no junction call; mklink is built into cmd and takes no privilege for /J.
+            $process = @proc_open(
+                'cmd /d /c mklink /J "' . str_replace('/', '\\', $link_path) . '" "' . $target_path . '"',
+                [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+                $pipes,
+                null,
+                null,
+                ['bypass_shell' => true]
+            );
+            if (!is_resource($process)) {
+                return false;
+            }
+            stream_get_contents($pipes[1]);
+            stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            clearstatcache(true, $link_path);
+            return proc_close($process) === 0 && self::is_link($link_path);
         }
+        if (is_file($target_path)) {
+            return @link($target_path, $link_path) || @copy($target_path, $link_path);
+        }
+        return false;
+    }
+
+    /**
+     * Whether $path is a symlink, or on Windows a junction.
+     *
+     * Windows PHP reports a junction as neither a link nor a directory, so
+     * is_link() alone would let a removal treat it as a file and a traversal
+     * miss it.
+     *
+     * @param string $path Path to inspect without following it.
+     */
+    public static function is_link(string $path): bool
+    {
+        if (Utils::native_path_format() !== 'windows') {
+            return is_link($path);
+        }
+        return Utils::source_is_link($path);
     }
 
     /**
@@ -116,15 +179,22 @@ final class LocalLink
      *
      * Windows PHP reads a relative link back as its resolved target, so there
      * a value matches when the link and the value name the same directory
-     * entry.
+     * entry. A Windows file that stands in for a file symlink matches when it
+     * has the target's contents.
      *
      * @param string $link_path  Path that may be a symlink.
      * @param string $link_value Value the link should have.
      */
     public static function has_value(string $link_path, string $link_value): bool
     {
-        if (!is_link($link_path)) {
-            return false;
+        if (!self::is_link($link_path)) {
+            // A hard link or copy made in place of a file symlink has its target's contents.
+            $target_path = self::lexical_target($link_value, $link_path);
+            return Utils::native_path_format() === 'windows'
+                && is_file($link_path)
+                && is_file($target_path)
+                && filesize($link_path) === filesize($target_path)
+                && sha1_file($link_path) === sha1_file($target_path);
         }
         $current_link_value = @readlink($link_path);
         if ($current_link_value === $link_value) {
@@ -150,11 +220,11 @@ final class LocalLink
             return true;
         }
         // A Windows link to a directory is removed like a directory.
-        if (Utils::native_path_format() === 'windows' && is_link($link_path) && @rmdir($link_path)) {
+        if (Utils::native_path_format() === 'windows' && self::is_link($link_path) && @rmdir($link_path)) {
             return true;
         }
         clearstatcache(true, $link_path);
-        return !is_link($link_path) && !file_exists($link_path);
+        return !self::is_link($link_path) && !file_exists($link_path);
     }
 
     /**
@@ -168,7 +238,7 @@ final class LocalLink
      */
     public static function remove_without_following_links(string $path): void
     {
-        if (is_link($path)) {
+        if (self::is_link($path)) {
             if (!self::remove_symlink($path)) {
                 // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
                 throw new RuntimeException("Could not remove the symlink at {$path}: " . self::last_php_error());
@@ -240,6 +310,21 @@ final class LocalLink
     private static function last_php_error(): string
     {
         return error_get_last()['message'] ?? 'PHP reported no reason';
+    }
+
+    /** Whether $path is a directory, including one reached through a junction. */
+    private static function names_directory(string $path): bool
+    {
+        if (is_dir($path)) {
+            return true;
+        }
+        // is_dir() is false for a junction even though its directory can be read.
+        $directory_handle = @opendir($path);
+        if ($directory_handle === false) {
+            return false;
+        }
+        closedir($directory_handle);
+        return true;
     }
 
     /** Returns the path $link_value names from the directory holding $link_path. */

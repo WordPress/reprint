@@ -7,6 +7,8 @@ use function Reprint\Importer\merge_local_index_mutations;
 use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_local_index_update;
 
+require_once __DIR__ . '/../class-local-link.php';
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
@@ -306,7 +308,7 @@ class PullIndexJournal
             ? null
             : $this->local_relative_path_from_local_absolute_path(
                 $local_absolute_path,
-                is_file($local_absolute_path) && !is_link($local_absolute_path)
+                is_file($local_absolute_path) && !LocalLink::is_link($local_absolute_path)
             );
         if ($local_relative_path !== null) {
             $local_path_stat = lstat($local_absolute_path);

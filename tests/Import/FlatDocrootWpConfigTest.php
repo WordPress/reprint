@@ -84,7 +84,7 @@ class FlatDocrootWpConfigTest extends TestCase
 
         $wpConfigFlat = $flattenTo . '/wp-config.php';
         $this->assertFileExists($wpConfigFlat, 'wp-config.php should exist in flattened output');
-        $this->assertTrue(is_link($wpConfigFlat), 'wp-config.php should be a symlink');
+        $this->assertTrue(\LocalLink::is_link($wpConfigFlat), 'wp-config.php should be a symlink');
         $this->assertStringContainsString(
             'wp-config from parent',
             file_get_contents($wpConfigFlat),
@@ -185,10 +185,10 @@ class FlatDocrootWpConfigTest extends TestCase
             ['flatten_to' => $flattenTo, 'force' => false],
         ]);
 
-        $this->assertTrue(is_link($flattenTo . '/wp-load.php'));
-        $this->assertTrue(is_link($flattenTo . '/wp-admin'));
-        $this->assertTrue(is_link($flattenTo . '/wp-includes'));
-        $this->assertTrue(is_link($flattenTo . '/wp-content'));
+        $this->assertTrue(\LocalLink::is_link($flattenTo . '/wp-load.php'));
+        $this->assertTrue(\LocalLink::is_link($flattenTo . '/wp-admin'));
+        $this->assertTrue(\LocalLink::is_link($flattenTo . '/wp-includes'));
+        $this->assertTrue(\LocalLink::is_link($flattenTo . '/wp-content'));
         $this->assertSame('theme', file_get_contents($flattenTo . '/wp-content/theme.txt'));
     }
 
@@ -229,7 +229,7 @@ class FlatDocrootWpConfigTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path)) {
+            if (\LocalLink::is_link($path)) {
                 \LocalLink::remove_symlink($path);
                 continue;
             }

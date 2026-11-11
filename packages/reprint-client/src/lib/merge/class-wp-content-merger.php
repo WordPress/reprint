@@ -3,6 +3,8 @@
 use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
 
+require_once __DIR__ . '/../class-local-link.php';
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Merge failures carry CLI filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
@@ -101,7 +103,7 @@ class WpContentMerger
             $destination_entry = $this->routed_destinations[$entry]
                 ?? wp_join_unix_paths($this->destination_wp_content, $entry);
 
-            if (!file_exists($destination_entry) && !is_link($destination_entry)) {
+            if (!file_exists($destination_entry) && !LocalLink::is_link($destination_entry)) {
                 // A detached component may not yet have a destination parent.
                 $this->create_parent_directory($destination_entry);
                 $this->move_entry($source_entry, $destination_entry, $link_value);
@@ -129,7 +131,7 @@ class WpContentMerger
 
         foreach ($this->entries_with_links_last($source) as [$entry, $link_value]) {
             $destination_entry = wp_join_unix_paths($destination, $entry);
-            if (file_exists($destination_entry) || is_link($destination_entry)) {
+            if (file_exists($destination_entry) || LocalLink::is_link($destination_entry)) {
                 continue;
             }
             $this->move_entry(wp_join_unix_paths($source, $entry), $destination_entry, $link_value);
@@ -147,7 +149,7 @@ class WpContentMerger
             $source_entry = wp_join_unix_paths($source, $entry);
             $destination_entry = wp_join_unix_paths($destination, $entry);
 
-            if (!file_exists($destination_entry) && !is_link($destination_entry)) {
+            if (!file_exists($destination_entry) && !LocalLink::is_link($destination_entry)) {
                 $this->move_entry($source_entry, $destination_entry, $link_value);
                 continue;
             }
@@ -234,7 +236,7 @@ class WpContentMerger
     /** Copy an entry without following symlinks and preserve its permissions. */
     private function copy_path(string $from, string $to): void
     {
-        if (is_link($from)) {
+        if (LocalLink::is_link($from)) {
             $link_value = readlink($from);
             if ($link_value === false) {
                 throw new RuntimeException(
@@ -318,7 +320,7 @@ class WpContentMerger
                 continue;
             }
             $path = wp_join_unix_paths($directory, $entry);
-            if (!is_link($path)) {
+            if (!LocalLink::is_link($path)) {
                 $entries[] = [$entry, null];
                 continue;
             }
@@ -336,7 +338,7 @@ class WpContentMerger
     /** Whether $path is a directory rather than a symlink to one. */
     private function is_real_directory(string $path): bool
     {
-        return !is_link($path) && is_dir($path);
+        return !LocalLink::is_link($path) && is_dir($path);
     }
 }
 

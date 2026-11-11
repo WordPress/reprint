@@ -82,9 +82,9 @@ final class PullLinkBeforeTargetTest extends TestCase
 
         ( new \ReflectionMethod($client, 'create_deferred_symlinks') )->invoke($client);
 
-        $this->assertTrue(is_link($this->root . '/files/srv/htdocs/wp-content/plugins/managed'));
+        $this->assertTrue(\LocalLink::is_link($this->root . '/files/srv/htdocs/wp-content/plugins/managed'));
         $this->assertSame('managed', file_get_contents($this->root . '/files/srv/htdocs/wp-content/plugins/managed/plugin.php'));
-        $this->assertTrue(is_link($this->root . '/files/srv/htdocs/wp-config.php'));
+        $this->assertTrue(\LocalLink::is_link($this->root . '/files/srv/htdocs/wp-config.php'));
         $this->assertSame('config', file_get_contents($this->root . '/files/srv/htdocs/wp-config.php'));
         $this->assertFileDoesNotExist($this->root . '/state/remotes/' . md5(rtrim($this->url, '?&')) . '/pull/deferred-symlinks.jsonl');
 
@@ -107,7 +107,7 @@ final class PullLinkBeforeTargetTest extends TestCase
 
         ( new \ReflectionMethod($client, 'create_deferred_symlinks') )->invoke($client);
 
-        $this->assertTrue(is_link($this->root . '/files/srv/htdocs/wp-admin'));
+        $this->assertTrue(\LocalLink::is_link($this->root . '/files/srv/htdocs/wp-admin'));
         $this->assertSame('admin', file_get_contents($this->root . '/files/srv/htdocs/wp-admin/index.php'));
         $pull_state_directory = $this->root . '/state/remotes/' . md5(rtrim($this->url, '?&')) . '/pull';
         $this->assertFileDoesNotExist($pull_state_directory . '/deferred-symlinks.jsonl');
@@ -131,7 +131,7 @@ final class PullLinkBeforeTargetTest extends TestCase
     private function can_create_symlinks(): bool
     {
         $probe = $this->root . '/probe';
-        if (!@symlink($this->root . '/files', $probe)) {
+        if (!\LocalLink::create_symlink($this->root . '/files', $probe)) {
             return false;
         }
         \LocalLink::remove_symlink($probe);
@@ -146,7 +146,7 @@ final class PullLinkBeforeTargetTest extends TestCase
                 continue;
             }
             $child = $path . '/' . $entry;
-            if (is_link($child)) {
+            if (\LocalLink::is_link($child)) {
                 \LocalLink::remove_symlink($child);
             } elseif (is_dir($child)) {
                 $this->remove_tree($child);

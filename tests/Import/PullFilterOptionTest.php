@@ -214,7 +214,7 @@ class PullFilterOptionTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path)) {
+            if (\LocalLink::is_link($path)) {
                 unlink($path);
             } elseif (is_dir($path)) {
                 $this->recursiveDelete($path);
