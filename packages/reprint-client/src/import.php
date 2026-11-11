@@ -6981,7 +6981,11 @@ class ImportClient
         // /srv/htdocs/wordpress/, so Phase 1's ABSPATH scan won't find it.
         $wp_config_in_flatten = wp_join_unix_paths($flatten_to, "wp-config.php");
         if (!file_exists($wp_config_in_flatten)) {
-            $parent_of_abspath = dirname($abspath);
+            // PHP's dirname() on Windows turns the Unix root into a backslash.
+            $parent_of_abspath = Utils::normalize_path(
+                wp_join_unix_paths($abspath, ".."),
+                $this->get_state()->remote_path_format()
+            );
             $local_parent_wp_config = $this->path_mapper()->remote_path_to_local_path(
                 wp_join_unix_paths($parent_of_abspath, "wp-config.php")
             );
