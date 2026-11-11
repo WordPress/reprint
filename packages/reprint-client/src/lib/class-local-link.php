@@ -13,10 +13,9 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  * moves. Links made on Windows are absolute, because Windows and PHP there
  * handle relative values differently:
  *
- * - Windows applies ".." in a relative value to the path used to reach the
- *   link. flat-docroot reaches the pulled wp-content through a link, so a
- *   managed plugin's ../../wordpress/plugins value would climb out of the
- *   flattened site instead of the pulled tree.
+ * - A managed plugin's relative link, reached through flat-docroot's
+ *   relative wp-content link, resolved outside the pulled tree in the
+ *   Linux-to-Windows end-to-end test. Absolute values resolve there.
  * - Windows does not treat forward slashes in a value as separators.
  * - symlink() looks at a relative target from the current directory to
  *   decide between a file and a directory link.
@@ -115,7 +114,8 @@ final class LocalLink
      * Whether $link_path is a symlink that already has $link_value.
      *
      * Windows PHP reads a relative link back as its resolved target, so there
-     * a relative value matches when that target is the path it names.
+     * a value matches when the link and the value name the same directory
+     * entry.
      *
      * @param string $link_path  Path that may be a symlink.
      * @param string $link_value Value the link should have.
@@ -132,8 +132,9 @@ final class LocalLink
         if (Utils::native_path_format() !== 'windows' || $current_link_value === false) {
             return false;
         }
-        return Utils::normalize_path($current_link_value, 'windows')
-            === Utils::normalize_path(self::lexical_target($link_value, $link_path), 'windows');
+        // One directory can be spelled with its short 8.3 name or its long name.
+        return Utils::realpath_with_missing_tail($current_link_value)
+            === Utils::realpath_with_missing_tail(self::lexical_target($link_value, $link_path));
     }
 
     /**

@@ -28,6 +28,8 @@ rename($work_directory . '\\wordpress', $site_directory);
 mkdir($site_directory . '\\wp-content\\plugins\\local-only', 0777, true);
 file_put_contents($site_directory . '\\wp-content\\plugins\\local-only\\local-only.php', "<?php\n/* Plugin Name: Local only */\n");
 mkdir(dirname($sqlite_path), 0777, true);
+// The desktop app's site keeps its own configuration; the runtime supplies the database.
+file_put_contents($site_directory . '\\wp-config.php', "<?php\n\$table_prefix = 'wp_';\nif (!defined('ABSPATH')) {\n    define('ABSPATH', __DIR__ . '/');\n}\nrequire_once ABSPATH . 'wp-settings.php';\n");
 
 $connection = [$source_url, '--allow-unsafe-http', '--private-key-path=' . $private_key_path, '--no-adaptive', '--state-dir=' . $state_directory, '--progress=jsonl'];
 $commands = [

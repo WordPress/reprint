@@ -115,30 +115,16 @@ final class LocalLinkTest extends TestCase
         );
     }
 
-    /**
-     * A relative link reached through another relative link misses its
-     * target on Windows: ".." climbs from the path used to reach it. This is
-     * the shape flat-docroot made for a managed plugin before local links on
-     * Windows became absolute.
-     */
-    public function testWindowsMissesARelativeLinkReachedThroughARelativeLink(): void
+    /** flat-docroot reaches a pulled plugin link through its relative wp-content link. */
+    public function testALinkReachedThroughARelativeLinkResolves(): void
     {
-        if (Utils::native_path_format() !== 'windows') {
-            $this->markTestSkipped('Windows link behavior.');
-        }
         mkdir($this->root . '/site');
-        chdir($this->root . '/site');
-        $this->assertTrue(symlink('..\\files\\wp-content', 'wp-content'));
-        chdir($this->root . '/files/wp-content/plugins');
-        $this->assertTrue(symlink('..\\..\\wordpress\\plugins\\akismet\\latest', 'relative'));
-        chdir($this->root . '/elsewhere');
-        $absolute_link_path = $this->root . '/files/wp-content/plugins/absolute';
-        $this->assertTrue(LocalLink::create_symlink(LocalLink::native_link_value('../../wordpress/plugins/akismet/latest', $absolute_link_path), $absolute_link_path));
-        clearstatcache();
+        $site_link_path = $this->root . '/site/wp-content';
+        $this->assertTrue(LocalLink::create_symlink(LocalLink::native_link_value('../files/wp-content', $site_link_path), $site_link_path));
+        $plugin_link_path = $this->root . '/files/wp-content/plugins/akismet';
+        $this->assertTrue(LocalLink::create_symlink(LocalLink::native_link_value('../../wordpress/plugins/akismet/latest', $plugin_link_path), $plugin_link_path));
 
-        $this->assertFileExists($this->root . '/files/wp-content/plugins/relative/akismet.php');
-        $this->assertFileExists($this->root . '/site/wp-content/plugins/absolute/akismet.php');
-        $this->assertFileDoesNotExist($this->root . '/site/wp-content/plugins/relative/akismet.php');
+        $this->assertSame('akismet', file_get_contents($this->root . '/site/wp-content/plugins/akismet/akismet.php'));
     }
 
     private function can_create_symlinks(): bool
