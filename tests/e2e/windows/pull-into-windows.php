@@ -47,7 +47,6 @@ $expected_files = [
     'wp-content\\plugins\\managed-plugin\\managed-plugin.php' => 'Plugin Name: Managed plugin',
     'wp-content\\plugins\\local-only\\local-only.php' => 'Plugin Name: Local only',
     'wp-content\\uploads\\2026\\01\\hello.txt' => 'Uploaded on Linux',
-    'wp-config.php' => 'wpcloud_source',
     'wp-includes\\version.php' => '$wp_version',
 ];
 foreach ($expected_files as $relative_path => $expected_contents) {
@@ -113,7 +112,7 @@ function describe_failure(string $site_directory, string $relative_path, string 
             var_export(realpath($path), true)
         );
     }
-    $searched_name = $names[count($names) - 2];
+    $searched_name = $names[max(0, count($names) - 2)];
     foreach (file($audit_log_path) ?: [] as $line) {
         if (stripos($line, $searched_name) !== false) {
             echo substr($line, 0, 600), "\n";

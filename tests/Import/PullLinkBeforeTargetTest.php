@@ -87,6 +87,10 @@ final class PullLinkBeforeTargetTest extends TestCase
         $this->assertTrue(is_link($this->root . '/files/srv/htdocs/wp-config.php'));
         $this->assertSame('config', file_get_contents($this->root . '/files/srv/htdocs/wp-config.php'));
         $this->assertFileDoesNotExist($this->root . '/state/remotes/' . md5(rtrim($this->url, '?&')) . '/pull/deferred-symlinks.jsonl');
+
+        // Windows cannot remove the state directory while the client holds its files open.
+        unset($client);
+        gc_collect_cycles();
     }
 
     /** Sends parts through the real multipart reader. */

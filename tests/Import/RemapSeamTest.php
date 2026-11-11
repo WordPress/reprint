@@ -47,7 +47,13 @@ class RemapSeamTest extends TestCase
                 continue;
             }
             $p = "$d/$i";
-            (is_dir($p) && !is_link($p)) ? $this->rrm($p) : unlink($p);
+            if (is_link($p)) {
+                \LocalLink::remove_symlink($p);
+            } elseif (is_dir($p)) {
+                $this->rrm($p);
+            } else {
+                unlink($p);
+            }
         }
         rmdir($d);
     }
