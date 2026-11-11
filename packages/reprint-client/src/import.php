@@ -7227,7 +7227,9 @@ class ImportClient
         // A Windows account that may not create symlinks gets a copy in place
         // of a file symlink. An identical copy is already in place; a copy
         // that differs may hold a local edit, so it conflicts like any file.
-        if (LocalLink::has_value($target, $link_value)) {
+        // --force replaces every file, so an account that may create symlinks
+        // turns copied core back into links.
+        if (!$force && LocalLink::has_value($target, $link_value)) {
             ++$refreshed;
             return;
         }
