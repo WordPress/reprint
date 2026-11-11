@@ -66,6 +66,33 @@ final class LocalLink
     }
 
     /**
+     * Whether symlink() accepts a target that does not exist yet.
+     *
+     * Windows needs to know whether the target is a directory, and PHP finds
+     * out by looking at it, so there a link can only follow its target.
+     */
+    public static function can_create_symlink_before_target(): bool
+    {
+        return Utils::native_path_format() !== 'windows';
+    }
+
+    /**
+     * Whether the path that $link_value names from $link_path's directory exists.
+     *
+     * @param string $link_value Relative value resolved from the link's directory, or an absolute path.
+     * @param string $link_path  Path of the link, which need not exist.
+     */
+    public static function target_exists(string $link_value, string $link_path): bool
+    {
+        $path_format = Utils::native_path_format();
+        return file_exists(
+            Utils::is_absolute_path($link_value, $path_format)
+                ? $link_value
+                : wp_join_unix_paths(dirname($link_path), $link_value)
+        );
+    }
+
+    /**
      * Whether $link_path is a symlink that already has $link_value.
      *
      * On Windows, PHP cannot read a relative value back, so a link counts as

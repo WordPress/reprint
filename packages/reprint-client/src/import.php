@@ -361,6 +361,9 @@ class ImportClient
     /** @var string Path to pull/volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
 
+    /** @var string Path to pull/deferred-symlinks.jsonl — Windows links whose targets had not arrived. */
+    private $deferred_symlinks_file;
+
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
 
@@ -704,6 +707,7 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl.new");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
+        $this->deferred_symlinks_file = wp_join_unix_paths($this->pull_state_directory, "deferred-symlinks.jsonl");
         $this->progress_reporter = new ProgressReporter(
             wp_join_unix_paths($this->state_dir, "progress.json")
         );
@@ -3217,7 +3221,7 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
         }
         foreach (
-            [$this->mapped_remote_index_file, $this->fetch_list_replacement_file]
+            [$this->mapped_remote_index_file, $this->fetch_list_replacement_file, $this->deferred_symlinks_file]
             as $mirror_work_file
         ) {
             if (file_exists($mirror_work_file)) {
@@ -4559,6 +4563,7 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
+        $this->create_deferred_symlinks();
         $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
 
         $this->ensure_local_index_exists();
@@ -13421,6 +13426,13 @@ class ImportClient
             }
         }
 
+        // Windows PHP links only to an existing target. Sources send a link
+        // and its target in any order, so create this one after the fetch.
+        if (!LocalLink::can_create_symlink_before_target() && !LocalLink::target_exists($target_for_local, $local_absolute_path)) {
+            $this->defer_symlink($path, $target_for_local, $ctime);
+            return;
+        }
+
         // Create symlink
         $symlink_result = LocalLink::create_symlink($target_for_local, $local_absolute_path);
         if (true !== $symlink_result || !is_link($local_absolute_path)) {
@@ -13461,6 +13473,92 @@ class ImportClient
             "target" => $target_for_local,
             "message" => "Symlink: {$path} -> {$target}",
         ]);
+    }
+
+    /**
+     * Records a symlink part to create once the fetch has completed.
+     *
+     * The line is written before the part counts as handled, so a resumed
+     * fetch that replays the part appends it again; creating it twice is a no-op.
+     *
+     * @param string $remote_absolute_path Remote path of the link.
+     * @param string $local_link_value     Link value for the local filesystem.
+     * @param int    $ctime                Source ctime of the link, or 0.
+     */
+    private function defer_symlink(string $remote_absolute_path, string $local_link_value, int $ctime): void
+    {
+        $deferred_symlink = Utils::json_encode_or_throw([
+            "path" => base64_encode($remote_absolute_path),
+            "target" => base64_encode($local_link_value),
+            "ctime" => $ctime,
+        ]) . "\n";
+        if (file_put_contents($this->deferred_symlinks_file, $deferred_symlink, FILE_APPEND | LOCK_EX) !== strlen($deferred_symlink)) {
+            throw new RuntimeException("Failed to record a deferred symlink in {$this->deferred_symlinks_file}");
+        }
+        $this->audit_log("SYMLINK DEFERRED | {$remote_absolute_path} -> {$local_link_value} | target not yet downloaded", false);
+    }
+
+    /**
+     * Creates the symlinks deferred during the fetch, then forgets them.
+     *
+     * Every target has been downloaded by now. A link whose target is still
+     * missing was pointing outside the pulled selection and is reported like
+     * any other link this client cannot create. Repeating the pass after an
+     * interruption skips links that already have their value.
+     */
+    private function create_deferred_symlinks(): void
+    {
+        if (!file_exists($this->deferred_symlinks_file)) {
+            return;
+        }
+        $deferred_symlinks_handle = fopen($this->deferred_symlinks_file, "r");
+        if ($deferred_symlinks_handle === false) {
+            throw new RuntimeException("Failed to open {$this->deferred_symlinks_file}");
+        }
+        while (($deferred_symlink_line = fgets($deferred_symlinks_handle)) !== false) {
+            $deferred_symlink = json_decode($deferred_symlink_line, true);
+            $remote_absolute_path = is_array($deferred_symlink) && is_string($deferred_symlink["path"] ?? null)
+                ? base64_decode($deferred_symlink["path"], true)
+                : false;
+            $local_link_value = is_array($deferred_symlink) && is_string($deferred_symlink["target"] ?? null)
+                ? base64_decode($deferred_symlink["target"], true)
+                : false;
+            if (!is_string($remote_absolute_path) || !is_string($local_link_value) || !is_int($deferred_symlink["ctime"] ?? null)) {
+                throw new RuntimeException("Invalid deferred symlink record in {$this->deferred_symlinks_file}: " . substr($deferred_symlink_line, 0, 200));
+            }
+            $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($remote_absolute_path);
+            if (LocalLink::has_value($local_absolute_path, $local_link_value)) {
+                continue;
+            }
+            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+                $this->audit_log("SYMLINK DEFERRED SKIP | {$remote_absolute_path} | a later part placed another entry there", true);
+                continue;
+            }
+            if (!LocalLink::create_symlink($local_link_value, $local_absolute_path)) {
+                $this->audit_log("Failed to create symlink: {$local_absolute_path} -> {$local_link_value}", true);
+                $this->output_progress([
+                    "type" => "symlink_error",
+                    "path" => $remote_absolute_path,
+                    "target" => $local_link_value,
+                    "error" => "Failed to create symlink",
+                    "message" => "Symlink error: {$remote_absolute_path} -> {$local_link_value}",
+                ]);
+                continue;
+            }
+            $this->audit_log("Symlink: {$remote_absolute_path} -> {$local_link_value}", false);
+            if ($deferred_symlink["ctime"] > 0) {
+                $this->pull_index_journal->record_remote_upsert(
+                    $remote_absolute_path,
+                    $deferred_symlink["ctime"],
+                    0,
+                    "link",
+                    $local_absolute_path
+                );
+            }
+        }
+        fclose($deferred_symlinks_handle);
+        @unlink($this->deferred_symlinks_file);
+        $this->audit_log("FILE DELETE | {$this->deferred_symlinks_file} | deferred symlinks created");
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path errors are CLI text, not HTML.
