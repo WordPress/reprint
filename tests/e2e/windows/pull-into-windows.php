@@ -53,6 +53,7 @@ $expected_files = [
 foreach ($expected_files as $relative_path => $expected_contents) {
     $contents = @file_get_contents($site_directory . '\\' . $relative_path);
     if ($contents === false || strpos($contents, $expected_contents) === false) {
+        describe_failure($site_directory, $relative_path, $state_directory . '\\audit.log');
         throw new RuntimeException("The flattened site does not read {$relative_path} through its links.");
     }
 }
@@ -91,5 +92,33 @@ function run_client(array $command, string $log_path): void
     echo "== {$command[2]} exited {$exit_code}\n";
     if ($exit_code !== 0) {
         throw new RuntimeException($command[2] . " failed:\n" . file_get_contents($log_path));
+    }
+}
+
+/** Prints each link along a path and the audit lines naming its components. */
+function describe_failure(string $site_directory, string $relative_path, string $audit_log_path): void
+{
+    $path = $site_directory;
+    $names = [];
+    foreach (explode('\\', $relative_path) as $component) {
+        $path .= '\\' . $component;
+        $names[] = $component;
+        printf(
+            "%s: exists=%s link=%s dir=%s readlink=%s realpath=%s\n",
+            $path,
+            var_export(file_exists($path), true),
+            var_export(is_link($path), true),
+            var_export(is_dir($path), true),
+            var_export(@readlink($path), true),
+            var_export(realpath($path), true)
+        );
+    }
+    foreach (file($audit_log_path) ?: [] as $line) {
+        foreach (array_slice($names, 1, -1) as $name) {
+            if (stripos($line, $name) !== false && stripos($line, 'link') !== false) {
+                echo $line;
+                break;
+            }
+        }
     }
 }
