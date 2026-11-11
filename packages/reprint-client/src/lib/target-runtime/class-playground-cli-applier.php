@@ -34,7 +34,7 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  */
 class PlaygroundCliApplier implements RuntimeApplier
 {
-    private const CLI_VERSION = '3.1.29';
+    private const CLI_VERSION = '3.1.60';
 
     /**
      * Playground's internal document root path in the virtual filesystem.
