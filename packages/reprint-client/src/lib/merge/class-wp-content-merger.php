@@ -171,6 +171,10 @@ class WpContentMerger
      * source tree, which moves with it; an external target is rebased.
      * Absolute values, and links nested inside a moved entry, travel
      * unchanged.
+     *
+     * Windows PHP reads a relative link back as its resolved absolute
+     * target, so there every moved link whose target exists gets a new
+     * relative value.
      */
     private function move_entry(string $source_entry, string $destination_entry): void
     {
@@ -181,10 +185,13 @@ class WpContentMerger
                     "Could not read the symlink value at {$source_entry}.",
                 );
             }
-            if (strpos($link_value, "/") !== 0) {
+            $path_format = Utils::native_path_format();
+            if ($path_format === 'windows') {
+                $link_value = $this->windows_moved_link_value($source_entry, $destination_entry, $link_value);
+            } elseif (strpos($link_value, "/") !== 0) {
                 $resolved_target = Utils::normalize_path(
                     wp_join_unix_paths(dirname($source_entry), $link_value),
-                    Utils::native_path_format()
+                    $path_format
                 );
                 // The source tree moves; an external target does not.
                 if (
@@ -193,18 +200,19 @@ class WpContentMerger
                         $this->source_wp_content
                     )
                 ) {
-                    $link_value = self::compute_relative_path(
+                    $link_value = Utils::relative_link_target(
                         Utils::realpath_with_missing_tail(dirname($destination_entry)),
-                        $resolved_target
+                        $resolved_target,
+                        $path_format
                     );
                 }
             }
-            if (!symlink($link_value, $destination_entry)) {
+            if (!LocalLink::create_symlink($link_value, $destination_entry)) {
                 throw new RuntimeException(
                     "Failed to create symlink: {$destination_entry} -> {$link_value}",
                 );
             }
-            if (!unlink($source_entry)) {
+            if (!LocalLink::remove_symlink($source_entry)) {
                 throw new RuntimeException(
                     "Created {$destination_entry} but could not remove the original " .
                         "symlink at {$source_entry}.",
@@ -251,7 +259,7 @@ class WpContentMerger
                     "Could not read the symlink value at {$from}.",
                 );
             }
-            if (!symlink($link_value, $to)) {
+            if (!LocalLink::create_symlink($link_value, $to)) {
                 throw new RuntimeException(
                     "Failed to create symlink: {$to} -> {$link_value}",
                 );
@@ -319,7 +327,10 @@ class WpContentMerger
             return true;
         }
 
-        if (is_link($path) || !is_dir($path)) {
+        if (is_link($path)) {
+            return LocalLink::remove_symlink($path);
+        }
+        if (!is_dir($path)) {
             return true === @unlink($path);
         }
 
@@ -342,23 +353,29 @@ class WpContentMerger
         return true === @rmdir($path);
     }
 
-    /** Compute a relative path between absolute paths. */
-    private static function compute_relative_path(string $from, string $to): string
+    /**
+     * Returns the value a moved link needs on Windows.
+     *
+     * $read_link_value is what readlink() returned: the resolved absolute
+     * target of a relative link, or the stored value of an absolute one.
+     * A target inside the source tree moves with it, so the new value keeps
+     * the link's position relative to that target. An external target stays
+     * where it is, so the new value reaches it from the destination.
+     */
+    private function windows_moved_link_value(string $source_entry, string $destination_entry, string $read_link_value): string
     {
-        $from_parts = explode("/", trim($from, "/"));
-        $to_parts = explode("/", trim($to, "/"));
-
-        $common = 0;
-        $max = min(count($from_parts), count($to_parts));
-        while ($common < $max && $from_parts[$common] === $to_parts[$common]) {
-            ++$common;
-        }
-
-        $up = count($from_parts) - $common;
-        $down = array_slice($to_parts, $common);
-
-        $parts = array_merge(array_fill(0, $up, ".."), $down);
-        return implode("/", $parts) ?: ".";
+        $resolved_target = Utils::realpath_with_missing_tail(
+            Utils::is_absolute_path($read_link_value, 'windows')
+                ? $read_link_value
+                : wp_join_unix_paths(dirname($source_entry), $read_link_value)
+        );
+        $resolved_source_wp_content = Utils::realpath_with_missing_tail($this->source_wp_content);
+        $target_moves = Utils::path_is_same_as_or_descendant_of($resolved_target, $resolved_source_wp_content);
+        return Utils::relative_link_target(
+            Utils::realpath_with_missing_tail(dirname($target_moves ? $source_entry : $destination_entry)),
+            $resolved_target,
+            'windows'
+        );
     }
 }
 

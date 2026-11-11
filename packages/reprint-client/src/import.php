@@ -97,6 +97,7 @@ require_once __DIR__ . '/lib/url-rewrite/load.php';
 // Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
 require_once __DIR__ . '/lib/class-multisite-target.php';
+require_once __DIR__ . '/lib/class-local-link.php';
 
 // Load target runtime appliers (consume a runtime manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
@@ -733,7 +734,9 @@ class ImportClient
                 "Failed to resolve filesystem root path: {$this->filesystem_root}",
             );
         }
-        $this->filesystem_root = $resolved_local_filesystem_root;
+        // Windows realpath() returns backslashes; local paths built from the
+        // root use the forward-slash spelling of normalize_path().
+        $this->filesystem_root = Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format());
 
         $this->pull_index_journal = new PullIndexJournal(
             [$this, "audit_log"],
@@ -2748,7 +2751,7 @@ class ImportClient
             $state_dir
         );
         $push_state_directory = wp_join_unix_paths($remote_state_directory, 'push');
-        if (strpos($push_state_directory, '/') !== 0) {
+        if (!Utils::is_absolute_path($push_state_directory, Utils::native_path_format())) {
             $working_directory = getcwd();
             if ($working_directory === false) {
                 throw new RuntimeException('Could not resolve the current working directory.');
@@ -5426,7 +5429,7 @@ class ImportClient
             }
 
             // Already correct — skip
-            if (is_link($local_absolute_path) && readlink($local_absolute_path) === $symlink_target) {
+            if (LocalLink::has_value($local_absolute_path, $symlink_target)) {
                 continue;
             }
 
@@ -5456,7 +5459,7 @@ class ImportClient
 
             // Remove stale symlink if present
             if (is_link($local_absolute_path)) {
-                @unlink($local_absolute_path);
+                LocalLink::remove_symlink($local_absolute_path);
             }
 
             // Don't overwrite a real directory — that shouldn't exist for
@@ -5470,7 +5473,7 @@ class ImportClient
                 continue;
             }
 
-            if (@symlink($symlink_target, $local_absolute_path)) {
+            if (@LocalLink::create_symlink($symlink_target, $local_absolute_path)) {
                 $created++;
                 $this->pull_index_journal->record_remote_upsert(
                     $remote_absolute_path,
@@ -6570,7 +6573,7 @@ class ImportClient
         }
         // Keep a lexical absolute path because --from may not exist yet.
         $from = Utils::trim_right_slash($from, Utils::native_path_format());
-        if (strpos($from, "/") !== 0) {
+        if (!Utils::is_absolute_path($from, Utils::native_path_format())) {
             $from = Utils::normalize_path(wp_join_unix_paths(getcwd(), $from), Utils::native_path_format());
         }
         // A WordPress root passed by mistake would move wp-admin, wp-includes
@@ -7149,36 +7152,6 @@ class ImportClient
     }
 
     /**
-     * Compute a relative path from $from to $to.
-     *
-     * Both paths must be absolute. Returns a relative path such that
-     * a symlink at $from/$name pointing to the result will resolve to $to.
-     *
-     * Example: relative_path('/a/b/c', '/a/d/e') => '../../d/e'
-     */
-    private static function compute_relative_path(
-        string $from,
-        string $to
-    ): string {
-        $from_parts = explode("/", trim($from, "/"));
-        $to_parts = explode("/", trim($to, "/"));
-
-        // Find common prefix length
-        $common = 0;
-        $max = min(count($from_parts), count($to_parts));
-        while ($common < $max && $from_parts[$common] === $to_parts[$common]) {
-            $common++;
-        }
-
-        // Go up from $from to the common ancestor, then down to $to
-        $up = count($from_parts) - $common;
-        $down = array_slice($to_parts, $common);
-
-        $parts = array_merge(array_fill(0, $up, ".."), $down);
-        return implode("/", $parts) ?: ".";
-    }
-
-    /**
      * Create or refresh a symlink at $target pointing to $source.
      * Handles conflicts (existing non-symlinks) based on --force flag.
      *
@@ -7218,22 +7191,24 @@ class ImportClient
             );
         }
 
-        $link_value = self::compute_relative_path($target_parent_real, $abs_source);
+        $link_value = Utils::relative_link_target($target_parent_real, $abs_source, Utils::native_path_format());
 
         // If the target is already a symlink, check if it resolves to the
         // same place. Refresh if not, skip if already correct.
         if (is_link($target)) {
-            $current_link_target = readlink($target);
-            if ($current_link_target === $link_value) {
+            if (LocalLink::has_value($target, $link_value)) {
                 $refreshed++;
                 return;
             }
             // Points elsewhere — remove and recreate
-            unlink($target);
+            $current_link_target = @readlink($target);
+            if (!LocalLink::remove_symlink($target)) {
+                throw new RuntimeException("Failed to remove symlink: {$target}");
+            }
             $this->audit_log(
                 "FLAT-DOCUMENT-ROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
             );
-            if (!symlink($link_value, $target)) {
+            if (!LocalLink::create_symlink($link_value, $target)) {
                 throw new RuntimeException(
                     "Failed to create symlink: {$target} -> {$link_value}",
                 );
@@ -7271,7 +7246,7 @@ class ImportClient
         }
 
         // Create the symlink
-        if (!symlink($link_value, $target)) {
+        if (!LocalLink::create_symlink($link_value, $target)) {
             throw new RuntimeException(
                 "Failed to create symlink: {$target} -> {$link_value}",
             );
@@ -7337,7 +7312,9 @@ class ImportClient
      */
     private function flatten_remove_entry(string $path): void
     {
-        if (is_link($path) || is_file($path)) {
+        if (is_link($path)) {
+            LocalLink::remove_symlink($path);
+        } elseif (is_file($path)) {
             @unlink($path);
         } elseif (is_dir($path)) {
             @$this->remove_directory_recursive($path);
@@ -7445,7 +7422,9 @@ class ImportClient
                 "FLAT-DOCUMENT-ROOT FORCE | Replacing symlink with real directory: {$path}",
                 true,
             );
-            unlink($path);
+            if (!LocalLink::remove_symlink($path)) {
+                throw new RuntimeException("Failed to remove symlink: {$path}");
+            }
             $forced++;
         }
 
@@ -7475,7 +7454,9 @@ class ImportClient
                 continue;
             }
             $path = wp_join_unix_paths($dir, $entry);
-            if (is_dir($path) && !is_link($path)) {
+            if (is_link($path)) {
+                LocalLink::remove_symlink($path);
+            } elseif (is_dir($path)) {
                 $this->remove_directory_recursive($path);
             } else {
                 unlink($path);
@@ -10726,7 +10707,10 @@ class ImportClient
             return true;
         }
 
-        if (is_link($local_absolute_path) || is_file($local_absolute_path)) {
+        if (is_link($local_absolute_path)) {
+            return LocalLink::remove_symlink($local_absolute_path);
+        }
+        if (is_file($local_absolute_path)) {
             return true === @unlink($local_absolute_path);
         }
 
@@ -11881,7 +11865,7 @@ class ImportClient
             !$this->follow_symlinks ||
             !$this->next_remote_index_contains_remote_absolute_path_prefix($remote_absolute_target)
         ) {
-            return $target;
+            return LocalLink::native_link_value($target);
         }
 
         // Repoint to where the target's content is placed by the same pull
@@ -11889,9 +11873,10 @@ class ImportClient
         $local_absolute_target = $this->path_mapper()->remote_path_to_local_path(
             $remote_absolute_target
         );
-        $local_relative_target = self::compute_relative_path(
+        $local_relative_target = Utils::relative_link_target(
             dirname($local_absolute_path),
-            $local_absolute_target
+            $local_absolute_target,
+            Utils::native_path_format()
         );
 
         $this->audit_log(
@@ -13164,7 +13149,7 @@ class ImportClient
                     "Removing symlink blocking directory: {$current}",
                     true,
                 );
-                if (!unlink($current)) {
+                if (!LocalLink::remove_symlink($current)) {
                     throw new RuntimeException(
                         "Failed to remove symlink blocking directory: {$current}",
                     );
@@ -13208,7 +13193,7 @@ class ImportClient
             }
 
             $resolved = realpath($current);
-            if ($resolved === false || !Utils::path_is_same_as_or_descendant_of($resolved, $real_filesystem_root)) {
+            if ($resolved === false || !Utils::path_is_same_as_or_descendant_of(Utils::normalize_path($resolved, Utils::native_path_format()), $real_filesystem_root)) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem root: {$current}",
                 );
@@ -13433,7 +13418,7 @@ class ImportClient
         }
 
         // Create symlink
-        $symlink_result = symlink($target_for_local, $local_absolute_path);
+        $symlink_result = LocalLink::create_symlink($target_for_local, $local_absolute_path);
         if (true !== $symlink_result || !is_link($local_absolute_path)) {
             // Log error and skip this symlink
             $this->audit_log(
