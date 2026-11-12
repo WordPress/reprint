@@ -239,9 +239,218 @@ jobs:
           header: pull-pipeline-perf
           path: tests/e2e/bench-results.md
 
+  # Native Windows PHP pulls from a source in WSL on the same runner. The
+  # Linux client then pulls the same source there, for the platform table.
+  bench-windows:
+    name: Pull pipeline benchmark (Windows client)
+    needs: [build-pr-phar, build-trunk-phar]
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.5'
+          extensions: mysqli, pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, openssl
+          coverage: none
+
+      - name: Download PR phar
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: client-phar-pr
+          path: phars/pr
+
+      - name: Download trunk phar
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: client-phar-trunk
+          path: phars/trunk
+
+      - name: Record the Windows PHP path
+        shell: pwsh
+        run: (Get-Command php).Source | Out-File -Encoding ascii -NoNewline windows-php-path.txt
+
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: php8.3-cli php8.3-fpm php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-sqlite3 composer jq curl xz-utils
+
+      # setup-infrastructure.sh starts its services with systemctl.
+      - name: Enable systemd in WSL
+        shell: wsl-bash {0}
+        run: printf '[boot]\nsystemd=true\n' > /etc/wsl.conf
+
+      - name: Restart WSL with systemd
+        shell: pwsh
+        run: wsl --terminate Ubuntu-24.04
+
+      - name: Copy the harness into WSL and install Node
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          mkdir -p /root/reprint
+          tar --exclude=.git --exclude=vendor -cf - . | tar -xf - -C /root/reprint
+          node_tarball=$(curl -fsSL https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt | awk '/linux-x64.tar.xz/ { print $2 }')
+          curl -fsSL "https://nodejs.org/dist/latest-v24.x/$node_tarball" | tar -xJ -C /opt
+          ln -sf /opt/"${node_tarball%.tar.xz}"/bin/* /usr/local/bin/
+
+      - name: Setup the source in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          cd /root/reprint
+          tests/e2e/ci/setup-infrastructure.sh 8.3
+          tests/e2e/setup.sh
+          tests/e2e/ci/download-wp-cli.sh
+          (cd tests/e2e && npm ci)
+          # WSL steps do not inherit the job environment, so each bench sources these.
+          cat > /root/bench-settings.sh <<'SETTINGS'
+          export BENCH_STAGES=preflight,files-pull,db-pull,db-apply,apply-runtime
+          export BENCH_URL_REWRITE=0
+          export BENCH_SEED_POSTS=10000 BENCH_SEED_POSTMETA=25000
+          export E2E_SERVER_PROJECT_ROOT=/root/reprint
+          SETTINGS
+
+      - name: Bench PR with the Windows client
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          source /root/bench-settings.sh
+          workspace=$(pwd)
+          export WINDOWS_PHP=$(wslpath -u "$(cat windows-php-path.txt)")
+          export PHP_BINARY=/root/reprint/tests/e2e/ci/windows-php.sh
+          export IMPORTER_PATH="$workspace/phars/pr/reprint.phar"
+          # State and the pulled tree live on NTFS, as they do for a Windows user.
+          mkdir -p /mnt/c/reprint-bench-tmp
+          export TMPDIR=/mnt/c/reprint-bench-tmp
+          export BENCH_LABEL=pr BENCH_JSON_OUT=bench-windows-pr.json BENCH_MD_OUT=bench-windows-pr.md
+          cd /root/reprint/tests/e2e
+          trap 'cp bench-windows-pr.json "$workspace/" 2>/dev/null || true' EXIT
+          node benchmark/bench-pull.mjs
+
+      - name: Reset benchmark sites before trunk
+        shell: wsl-bash {0}
+        run: rm -rf /srv/e2e-sites/large-directory /tmp/e2e-site-large-directory.lock
+
+      # Trunk could not pull on Windows before the native Windows client landed.
+      - name: Bench trunk with the Windows client
+        shell: wsl-bash {0}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          source /root/bench-settings.sh
+          workspace=$(pwd)
+          export WINDOWS_PHP=$(wslpath -u "$(cat windows-php-path.txt)")
+          export PHP_BINARY=/root/reprint/tests/e2e/ci/windows-php.sh
+          export IMPORTER_PATH="$workspace/phars/trunk/reprint.phar"
+          export BENCH_PREFLIGHT_IMPORTER_PATH="$workspace/phars/pr/reprint.phar"
+          export TMPDIR=/mnt/c/reprint-bench-tmp
+          export BENCH_LABEL=trunk BENCH_JSON_OUT=bench-windows-trunk.json BENCH_MD_OUT=bench-windows-trunk.md
+          cd /root/reprint/tests/e2e
+          trap 'cp bench-windows-trunk.json "$workspace/" 2>/dev/null || true' EXIT
+          node benchmark/bench-pull.mjs
+
+      - name: Bench PR with the Linux client on the same runner
+        shell: wsl-bash {0}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          source /root/bench-settings.sh
+          workspace=$(pwd)
+          mkdir -p /root/phars
+          cp "$workspace/phars/pr/reprint.phar" /root/phars/pr.phar
+          export IMPORTER_PATH=/root/phars/pr.phar
+          # The source enrolled the key the Windows runs generated under their TMPDIR.
+          cp -r /mnt/c/reprint-bench-tmp/reprint-e2e-keys /tmp/
+          export BENCH_LABEL=wsl-linux BENCH_JSON_OUT=bench-wsl-linux-pr.json BENCH_MD_OUT=bench-wsl-linux-pr.md
+          cd /root/reprint/tests/e2e
+          trap 'cp bench-wsl-linux-pr.json "$workspace/" 2>/dev/null || true' EXIT
+          node benchmark/bench-pull.mjs
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pull-pipeline-bench-windows
+          path: |
+            bench-windows-pr.json
+            bench-windows-trunk.json
+            bench-wsl-linux-pr.json
+          if-no-files-found: ignore
+
+  # The Linux job posts its report as soon as it finishes; this replaces it
+  # with both reports once the Windows job has finished too.
+  report:
+    name: Combine the Linux and Windows reports
+    needs: [bench, bench-windows]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - name: Download Linux report
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pull-pipeline-bench
+          path: tests/e2e/linux
+
+      - name: Download Windows results
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: pull-pipeline-bench-windows
+          path: tests/e2e/windows
+
+      - name: Render the combined report
+        id: render
+        working-directory: tests/e2e
+        run: |
+          set -euo pipefail
+          sections=()
+          [ -f linux/bench-results.md ] && sections+=(linux/bench-results.md)
+          if [ -f windows/bench-windows-pr.json ]; then
+            PR_JSON=windows/bench-windows-pr.json TRUNK_JSON=windows/bench-windows-trunk.json \
+              OUT_MD=windows/bench-windows.md BASELINE_LABEL=trunk \
+              REPORT_HEADING='Native Windows client' PERF_HISTORY_URL=none \
+              node benchmark/render-diff.mjs > /dev/null
+            sections+=(windows/bench-windows.md)
+            if [ -f windows/bench-wsl-linux-pr.json ]; then
+              WINDOWS_JSON=windows/bench-windows-pr.json LINUX_JSON=windows/bench-wsl-linux-pr.json \
+                OUT_MD=windows/bench-platforms.md node benchmark/render-platforms.mjs > /dev/null
+              sections+=(windows/bench-platforms.md)
+            fi
+          fi
+          if [ ${#sections[@]} -eq 0 ]; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for section in "${sections[@]}"; do cat "$section"; echo; done > bench-combined.md
+          cat bench-combined.md >> "$GITHUB_STEP_SUMMARY"
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+
+      - name: Post sticky PR comment
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository &&
+          steps.render.outputs.exists == 'true'
+        continue-on-error: true
+        uses: marocchino/sticky-pull-request-comment@773744901bac0e8cbb5a0dc842800d45e9b2b405 # v2
+        with:
+          header: pull-pipeline-perf
+          path: tests/e2e/bench-combined.md
+
   ci-result:
     name: Performance result
-    needs: [build-pr-phar, build-trunk-phar, bench]
+    needs: [build-pr-phar, build-trunk-phar, bench, bench-windows, report]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
