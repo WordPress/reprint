@@ -210,66 +210,6 @@ final class LocalLink
     }
 
     /**
-     * Removes the symlink at $link_path without changing its target.
-     *
-     * @param string $link_path Path of a symlink.
-     * @return bool Whether nothing remains at $link_path.
-     */
-    public static function remove_symlink(string $link_path): bool
-    {
-        if (@unlink($link_path)) {
-            return true;
-        }
-        // A Windows link to a directory is removed like a directory.
-        if (Utils::native_path_format() === 'windows' && self::is_link($link_path) && @rmdir($link_path)) {
-            return true;
-        }
-        clearstatcache(true, $link_path);
-        return !self::is_link($link_path) && !file_exists($link_path);
-    }
-
-    /**
-     * Removes $path and, for a directory, everything in it, without following links.
-     *
-     * A link is removed as a link, so its target is left alone.
-     *
-     * @param string $path Path to remove; nothing happens when it does not exist.
-     * @throws RuntimeException When an entry cannot be removed, naming that
-     *                          entry and PHP's reason.
-     */
-    public static function remove_without_following_links(string $path): void
-    {
-        if (self::is_link($path)) {
-            if (!self::remove_symlink($path)) {
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
-                throw new RuntimeException("Could not remove the symlink at {$path}: " . self::last_php_error());
-            }
-            return;
-        }
-        if (is_dir($path)) {
-            $entries = @scandir($path);
-            if ($entries === false) {
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
-                throw new RuntimeException("Could not list the directory {$path} for removal: " . self::last_php_error());
-            }
-            foreach ($entries as $entry) {
-                if ($entry !== '.' && $entry !== '..') {
-                    self::remove_without_following_links(wp_join_unix_paths($path, $entry));
-                }
-            }
-            if (!@rmdir($path)) {
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
-                throw new RuntimeException("Could not remove the directory {$path}: " . self::last_php_error());
-            }
-            return;
-        }
-        if (file_exists($path) && !@unlink($path)) {
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
-            throw new RuntimeException("Could not remove the file {$path}: " . self::last_php_error());
-        }
-    }
-
-    /**
      * Returns the Windows value a link needs after it moves from $source_link_path
      * to $destination_link_path.
      *
@@ -305,12 +245,6 @@ final class LocalLink
             );
         }
         return self::link_value(dirname($destination_link_path), $resolved_target);
-    }
-
-    /** Returns PHP's message for the last suppressed failure. */
-    private static function last_php_error(): string
-    {
-        return error_get_last()['message'] ?? 'PHP reported no reason';
     }
 
     /** Whether $path is a directory, including one reached through a junction. */

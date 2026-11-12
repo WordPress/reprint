@@ -201,11 +201,11 @@ class WpContentMerger
                     "Failed to create symlink: {$destination_entry} -> {$link_value}",
                 );
             }
-            LocalLink::remove_without_following_links($source_entry);
+            Utils::remove_without_following_links($source_entry);
         } elseif (!@rename($source_entry, $destination_entry)) {
             // A sibling rename prevents a partial copy from occupying the destination.
             $staging_path = $destination_entry . self::STAGING_SUFFIX;
-            LocalLink::remove_without_following_links($staging_path);
+            Utils::remove_without_following_links($staging_path);
             try {
                 $this->copy_path($source_entry, $staging_path);
                 if (!@rename($staging_path, $destination_entry)) {
@@ -216,14 +216,14 @@ class WpContentMerger
                 }
             } catch (Throwable $copy_failure) {
                 try {
-                    LocalLink::remove_without_following_links($staging_path);
+                    Utils::remove_without_following_links($staging_path);
                 } catch (RuntimeException $cleanup_failure) {
                     // Report the copy failure first; the staging path is cleared again on the next run.
                     $copy_failure = new RuntimeException($copy_failure->getMessage() . ' ' . $cleanup_failure->getMessage(), 0, $copy_failure);
                 }
                 throw $copy_failure;
             }
-            LocalLink::remove_without_following_links($source_entry);
+            Utils::remove_without_following_links($source_entry);
         }
 
         ++$this->moved;

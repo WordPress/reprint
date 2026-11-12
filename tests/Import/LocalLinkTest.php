@@ -85,7 +85,7 @@ final class LocalLinkTest extends TestCase
         $link_value = LocalLink::native_link_value('../../wordpress/plugins/akismet/latest', $link_path);
         $this->assertTrue(LocalLink::create_symlink($link_value, $link_path));
 
-        $this->assertTrue(LocalLink::remove_symlink($link_path));
+        $this->assertTrue(Utils::remove_symlink($link_path));
 
         $this->assertFalse(LocalLink::is_link($link_path));
         $this->assertFileDoesNotExist($link_path);
@@ -145,7 +145,7 @@ final class LocalLinkTest extends TestCase
         $this->assertTrue(LocalLink::is_link($link_path));
         $this->assertTrue(LocalLink::has_value($link_path, $link_value));
         $this->assertSame('akismet', file_get_contents($link_path . '/akismet.php'));
-        LocalLink::remove_without_following_links($link_path);
+        Utils::remove_without_following_links($link_path);
         $this->assertFalse(LocalLink::is_link($link_path));
         $this->assertFileDoesNotExist($link_path);
         $this->assertSame('akismet', file_get_contents($target_path . '/akismet.php'), 'removing the junction keeps its target');
@@ -169,7 +169,7 @@ final class LocalLinkTest extends TestCase
         file_put_contents($link_path, 'changed');
         $this->assertSame('akismet', file_get_contents($target_path), 'writing the stand-in leaves the target alone');
         $this->assertFalse(LocalLink::has_value($link_path, $link_value));
-        LocalLink::remove_without_following_links($link_path);
+        Utils::remove_without_following_links($link_path);
         $this->assertFileDoesNotExist($link_path);
     }
 
@@ -185,14 +185,14 @@ final class LocalLinkTest extends TestCase
         if (!LocalLink::create_symlink($this->root . '/files', $probe)) {
             return false;
         }
-        LocalLink::remove_symlink($probe);
+        Utils::remove_symlink($probe);
         return true;
     }
 
     private function remove_tree(string $path): void
     {
         if (LocalLink::is_link($path)) {
-            LocalLink::remove_symlink($path);
+            Utils::remove_symlink($path);
             return;
         }
         if (!is_dir($path)) {

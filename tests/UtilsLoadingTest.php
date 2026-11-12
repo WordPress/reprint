@@ -49,9 +49,8 @@ final class UtilsLoadingTest extends TestCase
         use WordPress\Reprint\Server\Utils;
         require $argv[1];
         $already_loaded = class_exists(Utils::class, false);
-        $removed = Utils::remove_local_files_and_directories(['plugin', 'absent'], $argv[2]);
-        Utils::remove_directory_and_its_contents($argv[2]);
-        echo json_encode([$already_loaded, $removed]);
+        Utils::remove_without_following_links($argv[2]);
+        echo json_encode($already_loaded);
         PHP;
 
         try {
@@ -64,7 +63,7 @@ final class UtilsLoadingTest extends TestCase
             $output = stream_get_contents($pipes[1]);
             fclose($pipes[1]);
             $this->assertSame(0, proc_close($process), $output);
-            $this->assertSame([false, ['plugin']], json_decode($output, true));
+            $this->assertFalse(json_decode($output, true));
             $this->assertDirectoryDoesNotExist($directory);
         } finally {
             if (is_file($directory . '/plugin/index.php')) {

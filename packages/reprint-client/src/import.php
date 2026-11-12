@@ -3642,7 +3642,7 @@ class ImportClient
 
         // Always wipe and recreate so the directory reflects current state.
         if (is_dir($runtime_dir)) {
-            Utils::remove_directory_and_its_contents($runtime_dir);
+            Utils::remove_without_following_links($runtime_dir);
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
@@ -5464,7 +5464,7 @@ class ImportClient
 
             // Remove stale symlink if present
             if (LocalLink::is_link($local_absolute_path)) {
-                LocalLink::remove_symlink($local_absolute_path);
+                Utils::remove_symlink($local_absolute_path);
             }
 
             // Don't overwrite a real directory — that shouldn't exist for
@@ -6309,7 +6309,16 @@ class ImportClient
             $excluded_local_paths
         )));
         $this->save_state();
-        return Utils::remove_local_files_and_directories($excluded_local_paths, $local_document_root);
+        $removed_paths = [];
+        foreach ($excluded_local_paths as $relative_path) {
+            $local_absolute_path = wp_join_unix_paths($local_document_root, $relative_path);
+            if (!file_exists($local_absolute_path) && !LocalLink::is_link($local_absolute_path)) {
+                continue;
+            }
+            Utils::remove_without_following_links($local_absolute_path);
+            $removed_paths[] = $relative_path;
+        }
+        return $removed_paths;
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
@@ -7211,7 +7220,7 @@ class ImportClient
             }
             // Points elsewhere — remove and recreate
             $current_link_target = @readlink($target);
-            LocalLink::remove_without_following_links($target);
+            Utils::remove_without_following_links($target);
             $this->audit_log(
                 "FLAT-DOCUMENT-ROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
             );
@@ -7251,7 +7260,7 @@ class ImportClient
                 true,
             );
 
-            LocalLink::remove_without_following_links($target);
+            Utils::remove_without_following_links($target);
             $forced++;
         }
 
@@ -7346,7 +7355,7 @@ class ImportClient
         if (LocalLink::is_link($destination)
             || (file_exists($destination) && is_dir($destination) !== $source_is_directory)
         ) {
-            LocalLink::remove_without_following_links($destination);
+            Utils::remove_without_following_links($destination);
         }
 
         if (!$source_is_directory) {
@@ -7379,7 +7388,7 @@ class ImportClient
         // Remove first. On a case-insensitive filesystem, copying Foo.php
         // writes into an existing foo.php, which would then look stale.
         foreach (array_diff($destination_entries, $source_entries) as $entry) {
-            LocalLink::remove_without_following_links(wp_join_unix_paths($destination, $entry));
+            Utils::remove_without_following_links(wp_join_unix_paths($destination, $entry));
         }
         foreach (array_diff($source_entries, [".", ".."]) as $entry) {
             $this->flatten_copy_core_tree(
@@ -7411,7 +7420,7 @@ class ImportClient
                 "FLAT-DOCUMENT-ROOT FORCE | Replacing symlink with real directory: {$path}",
                 true,
             );
-            LocalLink::remove_without_following_links($path);
+            Utils::remove_without_following_links($path);
             $forced++;
         }
 
@@ -10668,7 +10677,7 @@ class ImportClient
             $this->assert_local_path_within_root($local_absolute_path);
         }
         try {
-            LocalLink::remove_without_following_links($local_absolute_path);
+            Utils::remove_without_following_links($local_absolute_path);
         } catch (RuntimeException $removal_failure) {
             $this->audit_log($removal_failure->getMessage(), true);
             return false;
@@ -13083,7 +13092,7 @@ class ImportClient
                     "Removing symlink blocking directory: {$current}",
                     true,
                 );
-                LocalLink::remove_without_following_links($current);
+                Utils::remove_without_following_links($current);
                 // Clear cached realpath so the subsequent realpath() check
                 // sees the new directory instead of the removed symlink.
                 clearstatcache(true, $current);

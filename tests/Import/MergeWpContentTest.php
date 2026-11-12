@@ -604,7 +604,7 @@ class MergeWpContentTest extends TestCase
     {
         if (!is_dir($dir) || \LocalLink::is_link($dir)) {
             if (\LocalLink::is_link($dir)) {
-                \LocalLink::remove_symlink($dir);
+                \WordPress\Reprint\Server\Utils::remove_symlink($dir);
             }
             return;
         }
@@ -614,7 +614,7 @@ class MergeWpContentTest extends TestCase
             }
             $path = $dir . '/' . $item;
             if (\LocalLink::is_link($path)) {
-                \LocalLink::remove_symlink($path);
+                \WordPress\Reprint\Server\Utils::remove_symlink($path);
                 continue;
             }
             if (is_file($path)) {

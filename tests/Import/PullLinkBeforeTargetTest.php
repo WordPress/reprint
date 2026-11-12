@@ -137,7 +137,7 @@ final class PullLinkBeforeTargetTest extends TestCase
         if (!\LocalLink::create_symlink($this->root . '/files', $probe)) {
             return false;
         }
-        \LocalLink::remove_symlink($probe);
+        \WordPress\Reprint\Server\Utils::remove_symlink($probe);
         return true;
     }
 
@@ -150,7 +150,7 @@ final class PullLinkBeforeTargetTest extends TestCase
             }
             $child = $path . '/' . $entry;
             if (\LocalLink::is_link($child)) {
-                \LocalLink::remove_symlink($child);
+                \WordPress\Reprint\Server\Utils::remove_symlink($child);
             } elseif (is_dir($child)) {
                 $this->remove_tree($child);
             } else {

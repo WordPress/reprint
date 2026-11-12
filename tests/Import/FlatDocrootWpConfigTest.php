@@ -295,7 +295,7 @@ class FlatDocrootWpConfigTest extends TestCase
             }
             $path = $dir . '/' . $item;
             if (\LocalLink::is_link($path)) {
-                \LocalLink::remove_symlink($path);
+                \WordPress\Reprint\Server\Utils::remove_symlink($path);
                 continue;
             }
             if (is_file($path)) {

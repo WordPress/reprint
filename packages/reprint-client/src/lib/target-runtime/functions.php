@@ -1,5 +1,6 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
 
 require_once __DIR__ . '/../class-local-link.php';
@@ -270,7 +271,7 @@ function ensure_sqlite_plugin_database_driver(string $source_dir, string $target
 
     // phpcs:ignore PHPCompatibility.Extensions.RemovedExtensions.sqliteRemoved -- user-defined helper, not the removed sqlite extension.
     $source_database_dir = sqlite_plugin_database_driver_source($source_dir);
-    remove_sqlite_runtime_path_recursive($target_database_dir);
+    Utils::remove_without_following_links($target_database_dir);
     copy_directory_recursive($source_database_dir, $target_database_dir);
 }
 
@@ -293,11 +294,6 @@ function sqlite_plugin_database_driver_source(string $source_dir): string
         "sqlite-database-integration database driver not found for {$source_dir}. " .
         "Run 'git submodule update --init' to fetch it.",
     );
-}
-
-function remove_sqlite_runtime_path_recursive(string $path): void
-{
-    LocalLink::remove_without_following_links($path);
 }
 
 /**

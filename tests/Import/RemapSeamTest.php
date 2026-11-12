@@ -48,7 +48,7 @@ class RemapSeamTest extends TestCase
             }
             $p = "$d/$i";
             if (\LocalLink::is_link($p)) {
-                \LocalLink::remove_symlink($p);
+                \WordPress\Reprint\Server\Utils::remove_symlink($p);
             } elseif (is_dir($p)) {
                 $this->rrm($p);
             } else {
