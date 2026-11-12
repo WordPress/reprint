@@ -118,7 +118,7 @@ See [Windows sources](https://developer.wordpress.org/reprint/guides/windows-sou
 
 On a Windows destination, `pull-files`, `merge-wp-content`, and `flat-docroot` write each link as a full Windows path, such as `C:\Sites\example\wp-content\plugins\shared`. Keep `--fs-root` where it is after the pull.
 
-PHP on Windows creates symlinks only for an account with the symlink privilege, such as an administrator running elevated. Developer Mode does not change this, because PHP does not request it. Any other account, including an administrator running without elevation, gets these instead:
+PHP on Windows creates symlinks only for an account with the symlink privilege, such as an administrator running elevated. Any other account, including an administrator running without elevation, gets these instead:
 
 | Source link points to | Created on the destination |
 | --- | --- |
@@ -128,7 +128,7 @@ PHP on Windows creates symlinks only for an account with the symlink privilege, 
 
 A link whose target has not been downloaded yet is created after the file transfer, once its target is in place.
 
-Running `flat-docroot` again keeps a copy that still matches its source. A copy that differs, because you edited it or because a later pull changed its source, stops the run; `--force` replaces it with a fresh copy.
+Running `flat-docroot` again keeps a copy that still matches its source. A copy that differs, because you edited it or because a later pull changed its source, stops the run. Pass `--force` to replace it with a fresh copy.
 
 ## Rewrite asset URLs
 
