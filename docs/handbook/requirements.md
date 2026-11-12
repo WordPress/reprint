@@ -6,6 +6,8 @@ To clone your site, you need a terminal, command-line PHP, enough disk space, an
 
 The client requires PHP 7.4 or newer. Use a terminal on macOS or Linux, or WSL on Windows. Run these checks on the computer receiving the copy. The generated development-server start script uses Bash; you do not need to change your interactive shell.
 
+Native Windows PHP can run the step-by-step pull commands: `pull-files`, `pull-db` into SQLite, `merge-wp-content`, `flat-docroot`, and `apply-runtime`. Push and the Bash start script need WSL, macOS, or Linux. Windows lets only some accounts create symlinks, so links can arrive in another form. See [Links on a Windows destination](https://developer.wordpress.org/reprint/reference/file-transfers/#links-on-a-windows-destination).
+
 ```sh
 php --version
 php -m

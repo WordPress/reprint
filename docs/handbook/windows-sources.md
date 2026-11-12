@@ -1,6 +1,6 @@
 # Copy a Windows-hosted site
 
-Follow [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/) using a Linux, macOS, or WSL client. Update both the source plugin and the client to versions with Windows path support. These notes explain source paths and checks before migration; they are not instructions for running the client in native Windows PHP.
+Follow [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/) using a Linux, macOS, or WSL client. Update both the source plugin and the client to versions with Windows path support. These notes explain source paths and checks before migration. To run the client in native Windows PHP, see [Requirements and downloads](https://developer.wordpress.org/reprint/getting-started/requirements/#check-the-destination-computer).
 
 ## Choose source paths
 
