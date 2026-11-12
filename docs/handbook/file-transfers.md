@@ -114,6 +114,22 @@ Replacing or deleting a local symlink changes the link itself, not its target. S
 
 See [Windows sources](https://developer.wordpress.org/reprint/guides/windows-sources/) for drive-letter and share paths.
 
+### Links on a Windows destination
+
+On a Windows destination, `pull-files`, `merge-wp-content`, and `flat-docroot` write each link as a full Windows path, such as `C:\Sites\example\wp-content\plugins\shared`. Keep `--fs-root` where it is after the pull.
+
+PHP on Windows creates symlinks only for an account with the symlink privilege, such as an administrator running elevated. Developer Mode does not change this, because PHP does not request it. Any other account, including an administrator running without elevation, gets these instead:
+
+| Source link points to | Created on the destination |
+| --- | --- |
+| A directory | A junction. It behaves like a symlink to the directory, so edits through it change the downloaded tree. |
+| A file | A copy of the file. Edits to the copy stay in that copy. |
+| Nothing, or a path outside the pull | Nothing. The link is reported and skipped. This applies to every Windows account. |
+
+A link whose target has not been downloaded yet is created after the file transfer, once its target is in place.
+
+Running `flat-docroot` again keeps a copy that still matches its source. A copy that differs, because you edited it or because a later pull changed its source, stops the run; `--force` replaces it with a fresh copy.
+
 ## Rewrite asset URLs
 
 Pass `--new-site-url` or repeat `--rewrite-url FROM TO` before the first file pull when the destination address differs. `pull` applies its mappings to both CSS downloads and the database; `pull-files` accepts them too.

@@ -9,7 +9,7 @@ php reprint.phar flat-docroot "$URL" --state-dir="$STATE_DIR" \
   --fs-root="$FS_ROOT" --flatten-to="$FLAT_DIR"
 ```
 
-By default this creates symlinks to the downloaded tree; it does not copy the files. Keep the download directory while using that layout.
+By default this creates symlinks to the downloaded tree; it does not copy the files. Keep the download directory while using that layout. A Windows account that cannot create symlinks gets junctions and file copies instead; see [Links on a Windows destination](https://developer.wordpress.org/reprint/reference/file-transfers/#links-on-a-windows-destination).
 
 With `--core-files=copy`, WordPress core is copied instead of linked. Every run brings the copy back in line with the downloaded core, so local edits to core are discarded and never reach `--fs-root`. Core is the fixed set of files WordPress ships. `wp-includes/version.php` is copied last, so a copy that stops partway still reports the previous WordPress version, and a caller comparing versions copies again. `wp-content`, `wp-config.php` and similar config files, and other site files stay linked, including a `wp-*.php` file such as a `wp-salt.php` that `wp-config.php` requires. `--flatten-to` must be outside `--fs-root`, and a symlink inside core stops the run. To go back to links, run `flat-docroot` with `--force`.
 
