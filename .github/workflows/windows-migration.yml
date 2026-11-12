@@ -70,16 +70,16 @@ jobs:
       - name: Run link-placing client tests
         shell: pwsh
         run: |
-          $tests = 'PathFormatTest.php Import/RemapSeamTest.php Import/LocalLinkTest.php Import/PullLinkBeforeTargetTest.php Import/FilesPullLocalIndexTest.php Import/PullFilterOptionTest.php Import/MergeWpContentTest.php Import/FlatDocrootWpConfigTest.php Import/FlatDocrootCoreFilesCopyTest.php'
+          $tests = 'PathFormatTest.php,Import/RemapSeamTest.php,Import/LocalLinkTest.php,Import/PullLinkBeforeTargetTest.php,Import/FilesPullLocalIndexTest.php,Import/PullFilterOptionTest.php,Import/MergeWpContentTest.php,Import/FlatDocrootWpConfigTest.php,Import/FlatDocrootCoreFilesCopyTest.php,--group windows-links Import/ProductionDropInRemovalTest.php'
           $php = (Get-Command php).Source
           $failed = 0
-          foreach ($test in $tests.Split(' ')) {
+          foreach ($test in $tests.Split(',')) {
             Write-Output "::group::$test"
             if ('${{ matrix.account }}' -eq 'standard') {
               ./tests/e2e/windows/run-as-standard-user.ps1 -WorkingDirectory "$env:GITHUB_WORKSPACE\tests" -Command "`"$php`" ..\vendor\bin\phpunit $test"
             } else {
               Push-Location tests
-              & $php ../vendor/bin/phpunit --display-warnings $test
+              & $php ../vendor/bin/phpunit --display-warnings $test.Split(' ')
               Pop-Location
             }
             if ($LASTEXITCODE -ne 0) { $failed++ }
