@@ -49,7 +49,7 @@ final class LocalLinkTest extends TestCase
 
         $this->assertTrue(LocalLink::create_symlink($link_value, $link_path));
 
-        $this->assertTrue(is_link($link_path));
+        $this->assertTrue(LocalLink::is_link($link_path));
         $this->assertSame('akismet', file_get_contents($link_path . '/akismet.php'));
         $this->assertSame($this->root . '/elsewhere', Utils::normalize_path(getcwd(), Utils::native_path_format()), 'the working directory is restored');
         $this->assertTrue(LocalLink::has_value($link_path, $link_value));
@@ -85,9 +85,9 @@ final class LocalLinkTest extends TestCase
         $link_value = LocalLink::native_link_value('../../wordpress/plugins/akismet/latest', $link_path);
         $this->assertTrue(LocalLink::create_symlink($link_value, $link_path));
 
-        $this->assertTrue(LocalLink::remove_symlink($link_path));
+        $this->assertTrue(Utils::remove_symlink($link_path));
 
-        $this->assertFalse(is_link($link_path));
+        $this->assertFalse(LocalLink::is_link($link_path));
         $this->assertFileDoesNotExist($link_path);
         $this->assertFileExists($this->root . '/files/wordpress/plugins/akismet/latest/akismet.php');
     }
@@ -104,7 +104,9 @@ final class LocalLinkTest extends TestCase
             $this->markTestSkipped('Windows link behavior.');
         }
         chdir($this->root . '/files/wp-content/plugins');
-        $this->assertTrue(symlink('../../wordpress/plugins/akismet/latest', 'forward'));
+        if (!@symlink('../../wordpress/plugins/akismet/latest', 'forward')) {
+            $this->markTestSkipped('PHP cannot create symlinks for this account.');
+        }
         $this->assertTrue(symlink('..\\..\\wordpress\\plugins\\akismet\\latest', 'backward'));
 
         $this->assertFileDoesNotExist($this->root . '/files/wp-content/plugins/forward/akismet.php');
@@ -127,20 +129,70 @@ final class LocalLinkTest extends TestCase
         $this->assertSame('akismet', file_get_contents($this->root . '/site/wp-content/plugins/akismet/akismet.php'));
     }
 
+    /** An account without the symlink privilege gets a junction for a directory. */
+    public function testAJunctionStandsInForADirectorySymlink(): void
+    {
+        if (Utils::native_path_format() !== 'windows') {
+            $this->markTestSkipped('Junctions are a Windows substitute.');
+        }
+        $target_path = $this->root . '/files/wordpress/plugins/akismet/latest';
+        $link_path = $this->root . '/files/wp-content/plugins/akismet';
+        $link_value = LocalLink::link_value(dirname($link_path), $target_path);
+
+        $this->assertTrue($this->create_substitute($link_value, $link_path));
+
+        $this->assertFalse(is_link($link_path), 'PHP does not report a junction as a link');
+        $this->assertTrue(LocalLink::is_link($link_path));
+        $this->assertTrue(LocalLink::has_value($link_path, $link_value));
+        $this->assertSame('akismet', file_get_contents($link_path . '/akismet.php'));
+        Utils::remove_without_following_links($link_path);
+        $this->assertFalse(LocalLink::is_link($link_path));
+        $this->assertFileDoesNotExist($link_path);
+        $this->assertSame('akismet', file_get_contents($target_path . '/akismet.php'), 'removing the junction keeps its target');
+    }
+
+    /** An account without the symlink privilege gets a copy of a file. */
+    public function testACopyStandsInForAFileSymlink(): void
+    {
+        if (Utils::native_path_format() !== 'windows') {
+            $this->markTestSkipped('Copies are a Windows substitute.');
+        }
+        $target_path = $this->root . '/files/wordpress/plugins/akismet/latest/akismet.php';
+        $link_path = $this->root . '/files/wp-content/akismet.php';
+        $link_value = LocalLink::link_value(dirname($link_path), $target_path);
+
+        $this->assertTrue($this->create_substitute($link_value, $link_path));
+
+        $this->assertSame('akismet', file_get_contents($link_path));
+        $this->assertTrue(LocalLink::has_value($link_path, $link_value));
+        $this->assertFalse(LocalLink::has_value($link_path, LocalLink::link_value(dirname($link_path), $this->root . '/elsewhere')));
+        file_put_contents($link_path, 'changed');
+        $this->assertSame('akismet', file_get_contents($target_path), 'writing the stand-in leaves the target alone');
+        $this->assertFalse(LocalLink::has_value($link_path, $link_value));
+        Utils::remove_without_following_links($link_path);
+        $this->assertFileDoesNotExist($link_path);
+    }
+
+    /** Calls the substitute directly, so an administrator account covers it too. */
+    private function create_substitute(string $link_value, string $link_path): bool
+    {
+        return ( new \ReflectionMethod(LocalLink::class, 'create_symlink_substitute') )->invoke(null, $link_value, $link_path);
+    }
+
     private function can_create_symlinks(): bool
     {
         $probe = $this->root . '/elsewhere/probe';
-        if (!@symlink($this->root . '/files', $probe)) {
+        if (!LocalLink::create_symlink($this->root . '/files', $probe)) {
             return false;
         }
-        LocalLink::remove_symlink($probe);
+        Utils::remove_symlink($probe);
         return true;
     }
 
     private function remove_tree(string $path): void
     {
-        if (is_link($path)) {
-            LocalLink::remove_symlink($path);
+        if (LocalLink::is_link($path)) {
+            Utils::remove_symlink($path);
             return;
         }
         if (!is_dir($path)) {

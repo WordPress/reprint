@@ -5,6 +5,7 @@ namespace ImportTests;
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
+require_once __DIR__ . '/LinkOrCopyAssertions.php';
 
 /**
  * Verify run_flat_document_root() picks up wp-config.php when it lives
@@ -12,6 +13,8 @@ require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
  */
 class FlatDocrootWpConfigTest extends TestCase
 {
+    use LinkOrCopyAssertions;
+
     private string $tempDir;
     private string $stateDir;
     private string $fsRoot;
@@ -84,7 +87,7 @@ class FlatDocrootWpConfigTest extends TestCase
 
         $wpConfigFlat = $flattenTo . '/wp-config.php';
         $this->assertFileExists($wpConfigFlat, 'wp-config.php should exist in flattened output');
-        $this->assertTrue(is_link($wpConfigFlat), 'wp-config.php should be a symlink');
+        $this->assertLinkedOrCopied($wpConfigFlat, 'wp-config.php should be a symlink');
         $this->assertStringContainsString(
             'wp-config from parent',
             file_get_contents($wpConfigFlat),
@@ -185,14 +188,76 @@ class FlatDocrootWpConfigTest extends TestCase
             ['flatten_to' => $flattenTo, 'force' => false],
         ]);
 
-        $this->assertTrue(is_link($flattenTo . '/wp-load.php'));
-        $this->assertTrue(is_link($flattenTo . '/wp-admin'));
-        $this->assertTrue(is_link($flattenTo . '/wp-includes'));
-        $this->assertTrue(is_link($flattenTo . '/wp-content'));
+        $this->assertLinkedOrCopied($flattenTo . '/wp-load.php');
+        $this->assertLinkedOrCopied($flattenTo . '/wp-admin');
+        $this->assertLinkedOrCopied($flattenTo . '/wp-includes');
+        $this->assertLinkedOrCopied($flattenTo . '/wp-content');
         $this->assertSame('theme', file_get_contents($flattenTo . '/wp-content/theme.txt'));
     }
 
+    public function testASecondRunWithoutForceKeepsItsLinksAndCopies(): void
+    {
+        $this->writeRootAbspathSite();
+        $flattenTo = $this->tempDir . '/flat';
+
+        for ($run = 1; $run <= 2; $run++) {
+            $client = $this->makeClient();
+            $this->loadClientState($client);
+            $this->callPrivate($client, 'run_flat_document_root', [
+                ['flatten_to' => $flattenTo, 'force' => false],
+            ]);
+        }
+
+        $this->assertLinkedOrCopied($flattenTo . '/wp-load.php');
+        $this->assertSame('<?php // wp-load at root', file_get_contents($flattenTo . '/wp-load.php'));
+    }
+
+    public function testAFileThatDiffersFromItsSourceStopsARunWithoutForce(): void
+    {
+        $this->writeRootAbspathSite();
+        $flattenTo = $this->tempDir . '/flat';
+        mkdir($flattenTo, 0755, true);
+        file_put_contents($flattenTo . '/wp-load.php', '<?php // edited in the flat layout');
+
+        $client = $this->makeClient();
+        $this->loadClientState($client);
+        try {
+            $this->callPrivate($client, 'run_flat_document_root', [
+                ['flatten_to' => $flattenTo, 'force' => false],
+            ]);
+            $this->fail('A file that differs from its source should stop the run.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('a non-symlink file already exists', $exception->getMessage());
+        }
+        $this->assertSame('<?php // edited in the flat layout', file_get_contents($flattenTo . '/wp-load.php'));
+    }
+
     // ---- helpers ----
+
+    private function writeRootAbspathSite(): void
+    {
+        mkdir($this->fsRoot . '/wp-admin', 0755, true);
+        mkdir($this->fsRoot . '/wp-includes', 0755, true);
+        mkdir($this->fsRoot . '/wp-content', 0755, true);
+        file_put_contents($this->fsRoot . '/wp-load.php', '<?php // wp-load at root');
+        $this->writeState([
+            'preflight' => [
+                'data' => [
+                    'database' => [
+                        'wp' => [
+                            'table_prefix' => 'wp_',
+                            'paths_urls' => [
+                                'abspath' => '/',
+                                'wp_admin_path' => '/wp-admin',
+                                'wp_includes_path' => '/wp-includes',
+                                'content_dir' => '/wp-content',
+                            ],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+    }
 
     private function writeState(array $state): void
     {
@@ -229,8 +294,8 @@ class FlatDocrootWpConfigTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path)) {
-                \LocalLink::remove_symlink($path);
+            if (\LocalLink::is_link($path)) {
+                \WordPress\Reprint\Server\Utils::remove_symlink($path);
                 continue;
             }
             if (is_file($path)) {

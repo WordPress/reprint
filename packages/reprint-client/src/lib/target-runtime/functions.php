@@ -1,6 +1,9 @@
 <?php
 
+use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
+
+require_once __DIR__ . '/../class-local-link.php';
 
 /**
  * Target runtime functions.
@@ -262,13 +265,13 @@ function copy_sqlite_plugin(string $source_dir, string $output_dir): string
 function ensure_sqlite_plugin_database_driver(string $source_dir, string $target_dir): void
 {
     $target_database_dir = wp_join_unix_paths($target_dir, 'wp-includes/database');
-    if (is_file(wp_join_unix_paths($target_database_dir, 'version.php')) && !is_link($target_database_dir)) {
+    if (is_file(wp_join_unix_paths($target_database_dir, 'version.php')) && !LocalLink::is_link($target_database_dir)) {
         return;
     }
 
     // phpcs:ignore PHPCompatibility.Extensions.RemovedExtensions.sqliteRemoved -- user-defined helper, not the removed sqlite extension.
     $source_database_dir = sqlite_plugin_database_driver_source($source_dir);
-    remove_sqlite_runtime_path_recursive($target_database_dir);
+    Utils::remove_without_following_links($target_database_dir);
     copy_directory_recursive($source_database_dir, $target_database_dir);
 }
 
@@ -291,31 +294,6 @@ function sqlite_plugin_database_driver_source(string $source_dir): string
         "sqlite-database-integration database driver not found for {$source_dir}. " .
         "Run 'git submodule update --init' to fetch it.",
     );
-}
-
-function remove_sqlite_runtime_path_recursive(string $path): void
-{
-    if (!file_exists($path) && !is_link($path)) {
-        return;
-    }
-
-    if (is_link($path) || is_file($path)) {
-        unlink($path);
-        return;
-    }
-
-    $iterator = new RecursiveIteratorIterator(
-        new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS),
-        RecursiveIteratorIterator::CHILD_FIRST,
-    );
-    foreach ($iterator as $item) {
-        if ($item->isLink() || $item->isFile()) {
-            unlink($item->getPathname());
-        } else {
-            rmdir($item->getPathname());
-        }
-    }
-    rmdir($path);
 }
 
 /**

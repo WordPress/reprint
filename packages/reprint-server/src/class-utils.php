@@ -898,64 +898,70 @@ final class Utils
     }
 
     /**
-     * Remove selected local files and directories after the caller saves their push exclusions.
+     * Removes the link at $link_path without changing its target.
      *
-     * @param string[] $excluded_local_paths Paths relative to the local site root.
-     * @param string   $local_document_root  Local site root with the standard wp-content layout.
-     * @return string[] Paths removed, relative to the local site root. Absent paths are omitted.
+     * Windows PHP removes a link to a directory, including a junction, with
+     * rmdir() rather than unlink().
+     *
+     * @param string $link_path Path of a symlink or junction.
+     * @return bool Whether nothing remains at $link_path.
      */
-    public static function remove_local_files_and_directories(array $excluded_local_paths, string $local_document_root): array
+    public static function remove_symlink(string $link_path): bool
     {
-        $removed_paths = [];
-        foreach ($excluded_local_paths as $relative_path) {
-            $full_path = self::wp_join_unix_paths($local_document_root, $relative_path);
-            if (!file_exists($full_path) && !is_link($full_path)) {
-                continue;
-            }
-            if (is_dir($full_path) && !is_link($full_path)) {
-                self::remove_directory_and_its_contents($full_path);
-            } else {
-                unlink($full_path);
-            }
-            clearstatcache(true, $full_path);
-            if (file_exists($full_path) || is_link($full_path)) {
-                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem error, not HTML.
-                throw new RuntimeException("Could not remove source-host path: {$full_path}.");
-            }
-            $removed_paths[] = $relative_path;
+        if (@unlink($link_path)) {
+            return true;
         }
-        return $removed_paths;
+        if (self::native_path_format() === 'windows' && self::source_is_link($link_path) && @rmdir($link_path)) {
+            return true;
+        }
+        clearstatcache(true, $link_path);
+        return !self::source_is_link($link_path) && !file_exists($link_path);
     }
 
     /**
-     * Recursively remove a directory and all its contents.
+     * Removes $path and, for a directory, everything in it, without following links.
      *
-     * Child symlinks are unlinked, not followed. Removal errors are left to callers
-     * to check; runtime-file refresh tolerates them, host-plugin cleanup does not.
+     * A link, including a Windows junction, is removed as a link, so its target
+     * is left alone.
      *
-     * @param string $directory Directory to remove.
+     * @param string $path Path to remove; nothing happens when it does not exist.
+     * @throws RuntimeException When an entry cannot be removed, naming that
+     *                          entry and PHP's reason.
      */
-    public static function remove_directory_and_its_contents(string $directory): void
+    public static function remove_without_following_links(string $path): void
     {
-        if (!is_dir($directory)) {
+        if (self::source_is_link($path)) {
+            if (!self::remove_symlink($path)) {
+                $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
+                throw new RuntimeException("Could not remove the symlink at {$path}: {$php_error}");
+            }
             return;
         }
-        $entries = scandir($directory);
-        if (false === $entries) {
+        if (is_dir($path)) {
+            $entries = @scandir($path);
+            if ($entries === false) {
+                $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
+                throw new RuntimeException("Could not list the directory {$path} for removal: {$php_error}");
+            }
+            foreach ($entries as $entry) {
+                if ($entry !== '.' && $entry !== '..') {
+                    self::remove_without_following_links(self::wp_join_unix_paths($path, $entry));
+                }
+            }
+            if (!@rmdir($path)) {
+                $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
+                throw new RuntimeException("Could not remove the directory {$path}: {$php_error}");
+            }
             return;
         }
-        foreach ($entries as $entry) {
-            if ('.' === $entry || '..' === $entry) {
-                continue;
-            }
-            $path = self::wp_join_unix_paths($directory, $entry);
-            if (is_dir($path) && !is_link($path)) {
-                self::remove_directory_and_its_contents($path);
-            } else {
-                @unlink($path);
-            }
+        if (file_exists($path) && !@unlink($path)) {
+            $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI path error, not HTML.
+            throw new RuntimeException("Could not remove the file {$path}: {$php_error}");
         }
-        @rmdir($directory);
     }
 
     // ---------------------------------------------------------------------------

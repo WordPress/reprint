@@ -3,6 +3,8 @@
 use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
 
+require_once __DIR__ . '/../class-local-link.php';
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Merge failures carry CLI filesystem paths, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
@@ -101,7 +103,7 @@ class WpContentMerger
             $destination_entry = $this->routed_destinations[$entry]
                 ?? wp_join_unix_paths($this->destination_wp_content, $entry);
 
-            if (!file_exists($destination_entry) && !is_link($destination_entry)) {
+            if (!file_exists($destination_entry) && !LocalLink::is_link($destination_entry)) {
                 // A detached component may not yet have a destination parent.
                 $this->create_parent_directory($destination_entry);
                 $this->move_entry($source_entry, $destination_entry, $link_value);
@@ -129,7 +131,7 @@ class WpContentMerger
 
         foreach ($this->entries_with_links_last($source) as [$entry, $link_value]) {
             $destination_entry = wp_join_unix_paths($destination, $entry);
-            if (file_exists($destination_entry) || is_link($destination_entry)) {
+            if (file_exists($destination_entry) || LocalLink::is_link($destination_entry)) {
                 continue;
             }
             $this->move_entry(wp_join_unix_paths($source, $entry), $destination_entry, $link_value);
@@ -147,7 +149,7 @@ class WpContentMerger
             $source_entry = wp_join_unix_paths($source, $entry);
             $destination_entry = wp_join_unix_paths($destination, $entry);
 
-            if (!file_exists($destination_entry) && !is_link($destination_entry)) {
+            if (!file_exists($destination_entry) && !LocalLink::is_link($destination_entry)) {
                 $this->move_entry($source_entry, $destination_entry, $link_value);
                 continue;
             }
@@ -164,7 +166,8 @@ class WpContentMerger
      * unchanged.
      *
      * Windows PHP reads a relative link back as its resolved absolute
-     * target, so there every moved link gets a new relative value.
+     * target, so there every moved link gets a new relative value, and a
+     * staged copy rebases nested links whose target is inside the entry.
      *
      * @param string|null $link_value Value read from the source link before
      *                                any sibling moved, or null for an entry
@@ -199,29 +202,10 @@ class WpContentMerger
                     "Failed to create symlink: {$destination_entry} -> {$link_value}",
                 );
             }
-            LocalLink::remove_without_following_links($source_entry);
+            Utils::remove_without_following_links($source_entry);
         } elseif (!@rename($source_entry, $destination_entry)) {
-            // A sibling rename prevents a partial copy from occupying the destination.
-            $staging_path = $destination_entry . self::STAGING_SUFFIX;
-            LocalLink::remove_without_following_links($staging_path);
-            try {
-                $this->copy_path($source_entry, $staging_path);
-                if (!@rename($staging_path, $destination_entry)) {
-                    throw new RuntimeException(
-                        "Copied {$source_entry} to {$staging_path} but could not move it " .
-                            "to {$destination_entry}.",
-                    );
-                }
-            } catch (Throwable $copy_failure) {
-                try {
-                    LocalLink::remove_without_following_links($staging_path);
-                } catch (RuntimeException $cleanup_failure) {
-                    // Report the copy failure first; the staging path is cleared again on the next run.
-                    $copy_failure = new RuntimeException($copy_failure->getMessage() . ' ' . $cleanup_failure->getMessage(), 0, $copy_failure);
-                }
-                throw $copy_failure;
-            }
-            LocalLink::remove_without_following_links($source_entry);
+            $this->copy_entry($source_entry, $destination_entry);
+            Utils::remove_without_following_links($source_entry);
         }
 
         ++$this->moved;
@@ -231,15 +215,73 @@ class WpContentMerger
         );
     }
 
-    /** Copy an entry without following symlinks and preserve its permissions. */
-    private function copy_path(string $from, string $to): void
+    /**
+     * Copy an entry to its destination through a staging sibling, as a rename would place it.
+     *
+     * A Windows link value is an absolute path, so a nested link into the
+     * entry would still name the source after the copy. Each one is
+     * created once the copy has its final name, pointing at the same place
+     * inside it; a link to anywhere else keeps its target, as a rename
+     * leaves it.
+     */
+    private function copy_entry(string $source_entry, string $destination_entry): void
     {
-        if (is_link($from)) {
+        // A sibling rename prevents a partial copy from occupying the destination.
+        $staging_path = $destination_entry . self::STAGING_SUFFIX;
+        Utils::remove_without_following_links($staging_path);
+        $staged_windows_links = [];
+        $renamed = false;
+        try {
+            $this->copy_path($source_entry, $staging_path, $staged_windows_links);
+            if (!@rename($staging_path, $destination_entry)) {
+                throw new RuntimeException(
+                    "Copied {$source_entry} to {$staging_path} but could not move it " .
+                        "to {$destination_entry}.",
+                );
+            }
+            $renamed = true;
+            foreach ($staged_windows_links as [$source_link_path, $staged_link_path, $read_link_value]) {
+                $link_path = $destination_entry . substr($staged_link_path, strlen($staging_path));
+                $link_value = LocalLink::windows_moved_link_value($source_link_path, $link_path, $read_link_value, $source_entry);
+                if (!LocalLink::create_symlink($link_value, $link_path)) {
+                    throw new RuntimeException(
+                        "Failed to create symlink: {$link_path} -> {$link_value}",
+                    );
+                }
+            }
+        } catch (Throwable $copy_failure) {
+            // Nothing incomplete may stay at the name the next run reads as the pulled copy.
+            $incomplete_path = $renamed ? $destination_entry : $staging_path;
+            try {
+                Utils::remove_without_following_links($incomplete_path);
+            } catch (RuntimeException $cleanup_failure) {
+                // Report the copy failure first; the next run clears a leftover staging path.
+                $copy_failure = new RuntimeException($copy_failure->getMessage() . ' ' . $cleanup_failure->getMessage(), 0, $copy_failure);
+            }
+            throw $copy_failure;
+        }
+    }
+
+    /**
+     * Copy an entry without following symlinks and preserve its permissions.
+     *
+     * @param array $staged_windows_links Receives each Windows link as its
+     *                                    source path, copy path, and read
+     *                                    value, for the caller to create.
+     * @phpstan-param list<array{0: string, 1: string, 2: string}> $staged_windows_links
+     */
+    private function copy_path(string $from, string $to, array &$staged_windows_links): void
+    {
+        if (LocalLink::is_link($from)) {
             $link_value = readlink($from);
             if ($link_value === false) {
                 throw new RuntimeException(
                     "Could not read the symlink value at {$from}.",
                 );
+            }
+            if (Utils::native_path_format() === 'windows') {
+                $staged_windows_links[] = [$from, $to, $link_value];
+                return;
             }
             if (!LocalLink::create_symlink($link_value, $to)) {
                 throw new RuntimeException(
@@ -267,7 +309,8 @@ class WpContentMerger
             }
             $this->copy_path(
                 wp_join_unix_paths($from, $entry),
-                wp_join_unix_paths($to, $entry)
+                wp_join_unix_paths($to, $entry),
+                $staged_windows_links
             );
         }
     }
@@ -318,7 +361,7 @@ class WpContentMerger
                 continue;
             }
             $path = wp_join_unix_paths($directory, $entry);
-            if (!is_link($path)) {
+            if (!LocalLink::is_link($path)) {
                 $entries[] = [$entry, null];
                 continue;
             }
@@ -336,7 +379,7 @@ class WpContentMerger
     /** Whether $path is a directory rather than a symlink to one. */
     private function is_real_directory(string $path): bool
     {
-        return !is_link($path) && is_dir($path);
+        return !LocalLink::is_link($path) && is_dir($path);
     }
 }
 

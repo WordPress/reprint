@@ -3,6 +3,8 @@
 use WordPress\Reprint\Server\Utils;
 use function WordPress\Filesystem\wp_join_unix_paths;
 
+require_once __DIR__ . '/../class-local-link.php';
+
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Sender failures are CLI/API values, never HTML output.
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedClassFound -- Importer classes use unprefixed domain names.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Importer classes place braces on the following line.
@@ -363,7 +365,7 @@ final class PushFilesSender
         /** @var string $document_root */
         $document_root = $options['document_root'];
         $push_state_directory = $options['push_state_directory'] ?? null;
-        if (!is_string($filesystem_root) || !is_dir($filesystem_root) || is_link($filesystem_root)) {
+        if (!is_string($filesystem_root) || !is_dir($filesystem_root) || LocalLink::is_link($filesystem_root)) {
             throw new InvalidArgumentException('PushFilesSender requires a real filesystem root directory.');
         }
         if (!is_string($push_state_directory) || $push_state_directory === '') {
@@ -1685,7 +1687,8 @@ final class PushFilesSender
     {
         $absolute_path = wp_join_unix_paths($this->filesystem_root, $path);
         clearstatcache(true, $absolute_path);
-        $path_stat = @lstat($absolute_path);
+        // Match the push plan's indexer, which reports a Windows junction as a link.
+        $path_stat = @Utils::source_lstat($absolute_path);
         if (!is_array($path_stat)) {
             return null;
         }

@@ -47,8 +47,8 @@ class RemapSeamTest extends TestCase
                 continue;
             }
             $p = "$d/$i";
-            if (is_link($p)) {
-                \LocalLink::remove_symlink($p);
+            if (\LocalLink::is_link($p)) {
+                \WordPress\Reprint\Server\Utils::remove_symlink($p);
             } elseif (is_dir($p)) {
                 $this->rrm($p);
             } else {
@@ -366,7 +366,7 @@ class RemapSeamTest extends TestCase
         }
 
         $symlink = $this->tempDir . '/existing-link';
-        symlink($canonical_existing_directory, $symlink);
+        \LocalLink::create_symlink($canonical_existing_directory, $symlink);
         $this->assertSame(
             $canonical_existing_directory . '/missing-through-link',
             Utils::realpath_with_missing_tail($symlink . '/missing-through-link')
@@ -377,7 +377,7 @@ class RemapSeamTest extends TestCase
             return;
         }
         $broken_symlink = $this->tempDir . '/broken-link';
-        symlink($this->tempDir . '/missing-target', $broken_symlink);
+        \LocalLink::create_symlink($this->tempDir . '/missing-target', $broken_symlink);
         $this->assertSame(
             Utils::normalize_path($broken_symlink . '/child', Utils::native_path_format()),
             Utils::realpath_with_missing_tail($broken_symlink . '/child')

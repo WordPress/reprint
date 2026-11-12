@@ -2734,7 +2734,7 @@ class ImportClient
                 'The ' . $command . ' remote Reprint API URL must not contain URL user-info: ' . $masked_remote_reprint_api_url . '.'
             );
         }
-        if (is_link($filesystem_root)) {
+        if (LocalLink::is_link($filesystem_root)) {
             throw new InvalidArgumentException('The filesystem root must not be a symlink: ' . $filesystem_root . '.');
         }
         if (!is_dir($filesystem_root)) {
@@ -3502,7 +3502,7 @@ class ImportClient
         $detected_webhost = is_array($payload) ? detect_host($payload) : 'other';
         if (
             $detected_webhost === 'other'
-            && is_link(wp_join_unix_paths($this->filesystem_root, '__wp__'))
+            && LocalLink::is_link(wp_join_unix_paths($this->filesystem_root, '__wp__'))
         ) {
             $detected_webhost = 'wpcloud';
         }
@@ -3642,7 +3642,7 @@ class ImportClient
 
         // Always wipe and recreate so the directory reflects current state.
         if (is_dir($runtime_dir)) {
-            Utils::remove_directory_and_its_contents($runtime_dir);
+            Utils::remove_without_following_links($runtime_dir);
             $this->audit_log("RUNTIME FILES | deleted {$runtime_dir}");
         }
 
@@ -4582,7 +4582,7 @@ class ImportClient
             foreach (array_unique($earlier_local_core_directories) as $earlier_local_core_directory) {
                 if (
                     is_dir($earlier_local_core_directory)
-                    && !is_link($earlier_local_core_directory)
+                    && !LocalLink::is_link($earlier_local_core_directory)
                     && @rmdir($earlier_local_core_directory)
                 ) {
                     $this->audit_log("Deleted empty earlier core directory: {$earlier_local_core_directory}", false);
@@ -5463,8 +5463,8 @@ class ImportClient
             }
 
             // Remove stale symlink if present
-            if (is_link($local_absolute_path)) {
-                LocalLink::remove_symlink($local_absolute_path);
+            if (LocalLink::is_link($local_absolute_path)) {
+                Utils::remove_symlink($local_absolute_path);
             }
 
             // Don't overwrite a real directory — that shouldn't exist for
@@ -6309,7 +6309,16 @@ class ImportClient
             $excluded_local_paths
         )));
         $this->save_state();
-        return Utils::remove_local_files_and_directories($excluded_local_paths, $local_document_root);
+        $removed_paths = [];
+        foreach ($excluded_local_paths as $relative_path) {
+            $local_absolute_path = wp_join_unix_paths($local_document_root, $relative_path);
+            if (!file_exists($local_absolute_path) && !LocalLink::is_link($local_absolute_path)) {
+                continue;
+            }
+            Utils::remove_without_following_links($local_absolute_path);
+            $removed_paths[] = $relative_path;
+        }
+        return $removed_paths;
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- These exceptions contain CLI option values and filesystem paths, never HTML output.
@@ -6630,7 +6639,7 @@ class ImportClient
 
         // Guard only a real source directory. A flattened one resolves to the
         // destination, and the merge below already does nothing with it.
-        if (!is_link($source_wp_content) && is_dir($source_wp_content)) {
+        if (!LocalLink::is_link($source_wp_content) && is_dir($source_wp_content)) {
             foreach (array_merge([$destination_wp_content], array_values($component_destinations)) as $destination) {
                 $this->assert_merge_paths_do_not_overlap($source_wp_content, $destination);
             }
@@ -6936,7 +6945,7 @@ class ImportClient
             $target = wp_join_unix_paths($flatten_to, $entry);
             // A core entry that is itself a symlink on the source stays a
             // link, as in link mode.
-            if ($copy_core_files && self::is_wp_core_entry($entry) && !is_link($source)) {
+            if ($copy_core_files && self::is_wp_core_entry($entry) && !LocalLink::is_link($source)) {
                 $this->flatten_place_copy($source, $target, $copied, $deferred_core_files);
                 continue;
             }
@@ -7204,14 +7213,14 @@ class ImportClient
 
         // If the target is already a symlink, check if it resolves to the
         // same place. Refresh if not, skip if already correct.
-        if (is_link($target)) {
+        if (LocalLink::is_link($target)) {
             if (LocalLink::has_value($target, $link_value)) {
                 $refreshed++;
                 return;
             }
             // Points elsewhere — remove and recreate
             $current_link_target = @readlink($target);
-            LocalLink::remove_without_following_links($target);
+            Utils::remove_without_following_links($target);
             $this->audit_log(
                 "FLAT-DOCUMENT-ROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
             );
@@ -7221,6 +7230,16 @@ class ImportClient
                 );
             }
             $refreshed++;
+            return;
+        }
+
+        // A Windows account that may not create symlinks gets a copy in place
+        // of a file symlink. An identical copy is already in place; a copy
+        // that differs may hold a local edit, so it conflicts like any file.
+        // --force replaces every file, so an account that may create symlinks
+        // turns copied core back into links.
+        if (!$force && LocalLink::has_value($target, $link_value)) {
+            ++$refreshed;
             return;
         }
 
@@ -7241,7 +7260,7 @@ class ImportClient
                 true,
             );
 
-            LocalLink::remove_without_following_links($target);
+            Utils::remove_without_following_links($target);
             $forced++;
         }
 
@@ -7324,7 +7343,7 @@ class ImportClient
         if ($destination === $skipped_destination) {
             return;
         }
-        if (is_link($source)) {
+        if (LocalLink::is_link($source)) {
             throw new RuntimeException(
                 "Cannot copy core: found a symlink inside WordPress core at {$source}",
             );
@@ -7333,10 +7352,10 @@ class ImportClient
         // copy() writes through a symlink, which would change the pulled
         // tree when the link comes from an earlier --core-files=link run.
         $source_is_directory = is_dir($source);
-        if (is_link($destination)
+        if (LocalLink::is_link($destination)
             || (file_exists($destination) && is_dir($destination) !== $source_is_directory)
         ) {
-            LocalLink::remove_without_following_links($destination);
+            Utils::remove_without_following_links($destination);
         }
 
         if (!$source_is_directory) {
@@ -7369,7 +7388,7 @@ class ImportClient
         // Remove first. On a case-insensitive filesystem, copying Foo.php
         // writes into an existing foo.php, which would then look stale.
         foreach (array_diff($destination_entries, $source_entries) as $entry) {
-            LocalLink::remove_without_following_links(wp_join_unix_paths($destination, $entry));
+            Utils::remove_without_following_links(wp_join_unix_paths($destination, $entry));
         }
         foreach (array_diff($source_entries, [".", ".."]) as $entry) {
             $this->flatten_copy_core_tree(
@@ -7390,7 +7409,7 @@ class ImportClient
         bool $force,
         int &$forced
     ): void {
-        if (is_link($path)) {
+        if (LocalLink::is_link($path)) {
             if (!$force) {
                 throw new RuntimeException(
                     "Cannot create real directory at {$path}: a symlink already " .
@@ -7401,7 +7420,7 @@ class ImportClient
                 "FLAT-DOCUMENT-ROOT FORCE | Replacing symlink with real directory: {$path}",
                 true,
             );
-            LocalLink::remove_without_following_links($path);
+            Utils::remove_without_following_links($path);
             $forced++;
         }
 
@@ -10520,7 +10539,7 @@ class ImportClient
             );
             return null;
         }
-        if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
+        if (!file_exists($local_absolute_path) && !LocalLink::is_link($local_absolute_path)) {
             return $local_absolute_path;
         }
 
@@ -10654,11 +10673,11 @@ class ImportClient
     ): bool {
         // A trailing slash makes is_link() inspect a directory link's target.
         $local_absolute_path = Utils::trim_right_slash($local_absolute_path, Utils::native_path_format());
-        if (!is_link($local_absolute_path) && is_dir($local_absolute_path)) {
+        if (!LocalLink::is_link($local_absolute_path) && is_dir($local_absolute_path)) {
             $this->assert_local_path_within_root($local_absolute_path);
         }
         try {
-            LocalLink::remove_without_following_links($local_absolute_path);
+            Utils::remove_without_following_links($local_absolute_path);
         } catch (RuntimeException $removal_failure) {
             $this->audit_log($removal_failure->getMessage(), true);
             return false;
@@ -12631,7 +12650,7 @@ class ImportClient
             // Regular files selected by the diff may be delta updates. Links,
             // directories, and symlinked parents still belong to the local layout.
             if ($this->fs_root_nonempty_behavior === 'preserve-local'
-                && ( !is_file($local_absolute_path) || is_link($local_absolute_path)
+                && ( !is_file($local_absolute_path) || LocalLink::is_link($local_absolute_path)
                     || $this->path_traverses_symlink(dirname($local_absolute_path)) )) {
                 $skip_reason = $this->should_skip_for_preserve_local($path);
                 if ($skip_reason !== null) {
@@ -12641,8 +12660,8 @@ class ImportClient
             }
 
             if (
-                (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
-                (!is_file($local_absolute_path) || is_link($local_absolute_path))
+                (file_exists($local_absolute_path) || LocalLink::is_link($local_absolute_path)) &&
+                (!is_file($local_absolute_path) || LocalLink::is_link($local_absolute_path))
             ) {
                 if (
                     !$this->remove_local_absolute_path_without_following_symlinks(
@@ -12963,7 +12982,7 @@ class ImportClient
         // (even to a file), or directory.  This preserves hosting symlinks like
         // wp-load.php -> __wp__/wp-load.php and drop-in symlinks like
         // object-cache.php -> ../../wordpress/drop-ins/...
-        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+        if (file_exists($local_absolute_path) || LocalLink::is_link($local_absolute_path)) {
             return "PRESERVE-LOCAL skip file (exists): {$remote_absolute_path}";
         }
 
@@ -12995,7 +13014,7 @@ class ImportClient
                 continue;
             }
             $current = wp_join_unix_paths($current, $part);
-            if (is_link($current)) {
+            if (LocalLink::is_link($current)) {
                 return true;
             }
             if (!file_exists($current)) {
@@ -13033,7 +13052,7 @@ class ImportClient
             );
         }
 
-        if (is_dir($dir) && !is_link($dir)) {
+        if (is_dir($dir) && !LocalLink::is_link($dir)) {
             if ($this->fs_root_nonempty_behavior === 'preserve-local' && !is_writable($dir)) {
                 throw new PreserveLocalSkipException(
                     "PRESERVE-LOCAL: directory not writable: {$dir}",
@@ -13060,7 +13079,7 @@ class ImportClient
             }
             $current = wp_join_unix_paths($current, $part);
 
-            if (is_link($current)) {
+            if (LocalLink::is_link($current)) {
                 if ($this->fs_root_nonempty_behavior === 'preserve-local') {
                     // Never create directories through symlinks — the symlink
                     // and its target contents are shared hosting infrastructure
@@ -13073,7 +13092,7 @@ class ImportClient
                     "Removing symlink blocking directory: {$current}",
                     true,
                 );
-                LocalLink::remove_without_following_links($current);
+                Utils::remove_without_following_links($current);
                 // Clear cached realpath so the subsequent realpath() check
                 // sees the new directory instead of the removed symlink.
                 clearstatcache(true, $current);
@@ -13174,14 +13193,14 @@ class ImportClient
         $path_format = Utils::native_path_format();
         $is_existing_root_directory = Utils::normalize_path_separators($local_absolute_path, $path_format)
             === Utils::normalize_path_separators($this->filesystem_root, $path_format)
-            && is_dir($local_absolute_path) && !is_link($local_absolute_path);
+            && is_dir($local_absolute_path) && !LocalLink::is_link($local_absolute_path);
         $this->assert_local_path_within_root(
             $is_existing_root_directory ? $local_absolute_path : dirname($local_absolute_path)
         );
 
         if (
-            (file_exists($local_absolute_path) || is_link($local_absolute_path)) &&
-            (!is_dir($local_absolute_path) || is_link($local_absolute_path))
+            (file_exists($local_absolute_path) || LocalLink::is_link($local_absolute_path)) &&
+            (!is_dir($local_absolute_path) || LocalLink::is_link($local_absolute_path))
         ) {
             if (
                 !$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)
@@ -13258,7 +13277,7 @@ class ImportClient
         // Also skip if any parent component is a symlink — we never create
         // new content through symlinked directories.
         if ($this->fs_root_nonempty_behavior === 'preserve-local') {
-            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+            if (file_exists($local_absolute_path) || LocalLink::is_link($local_absolute_path)) {
                 $this->audit_log("PRESERVE-LOCAL skip symlink (path exists): {$path} -> {$target}", true);
                 $this->emit_skip_progress($path);
                 return;
@@ -13292,7 +13311,7 @@ class ImportClient
         }
 
         // Remove existing file/symlink if present
-        if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+        if (file_exists($local_absolute_path) || LocalLink::is_link($local_absolute_path)) {
             if (
                 !$this->remove_local_absolute_path_without_following_symlinks($local_absolute_path)
             ) {
@@ -13363,7 +13382,7 @@ class ImportClient
         string $source_link_value,
         int $ctime
     ): void {
-        if (!LocalLink::create_symlink($local_link_value, $local_absolute_path) || !is_link($local_absolute_path)) {
+        if (!LocalLink::create_symlink($local_link_value, $local_absolute_path)) {
             $this->audit_log(
                 "Failed to create symlink: {$local_absolute_path} -> {$local_link_value}",
                 true,
@@ -13475,7 +13494,7 @@ class ImportClient
                 if (LocalLink::has_value($local_absolute_path, $local_link_value)) {
                     continue;
                 }
-                if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+                if (file_exists($local_absolute_path) || LocalLink::is_link($local_absolute_path)) {
                     $this->audit_log("SYMLINK DEFERRED SKIP | {$remote_absolute_path} | a later part placed another entry there", true);
                     continue;
                 }
@@ -13555,7 +13574,7 @@ class ImportClient
                 // Apply .. only after expanding the preceding link. Walk even
                 // a missing component: a later .. can return to existing paths.
                 $resolved = Utils::normalize_path(wp_join_unix_paths($resolved, $component), $path_format);
-                if (!is_link($resolved)) {
+                if (!LocalLink::is_link($resolved)) {
                     continue;
                 }
                 $link_target = readlink($resolved);
@@ -13655,7 +13674,7 @@ class ImportClient
                 $context->file_bytes_written = 0;
             }
 
-            if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+            if (file_exists($local_absolute_path) || LocalLink::is_link($local_absolute_path)) {
                 @unlink($local_absolute_path);
             }
             $this->pull_index_journal->record_remote_invalidation($path);

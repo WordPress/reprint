@@ -112,7 +112,8 @@ function try_exec_sort_index_file(
         array_map('trim', explode(',', (string) ini_get('disable_functions'))),
         true
     );
-    if (!$exec_is_available) {
+    // cmd.exe cannot run `LC_ALL=C sort`, and Windows sort orders differently.
+    if (!$exec_is_available || Utils::native_path_format() === 'windows') {
         return false;
     }
 

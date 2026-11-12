@@ -8,6 +8,8 @@ use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function WordPress\Filesystem\wp_join_unix_paths;
 
+require_once __DIR__ . '/../class-local-link.php';
+
 require_once __DIR__ . '/../index/class-file-sync-plan-runner.php';
 
 // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Journal failures are CLI/API values, never HTML output.
@@ -357,7 +359,7 @@ class PushPlan
     {
         clearstatcache(true, $filesystem_root);
         $resolved_local_filesystem_root = realpath($filesystem_root);
-        if ($resolved_local_filesystem_root === false || !is_dir($resolved_local_filesystem_root) || is_link($filesystem_root)) {
+        if ($resolved_local_filesystem_root === false || !is_dir($resolved_local_filesystem_root) || LocalLink::is_link($filesystem_root)) {
             throw new InvalidArgumentException("PushPlan requires the filesystem root to be a real directory.");
         }
         $this->filesystem_root = Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format());

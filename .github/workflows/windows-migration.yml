@@ -49,7 +49,12 @@ jobs:
         working-directory: tests
         run: php ../vendor/bin/phpunit --group received-paths Import/RuntimeFilesRootPathTest.php
   windows-client:
-    name: Pull, merge, and flatten with a native Windows client
+    name: Pull, merge, and flatten with a native Windows client (${{ matrix.account }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # A standard account cannot create symlinks; the client uses junctions and hard links.
+        account: [administrator, standard]
     runs-on: windows-2025
     timeout-minutes: 20
     steps:
@@ -65,20 +70,28 @@ jobs:
       - name: Run link-placing client tests
         shell: pwsh
         run: |
-          $tests = 'PathFormatTest.php Import/RemapSeamTest.php Import/LocalLinkTest.php Import/PullLinkBeforeTargetTest.php Import/FilesPullLocalIndexTest.php Import/PullFilterOptionTest.php Import/MergeWpContentTest.php Import/FlatDocrootWpConfigTest.php Import/FlatDocrootCoreFilesCopyTest.php'
+          $tests = 'PathFormatTest.php,Import/RemapSeamTest.php,Import/LocalLinkTest.php,Import/PullLinkBeforeTargetTest.php,Import/FilesPullLocalIndexTest.php,Import/PullFilterOptionTest.php,Import/MergeWpContentTest.php,Import/FlatDocrootWpConfigTest.php,Import/FlatDocrootCoreFilesCopyTest.php,--group windows-links Import/ProductionDropInRemovalTest.php'
           $php = (Get-Command php).Source
           $failed = 0
-          foreach ($test in $tests.Split(' ')) {
+          foreach ($test in $tests.Split(',')) {
             Write-Output "::group::$test"
-            Push-Location tests
-            & $php ../vendor/bin/phpunit --display-warnings $test
-            Pop-Location
+            if ('${{ matrix.account }}' -eq 'standard') {
+              ./tests/e2e/windows/run-as-standard-user.ps1 -WorkingDirectory "$env:GITHUB_WORKSPACE\tests" -Command "`"$php`" ..\vendor\bin\phpunit $test"
+            } else {
+              Push-Location tests
+              & $php ../vendor/bin/phpunit --display-warnings $test.Split(' ')
+              Pop-Location
+            }
             if ($LASTEXITCODE -ne 0) { $failed++ }
             Write-Output '::endgroup::'
           }
           exit $failed
   linux-to-windows:
-    name: Pull linked Linux WordPress into a native Windows client
+    name: Pull linked Linux WordPress into a native Windows client (${{ matrix.account }})
+    strategy:
+      fail-fast: false
+      matrix:
+        account: [administrator, standard]
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
@@ -116,14 +129,25 @@ jobs:
           for ($attempt = 0; $attempt -lt 30; $attempt++) {
             try { Invoke-WebRequest "$sourceUrl/wp-content/uploads/2026/01/hello.txt" -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Seconds 1 }
           }
-          New-Item -ItemType Directory -Force C:\reprint-client | Out-Null
-          php tests/e2e/windows/pull-into-windows.php "$sourceUrl/?reprint-api" $keyPath C:\reprint-client
+          if ('${{ matrix.account }}' -eq 'standard') {
+            # The standard account owns only its sandbox, so the key and work directory live there.
+            $workDirectory = 'C:\reprint-standard-user\client'
+            New-Item -ItemType Directory -Force $workDirectory | Out-Null
+            Copy-Item $keyPath "$workDirectory\..\source-key.pem"
+            $php = (Get-Command php).Source
+            ./tests/e2e/windows/run-as-standard-user.ps1 -WorkingDirectory $env:GITHUB_WORKSPACE -Command "`"$php`" tests\e2e\windows\pull-into-windows.php `"$sourceUrl/?reprint-api`" C:\reprint-standard-user\source-key.pem $workDirectory"
+          } else {
+            New-Item -ItemType Directory -Force C:\reprint-client | Out-Null
+            php tests/e2e/windows/pull-into-windows.php "$sourceUrl/?reprint-api" $keyPath C:\reprint-client
+          }
       - name: Collect client logs
         if: always()
         shell: pwsh
         run: |
-          Get-ChildItem C:\reprint-client\*.log -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "::group::$($_.Name)"; Get-Content $_ -Tail 80; Write-Output '::endgroup::' }
-          Get-Content C:\reprint-client\state\audit.log -Tail 120 -ErrorAction SilentlyContinue
+          foreach ($workDirectory in 'C:\reprint-client', 'C:\reprint-standard-user\client') {
+            Get-ChildItem "$workDirectory\*.log" -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "::group::$($_.Name)"; Get-Content $_ -Tail 80; Write-Output '::endgroup::' }
+            Get-Content "$workDirectory\state\audit.log" -Tail 120 -ErrorAction SilentlyContinue
+          }
           Get-Content "$env:RUNNER_TEMP/source.stderr.log" -Tail 40 -ErrorAction SilentlyContinue
   windows-to-linux:
     needs: php-reader

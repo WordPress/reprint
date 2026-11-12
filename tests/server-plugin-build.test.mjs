@@ -42,7 +42,7 @@ test('WordPress.org excludes push while the GitHub package retains it', async ()
             const features = await readFile(join(server, 'build-features.php'), 'utf8');
             assert.match(features, new RegExp("define\\('REPRINT_PUSH_AVAILABLE', " + (target === 'github' ? 'true' : 'false') + "\\)"));
             const utilities = await readFile(join(server, 'class-utils.php'), 'utf8');
-            for (const symbol of ['function connect_mysql(', 'function normalize_excluded_paths(', 'function remove_local_files_and_directories(']) {
+            for (const symbol of ['function connect_mysql(', 'function normalize_excluded_paths(', 'function remove_without_following_links(']) {
                 assert.ok(utilities.includes(symbol), `${target}: shared utility ${symbol}`);
             }
             const library = await readFile(join(plugin, 'lib.php'), 'utf8');

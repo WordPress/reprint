@@ -591,6 +591,11 @@ class ProductionDropInRemovalTest extends TestCase
     }
 
     /** Verify cleanup removes links themselves, not the directories they point to. */
+    /**
+     * A Windows account that may not create symlinks gets junctions here.
+     *
+     * @group windows-links
+     */
     public function testHostPluginFileRemovalPreservesSymlinkTargetsAndReportsOnlyRemovedPaths(): void
     {
         $this->writeState([]);
@@ -599,10 +604,13 @@ class ProductionDropInRemovalTest extends TestCase
         mkdir($plugins_directory . '/spinupwp', 0755, true);
         mkdir($linked_directory);
         file_put_contents($linked_directory . '/keep.php', '<?php');
-        symlink($linked_directory, $plugins_directory . '/hostinger');
-        symlink($linked_directory, $plugins_directory . '/spinupwp/shared');
-        symlink($this->tempDir . '/missing-target', $plugins_directory . '/hostinger-easy-onboarding');
-        $paths = ['wp-content/plugins/hostinger', 'wp-content/plugins/spinupwp', 'wp-content/plugins/hostinger-easy-onboarding'];
+        $this->assertTrue(\LocalLink::create_symlink($linked_directory, $plugins_directory . '/hostinger'));
+        $this->assertTrue(\LocalLink::create_symlink($linked_directory, $plugins_directory . '/spinupwp/shared'));
+        $paths = ['wp-content/plugins/hostinger', 'wp-content/plugins/spinupwp'];
+        // Without the symlink privilege, Windows cannot link to a missing target.
+        if (\LocalLink::create_symlink($this->tempDir . '/missing-target', $plugins_directory . '/hostinger-easy-onboarding')) {
+            $paths[] = 'wp-content/plugins/hostinger-easy-onboarding';
+        }
 
         $client = $this->makeClient();
         $this->loadClientState($client);
@@ -611,7 +619,7 @@ class ProductionDropInRemovalTest extends TestCase
         $this->assertSame($paths, $removed);
         $this->assertFileExists($linked_directory . '/keep.php');
         foreach ($paths as $path) {
-            $this->assertFalse(is_link($this->fsRoot . '/' . $path));
+            $this->assertFalse(\LocalLink::is_link($this->fsRoot . '/' . $path));
             $this->assertFileDoesNotExist($this->fsRoot . '/' . $path);
         }
     }
@@ -633,7 +641,7 @@ class ProductionDropInRemovalTest extends TestCase
             $result = PostProcess::run_selected_tasks($this->fsRoot, 'disable-hosting-plugins', $this->stateDir);
             $this->assertSame('failed', $result['status']);
             $this->assertSame('failed', $result['results'][0]['status']);
-            $this->assertStringContainsString('Could not remove source-host path: ' . $locked_directory, $result['message']);
+            $this->assertStringContainsString('Could not remove the file ' . $locked_directory . '/plugin.php', $result['message']);
             $this->assertFileExists($locked_directory . '/plugin.php');
             $reopened = $this->makeClient();
             $this->loadClientState($reopened);
