@@ -397,15 +397,8 @@ class MergeWpContentTest extends TestCase
         chmod($this->localWpContent . '/plugins/local-only/bin/run.sh', 0755);
         chmod($this->localWpContent . '/plugins/local-only/private', 0700);
 
-        $merger = new \WpContentMerger(
-            $this->localWpContent,
-            $this->pulledWpContent,
-            [],
-            function (string $line): void {}
-        );
-        $copy = (new \ReflectionClass($merger))->getMethod('copy_path');
-        $copied = $this->tempDir . '/copied-plugin';
-        $copy->invoke($merger, $this->localWpContent . '/plugins/local-only', $copied);
+        $copied = $this->pulledWpContent . '/plugins/local-only';
+        $this->copyEntry($this->localWpContent . '/plugins/local-only', $copied);
 
         $this->assertSame('0755', $this->permissionsOf($copied . '/bin/run.sh'));
         $this->assertSame('0700', $this->permissionsOf($copied . '/private'));
@@ -414,6 +407,32 @@ class MergeWpContentTest extends TestCase
             $this->permissionsOf($copied . '/plugin.php'),
             'an ordinary file keeps what it had rather than taking the umask',
         );
+    }
+
+    /** Exercise the copy fallback directly because filesystem boundaries are not portable. */
+    public function testACopiedPluginsLinksIntoItselfReachTheCopy(): void
+    {
+        $source = $this->localWpContent . '/plugins/local-only';
+        $this->writeLocal('plugins/local-only/assets/app.js', 'app');
+        foreach (['current' => $source . '/assets', 'app.js' => $source . '/assets/app.js'] as $linkName => $target) {
+            $this->assertTrue(
+                \LocalLink::create_symlink(\LocalLink::link_value($source, $target), $source . '/' . $linkName),
+                "the link {$linkName} could not be created",
+            );
+        }
+        $destination = $this->pulledWpContent . '/plugins/local-only';
+
+        $this->copyEntry($source, $destination);
+        // The merge removes the source once the copy is in place.
+        \WordPress\Reprint\Server\Utils::remove_without_following_links($source);
+
+        $this->assertTrue(\LocalLink::is_link($destination . '/current'), 'a link to a directory stays a link');
+        $this->assertSame(
+            'app',
+            file_get_contents($destination . '/current/app.js'),
+            'and reaches the copied directory, not the removed source',
+        );
+        $this->assertSame('app', file_get_contents($destination . '/app.js'));
     }
 
     public function testARelativeFromIsResolvedAgainstTheWorkingDirectory(): void
@@ -500,6 +519,18 @@ class MergeWpContentTest extends TestCase
         $this->expectExceptionMessage('one holds the other');
         // --from is the destination itself.
         $this->merge([], $this->pulledWpContent);
+    }
+
+    private function copyEntry(string $sourceEntry, string $destinationEntry): void
+    {
+        $merger = new \WpContentMerger(
+            $this->localWpContent,
+            $this->pulledWpContent,
+            [],
+            function (string $line): void {}
+        );
+        $copyEntry = new \ReflectionMethod($merger, 'copy_entry');
+        $copyEntry->invoke($merger, $sourceEntry, $destinationEntry);
     }
 
     private function merge(array $pathsUrls = [], ?string $from = null): void
