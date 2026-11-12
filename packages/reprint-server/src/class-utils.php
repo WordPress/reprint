@@ -363,17 +363,22 @@ final class Utils
      *     Utils::realpath_with_missing_tail('/links/site/state');
      *     // '/srv/site/state' when /links/site is a symlink to /srv/site
      *
+     * The path uses this process's native format. On Windows, a drive or share
+     * path may use either separator, and the result uses the forward-slash
+     * spelling of normalize_path(), such as `C:/Users/site/state`.
+     *
      * This does not create, remove, or otherwise modify filesystem entries.
      *
      * @throws InvalidArgumentException When $absolute_path is not absolute.
      */
     public static function realpath_with_missing_tail(string $absolute_path): string
     {
-        if ($absolute_path === '' || $absolute_path[0] !== '/') {
+        $path_format = self::native_path_format();
+        if (!self::is_absolute_path($absolute_path, $path_format)) {
             throw new InvalidArgumentException('Path must be absolute: ' . $absolute_path);
         }
 
-        $normalized_path = self::normalize_path($absolute_path, 'unix');
+        $normalized_path = self::normalize_path($absolute_path, $path_format);
         $missing_components = [];
         $existing_ancestor = $normalized_path;
         $canonical_existing_ancestor = realpath($existing_ancestor);
@@ -385,7 +390,7 @@ final class Utils
                 return $normalized_path;
             }
 
-            $parent = dirname($existing_ancestor);
+            $parent = self::normalize_path(dirname($existing_ancestor), $path_format);
             if ($parent === $existing_ancestor) {
                 return $normalized_path;
             }
@@ -395,12 +400,12 @@ final class Utils
         }
 
         if ($missing_components === []) {
-            return self::normalize_path($canonical_existing_ancestor, 'unix');
+            return self::normalize_path($canonical_existing_ancestor, $path_format);
         }
 
         return self::normalize_path(
             $canonical_existing_ancestor . '/' . implode('/', $missing_components),
-            'unix'
+            $path_format
         );
     }
 
@@ -641,6 +646,84 @@ final class Utils
         }
         $remainder = self::path_remainder_under($path, $root);
         return $remainder === null ? null : ltrim($remainder, "/");
+    }
+
+    /**
+     * Returns the value for a link in $link_directory that resolves to $target_path.
+     *
+     * Both paths must be absolute in $path_format. Dot segments are resolved
+     * lexically; callers resolve symlinks first when the result must survive
+     * them. Windows paths may use either separator and either drive-letter
+     * case. Windows resolves a link value's backslashes, but not its forward
+     * slashes, so a Windows result uses backslashes. A Windows target on
+     * another drive or share has no relative spelling and is returned
+     * absolute.
+     *
+     * Examples:
+     *
+     *     Utils::relative_link_target('/a/b/c', '/a/d/e', 'unix');       // '../../d/e'
+     *     Utils::relative_link_target('/a/b', '/a/b', 'unix');           // '.'
+     *     Utils::relative_link_target('C:\\a\\b', 'c:/a/d', 'windows');  // '..\\d'
+     *     Utils::relative_link_target('C:/a', 'D:/a', 'windows');        // 'D:\\a'
+     *
+     * @param string $link_directory Absolute directory that will contain the link.
+     * @param string $target_path    Absolute path the link must resolve to.
+     * @param string $path_format    Path format of both paths: 'unix' or 'windows'.
+     * @return string Relative link value, or an absolute Windows path across roots.
+     * @throws InvalidArgumentException When either path is not absolute.
+     */
+    public static function relative_link_target(string $link_directory, string $target_path, string $path_format): string
+    {
+        foreach (['Link directory' => $link_directory, 'Link target' => $target_path] as $label => $path) {
+            if (!self::is_absolute_path($path, $path_format)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Path validation error, not HTML.
+                throw new InvalidArgumentException("{$label} must be an absolute {$path_format} path; received " . json_encode($path) . '.');
+            }
+        }
+        $separator = $path_format === 'windows' ? '\\' : '/';
+        $link_directory = self::normalize_path($link_directory, $path_format);
+        $target_path = self::normalize_path($target_path, $path_format);
+        $link_directory_root = self::absolute_path_root($link_directory, $path_format);
+        $target_root = self::absolute_path_root($target_path, $path_format);
+        if ($link_directory_root !== $target_root) {
+            return str_replace('/', $separator, $target_path);
+        }
+
+        $is_component = static function (string $component): bool {
+            return $component !== '';
+        };
+        $link_directory_components = array_values(array_filter(explode('/', substr($link_directory, strlen($link_directory_root))), $is_component));
+        $target_components = array_values(array_filter(explode('/', substr($target_path, strlen($target_root))), $is_component));
+        $common_component_count = 0;
+        $maximum_common_component_count = min(count($link_directory_components), count($target_components));
+        while (
+            $common_component_count < $maximum_common_component_count
+            && $link_directory_components[$common_component_count] === $target_components[$common_component_count]
+        ) {
+            ++$common_component_count;
+        }
+
+        $components = array_merge(
+            array_fill(0, count($link_directory_components) - $common_component_count, '..'),
+            array_slice($target_components, $common_component_count)
+        );
+        return $components === [] ? '.' : implode($separator, $components);
+    }
+
+    /**
+     * Returns the root of a path already passed through normalize_path().
+     *
+     * @param string $normalized_path Absolute path in normalize_path() spelling.
+     * @param string $path_format     Path format: 'unix' or 'windows'.
+     * @return string `/`, a drive root such as `D:/`, or a share root such as `\\SERVER\SHARE`.
+     */
+    private static function absolute_path_root(string $normalized_path, string $path_format): string
+    {
+        if ($path_format === 'windows') {
+            $share_root = self::windows_share_root($normalized_path);
+            return $share_root ?? substr($normalized_path, 0, 3);
+        }
+        return '/';
     }
 
     /**

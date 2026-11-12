@@ -44,6 +44,9 @@ class FlatDocrootWpConfigTest extends TestCase
      */
     public function testSymlinksWpConfigFromAbspathParent(string $abspath, string $local_parent_path, string $path_format): void
     {
+        if (DIRECTORY_SEPARATOR === '\\' && strpos($local_parent_path, ':') !== false) {
+            $this->markTestSkipped('The pulled tree keeps a source drive as a D: directory, which Windows cannot name.');
+        }
         // Create the filesystem layout under fsRoot
         $localParent = $this->fsRoot . '/' . $local_parent_path;
         $localAbspath = $localParent . '/wordpress/';
@@ -226,7 +229,11 @@ class FlatDocrootWpConfigTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path) || is_file($path)) {
+            if (is_link($path)) {
+                \LocalLink::remove_symlink($path);
+                continue;
+            }
+            if (is_file($path)) {
                 unlink($path);
                 continue;
             }

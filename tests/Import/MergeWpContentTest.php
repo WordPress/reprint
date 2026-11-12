@@ -145,8 +145,8 @@ class MergeWpContentTest extends TestCase
         $this->writeFile($this->siteDir . '/shared-store/local-plugin/plugin.php', '<?php // shared store');
         mkdir($this->localWpContent . '/plugins', 0755, true);
         // The destination parent is at a different depth.
-        symlink(
-            '../../shared-store/local-plugin',
+        \LocalLink::create_symlink(
+            \LocalLink::native_link_value('../../shared-store/local-plugin', $this->localWpContent . '/plugins/linked-plugin'),
             $this->localWpContent . '/plugins/linked-plugin',
         );
 
@@ -154,11 +154,14 @@ class MergeWpContentTest extends TestCase
 
         $moved = $this->pulledWpContent . '/plugins/linked-plugin';
         $this->assertTrue(is_link($moved), 'the entry is still a symlink, not a copy of its target');
-        $this->assertStringNotContainsString(
-            '/',
-            substr(readlink($moved), 0, 1),
-            'and its value is still relative, because files-push sends it verbatim',
-        );
+        if (DIRECTORY_SEPARATOR === '/') {
+            // Windows PHP reads a relative value back as its absolute target.
+            $this->assertStringNotContainsString(
+                '/',
+                substr(readlink($moved), 0, 1),
+                'and its value is still relative, because files-push sends it verbatim',
+            );
+        }
         $this->assertFileExists(
             $moved . '/plugin.php',
             'and it resolves from the deeper parent',
@@ -174,16 +177,15 @@ class MergeWpContentTest extends TestCase
         // A destination theme makes the merger move each source child.
         $this->writePulled('themes/twentytwentyfive/style.css', '/* pulled */');
         $this->writeLocal('themes/parent-theme/style.css', '/* parent */');
-        symlink('parent-theme', $this->localWpContent . '/themes/child-theme');
+        \LocalLink::create_symlink('parent-theme', $this->localWpContent . '/themes/child-theme');
 
         $this->merge();
 
         $moved = $this->pulledWpContent . '/themes/child-theme';
         $this->assertTrue(is_link($moved));
-        $this->assertSame(
-            'parent-theme',
-            readlink($moved),
-            'a value pointing inside the merged tree is kept as it was',
+        $this->assertTrue(
+            \LocalLink::has_value($moved, 'parent-theme'),
+            'a value pointing inside the merged tree still names the sibling; observed ' . json_encode(@readlink($moved)),
         );
         $this->assertFileExists(
             $moved . '/style.css',
@@ -195,12 +197,12 @@ class MergeWpContentTest extends TestCase
     {
         $this->writePulled('themes/parent-theme/style.css', '/* pulled parent */');
         $this->writeLocal('themes/parent-theme/style.css', '/* local parent */');
-        symlink('parent-theme', $this->localWpContent . '/themes/child-theme');
+        \LocalLink::create_symlink('parent-theme', $this->localWpContent . '/themes/child-theme');
 
         $this->merge();
 
         $moved = $this->pulledWpContent . '/themes/child-theme';
-        $this->assertSame('parent-theme', readlink($moved));
+        $this->assertTrue(\LocalLink::has_value($moved, 'parent-theme'), 'observed ' . json_encode(@readlink($moved)));
         $this->assertSame(
             '/* pulled parent */',
             file_get_contents($moved . '/style.css'),
@@ -312,6 +314,9 @@ class MergeWpContentTest extends TestCase
         if (function_exists('posix_getuid') && posix_getuid() === 0) {
             $this->markTestSkipped('Directory permissions do not stop root from writing.');
         }
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('Windows chmod() sets only the read-only attribute of files.');
+        }
 
         $this->writePulled('plugins/from-the-pull/plugin.php', '<?php');
         $this->writeLocal('plugins/local-only/plugin.php', '<?php // local');
@@ -337,6 +342,9 @@ class MergeWpContentTest extends TestCase
     {
         if (function_exists('posix_getuid') && posix_getuid() === 0) {
             $this->markTestSkipped('File permissions do not stop root from reading.');
+        }
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('Windows chmod() sets only the read-only attribute of files.');
         }
 
         $this->writePulled('plugins/from-the-pull/plugin.php', '<?php');
@@ -378,6 +386,9 @@ class MergeWpContentTest extends TestCase
     {
         if (function_exists('posix_getuid') && posix_getuid() === 0) {
             $this->markTestSkipped('The umask a root process runs under is not the point here.');
+        }
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('Windows chmod() sets only the read-only attribute of files.');
         }
 
         $this->writeLocal('plugins/local-only/plugin.php', '<?php // local');
@@ -593,7 +604,7 @@ class MergeWpContentTest extends TestCase
     {
         if (!is_dir($dir) || is_link($dir)) {
             if (is_link($dir)) {
-                unlink($dir);
+                \LocalLink::remove_symlink($dir);
             }
             return;
         }
@@ -602,7 +613,11 @@ class MergeWpContentTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path) || is_file($path)) {
+            if (is_link($path)) {
+                \LocalLink::remove_symlink($path);
+                continue;
+            }
+            if (is_file($path)) {
                 unlink($path);
                 continue;
             }

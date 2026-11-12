@@ -26,7 +26,9 @@ class RemapSeamTest extends TestCase
         $this->fsRoot = $this->tempDir . '/srv/htdocs';
         mkdir($this->stateDir, 0755, true);
         mkdir($this->fsRoot, 0755, true);
-        $this->root = realpath($this->fsRoot);
+        // The client keeps local paths in normalize_path() spelling, which uses
+        // forward slashes on Windows too.
+        $this->root = Utils::normalize_path(realpath($this->fsRoot), Utils::native_path_format());
     }
 
     protected function tearDown(): void
@@ -45,7 +47,13 @@ class RemapSeamTest extends TestCase
                 continue;
             }
             $p = "$d/$i";
-            (is_dir($p) && !is_link($p)) ? $this->rrm($p) : unlink($p);
+            if (is_link($p)) {
+                \LocalLink::remove_symlink($p);
+            } elseif (is_dir($p)) {
+                $this->rrm($p);
+            } else {
+                unlink($p);
+            }
         }
         rmdir($d);
     }
@@ -332,6 +340,7 @@ class RemapSeamTest extends TestCase
         mkdir($existing_directory);
         $canonical_existing_directory = realpath($existing_directory);
         $this->assertIsString($canonical_existing_directory);
+        $canonical_existing_directory = Utils::normalize_path($canonical_existing_directory, Utils::native_path_format());
 
         $this->assertSame(
             $canonical_existing_directory,
@@ -345,19 +354,32 @@ class RemapSeamTest extends TestCase
             $canonical_existing_directory . '/missing/child',
             Utils::realpath_with_missing_tail($existing_directory . '/missing/child')
         );
-        $this->assertSame('/', Utils::realpath_with_missing_tail('/'));
+        if (Utils::native_path_format() === 'windows') {
+            $drive_root = substr($canonical_existing_directory, 0, 3);
+            $this->assertSame($drive_root, Utils::realpath_with_missing_tail(str_replace('/', '\\', $drive_root)));
+            $this->assertSame(
+                $canonical_existing_directory . '/missing',
+                Utils::realpath_with_missing_tail(str_replace('/', '\\', $existing_directory) . '\\missing')
+            );
+        } else {
+            $this->assertSame('/', Utils::realpath_with_missing_tail('/'));
+        }
 
         $symlink = $this->tempDir . '/existing-link';
-        symlink($existing_directory, $symlink);
+        symlink($canonical_existing_directory, $symlink);
         $this->assertSame(
             $canonical_existing_directory . '/missing-through-link',
             Utils::realpath_with_missing_tail($symlink . '/missing-through-link')
         );
 
+        if (DIRECTORY_SEPARATOR === '\\') {
+            // Windows PHP cannot create a link to a missing target.
+            return;
+        }
         $broken_symlink = $this->tempDir . '/broken-link';
         symlink($this->tempDir . '/missing-target', $broken_symlink);
         $this->assertSame(
-            $broken_symlink . '/child',
+            Utils::normalize_path($broken_symlink . '/child', Utils::native_path_format()),
             Utils::realpath_with_missing_tail($broken_symlink . '/child')
         );
     }

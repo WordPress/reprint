@@ -83,4 +83,50 @@ final class PathFormatTest extends TestCase {
         $this->expectExceptionMessage('amiga');
         Utils::normalize_path_separators('/site/photos', 'amiga');
     }
+
+    /**
+     * A link value must resolve from the link's directory, whatever the spelling of either path.
+     *
+     * realpath() returns backslashes and an uppercase drive on Windows; splitting
+     * that on "/" alone produced values such as ../C:\Users\site.
+     *
+     * @dataProvider link_targets
+     * @param string $link_directory Directory that will contain the link.
+     * @param string $target_path Path the link must reach.
+     * @param string $path_format Format of both paths.
+     * @param string $link_value Expected link value.
+     */
+    public function testRelativeLinkTargetUsesTheSuppliedFormat(
+        string $link_directory,
+        string $target_path,
+        string $path_format,
+        string $link_value
+    ): void {
+        $this->assertSame($link_value, Utils::relative_link_target($link_directory, $target_path, $path_format));
+    }
+
+    /** @return array[] Link directory, target, path format, and link value. */
+    public static function link_targets(): array {
+        return [
+            'Unix sibling' => ['/a/b/c', '/a/d/e', 'unix', '../../d/e'],
+            'Unix descendant' => ['/a/b', '/a/b/c/d', 'unix', 'c/d'],
+            'Unix same directory' => ['/a/b/', '/a/b', 'unix', '.'],
+            'Unix from the root' => ['/', '/srv/site', 'unix', 'srv/site'],
+            'Unix keeps backslashes in names' => ['/a/b\\c/e', '/a/d', 'unix', '../../d'],
+            'Unix dot segments' => ['/a/b/../c', '/a/./d', 'unix', '../d'],
+            'Windows realpath spelling' => ['C:\\Users\\me\\flat', 'C:\\Users\\me\\files\\srv\\htdocs\\wp-config.php', 'windows', '..\\files\\srv\\htdocs\\wp-config.php'],
+            'Windows mixed separators and drive case' => ['c:/Users/me/flat/wp-content', 'C:\\Users\\me\\files/wordpress', 'windows', '..\\..\\files\\wordpress'],
+            'Windows drive root' => ['D:\\', 'D:\\site\\wp-content', 'windows', 'site\\wp-content'],
+            'Windows other drive' => ['C:\\site', 'D:\\files\\wordpress', 'windows', 'D:\\files\\wordpress'],
+            'Windows share' => ['\\\\server\\share\\site', '//SERVER/share/files', 'windows', '..\\files'],
+            'Windows other share' => ['\\\\server\\one\\site', '\\\\server\\two\\site', 'windows', '\\\\SERVER\\TWO\\site'],
+        ];
+    }
+
+    /** A relative path has no base from which to compute a link value. */
+    public function testRelativeLinkTargetRejectsARelativePath(): void {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('Link directory must be an absolute windows path; received "site".');
+        Utils::relative_link_target('site', 'C:\\site', 'windows');
+    }
 }

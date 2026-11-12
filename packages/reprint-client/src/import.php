@@ -97,6 +97,7 @@ require_once __DIR__ . '/lib/url-rewrite/load.php';
 // Load host analyzers (produce a runtime manifest from preflight data)
 require_once __DIR__ . '/lib/host/load.php';
 require_once __DIR__ . '/lib/class-multisite-target.php';
+require_once __DIR__ . '/lib/class-local-link.php';
 
 // Load target runtime appliers (consume a runtime manifest, write server config)
 require_once __DIR__ . '/lib/target-runtime/load.php';
@@ -359,6 +360,9 @@ class ImportClient
 
     /** @var string Path to pull/volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
+
+    /** @var string Path to pull/deferred-symlinks.jsonl — Windows links whose targets had not arrived. */
+    private $deferred_symlinks_file;
 
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
@@ -703,6 +707,7 @@ class ImportClient
             wp_join_unix_paths($this->pull_state_directory, "fetch-list.jsonl.new");
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
+        $this->deferred_symlinks_file = wp_join_unix_paths($this->pull_state_directory, "deferred-symlinks.jsonl");
         $this->progress_reporter = new ProgressReporter(
             wp_join_unix_paths($this->state_dir, "progress.json")
         );
@@ -733,7 +738,9 @@ class ImportClient
                 "Failed to resolve filesystem root path: {$this->filesystem_root}",
             );
         }
-        $this->filesystem_root = $resolved_local_filesystem_root;
+        // Windows realpath() returns backslashes; local paths built from the
+        // root use the forward-slash spelling of normalize_path().
+        $this->filesystem_root = Utils::trim_right_slash($resolved_local_filesystem_root, Utils::native_path_format());
 
         $this->pull_index_journal = new PullIndexJournal(
             [$this, "audit_log"],
@@ -2748,7 +2755,7 @@ class ImportClient
             $state_dir
         );
         $push_state_directory = wp_join_unix_paths($remote_state_directory, 'push');
-        if (strpos($push_state_directory, '/') !== 0) {
+        if (!Utils::is_absolute_path($push_state_directory, Utils::native_path_format())) {
             $working_directory = getcwd();
             if ($working_directory === false) {
                 throw new RuntimeException('Could not resolve the current working directory.');
@@ -3214,7 +3221,7 @@ class ImportClient
             $this->audit_log("FILE DELETE | {$this->next_remote_index_file}");
         }
         foreach (
-            [$this->mapped_remote_index_file, $this->fetch_list_replacement_file]
+            [$this->mapped_remote_index_file, $this->fetch_list_replacement_file, $this->deferred_symlinks_file, $this->deferred_symlinks_file . ".remaining"]
             as $mirror_work_file
         ) {
             if (file_exists($mirror_work_file)) {
@@ -4556,6 +4563,7 @@ class ImportClient
         if ($this->follow_symlinks) {
             $this->recreate_intermediate_symlinks();
         }
+        $this->create_deferred_symlinks();
         $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
 
         $this->ensure_local_index_exists();
@@ -5426,7 +5434,7 @@ class ImportClient
             }
 
             // Already correct — skip
-            if (is_link($local_absolute_path) && readlink($local_absolute_path) === $symlink_target) {
+            if (LocalLink::has_value($local_absolute_path, $symlink_target)) {
                 continue;
             }
 
@@ -5456,7 +5464,7 @@ class ImportClient
 
             // Remove stale symlink if present
             if (is_link($local_absolute_path)) {
-                @unlink($local_absolute_path);
+                LocalLink::remove_symlink($local_absolute_path);
             }
 
             // Don't overwrite a real directory — that shouldn't exist for
@@ -5470,7 +5478,7 @@ class ImportClient
                 continue;
             }
 
-            if (@symlink($symlink_target, $local_absolute_path)) {
+            if (LocalLink::create_symlink($symlink_target, $local_absolute_path)) {
                 $created++;
                 $this->pull_index_journal->record_remote_upsert(
                     $remote_absolute_path,
@@ -6570,7 +6578,7 @@ class ImportClient
         }
         // Keep a lexical absolute path because --from may not exist yet.
         $from = Utils::trim_right_slash($from, Utils::native_path_format());
-        if (strpos($from, "/") !== 0) {
+        if (!Utils::is_absolute_path($from, Utils::native_path_format())) {
             $from = Utils::normalize_path(wp_join_unix_paths(getcwd(), $from), Utils::native_path_format());
         }
         // A WordPress root passed by mistake would move wp-admin, wp-includes
@@ -6978,7 +6986,11 @@ class ImportClient
         // /srv/htdocs/wordpress/, so Phase 1's ABSPATH scan won't find it.
         $wp_config_in_flatten = wp_join_unix_paths($flatten_to, "wp-config.php");
         if (!file_exists($wp_config_in_flatten)) {
-            $parent_of_abspath = dirname($abspath);
+            // PHP's dirname() on Windows turns the Unix root into a backslash.
+            $parent_of_abspath = Utils::normalize_path(
+                wp_join_unix_paths($abspath, ".."),
+                $this->get_state()->remote_path_format()
+            );
             $local_parent_wp_config = $this->path_mapper()->remote_path_to_local_path(
                 wp_join_unix_paths($parent_of_abspath, "wp-config.php")
             );
@@ -7149,36 +7161,6 @@ class ImportClient
     }
 
     /**
-     * Compute a relative path from $from to $to.
-     *
-     * Both paths must be absolute. Returns a relative path such that
-     * a symlink at $from/$name pointing to the result will resolve to $to.
-     *
-     * Example: relative_path('/a/b/c', '/a/d/e') => '../../d/e'
-     */
-    private static function compute_relative_path(
-        string $from,
-        string $to
-    ): string {
-        $from_parts = explode("/", trim($from, "/"));
-        $to_parts = explode("/", trim($to, "/"));
-
-        // Find common prefix length
-        $common = 0;
-        $max = min(count($from_parts), count($to_parts));
-        while ($common < $max && $from_parts[$common] === $to_parts[$common]) {
-            $common++;
-        }
-
-        // Go up from $from to the common ancestor, then down to $to
-        $up = count($from_parts) - $common;
-        $down = array_slice($to_parts, $common);
-
-        $parts = array_merge(array_fill(0, $up, ".."), $down);
-        return implode("/", $parts) ?: ".";
-    }
-
-    /**
      * Create or refresh a symlink at $target pointing to $source.
      * Handles conflicts (existing non-symlinks) based on --force flag.
      *
@@ -7218,22 +7200,22 @@ class ImportClient
             );
         }
 
-        $link_value = self::compute_relative_path($target_parent_real, $abs_source);
+        $link_value = LocalLink::link_value($target_parent_real, $abs_source);
 
         // If the target is already a symlink, check if it resolves to the
         // same place. Refresh if not, skip if already correct.
         if (is_link($target)) {
-            $current_link_target = readlink($target);
-            if ($current_link_target === $link_value) {
+            if (LocalLink::has_value($target, $link_value)) {
                 $refreshed++;
                 return;
             }
             // Points elsewhere — remove and recreate
-            unlink($target);
+            $current_link_target = @readlink($target);
+            LocalLink::remove_without_following_links($target);
             $this->audit_log(
                 "FLAT-DOCUMENT-ROOT | Refreshed symlink: {$target} (was -> {$current_link_target})",
             );
-            if (!symlink($link_value, $target)) {
+            if (!LocalLink::create_symlink($link_value, $target)) {
                 throw new RuntimeException(
                     "Failed to create symlink: {$target} -> {$link_value}",
                 );
@@ -7259,19 +7241,12 @@ class ImportClient
                 true,
             );
 
-            // At this point, we know $target is not a symlink (symlinks
-            // are handled above and return early). So we only need to
-            // distinguish between directories and regular files.
-            if (is_dir($target)) {
-                $this->remove_directory_recursive($target);
-            } else {
-                unlink($target);
-            }
+            LocalLink::remove_without_following_links($target);
             $forced++;
         }
 
         // Create the symlink
-        if (!symlink($link_value, $target)) {
+        if (!LocalLink::create_symlink($link_value, $target)) {
             throw new RuntimeException(
                 "Failed to create symlink: {$target} -> {$link_value}",
             );
@@ -7330,25 +7305,6 @@ class ImportClient
     }
 
     /**
-     * Remove a file, symlink, or directory tree if it exists.
-     *
-     * A failure stops the run: copying over a symlink that is still there
-     * would write through it into the pulled tree.
-     */
-    private function flatten_remove_entry(string $path): void
-    {
-        if (is_link($path) || is_file($path)) {
-            @unlink($path);
-        } elseif (is_dir($path)) {
-            @$this->remove_directory_recursive($path);
-        }
-        clearstatcache();
-        if (is_link($path) || file_exists($path)) {
-            throw new RuntimeException("Failed to remove: {$path}");
-        }
-    }
-
-    /**
      * Recursively copy a core file or directory over $destination.
      *
      * Files with the source's size and mtime are skipped, so a run with
@@ -7380,7 +7336,7 @@ class ImportClient
         if (is_link($destination)
             || (file_exists($destination) && is_dir($destination) !== $source_is_directory)
         ) {
-            $this->flatten_remove_entry($destination);
+            LocalLink::remove_without_following_links($destination);
         }
 
         if (!$source_is_directory) {
@@ -7413,7 +7369,7 @@ class ImportClient
         // Remove first. On a case-insensitive filesystem, copying Foo.php
         // writes into an existing foo.php, which would then look stale.
         foreach (array_diff($destination_entries, $source_entries) as $entry) {
-            $this->flatten_remove_entry(wp_join_unix_paths($destination, $entry));
+            LocalLink::remove_without_following_links(wp_join_unix_paths($destination, $entry));
         }
         foreach (array_diff($source_entries, [".", ".."]) as $entry) {
             $this->flatten_copy_core_tree(
@@ -7445,7 +7401,7 @@ class ImportClient
                 "FLAT-DOCUMENT-ROOT FORCE | Replacing symlink with real directory: {$path}",
                 true,
             );
-            unlink($path);
+            LocalLink::remove_without_following_links($path);
             $forced++;
         }
 
@@ -7459,29 +7415,6 @@ class ImportClient
                 "FLAT-DOCUMENT-ROOT | Created directory: {$path}",
             );
         }
-    }
-
-    /**
-     * Recursively remove a directory and all its contents.
-     */
-    private function remove_directory_recursive(string $dir): void
-    {
-        $entries = @scandir($dir);
-        if ($entries === false) {
-            throw new RuntimeException("Failed to scan directory for removal: {$dir}");
-        }
-        foreach ($entries as $entry) {
-            if ($entry === "." || $entry === "..") {
-                continue;
-            }
-            $path = wp_join_unix_paths($dir, $entry);
-            if (is_dir($path) && !is_link($path)) {
-                $this->remove_directory_recursive($path);
-            } else {
-                unlink($path);
-            }
-        }
-        rmdir($dir);
     }
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors are never HTML.
@@ -10714,44 +10647,23 @@ class ImportClient
     /**
      * Remove a local absolute path recursively without traversing symlink targets.
      *
-     * Symlinks are always unlinked as links. Directories are traversed
-     * depth-first.
+     * @return bool Whether nothing remains; the audit log records why otherwise.
      */
     private function remove_local_absolute_path_without_following_symlinks(
         string $local_absolute_path
     ): bool {
         // A trailing slash makes is_link() inspect a directory link's target.
         $local_absolute_path = Utils::trim_right_slash($local_absolute_path, Utils::native_path_format());
-        if (!file_exists($local_absolute_path) && !is_link($local_absolute_path)) {
-            return true;
-        }
-
-        if (is_link($local_absolute_path) || is_file($local_absolute_path)) {
-            return true === @unlink($local_absolute_path);
-        }
-
-        if (is_dir($local_absolute_path)) {
+        if (!is_link($local_absolute_path) && is_dir($local_absolute_path)) {
             $this->assert_local_path_within_root($local_absolute_path);
-            $entries = @scandir($local_absolute_path);
-            if ($entries === false) {
-                return false;
-            }
-            foreach ($entries as $entry) {
-                if ($entry === "." || $entry === "..") {
-                    continue;
-                }
-                if (
-                    !$this->remove_local_absolute_path_without_following_symlinks(
-                        wp_join_unix_paths($local_absolute_path, $entry)
-                    )
-                ) {
-                    return false;
-                }
-            }
-            return true === @rmdir($local_absolute_path);
         }
-
-        return true === @unlink($local_absolute_path);
+        try {
+            LocalLink::remove_without_following_links($local_absolute_path);
+        } catch (RuntimeException $removal_failure) {
+            $this->audit_log($removal_failure->getMessage(), true);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -11881,7 +11793,7 @@ class ImportClient
             !$this->follow_symlinks ||
             !$this->next_remote_index_contains_remote_absolute_path_prefix($remote_absolute_target)
         ) {
-            return $target;
+            return LocalLink::native_link_value($target, $local_absolute_path);
         }
 
         // Repoint to where the target's content is placed by the same pull
@@ -11889,17 +11801,14 @@ class ImportClient
         $local_absolute_target = $this->path_mapper()->remote_path_to_local_path(
             $remote_absolute_target
         );
-        $local_relative_target = self::compute_relative_path(
-            dirname($local_absolute_path),
-            $local_absolute_target
-        );
+        $local_link_value = LocalLink::link_value(dirname($local_absolute_path), $local_absolute_target);
 
         $this->audit_log(
-            "SYMLINK TARGET REMAP | {$remote_absolute_path}: {$target} -> {$local_relative_target}",
+            "SYMLINK TARGET REMAP | {$remote_absolute_path}: {$target} -> {$local_link_value}",
             false,
         );
 
-        return $local_relative_target;
+        return $local_link_value;
     }
 
     /**
@@ -13164,11 +13073,7 @@ class ImportClient
                     "Removing symlink blocking directory: {$current}",
                     true,
                 );
-                if (!unlink($current)) {
-                    throw new RuntimeException(
-                        "Failed to remove symlink blocking directory: {$current}",
-                    );
-                }
+                LocalLink::remove_without_following_links($current);
                 // Clear cached realpath so the subsequent realpath() check
                 // sees the new directory instead of the removed symlink.
                 clearstatcache(true, $current);
@@ -13208,7 +13113,7 @@ class ImportClient
             }
 
             $resolved = realpath($current);
-            if ($resolved === false || !Utils::path_is_same_as_or_descendant_of($resolved, $real_filesystem_root)) {
+            if ($resolved === false || !Utils::path_is_same_as_or_descendant_of(Utils::normalize_path($resolved, Utils::native_path_format()), $real_filesystem_root)) {
                 throw new RuntimeException(
                     "Security: Refusing to create directory outside filesystem root: {$current}",
                 );
@@ -13432,20 +13337,43 @@ class ImportClient
             }
         }
 
-        // Create symlink
-        $symlink_result = symlink($target_for_local, $local_absolute_path);
-        if (true !== $symlink_result || !is_link($local_absolute_path)) {
-            // Log error and skip this symlink
+        // Windows PHP links only to an existing target. Sources send a link
+        // and its target in any order, so create this one after the fetch.
+        if (!LocalLink::can_create_symlink_before_target() && !LocalLink::target_exists($target_for_local, $local_absolute_path)) {
+            $this->defer_symlink($path, $target_for_local, $target, $ctime);
+            return;
+        }
+
+        $this->place_symlink($path, $local_absolute_path, $target_for_local, $target, $ctime);
+    }
+
+    /**
+     * Creates one pulled symlink and records it, or reports why it was skipped.
+     *
+     * @param string $remote_absolute_path Remote path of the link.
+     * @param string $local_absolute_path  Local path of the link.
+     * @param string $local_link_value     Link value for the local filesystem.
+     * @param string $source_link_value    Link value the source sent, for progress messages.
+     * @param int    $ctime                Source ctime of the link, or 0.
+     */
+    private function place_symlink(
+        string $remote_absolute_path,
+        string $local_absolute_path,
+        string $local_link_value,
+        string $source_link_value,
+        int $ctime
+    ): void {
+        if (!LocalLink::create_symlink($local_link_value, $local_absolute_path) || !is_link($local_absolute_path)) {
             $this->audit_log(
-                "Failed to create symlink: {$local_absolute_path} -> {$target_for_local}",
+                "Failed to create symlink: {$local_absolute_path} -> {$local_link_value}",
                 true,
             );
             $this->output_progress([
                 "type" => "symlink_error",
-                "path" => $path,
-                "target" => $target_for_local,
+                "path" => $remote_absolute_path,
+                "target" => $local_link_value,
                 "error" => "Failed to create symlink",
-                "message" => "Symlink error: {$path} -> {$target}",
+                "message" => "Symlink error: {$remote_absolute_path} -> {$source_link_value}",
             ]);
             return;
         }
@@ -13454,11 +13382,11 @@ class ImportClient
         // an empty file where a later intermediate symlink needs to go. Keep
         // the source ctime only in the journal; it cannot be set with touch().
 
-        $this->audit_log("Symlink: {$path} -> {$target_for_local}", false);
+        $this->audit_log("Symlink: {$remote_absolute_path} -> {$local_link_value}", false);
 
         if ($ctime > 0) {
             $this->pull_index_journal->record_remote_upsert(
-                $path,
+                $remote_absolute_path,
                 $ctime,
                 0,
                 "link",
@@ -13468,11 +13396,122 @@ class ImportClient
 
         $this->output_progress([
             "type" => "symlink",
-            "path" => $path,
-            "target" => $target_for_local,
-            "message" => "Symlink: {$path} -> {$target}",
+            "path" => $remote_absolute_path,
+            "target" => $local_link_value,
+            "message" => "Symlink: {$remote_absolute_path} -> {$source_link_value}",
         ]);
     }
+
+    // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI errors are never HTML.
+    /**
+     * Records a symlink part to create once the fetch has completed.
+     *
+     * The line is written before the part counts as handled, so a resumed
+     * fetch that replays the part appends it again; creating it twice is a no-op.
+     *
+     * @param string $remote_absolute_path Remote path of the link.
+     * @param string $local_link_value     Link value for the local filesystem.
+     * @param string $source_link_value    Link value the source sent, for progress messages.
+     * @param int    $ctime                Source ctime of the link, or 0.
+     */
+    private function defer_symlink(string $remote_absolute_path, string $local_link_value, string $source_link_value, int $ctime): void
+    {
+        $deferred_symlink = Utils::json_encode_or_throw([
+            "path" => base64_encode($remote_absolute_path),
+            "target" => base64_encode($local_link_value),
+            "source_target" => base64_encode($source_link_value),
+            "ctime" => $ctime,
+        ]) . "\n";
+        if (@file_put_contents($this->deferred_symlinks_file, $deferred_symlink, FILE_APPEND | LOCK_EX) !== strlen($deferred_symlink)) {
+            $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+            throw new RuntimeException("Could not append a deferred symlink to {$this->deferred_symlinks_file}: {$php_error}");
+        }
+        $this->audit_log("SYMLINK DEFERRED | {$remote_absolute_path} -> {$local_link_value} | target not yet downloaded", false);
+    }
+
+    /**
+     * Creates the symlinks deferred during the fetch, then forgets them.
+     *
+     * Every downloaded target exists by now, but a deferred link can target
+     * another deferred link listed after it. Each pass creates the links whose
+     * targets exist and carries the rest to the next pass. Once a pass creates
+     * none, the last pass reports the rest like any other link this client
+     * cannot create: their targets lie outside the pulled selection.
+     * Repeating a pass after an interruption skips links that already have
+     * their value.
+     */
+    private function create_deferred_symlinks(): void
+    {
+        $remaining_symlinks_file = $this->deferred_symlinks_file . ".remaining";
+        $create_links_to_missing_targets = false;
+        while (file_exists($this->deferred_symlinks_file)) {
+            $deferred_symlinks_handle = @fopen($this->deferred_symlinks_file, "r");
+            $remaining_symlinks_handle = @fopen($remaining_symlinks_file, "w");
+            if ($deferred_symlinks_handle === false || $remaining_symlinks_handle === false) {
+                $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+                throw new RuntimeException("Could not open {$this->deferred_symlinks_file} and {$remaining_symlinks_file} for the deferred symlink pass: {$php_error}");
+            }
+            $created_links = 0;
+            $remaining_links = 0;
+            $line_number = 0;
+            while (true) {
+                $deferred_symlink_line = fgets($deferred_symlinks_handle);
+                if ($deferred_symlink_line === false) {
+                    break;
+                }
+                ++$line_number;
+                $deferred_symlink = json_decode($deferred_symlink_line, true);
+                foreach (["path", "target", "source_target"] as $base64_field) {
+                    if (!is_array($deferred_symlink) || !is_string($deferred_symlink[$base64_field] ?? null) || !is_string(base64_decode($deferred_symlink[$base64_field], true))) {
+                        throw new RuntimeException("Deferred symlink line {$line_number} in {$this->deferred_symlinks_file} must have a base64 string \"{$base64_field}\"; observed: " . substr($deferred_symlink_line, 0, 200));
+                    }
+                }
+                if (!is_int($deferred_symlink["ctime"] ?? null)) {
+                    throw new RuntimeException("Deferred symlink line {$line_number} in {$this->deferred_symlinks_file} must have an integer \"ctime\"; observed: " . substr($deferred_symlink_line, 0, 200));
+                }
+                $remote_absolute_path = base64_decode($deferred_symlink["path"], true);
+                $local_link_value = base64_decode($deferred_symlink["target"], true);
+                $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($remote_absolute_path);
+                if (LocalLink::has_value($local_absolute_path, $local_link_value)) {
+                    continue;
+                }
+                if (file_exists($local_absolute_path) || is_link($local_absolute_path)) {
+                    $this->audit_log("SYMLINK DEFERRED SKIP | {$remote_absolute_path} | a later part placed another entry there", true);
+                    continue;
+                }
+                if (!$create_links_to_missing_targets && !LocalLink::target_exists($local_link_value, $local_absolute_path)) {
+                    if (fwrite($remaining_symlinks_handle, $deferred_symlink_line) !== strlen($deferred_symlink_line)) {
+                        $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+                        throw new RuntimeException("Could not write to {$remaining_symlinks_file}: {$php_error}");
+                    }
+                    ++$remaining_links;
+                    continue;
+                }
+                $this->place_symlink(
+                    $remote_absolute_path,
+                    $local_absolute_path,
+                    $local_link_value,
+                    base64_decode($deferred_symlink["source_target"], true),
+                    $deferred_symlink["ctime"]
+                );
+                ++$created_links;
+            }
+            fclose($deferred_symlinks_handle);
+            fclose($remaining_symlinks_handle);
+            if ($remaining_links === 0) {
+                @unlink($remaining_symlinks_file);
+                @unlink($this->deferred_symlinks_file);
+                $this->audit_log("FILE DELETE | {$this->deferred_symlinks_file} | deferred symlinks created");
+                return;
+            }
+            if (!@rename($remaining_symlinks_file, $this->deferred_symlinks_file)) {
+                $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+                throw new RuntimeException("Could not replace {$this->deferred_symlinks_file} with {$remaining_symlinks_file}: {$php_error}");
+            }
+            $create_links_to_missing_targets = $created_links === 0;
+        }
+    }
+    // phpcs:enable WordPress.Security.EscapeOutput.ExceptionNotEscaped
 
     // phpcs:disable WordPress.Security.EscapeOutput.ExceptionNotEscaped -- Local path errors are CLI text, not HTML.
     /**

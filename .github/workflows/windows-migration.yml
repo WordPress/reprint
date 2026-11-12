@@ -48,6 +48,83 @@ jobs:
       - name: Check received entry paths on a native Windows client
         working-directory: tests
         run: php ../vendor/bin/phpunit --group received-paths Import/RuntimeFilesRootPathTest.php
+  windows-client:
+    name: Pull, merge, and flatten with a native Windows client
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, pdo_sqlite, curl, mbstring
+          coverage: none
+      - run: composer install --no-interaction --prefer-dist
+      - name: Run link-placing client tests
+        shell: pwsh
+        run: |
+          $tests = 'PathFormatTest.php Import/RemapSeamTest.php Import/LocalLinkTest.php Import/PullLinkBeforeTargetTest.php Import/FilesPullLocalIndexTest.php Import/PullFilterOptionTest.php Import/MergeWpContentTest.php Import/FlatDocrootWpConfigTest.php Import/FlatDocrootCoreFilesCopyTest.php'
+          $php = (Get-Command php).Source
+          $failed = 0
+          foreach ($test in $tests.Split(' ')) {
+            Write-Output "::group::$test"
+            Push-Location tests
+            & $php ../vendor/bin/phpunit --display-warnings $test
+            Pop-Location
+            if ($LASTEXITCODE -ne 0) { $failed++ }
+            Write-Output '::endgroup::'
+          }
+          exit $failed
+  linux-to-windows:
+    name: Pull linked Linux WordPress into a native Windows client
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, openssl
+          coverage: none
+      - run: composer install --no-dev --no-interaction --prefer-dist
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: php-cli php-mysql php-curl php-mbstring php-xml php-zip composer mariadb-server curl
+      - name: Prepare the linked Linux source
+        shell: wsl-bash {0}
+        run: |
+          mkdir -p /root/reprint
+          tar --exclude=.git --exclude=vendor -cf - . | tar -xf - -C /root/reprint
+          bash /root/reprint/tests/e2e/windows/prepare-linux-source.sh /root/reprint /root/source-key.pem
+      # Keep the Linux server process alive until the Windows pull has finished.
+      - name: Pull with the native Windows client
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $keyPath = "$env:RUNNER_TEMP\source-key.pem"
+          wsl -d Ubuntu-24.04 --exec cp /root/source-key.pem (wsl -d Ubuntu-24.04 --exec wslpath -a "$env:RUNNER_TEMP/source-key.pem").Trim()
+          Start-Process wsl -ArgumentList '-d', 'Ubuntu-24.04', '--exec', 'php', '-S', '0.0.0.0:8082', '-t', '/srv/htdocs' -RedirectStandardOutput "$env:RUNNER_TEMP/source.stdout.log" -RedirectStandardError "$env:RUNNER_TEMP/source.stderr.log"
+          $sourceAddress = (wsl -d Ubuntu-24.04 --exec hostname -I).Trim().Split(' ')[0]
+          $sourceUrl = "http://${sourceAddress}:8082"
+          for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            try { Invoke-WebRequest "$sourceUrl/wp-content/uploads/2026/01/hello.txt" -UseBasicParsing | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+          }
+          New-Item -ItemType Directory -Force C:\reprint-client | Out-Null
+          php tests/e2e/windows/pull-into-windows.php "$sourceUrl/?reprint-api" $keyPath C:\reprint-client
+      - name: Collect client logs
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem C:\reprint-client\*.log -ErrorAction SilentlyContinue | ForEach-Object { Write-Output "::group::$($_.Name)"; Get-Content $_ -Tail 80; Write-Output '::endgroup::' }
+          Get-Content C:\reprint-client\state\audit.log -Tail 120 -ErrorAction SilentlyContinue
+          Get-Content "$env:RUNNER_TEMP/source.stderr.log" -Tail 40 -ErrorAction SilentlyContinue
   windows-to-linux:
     needs: php-reader
     name: Pull Windows WordPress into Linux (${{ matrix.source }})
@@ -124,7 +201,7 @@ jobs:
 
   ci-result:
     name: Windows migration result
-    needs: [php-reader, received-paths, windows-to-linux]
+    needs: [php-reader, received-paths, windows-client, linux-to-windows, windows-to-linux]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:

@@ -132,7 +132,8 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
     public function testCopyRejectsSymlinkInsideCore(): void
     {
         $this->createWpCloudLayout();
-        symlink('/etc', $this->fsRoot . '/wordpress/core/7.1.3/wp-includes/outside');
+        mkdir($this->tempDir . '/outside');
+        symlink($this->tempDir . '/outside', $this->fsRoot . '/wordpress/core/7.1.3/wp-includes/outside');
 
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('symlink');
@@ -206,13 +207,14 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->flatten(['core_files' => 'copy']);
         mkdir($this->flattenTo . '/wp-includes/stale/nested', 0755, true);
         file_put_contents($this->flattenTo . '/wp-includes/stale/nested/old.php', '<?php // old');
-        symlink('/etc', $this->flattenTo . '/wp-admin/stale-link');
+        mkdir($this->tempDir . '/outside');
+        symlink($this->tempDir . '/outside', $this->flattenTo . '/wp-admin/stale-link');
 
         $this->flatten(['core_files' => 'copy']);
 
         $this->assertDirectoryDoesNotExist($this->flattenTo . '/wp-includes/stale');
         $this->assertFalse(is_link($this->flattenTo . '/wp-admin/stale-link'));
-        $this->assertDirectoryExists('/etc');
+        $this->assertDirectoryExists($this->tempDir . '/outside');
     }
 
     public function testReplacesTargetsOfTheWrongType(): void
@@ -254,6 +256,9 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         if (function_exists('posix_getuid') && posix_getuid() === 0) {
             $this->markTestSkipped('Directory permissions do not stop root from writing.');
         }
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('Windows chmod() sets only the read-only attribute of files.');
+        }
 
         $this->createWpCloudLayout();
         $previousCore = $this->fsRoot . '/wordpress/core/7.0.7';
@@ -280,6 +285,9 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         if (function_exists('posix_getuid') && posix_getuid() === 0) {
             $this->markTestSkipped('Directory permissions do not stop root from writing.');
         }
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('Windows chmod() sets only the read-only attribute of files.');
+        }
 
         $this->createWpCloudLayout();
         $this->flatten(['core_files' => 'copy']);
@@ -300,6 +308,9 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
     {
         if (function_exists('posix_getuid') && posix_getuid() === 0) {
             $this->markTestSkipped('Directory permissions do not stop root from writing.');
+        }
+        if (DIRECTORY_SEPARATOR === '\\') {
+            $this->markTestSkipped('Windows chmod() sets only the read-only attribute of files.');
         }
 
         // On a standard layout wp-includes comes before wp-load.php,
@@ -427,7 +438,7 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
         $this->createCoreTree($this->fsRoot . '/srv/htdocs/__wp__', '7.1.3');
         $abspath = $this->fsRoot . '/srv/htdocs';
         unlink($abspath . '/__wp__/index.php');
-        symlink('__wp__/wp-load.php', $abspath . '/wp-load.php');
+        \LocalLink::create_symlink(\LocalLink::native_link_value('__wp__/wp-load.php', $abspath . '/wp-load.php'), $abspath . '/wp-load.php');
         file_put_contents($abspath . '/index.php', '<?php // site index');
         $this->writePreflight(['abspath' => '/srv/htdocs']);
 
@@ -647,7 +658,11 @@ class FlatDocrootCoreFilesCopyTest extends TestCase
                 continue;
             }
             $path = $dir . '/' . $item;
-            if (is_link($path) || is_file($path)) {
+            if (is_link($path)) {
+                \LocalLink::remove_symlink($path);
+                continue;
+            }
+            if (is_file($path)) {
                 unlink($path);
                 continue;
             }
