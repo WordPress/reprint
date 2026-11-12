@@ -1,0 +1,110 @@
+name: Windows performance probe
+
+# Throwaway: measures how long a Windows pull benchmark job takes.
+on:
+  push:
+    branches: [perf-windows-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  bench-windows:
+    name: Pull pipeline benchmark (Windows client)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.5'
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, openssl
+          coverage: none
+
+      - name: Install client dependencies for Windows PHP
+        run: composer install --no-dev --no-interaction --prefer-dist
+
+      - name: Record the Windows PHP path
+        shell: pwsh
+        run: (Get-Command php).Source | Out-File -Encoding ascii -NoNewline windows-php-path.txt
+
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: php8.3-cli php8.3-fpm php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-sqlite3 composer jq curl xz-utils
+
+      - name: Enable systemd in WSL
+        shell: wsl-bash {0}
+        run: printf '[boot]\nsystemd=true\n' > /etc/wsl.conf
+
+      - name: Restart WSL with systemd
+        shell: pwsh
+        run: wsl --terminate Ubuntu-24.04
+
+      - name: Copy the harness into WSL and install Node
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          mkdir -p /root/reprint
+          tar --exclude=.git --exclude=vendor -cf - . | tar -xf - -C /root/reprint
+          node_tarball=$(curl -fsSL https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt | awk '/linux-x64.tar.xz/ { print $2 }')
+          curl -fsSL "https://nodejs.org/dist/latest-v24.x/$node_tarball" | tar -xJ -C /opt
+          ln -sf /opt/"${node_tarball%.tar.xz}"/bin/* /usr/local/bin/
+          node --version
+
+      - name: Setup source infrastructure in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          cd /root/reprint
+          tests/e2e/ci/setup-infrastructure.sh 8.3
+          tests/e2e/setup.sh
+          tests/e2e/ci/download-wp-cli.sh
+          cd tests/e2e && npm ci
+
+      - name: Bench the native Windows client
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          workspace=$(pwd)
+          export WINDOWS_PHP=$(wslpath -u "$(cat windows-php-path.txt)")
+          export PHP_BINARY=/root/reprint/tests/e2e/ci/windows-php.sh
+          export IMPORTER_PATH="$workspace/packages/reprint-client/bin/reprint-client"
+          # State and the pulled tree live on NTFS, as for a Windows user.
+          mkdir -p /mnt/c/reprint-bench-tmp
+          export TMPDIR=/mnt/c/reprint-bench-tmp
+          export BENCH_LABEL=windows BENCH_JSON_OUT=bench-windows.json BENCH_MD_OUT=bench-windows.md
+          export BENCH_STAGES=preflight,files-pull,db-pull,db-apply,apply-runtime
+          export BENCH_SEED_POSTS=10000 BENCH_SEED_POSTMETA=25000
+          export E2E_SERVER_PROJECT_ROOT=/root/reprint
+          cd /root/reprint/tests/e2e
+          node benchmark/bench-pull.mjs
+          cp bench-windows.json bench-windows.md "$workspace/"
+
+      - name: Bench the Linux client on the same runner
+        shell: wsl-bash {0}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          workspace=$(pwd)
+          export BENCH_LABEL=wsl-linux BENCH_JSON_OUT=bench-wsl-linux.json BENCH_MD_OUT=bench-wsl-linux.md
+          export BENCH_STAGES=preflight,files-pull,db-pull,db-apply,apply-runtime
+          export BENCH_SEED_POSTS=10000 BENCH_SEED_POSTMETA=25000
+          export E2E_SERVER_PROJECT_ROOT=/root/reprint
+          cd /root/reprint/tests/e2e
+          node benchmark/bench-pull.mjs
+          cp bench-wsl-linux.json bench-wsl-linux.md "$workspace/"
+
+      - name: Upload benchmark results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-bench
+          path: |
+            bench-windows.*
+            bench-wsl-linux.*
+          if-no-files-found: ignore
