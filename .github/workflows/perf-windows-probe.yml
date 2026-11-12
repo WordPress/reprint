@@ -95,6 +95,8 @@ jobs:
           export BENCH_STAGES=preflight,files-pull,db-pull,db-apply,apply-runtime
           export BENCH_SEED_POSTS=10000 BENCH_SEED_POSTMETA=25000
           export E2E_SERVER_PROJECT_ROOT=/root/reprint
+          # The sites enrolled the key the Windows run generated under its TMPDIR.
+          cp -r /mnt/c/reprint-bench-tmp/reprint-e2e-keys /tmp/
           cd /root/reprint/tests/e2e
           node benchmark/bench-pull.mjs
           cp bench-wsl-linux.json bench-wsl-linux.md "$workspace/"
