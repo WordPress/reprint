@@ -641,7 +641,7 @@ class ProductionDropInRemovalTest extends TestCase
             $result = PostProcess::run_selected_tasks($this->fsRoot, 'disable-hosting-plugins', $this->stateDir);
             $this->assertSame('failed', $result['status']);
             $this->assertSame('failed', $result['results'][0]['status']);
-            $this->assertStringContainsString('Could not remove source-host path: ' . $locked_directory, $result['message']);
+            $this->assertStringContainsString('Could not remove the file ' . $locked_directory . '/plugin.php', $result['message']);
             $this->assertFileExists($locked_directory . '/plugin.php');
             $reopened = $this->makeClient();
             $this->loadClientState($reopened);
