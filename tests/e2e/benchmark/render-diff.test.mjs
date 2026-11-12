@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 /** Exercise the report CLI with saved measurements, without timing a fake rewriter. */
-function renderReport(context, prResults, baselineResults) {
+function renderReport(context, prResults, baselineResults, extraEnv = {}) {
     const directory = mkdtempSync(join(tmpdir(), 'reprint-benchmark-report-'));
     context.after(() => rmSync(directory, { recursive: true, force: true }));
     const meta = { site: 'large-directory', fileCount: 2000, phpVersion: '8.5' };
@@ -18,7 +18,7 @@ function renderReport(context, prResults, baselineResults) {
     execFileSync(process.execPath, [fileURLToPath(new URL('./render-diff.mjs', import.meta.url))], {
         env: {
             ...process.env, PR_JSON: join(directory, 'pr.json'), TRUNK_JSON: join(directory, 'baseline.json'),
-            OUT_MD: join(directory, 'report.md'), BASELINE_LABEL: 'trunk',
+            OUT_MD: join(directory, 'report.md'), BASELINE_LABEL: 'trunk', ...extraEnv,
         },
     });
     return readFileSync(join(directory, 'report.md'), 'utf8');
@@ -121,3 +121,12 @@ for (const withBaseline of [true, false]) {
         assert.doesNotMatch(row, /omitted=/);
     });
 }
+
+test('a second report in the same comment takes its own heading and no history link', context => {
+    const result = { stage: 'files-pull', elapsedMs: 1000, ok: true };
+    const report = renderReport(context, [result], [result], {
+        REPORT_HEADING: 'Native Windows client', PERF_HISTORY_URL: 'none', GITHUB_REPOSITORY: 'WordPress/reprint',
+    });
+    assert.match(report, /^## Native Windows client — `large-directory`/);
+    assert.doesNotMatch(report, /performance history/);
+});

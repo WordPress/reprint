@@ -4,6 +4,8 @@
  * The baseline label defaults
  * to "trunk" but can be overridden with BASELINE_LABEL — that's how stacked
  * PRs report their incremental impact against the parent branch.
+ * REPORT_HEADING names a second report, such as the Windows client's, and
+ * PERF_HISTORY_URL=none leaves out its history link.
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
@@ -46,6 +48,7 @@ const prPath = process.env.PR_JSON || 'bench-pr.json';
 const basePath = process.env.TRUNK_JSON || 'bench-trunk.json';
 const outPath = process.env.OUT_MD || 'bench-results.md';
 const baselineLabel = process.env.BASELINE_LABEL || 'trunk';
+const reportHeading = process.env.REPORT_HEADING || 'Pull pipeline performance';
 
 if (!existsSync(prPath)) {
     console.error(`Missing PR results: ${prPath}`);
@@ -56,7 +59,7 @@ const pr = JSON.parse(readFileSync(prPath, 'utf-8'));
 const base = existsSync(basePath) ? JSON.parse(readFileSync(basePath, 'utf-8')) : null;
 
 const lines = [];
-lines.push(`## Pull pipeline performance — \`${pr.meta.site}\``);
+lines.push(`## ${reportHeading} — \`${pr.meta.site}\``);
 lines.push('');
 {
     const seedSuffix = (pr.meta.seedPosts && pr.meta.seedPostmeta)
@@ -127,6 +130,8 @@ if (pr.results.some(result => result.stage.startsWith('url-rewrite-'))) {
 }
 
 const historyUrl = (() => {
+    // A second report in the same comment leaves the link to the first.
+    if (process.env.PERF_HISTORY_URL === 'none') return null;
     if (process.env.PERF_HISTORY_URL) return process.env.PERF_HISTORY_URL;
     const slug = process.env.GITHUB_REPOSITORY;
     if (!slug) return null;

@@ -76,3 +76,23 @@ checked-out source for both PR and trunk.
 
 Save the two runs as `bench-pr.json` and `bench-trunk.json`, then run
 `node tests/e2e/benchmark/render-diff.mjs` to produce the comparison table.
+
+## Native Windows client
+
+The same comment has a second report for a native Windows client. On a Windows
+runner, the source site and MariaDB run in WSL. Windows PHP runs the PR build and
+then the trunk build through `tests/e2e/ci/windows-php.sh`, which converts Linux
+path arguments to Windows paths. The pulled tree and state stay on NTFS, as they
+do for a Windows user. The report times `preflight`, `files-pull`, `db-pull`,
+`db-apply` and `apply-runtime` with 10,000 posts. It leaves out the URL cases
+(`BENCH_URL_REWRITE=0`) because the Linux report already runs them.
+
+A trunk build that cannot pull on Windows shows its exit codes instead of times.
+
+A collapsed table then puts the Windows times beside the Linux client's times for
+the same PR build, pulled on the same runner from the same source. Both clients
+share that hardware, so the ratio shows the cost of native Windows per stage. Windows
+PHP reaches MariaDB through WSL's localhost relay, so `db-apply` overstates it.
+
+The Linux job posts its report first. Once the Windows job finishes, the comment
+is replaced with both reports.
