@@ -418,16 +418,10 @@ jobs:
           sections=()
           [ -f linux/bench-results.md ] && sections+=(linux/bench-results.md)
           if [ -f windows/bench-windows-pr.json ]; then
-            PR_JSON=windows/bench-windows-pr.json TRUNK_JSON=windows/bench-windows-trunk.json \
-              OUT_MD=windows/bench-windows.md BASELINE_LABEL=trunk \
-              REPORT_HEADING='Native Windows client' PERF_HISTORY_URL=none \
-              node benchmark/render-diff.mjs > /dev/null
+            WINDOWS_JSON=windows/bench-windows-pr.json WINDOWS_TRUNK_JSON=windows/bench-windows-trunk.json \
+              LINUX_JSON=windows/bench-wsl-linux-pr.json OUT_MD=windows/bench-windows.md \
+              node benchmark/render-windows.mjs > /dev/null
             sections+=(windows/bench-windows.md)
-            if [ -f windows/bench-wsl-linux-pr.json ]; then
-              WINDOWS_JSON=windows/bench-windows-pr.json LINUX_JSON=windows/bench-wsl-linux-pr.json \
-                OUT_MD=windows/bench-platforms.md node benchmark/render-platforms.mjs > /dev/null
-              sections+=(windows/bench-platforms.md)
-            fi
           fi
           if [ ${#sections[@]} -eq 0 ]; then
             echo "exists=false" >> "$GITHUB_OUTPUT"

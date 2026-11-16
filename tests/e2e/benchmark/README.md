@@ -5,8 +5,9 @@ Every PR runs these cases in addition to the pipeline stages selected by
 change in the existing performance comment. JSON artifacts retain all five
 samples and the path of the implementation loaded from each build.
 
-Changes above 5% in either direction stay visible. Changes of 5% or less go in
-a collapsed second table. Each row's detailed metrics are also collapsed.
+Changes above 5% in either direction stay visible, with each row's detailed
+metrics collapsed. Changes of 5% or less go in a collapsed second table that
+shows only the times.
 Failed or unavailable comparisons stay visible. This is a display threshold,
 not a CI failure threshold.
 
@@ -79,7 +80,7 @@ Save the two runs as `bench-pr.json` and `bench-trunk.json`, then run
 
 ## Native Windows client
 
-The same comment has a second report for a native Windows client. On a Windows
+The same comment ends with one collapsed table for a native Windows client. On a Windows
 runner, the source site and MariaDB run in WSL. Windows PHP runs the PR build and
 then the trunk build through `tests/e2e/ci/windows-php.sh`, which converts Linux
 path arguments to Windows paths. The pulled tree and state stay on NTFS, as they
@@ -87,12 +88,15 @@ do for a Windows user. The report times `preflight`, `files-pull`, `db-pull`,
 `db-apply` and `apply-runtime` with 10,000 posts. It leaves out the URL cases
 (`BENCH_URL_REWRITE=0`) because the Linux report already runs them.
 
-A trunk build that cannot pull on Windows shows its exit codes instead of times.
+Its summary line gives the PR and trunk totals and counts the stages that
+changed more than 5% or could not be compared. A trunk build that cannot pull on
+Windows shows its exit codes instead of times.
 
-A collapsed table then puts the Windows times beside the Linux client's times for
-the same PR build, pulled on the same runner from the same source. Both clients
-share that hardware, so the ratio shows the cost of native Windows per stage. Windows
-PHP reaches MariaDB through WSL's localhost relay, so `db-apply` overstates it.
+The last column gives the Linux client's time for the same PR build, pulled on
+the same runner from the same source, and how many times longer Windows took.
+Both clients share that hardware, so the ratio shows the cost of native Windows
+per stage. Windows PHP reaches MariaDB through WSL's localhost relay, so
+`db-apply` overstates it. `render-windows.mjs` renders the table.
 
 The Linux job posts its report first. Once the Windows job finishes, the comment
 is replaced with both reports.

@@ -4,8 +4,6 @@
  * The baseline label defaults
  * to "trunk" but can be overridden with BASELINE_LABEL — that's how stacked
  * PRs report their incremental impact against the parent branch.
- * REPORT_HEADING names a second report, such as the Windows client's, and
- * PERF_HISTORY_URL=none leaves out its history link.
  */
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 
@@ -48,7 +46,6 @@ const prPath = process.env.PR_JSON || 'bench-pr.json';
 const basePath = process.env.TRUNK_JSON || 'bench-trunk.json';
 const outPath = process.env.OUT_MD || 'bench-results.md';
 const baselineLabel = process.env.BASELINE_LABEL || 'trunk';
-const reportHeading = process.env.REPORT_HEADING || 'Pull pipeline performance';
 
 if (!existsSync(prPath)) {
     console.error(`Missing PR results: ${prPath}`);
@@ -59,7 +56,7 @@ const pr = JSON.parse(readFileSync(prPath, 'utf-8'));
 const base = existsSync(basePath) ? JSON.parse(readFileSync(basePath, 'utf-8')) : null;
 
 const lines = [];
-lines.push(`## ${reportHeading} — \`${pr.meta.site}\``);
+lines.push(`## Pull pipeline performance — \`${pr.meta.site}\``);
 lines.push('');
 {
     const seedSuffix = (pr.meta.seedPosts && pr.meta.seedPostmeta)
@@ -89,12 +86,13 @@ if (base) {
             : !t ? '— No ' + baselineLabel + ' result'
             : !t.ok ? '✗ ' + baselineLabel + ' exit ' + t.exitCode
             : t.elapsedMs <= 0 ? '— Zero ' + baselineLabel + ' time' : '✓';
-        const row = `| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${t ? fmtMs(t.elapsedMs) : '—'} | ${delta} | ${status} | ${fmtDetails(r.details, t?.details)} |`;
+        const times = `| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${t ? fmtMs(t.elapsedMs) : '—'} | ${delta} |`;
         // Failed or missing comparisons need attention even when their recorded time is zero.
         if (comparable && Math.abs((r.elapsedMs - t.elapsedMs) / t.elapsedMs * 100) <= 5) {
-            smallChangeRows.push(row);
+            // Every collapsed row passed on both builds, so it needs no status or metrics.
+            smallChangeRows.push(times);
         } else {
-            visibleRows.push(row);
+            visibleRows.push(`${times} ${status} | ${fmtDetails(r.details, t?.details)} |`);
         }
     }
     if (visibleRows.length) {
@@ -105,7 +103,7 @@ if (base) {
     if (smallChangeRows.length) {
         // Blank lines let GitHub parse the Markdown table inside the HTML disclosure.
         lines.push('', '<details>', `<summary>Changes of 5% or less (${smallChangeRows.length})</summary>`,
-            '', ...tableHeader, ...smallChangeRows, '', '</details>');
+            '', `| Stage | PR | ${baselineLabel} | Δ |`, '|---|---:|---:|---:|', ...smallChangeRows, '', '</details>');
     }
     const comparable = pr.results.every(result => result.ok && baseByStage[result.stage]?.ok && baseByStage[result.stage].elapsedMs > 0);
     lines.push('', `**Total:** PR ${fmtMs(prTotal)} · ${baselineLabel} ${fmtMs(baseTotal)} · ${comparable ? fmtDelta(prTotal, baseTotal) : '—'}`);
@@ -130,8 +128,6 @@ if (pr.results.some(result => result.stage.startsWith('url-rewrite-'))) {
 }
 
 const historyUrl = (() => {
-    // A second report in the same comment leaves the link to the first.
-    if (process.env.PERF_HISTORY_URL === 'none') return null;
     if (process.env.PERF_HISTORY_URL) return process.env.PERF_HISTORY_URL;
     const slug = process.env.GITHUB_REPOSITORY;
     if (!slug) return null;
