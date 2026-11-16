@@ -315,6 +315,25 @@ jobs:
           export E2E_SERVER_PROJECT_ROOT=/root/reprint
           SETTINGS
 
+      # The first Windows pull on a fresh runner is slower whichever build runs it.
+      # An untimed pull first keeps that start-up cost out of the PR column.
+      - name: Warm up the Windows client
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          source /root/bench-settings.sh
+          workspace=$(pwd)
+          export WINDOWS_PHP=$(wslpath -u "$(cat windows-php-path.txt)")
+          export PHP_BINARY=/root/reprint/tests/e2e/ci/windows-php.sh
+          export IMPORTER_PATH="$workspace/phars/pr/reprint.phar"
+          mkdir -p /mnt/c/reprint-bench-tmp
+          export TMPDIR=/mnt/c/reprint-bench-tmp
+          export BENCH_STAGES=preflight,files-pull
+          export BENCH_LABEL=warm-up BENCH_JSON_OUT=/tmp/bench-warm-up.json BENCH_MD_OUT=/tmp/bench-warm-up.md
+          cd /root/reprint/tests/e2e
+          node benchmark/bench-pull.mjs
+          rm -rf /srv/e2e-sites/large-directory /tmp/e2e-site-large-directory.lock
+
       - name: Bench PR with the Windows client
         shell: wsl-bash {0}
         run: |

@@ -84,7 +84,9 @@ The same comment ends with one collapsed table for a native Windows client. On a
 runner, the source site and MariaDB run in WSL. Windows PHP runs the PR build and
 then the trunk build through `tests/e2e/ci/windows-php.sh`, which converts Linux
 path arguments to Windows paths. The pulled tree and state stay on NTFS, as they
-do for a Windows user. The report times `preflight`, `files-pull`, `db-pull`,
+do for a Windows user. An untimed `preflight` and `files-pull` with the PR build
+runs first, because the first pull on a fresh runner is slower whichever build
+runs it. The report times `preflight`, `files-pull`, `db-pull`,
 `db-apply` and `apply-runtime` with 10,000 posts. It leaves out the URL cases
 (`BENCH_URL_REWRITE=0`) because the Linux report already runs them.
 
