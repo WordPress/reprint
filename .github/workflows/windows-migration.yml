@@ -104,16 +104,28 @@ jobs:
           ini-values: memory_limit=1G
           coverage: none
       - run: composer install --no-interaction --prefer-dist
-      - name: Run the client test suites
+      # --debug names each test as it starts, so the log shows a test that hangs.
+      - name: Run Import Tests
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 30
         working-directory: tests
         shell: pwsh
-        run: |
-          foreach ($suite in 'Import Tests', 'URL Rewriting Tests', 'Query Stream Tests') {
-            $report = 'phpunit-' + ($suite -replace '\W', '-').ToLower() + '.xml'
-            php ../vendor/bin/phpunit --no-progress --testsuite $suite --log-junit $report *>&1 |
-              Tee-Object -Append -FilePath phpunit-output.txt
-          }
-          exit 0
+        run: php ../vendor/bin/phpunit --debug --testsuite 'Import Tests' --log-junit phpunit-import-tests.xml *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
+      - name: Run URL Rewriting Tests
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 15
+        working-directory: tests
+        shell: pwsh
+        run: php ../vendor/bin/phpunit --debug --testsuite 'URL Rewriting Tests' --log-junit phpunit-url-rewriting-tests.xml *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
+      - name: Run Query Stream Tests
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 10
+        working-directory: tests
+        shell: pwsh
+        run: php ../vendor/bin/phpunit --debug --testsuite 'Query Stream Tests' --log-junit phpunit-query-stream-tests.xml *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
       - name: Summarize failures
         if: always()
         working-directory: tests
