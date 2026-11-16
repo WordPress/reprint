@@ -86,6 +86,72 @@ jobs:
             Write-Output '::endgroup::'
           }
           exit $failed
+  # Report-only: lists how the full client suite fares on Windows PHP, so the
+  # failures can be fixed before this becomes a required check. No MySQL server
+  # runs here, so tests that need one error with a connection failure.
+  client-suite:
+    name: Report the full client test suite on Windows
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, gd, openssl
+          ini-values: memory_limit=1G
+          coverage: none
+      - run: composer install --no-interaction --prefer-dist
+      - name: Run the client test suites
+        working-directory: tests
+        shell: pwsh
+        run: |
+          foreach ($suite in 'Import Tests', 'URL Rewriting Tests', 'Query Stream Tests') {
+            $report = 'phpunit-' + ($suite -replace '\W', '-').ToLower() + '.xml'
+            php ../vendor/bin/phpunit --no-progress --testsuite $suite --log-junit $report *>&1 |
+              Tee-Object -Append -FilePath phpunit-output.txt
+          }
+          exit 0
+      - name: Summarize failures
+        if: always()
+        working-directory: tests
+        shell: pwsh
+        run: |
+          $rows = foreach ($report in Get-ChildItem phpunit-*.xml) {
+            foreach ($case in ([xml](Get-Content -Raw $report)).SelectNodes('//testcase')) {
+              foreach ($kind in 'failure', 'error', 'skipped') {
+                $node = $case.SelectSingleNode($kind)
+                if ($node) {
+                  $text = if ($node.InnerText) { $node.InnerText } else { $node.GetAttribute('message') }
+                  $line = (($text -split "`n") | Where-Object { $_.Trim() -and $_ -notmatch '::' } | Select-Object -First 1)
+                  [pscustomobject]@{ Kind = $kind; Test = "$($case.class)::$($case.name)"; Message = "$line".Trim() }
+                }
+              }
+            }
+          }
+          $summary = @('## Full client suite on Windows', '')
+          $summary += ($rows | Group-Object Kind | ForEach-Object { "- $($_.Name): $($_.Count)" })
+          foreach ($kind in 'failure', 'error') {
+            $summary += '', "### By message ($kind)", '', '| Tests | Message |', '|---:|---|'
+            $summary += ($rows | Where-Object Kind -eq $kind | Group-Object Message | Sort-Object Count -Descending |
+              ForEach-Object { "| $($_.Count) | $($_.Name -replace '\|', '\|') |" })
+            $summary += '', "<details><summary>Every $kind</summary>", '', '| Test | Message |', '|---|---|'
+            $summary += ($rows | Where-Object Kind -eq $kind |
+              ForEach-Object { "| $($_.Test) | $($_.Message -replace '\|', '\|') |" })
+            $summary += '', '</details>'
+          }
+          $summary | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - name: Upload the test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-client-suite
+          path: |
+            tests/phpunit-*.xml
+            tests/phpunit-output.txt
+          if-no-files-found: ignore
   linux-to-windows:
     name: Pull linked Linux WordPress into a native Windows client (${{ matrix.account }})
     strategy:
@@ -225,7 +291,7 @@ jobs:
 
   ci-result:
     name: Windows migration result
-    needs: [php-reader, received-paths, windows-client, linux-to-windows, windows-to-linux]
+    needs: [php-reader, received-paths, windows-client, client-suite, linux-to-windows, windows-to-linux]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
