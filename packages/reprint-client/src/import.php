@@ -358,6 +358,16 @@ class ImportClient
     /** @var string Path to audit.log — append-only log of every operation for debugging. */
     private $audit_log_file;
 
+    /**
+     * @var resource|null Open append handle for audit.log. A pull writes a few
+     * lines per file, and opening the log for each line cost Windows about
+     * 0.4 ms each, or 8 seconds for 5,000 files.
+     */
+    private $audit_log_handle = null;
+
+    /** @var string|null Path that $audit_log_handle has open. */
+    private ?string $audit_log_handle_path = null;
+
     /** @var string Path to pull/volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
 
@@ -834,15 +844,22 @@ class ImportClient
         $timestamp = date("Y-m-d H:i:s");
         $log_line = "[{$timestamp}] {$message}\n";
 
-        // New logs start private; tighten older logs before appending.
-        $previous_umask = umask(0077);
-        try {
-            if (is_file($this->audit_log_file) && !chmod($this->audit_log_file, 0600)) {
-                throw new RuntimeException("Failed to set audit log permissions: {$this->audit_log_file}");
+        if ($this->audit_log_handle_path !== $this->audit_log_file) {
+            // New logs start private; tighten older logs before appending.
+            $previous_umask = umask(0077);
+            try {
+                if (is_file($this->audit_log_file) && !chmod($this->audit_log_file, 0600)) {
+                    throw new RuntimeException("Failed to set audit log permissions: {$this->audit_log_file}");
+                }
+                // If the log cannot be opened, this line is lost and the next line tries again.
+                $this->audit_log_handle = fopen($this->audit_log_file, 'ab') ?: null;
+                $this->audit_log_handle_path = $this->audit_log_handle ? $this->audit_log_file : null;
+            } finally {
+                umask($previous_umask);
             }
-            file_put_contents($this->audit_log_file, $log_line, FILE_APPEND);
-        } finally {
-            umask($previous_umask);
+        }
+        if ($this->audit_log_handle) {
+            fwrite($this->audit_log_handle, $log_line);
         }
 
         // Output to console if verbose mode or if explicitly requested
