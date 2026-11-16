@@ -150,7 +150,10 @@ final class ReprintProcessLockTest extends TestCase
             $this->assertSame(0700, fileperms($this->root . '/cli-state') & 0777);
             $this->assertSame(0700, fileperms($this->root . '/library-state') & 0777);
             $this->assertSame(0600, fileperms($this->root . '/library-state/audit.log') & 0777);
+            // A log left readable by an older client is tightened when the next client opens it.
             chmod($this->root . '/library-state/audit.log', 0644);
+            $client = new \ImportClient('https://example.com/?reprint-api',
+                $this->root . '/library-state', $this->root . '/files');
             $client->audit_log('second line');
             clearstatcache();
             $this->assertSame(0600, fileperms($this->root . '/library-state/audit.log') & 0777);
