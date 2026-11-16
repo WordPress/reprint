@@ -829,7 +829,17 @@ class ImportClient
      * @param string $message Message to log
      * @param bool $to_console Whether to also output to console (respects verbose mode)
      */
-    public function audit_log(string $message, bool $to_console = true): void
+    public function audit_log(string $message, bool $to_console = true):void
+    {
+        $probe_started = microtime(true);
+        try {
+            $this->audit_log_unprobed($message, $to_console);
+        } finally {
+            reprint_probe_add('audit_log', $probe_started);
+        }
+    }
+
+    public function audit_log_unprobed(string $message, bool $to_console = true): void
     {
         $timestamp = date("Y-m-d H:i:s");
         $log_line = "[{$timestamp}] {$message}\n";
@@ -1101,7 +1111,17 @@ class ImportClient
     /**
      * Clear a file from the volatile tracker after a successful download.
      */
-    private function clear_volatile_file(string $path): void
+    private function clear_volatile_file(string $path):void
+    {
+        $probe_started = microtime(true);
+        try {
+            $this->clear_volatile_file_unprobed($path);
+        } finally {
+            reprint_probe_add('clear_volatile_file', $probe_started);
+        }
+    }
+
+    private function clear_volatile_file_unprobed(string $path): void
     {
         $files = $this->load_volatile_files();
         if (!isset($files[$path])) {
@@ -3742,7 +3762,9 @@ class ImportClient
 
                     if ($is_first) {
                         if ($context->file_handle) {
+                            $probe_started = microtime(true);
                             fclose($context->file_handle);
+                            reprint_probe_add('fclose', $probe_started);
                             $context->file_handle = null;
                         }
                         $dir = dirname($local_absolute_path);
@@ -3758,7 +3780,9 @@ class ImportClient
                     }
 
                     if ($is_last && $context->file_handle) {
+                        $probe_started = microtime(true);
                         fclose($context->file_handle);
+                        reprint_probe_add('fclose', $probe_started);
                         $context->file_handle = null;
                         $downloaded++;
                         $this->audit_log("Saved {$remote_absolute_path} → {$local_absolute_path}");
@@ -3783,7 +3807,9 @@ class ImportClient
                 @unlink($tmp);
 
                 if ($context->file_handle) {
+                    $probe_started = microtime(true);
                     fclose($context->file_handle);
+                    reprint_probe_add('fclose', $probe_started);
                 }
             }
         }
@@ -9576,7 +9602,9 @@ class ImportClient
             $this->progress_reporter->restore_file_progress($this->get_state()->fetch);
             if ($context->file_handle) {
                 fflush($context->file_handle);
+                $probe_started = microtime(true);
                 fclose($context->file_handle);
+                reprint_probe_add('fclose', $probe_started);
                 $context->file_handle = null;
             }
             $this->pull_index_journal->apply_pending_records($this->get_state()->remote_path_format());
@@ -12704,11 +12732,15 @@ class ImportClient
         if ($is_first) {
             // Close previous file if any
             if ($context->file_handle) {
+                $probe_started = microtime(true);
                 fclose($context->file_handle);
+                reprint_probe_add('fclose', $probe_started);
                 if ($context->file_ctime && $context->file_path) {
                     // Later parts may have redirected the retained pathname.
                     $this->assert_local_path_within_root($context->file_path);
+                    $probe_started = microtime(true);
                     touch($context->file_path, $context->file_ctime);
+                    reprint_probe_add('touch', $probe_started);
                 }
             }
 
@@ -12725,7 +12757,9 @@ class ImportClient
             }
 
             // Open new file
+            $probe_started = microtime(true);
             $context->file_handle = fopen($local_absolute_path, "wb");
+            reprint_probe_add('fopen', $probe_started);
             if (!$context->file_handle) {
                 $error = error_get_last();
                 throw new RuntimeException(
@@ -12800,22 +12834,29 @@ class ImportClient
 
         // Close on last chunk
         if ($is_last && $context->file_handle) {
+            $probe_started = microtime(true);
             fclose($context->file_handle);
+            reprint_probe_add('fclose', $probe_started);
 
             // Set file modification time
             if ($context->file_ctime && $context->file_path) {
                 $this->assert_local_path_within_root($context->file_path);
+                $probe_started = microtime(true);
                 touch($context->file_path, $context->file_ctime);
+                reprint_probe_add('touch', $probe_started);
             }
 
             // Index update (JSON lines)
+            $probe_started = microtime(true);
             $final_size = file_exists($context->file_path)
                 ? filesize($context->file_path)
                 : 0;
+            reprint_probe_add('final_size_stat', $probe_started);
 
             $file_changed = ($headers["x-file-changed"] ?? "0") === "1";
 
             if ($context->file_ctime && !$file_changed) {
+                $probe_started = microtime(true);
                 $this->pull_index_journal->record_remote_upsert(
                     $path,
                     $context->file_ctime,
@@ -12823,6 +12864,7 @@ class ImportClient
                     "file",
                     $context->file_path,
                 );
+                reprint_probe_add('journal_upsert', $probe_started);
                 $this->clear_volatile_file($path);
                 $this->audit_log(
                     sprintf("  Indexed (wrote %d bytes)", $final_size),
@@ -12932,7 +12974,17 @@ class ImportClient
      * @param StreamingContext $context Open file and its written byte count.
      * @param string           $bytes   Raw file bytes or completed, edited CSS.
      */
-    private function write_file_chunk(StreamingContext $context, string $bytes): void
+    private function write_file_chunk(StreamingContext $context, string $bytes):void
+    {
+        $probe_started = microtime(true);
+        try {
+            $this->write_file_chunk_unprobed($context, $bytes);
+        } finally {
+            reprint_probe_add('write_file_chunk', $probe_started);
+        }
+    }
+
+    private function write_file_chunk_unprobed(StreamingContext $context, string $bytes): void
     {
         $written = fwrite($context->file_handle, $bytes);
         if ($written === false || $written !== strlen($bytes)) {
@@ -13030,7 +13082,17 @@ class ImportClient
      * @param string $dir Directory path to create
      * @throws RuntimeException if directory cannot be created or is outside allowed path
      */
-    private function create_directory_if_missing(string $dir): void
+    private function create_directory_if_missing(string $dir):void
+    {
+        $probe_started = microtime(true);
+        try {
+            $this->create_directory_if_missing_unprobed($dir);
+        } finally {
+            reprint_probe_add('create_directory_if_missing', $probe_started);
+        }
+    }
+
+    private function create_directory_if_missing_unprobed(string $dir): void
     {
         // Security: Ensure path is under the filesystem root
         $real_filesystem_root = $this->filesystem_root;
@@ -13667,7 +13729,9 @@ class ImportClient
             $context->remote_file_path = null;
             $context->remote_file_size = null;
             if ($context->file_handle && $context->file_path === $local_absolute_path) {
+                $probe_started = microtime(true);
                 fclose($context->file_handle);
+                reprint_probe_add('fclose', $probe_started);
                 $context->file_handle = null;
                 $context->file_path = null;
                 $context->file_ctime = null;
@@ -15734,7 +15798,17 @@ class ImportClient
      * Uses atomic write (temp file + rename) to prevent corruption if
      * the process is killed mid-write.
      */
-    public function save_state(): void
+    public function save_state():void
+    {
+        $probe_started = microtime(true);
+        try {
+            $this->save_state_unprobed();
+        } finally {
+            reprint_probe_add('save_state', $probe_started);
+        }
+    }
+
+    public function save_state_unprobed(): void
     {
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills
@@ -16061,6 +16135,29 @@ class ImportClient
  *
  * @param resource $stream STDOUT or STDERR.
  */
+/** Throwaway probe: total time and calls per category, one JSON line per process. */
+function reprint_probe_add(string $category, float $started): void
+{
+    static $totals = null;
+    if ($totals === null) {
+        $totals = [];
+        $process_started = microtime(true);
+        register_shutdown_function(static function () use (&$totals, $process_started) {
+            global $argv;
+            $directory = PHP_OS_FAMILY === 'Windows' ? 'C:/reprint-probe' : '/tmp/reprint-probe';
+            @mkdir($directory, 0777, true);
+            ksort($totals);
+            file_put_contents($directory . '/timings.jsonl', json_encode([
+                'command' => $argv[1] ?? '',
+                'since_first_probe_ms' => round((microtime(true) - $process_started) * 1000),
+                'totals' => $totals,
+            ]) . "\n", FILE_APPEND);
+        });
+    }
+    $totals[$category]['ms'] = round(($totals[$category]['ms'] ?? 0) + (microtime(true) - $started) * 1000, 1);
+    $totals[$category]['calls'] = ($totals[$category]['calls'] ?? 0) + 1;
+}
+
 function reprint_stream_is_terminal($stream): bool
 {
     if (function_exists('sapi_windows_vt100_support')) {

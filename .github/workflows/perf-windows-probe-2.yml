@@ -1,0 +1,148 @@
+name: Windows performance probe 2
+
+# Throwaway: where does a native Windows files-pull spend its time?
+# Times the client's file operations with Defender as configured, with the
+# pull directory excluded from Defender, and with the Linux client in WSL.
+on:
+  push:
+    branches: [perf-windows-probe-2]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe Windows files-pull
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.5'
+          extensions: mysqli, pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, openssl
+          coverage: none
+
+      - name: Install client dependencies for Windows PHP
+        run: composer install --no-dev --no-interaction --prefer-dist
+
+      - name: Show Defender status
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Get-MpComputerStatus | Format-List AMRunningMode, AntivirusEnabled, RealTimeProtectionEnabled, OnAccessProtectionEnabled
+          "Exclusions: " + ((Get-MpPreference).ExclusionPath -join ', ')
+
+      - name: Record the Windows PHP path
+        shell: pwsh
+        run: (Get-Command php).Source | Out-File -Encoding ascii -NoNewline windows-php-path.txt
+
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: php8.3-cli php8.3-fpm php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-sqlite3 composer jq curl xz-utils
+
+      - name: Enable systemd in WSL
+        shell: wsl-bash {0}
+        run: printf '[boot]\nsystemd=true\n' > /etc/wsl.conf
+
+      - name: Restart WSL with systemd
+        shell: pwsh
+        run: wsl --terminate Ubuntu-24.04
+
+      - name: Copy the harness into WSL and install Node
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          mkdir -p /root/reprint
+          tar --exclude=.git --exclude=vendor -cf - . | tar -xf - -C /root/reprint
+          node_tarball=$(curl -fsSL https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt | awk '/linux-x64.tar.xz/ { print $2 }')
+          curl -fsSL "https://nodejs.org/dist/latest-v24.x/$node_tarball" | tar -xJ -C /opt
+          ln -sf /opt/"${node_tarball%.tar.xz}"/bin/* /usr/local/bin/
+
+      - name: Setup the source in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          cd /root/reprint
+          tests/e2e/ci/setup-infrastructure.sh 8.3
+          tests/e2e/setup.sh
+          tests/e2e/ci/download-wp-cli.sh
+          (cd tests/e2e && npm ci)
+          cat > /root/bench-settings.sh <<'SETTINGS'
+          export BENCH_STAGES=preflight,files-pull
+          export BENCH_URL_REWRITE=0
+          export E2E_SERVER_PROJECT_ROOT=/root/reprint
+          SETTINGS
+          cat > /root/bench-windows.sh <<'BENCH'
+          set -euo pipefail
+          source /root/bench-settings.sh
+          label=$1
+          workspace=$2
+          export WINDOWS_PHP=$(wslpath -u "$(cat "$workspace/windows-php-path.txt")")
+          export PHP_BINARY=/root/reprint/tests/e2e/ci/windows-php.sh
+          export IMPORTER_PATH="$workspace/packages/reprint-client/bin/reprint-client"
+          mkdir -p /mnt/c/reprint-bench-tmp /mnt/c/reprint-probe
+          export TMPDIR=/mnt/c/reprint-bench-tmp
+          export BENCH_LABEL=$label BENCH_JSON_OUT=bench-$label.json BENCH_MD_OUT=bench-$label.md
+          rm -rf /srv/e2e-sites/large-directory /tmp/e2e-site-large-directory.lock
+          cd /root/reprint/tests/e2e
+          node benchmark/bench-pull.mjs
+          cp bench-$label.json bench-$label.md "$workspace/"
+          mv /mnt/c/reprint-probe/timings.jsonl "$workspace/timings-$label.jsonl"
+          BENCH
+
+      - name: Windows client, Defender as configured
+        shell: wsl-bash {0}
+        run: bash /root/bench-windows.sh windows-defender-default "$(pwd)"
+
+      - name: Exclude the pull directories from Defender
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Add-MpPreference -ExclusionPath C:\reprint-bench-tmp, C:\reprint-probe
+          "Exclusions: " + ((Get-MpPreference).ExclusionPath -join ', ')
+
+      - name: Windows client, pull directories excluded from Defender
+        shell: wsl-bash {0}
+        run: bash /root/bench-windows.sh windows-defender-excluded "$(pwd)"
+
+      - name: Linux client on the same runner
+        shell: wsl-bash {0}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          source /root/bench-settings.sh
+          workspace=$(pwd)
+          cp -r /mnt/c/reprint-bench-tmp/reprint-e2e-keys /tmp/
+          rm -rf /srv/e2e-sites/large-directory /tmp/e2e-site-large-directory.lock /tmp/reprint-probe
+          export BENCH_LABEL=linux BENCH_JSON_OUT=bench-linux.json BENCH_MD_OUT=bench-linux.md
+          cd /root/reprint/tests/e2e
+          node benchmark/bench-pull.mjs
+          cp bench-linux.json bench-linux.md "$workspace/"
+          cp /tmp/reprint-probe/timings.jsonl "$workspace/timings-linux.jsonl"
+
+      - name: Show the timings
+        if: always()
+        shell: wsl-bash {0}
+        run: |
+          for label in windows-defender-default windows-defender-excluded linux; do
+            echo "== $label"
+            [ -f bench-$label.md ] && cat bench-$label.md
+            [ -f timings-$label.jsonl ] && jq -c 'select(.command == "files-pull") | {since_first_probe_ms, totals}' timings-$label.jsonl
+          done
+
+      - name: Upload the timings
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-probe-2
+          path: |
+            bench-*.json
+            bench-*.md
+            timings-*.jsonl
+          if-no-files-found: ignore
