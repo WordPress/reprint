@@ -245,9 +245,6 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
             $recorder,
             "<?php\n" . 'file_put_contents(__DIR__ . "/arguments.json", json_encode(array_slice($argv, 1)));' . "\n",
         );
-        // %* passes start.cmd's arguments on exactly as cmd.exe received them.
-        $php_wrapper = $command_dir . '/php.cmd';
-        file_put_contents($php_wrapper, '@"' . PHP_BINARY . '" "' . $recorder . "\" %*\r\n");
 
         $manifest = new \RuntimeManifest('other');
         $manifest->php_ini = [
@@ -260,15 +257,17 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
         $output_dir = $this->outputDir . ' spaces & 100% ^';
         mkdir($filesystem_root);
         $applier = new \PhpBuiltinApplier();
-        $applier->apply($manifest, $filesystem_root, $output_dir, [
-            'host' => $host,
-            'port' => 8882,
-            'php_binary' => $php_wrapper,
-        ]);
+        $applier->apply($manifest, $filesystem_root, $output_dir, ['host' => $host, 'port' => 8882]);
+        // PHP passes everything after a script to the script, so the recorder
+        // receives the server's arguments exactly as start.cmd gave them.
+        $start_cmd = $output_dir . '/start.cmd';
+        $script = str_replace('"' . PHP_BINARY . '"', '"' . PHP_BINARY . '" "' . $recorder . '"', file_get_contents($start_cmd), $replaced);
+        $this->assertSame(1, $replaced, 'start.cmd should run the PHP that wrote it');
+        file_put_contents($start_cmd, $script);
 
         // pull runs start.cmd the same way.
         $process = proc_open(
-            'cmd.exe /d /s /c ""' . str_replace('/', '\\', $output_dir . '/start.cmd') . '""',
+            'cmd.exe /d /s /c ""' . str_replace('/', '\\', $start_cmd) . '""',
             [0 => ['file', 'NUL', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
             $pipes,
             null,

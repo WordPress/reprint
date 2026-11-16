@@ -49,7 +49,7 @@ class PhpBuiltinApplier implements RuntimeApplier
             $start_cmd_path = str_replace('/', '\\', wp_join_unix_paths($output_dir, 'start.cmd'));
             $start_cmd_script = $this->generate_start_cmd_script(
                 $manifest,
-                $options['php_binary'] ?? PHP_BINARY,
+                PHP_BINARY,
                 $filesystem_root,
                 $runtime_path,
                 $host,
