@@ -641,6 +641,12 @@ class Pull
         if ($options['start_runtime'] === 'none') {
             return;
         }
+        if (PHP_OS_FAMILY === 'Windows' && $options['start_runtime'] === 'playground-cli') {
+            throw new InvalidArgumentException(
+                'Windows cannot start playground-cli: its start.sh needs Bash. ' .
+                'Pass --start-runtime=none and run start.sh from WSL, or use --runtime=php-builtin.'
+            );
+        }
         if (!$this->can_start_runtime($options['start_runtime'])) {
             throw new InvalidArgumentException(
                 "Starting runtime {$options['start_runtime']} is not supported yet. " .
@@ -767,6 +773,10 @@ class Pull
      */
     private function can_start_runtime(?string $runtime): bool
     {
+        // Playground's start.sh needs bash, which Windows does not have.
+        if (PHP_OS_FAMILY === 'Windows') {
+            return $runtime === 'php-builtin';
+        }
         return in_array($runtime, ['php-builtin', 'playground-cli'], true);
     }
 
@@ -914,6 +924,7 @@ class Pull
 
      * Start the local server. For php-builtin / playground-cli this
      * runs start.sh via passthru and blocks until the user hits Ctrl-C.
+     * Windows runs php-builtin's start.cmd instead.
      */
     private function start_server(array $options): void
     {
@@ -922,10 +933,13 @@ class Pull
             'runtime'
         );
         $start_sh = wp_join_unix_paths($output_dir, 'start.sh');
+        $start_script = PHP_OS_FAMILY === 'Windows'
+            ? str_replace('/', '\\', wp_join_unix_paths($output_dir, 'start.cmd'))
+            : $start_sh;
 
-        if (!file_exists($start_sh)) {
+        if (!file_exists($start_script)) {
             throw new RuntimeException(
-                "start.sh not found at {$start_sh}. " .
+                "Start script not found at {$start_script}. " .
                 "apply-runtime may have failed to generate it."
             );
         }
@@ -960,7 +974,24 @@ class Pull
             "message" => "Starting server at {$url}",
         ], true);
 
-        passthru("bash " . escapeshellarg($start_sh), $exit_code);
+        if (PHP_OS_FAMILY === 'Windows') {
+            // With /s, cmd.exe removes only the outer quotes, so a path holding & or ^ stays quoted.
+            $process = proc_open(
+                'cmd.exe /d /s /c ""' . $start_script . '""',
+                [0 => STDIN, 1 => STDOUT, 2 => STDERR],
+                $pipes,
+                null,
+                null,
+                ['bypass_shell' => true]
+            );
+            if (!is_resource($process)) {
+                // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI error naming a local path, never HTML.
+                throw new RuntimeException("Could not run {$start_script}.");
+            }
+            $exit_code = proc_close($process);
+        } else {
+            passthru("bash " . escapeshellarg($start_sh), $exit_code);
+        }
         $this->client->exit_code = $exit_code;
     }
 

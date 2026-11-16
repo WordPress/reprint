@@ -17686,7 +17686,7 @@ if (
             "extra" =>
                 "Runtime modes:\n" .
                 "  nginx-fpm      — writes runtime.php + nginx.conf\n" .
-                "  php-builtin    — writes runtime.php + start.sh\n" .
+                "  php-builtin    — writes runtime.php + start.sh, and start.cmd on Windows\n" .
                 "  playground-cli — writes runtime.php + blueprint.json\n" .
                 "\n" .
                 "Database configuration:\n" .
@@ -17714,6 +17714,7 @@ if (
                 "Output files (php-builtin):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, routing, handlers)\n" .
                 "  (output-dir)/start.sh                Shell script to launch the server\n" .
+                "  (output-dir)/start.cmd               cmd.exe script to launch it on Windows\n" .
                 "\n" .
                 "Output files (playground-cli):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .

@@ -25,6 +25,8 @@ php reprint.phar apply-runtime "$URL" --state-dir="$STATE_DIR" \
 bash "$RUNTIME_DIR/start.sh"
 ```
 
+On Windows, `apply-runtime` also writes `start.cmd`, which runs the same server with the PHP that ran `apply-runtime`. Run it from `cmd.exe` or PowerShell instead of `start.sh`.
+
 For nginx + PHP-FPM:
 
 ```bash
@@ -57,7 +59,7 @@ The command produces a `runtime.php` file that sets PHP constants, server variab
 
 | Runtime | Output files | How runtime.php loads |
 |---------|-------------|----------------------|
-| `php-builtin` | `runtime.php`, `start.sh` | Used as the router script for `php -S` |
+| `php-builtin` | `runtime.php`, `start.sh`, and `start.cmd` on Windows | Used as the router script for `php -S` |
 | `nginx-fpm` | `runtime.php`, `nginx.conf` | Loaded via `auto_prepend_file` in `fastcgi_param PHP_VALUE` |
 
 Reprint has source-host support for WP Cloud and WP Engine, plus a generic default for other hosts. WP Cloud support can generate missing image sizes in the copy. `apply-runtime` removes known host-plugin copies by default, independently of the saved download selection. Pass `apply-runtime --include-host-plugins` to skip that local cleanup. See [host platform plugins](https://developer.wordpress.org/reprint/reference/file-transfers/) for download selection and cleanup. Currently supported target runtimes: nginx + PHP-FPM, PHP's built-in development server, and WordPress Playground CLI.
