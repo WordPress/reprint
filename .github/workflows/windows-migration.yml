@@ -104,28 +104,34 @@ jobs:
           ini-values: memory_limit=1G
           coverage: none
       - run: composer install --no-interaction --prefer-dist
-      # The TeamCity log names each test as it starts, so it shows a test that hangs.
-      - name: Run Import Tests
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 30
+      # Some tests leave PHP processes running on Windows, and those keep the
+      # step's output open after PHPUnit exits. So each suite runs with its
+      # output in files, the step waits for PHPUnit alone, and any PHP process
+      # still running afterwards is listed in the summary and stopped.
+      - name: Run the client test suites
         working-directory: tests
         shell: pwsh
-        run: php ../vendor/bin/phpunit --no-progress --testsuite 'Import Tests' --log-junit phpunit-import-tests.xml --log-teamcity teamcity-import-tests.txt *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
-      - name: Run URL Rewriting Tests
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 15
-        working-directory: tests
-        shell: pwsh
-        run: php ../vendor/bin/phpunit --no-progress --testsuite 'URL Rewriting Tests' --log-junit phpunit-url-rewriting-tests.xml --log-teamcity teamcity-url-rewriting-tests.txt *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
-      - name: Run Query Stream Tests
-        if: always()
-        continue-on-error: true
-        timeout-minutes: 10
-        working-directory: tests
-        shell: pwsh
-        run: php ../vendor/bin/phpunit --no-progress --testsuite 'Query Stream Tests' --log-junit phpunit-query-stream-tests.xml --log-teamcity teamcity-query-stream-tests.txt *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
+        run: |
+          $leftovers = @()
+          foreach ($suite in 'Import Tests', 'URL Rewriting Tests', 'Query Stream Tests') {
+            $slug = ($suite -replace '\W', '-').ToLower()
+            $arguments = "../vendor/bin/phpunit --no-progress --testsuite `"$suite`" --log-junit phpunit-$slug.xml"
+            $phpunit = Start-Process php -ArgumentList $arguments -NoNewWindow -PassThru `
+              -RedirectStandardOutput "output-$slug.txt" -RedirectStandardError "errors-$slug.txt"
+            if (-not $phpunit.WaitForExit(30 * 60 * 1000)) {
+              Write-Output "$suite did not finish within 30 minutes."
+              Stop-Process -Id $phpunit.Id -Force
+            }
+            Get-Content "output-$slug.txt", "errors-$slug.txt"
+            $leftovers += Get-CimInstance Win32_Process -Filter "Name = 'php.exe'" |
+              ForEach-Object { [pscustomobject]@{ Suite = $suite; Command = $_.CommandLine } }
+            Get-Process php -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
+          $summary = @('## PHP processes left running after each suite', '')
+          $summary += if ($leftovers) { $leftovers | ForEach-Object { "- $($_.Suite): ``$($_.Command)``" } } else { 'None.' }
+          $summary += ''
+          $summary | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          exit 0
       - name: Summarize failures
         if: always()
         working-directory: tests
@@ -162,8 +168,8 @@ jobs:
           name: windows-client-suite
           path: |
             tests/phpunit-*.xml
-            tests/teamcity-*.txt
-            tests/phpunit-output.txt
+            tests/output-*.txt
+            tests/errors-*.txt
           if-no-files-found: ignore
   linux-to-windows:
     name: Pull linked Linux WordPress into a native Windows client (${{ matrix.account }})
