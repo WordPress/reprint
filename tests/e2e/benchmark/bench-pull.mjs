@@ -747,7 +747,8 @@ async function main() {
     // Load library code from the selected PHAR, not from this harness checkout.
     // Local source runs use the checkout root instead of the CLI entry point.
     const urlBuild = IMPORTER_PATH.endsWith('.phar') ? IMPORTER_PATH : join(dirname(IMPORTER_PATH), '../../..');
-    const urlResults = runUrlRewriteBenchmarks(urlBuild, PHP_BINARY);
+    // The Windows report times the pipeline only; the Linux report covers URL rewriting.
+    const urlResults = process.env.BENCH_URL_REWRITE === '0' ? [] : runUrlRewriteBenchmarks(urlBuild, PHP_BINARY);
     results.push(...urlResults);
     for (const result of urlResults) {
         console.log(`-> ${result.stage}: ${result.ok ? fmtMs(result.elapsedMs) : result.stderr}`);
