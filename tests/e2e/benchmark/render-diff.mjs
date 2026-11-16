@@ -86,12 +86,13 @@ if (base) {
             : !t ? '— No ' + baselineLabel + ' result'
             : !t.ok ? '✗ ' + baselineLabel + ' exit ' + t.exitCode
             : t.elapsedMs <= 0 ? '— Zero ' + baselineLabel + ' time' : '✓';
-        const row = `| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${t ? fmtMs(t.elapsedMs) : '—'} | ${delta} | ${status} | ${fmtDetails(r.details, t?.details)} |`;
+        const times = `| \`${r.stage}\` | ${fmtMs(r.elapsedMs)} | ${t ? fmtMs(t.elapsedMs) : '—'} | ${delta} |`;
         // Failed or missing comparisons need attention even when their recorded time is zero.
         if (comparable && Math.abs((r.elapsedMs - t.elapsedMs) / t.elapsedMs * 100) <= 5) {
-            smallChangeRows.push(row);
+            // Every collapsed row passed on both builds, so it needs no status or metrics.
+            smallChangeRows.push(times);
         } else {
-            visibleRows.push(row);
+            visibleRows.push(`${times} ${status} | ${fmtDetails(r.details, t?.details)} |`);
         }
     }
     if (visibleRows.length) {
@@ -102,7 +103,7 @@ if (base) {
     if (smallChangeRows.length) {
         // Blank lines let GitHub parse the Markdown table inside the HTML disclosure.
         lines.push('', '<details>', `<summary>Changes of 5% or less (${smallChangeRows.length})</summary>`,
-            '', ...tableHeader, ...smallChangeRows, '', '</details>');
+            '', `| Stage | PR | ${baselineLabel} | Δ |`, '|---|---:|---:|---:|', ...smallChangeRows, '', '</details>');
     }
     const comparable = pr.results.every(result => result.ok && baseByStage[result.stage]?.ok && baseByStage[result.stage].elapsedMs > 0);
     lines.push('', `**Total:** PR ${fmtMs(prTotal)} · ${baselineLabel} ${fmtMs(baseTotal)} · ${comparable ? fmtDelta(prTotal, baseTotal) : '—'}`);

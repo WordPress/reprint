@@ -84,6 +84,13 @@ test('an all-small-change report has no empty visible table', context => {
     assert.equal(report.match(/\| Stage \|/g).length, 1);
 });
 
+test('collapsed rows show only the times, since both builds passed', context => {
+    const results = [{ stage: 'url-rewrite-html', elapsedMs: 1000, ok: true, details: { rows: 128 } }];
+    const report = renderReport(context, results, results);
+    assert.match(report, /\| Stage \| PR \| trunk \| Δ \|\n\|---\|---:\|---:\|---:\|\n\| `url-rewrite-html` \| 1\.00 s \| 1\.00 s \| ⚪ \+0 ms \(\+0\.0%\) \|\n/);
+    assert.doesNotMatch(report, /Metrics|rows=128/);
+});
+
 test('a missing or zero-time baseline row stays visible beside collapsed comparisons', context => {
     const report = renderReport(context, [
         { stage: 'missing', elapsedMs: 100, ok: true },
