@@ -170,14 +170,14 @@ class PullStartModeTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage(
-            '--start-runtime=playground-cli requires matching --runtime=playground-cli, or omit --runtime to use playground-cli for both.'
+            '--start-runtime=php-builtin requires matching --runtime=php-builtin, or omit --runtime to use php-builtin for both.'
         );
 
         $client = new \ImportClient('https://example.invalid', $this->stateDir, $this->fsRoot);
         $client->run([
             'command' => 'pull',
-            'runtime' => 'php-builtin',
-            'start_runtime' => 'playground-cli',
+            'runtime' => 'playground-cli',
+            'start_runtime' => 'php-builtin',
         ]);
     }
 }
