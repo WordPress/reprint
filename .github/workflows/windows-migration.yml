@@ -104,28 +104,28 @@ jobs:
           ini-values: memory_limit=1G
           coverage: none
       - run: composer install --no-interaction --prefer-dist
-      # --debug names each test as it starts, so the log shows a test that hangs.
+      # The TeamCity log names each test as it starts, so it shows a test that hangs.
       - name: Run Import Tests
         if: always()
         continue-on-error: true
         timeout-minutes: 30
         working-directory: tests
         shell: pwsh
-        run: php ../vendor/bin/phpunit --debug --testsuite 'Import Tests' --log-junit phpunit-import-tests.xml *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
+        run: php ../vendor/bin/phpunit --no-progress --testsuite 'Import Tests' --log-junit phpunit-import-tests.xml --log-teamcity teamcity-import-tests.txt *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
       - name: Run URL Rewriting Tests
         if: always()
         continue-on-error: true
         timeout-minutes: 15
         working-directory: tests
         shell: pwsh
-        run: php ../vendor/bin/phpunit --debug --testsuite 'URL Rewriting Tests' --log-junit phpunit-url-rewriting-tests.xml *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
+        run: php ../vendor/bin/phpunit --no-progress --testsuite 'URL Rewriting Tests' --log-junit phpunit-url-rewriting-tests.xml --log-teamcity teamcity-url-rewriting-tests.txt *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
       - name: Run Query Stream Tests
         if: always()
         continue-on-error: true
         timeout-minutes: 10
         working-directory: tests
         shell: pwsh
-        run: php ../vendor/bin/phpunit --debug --testsuite 'Query Stream Tests' --log-junit phpunit-query-stream-tests.xml *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
+        run: php ../vendor/bin/phpunit --no-progress --testsuite 'Query Stream Tests' --log-junit phpunit-query-stream-tests.xml --log-teamcity teamcity-query-stream-tests.txt *>&1 | Tee-Object -Append -FilePath phpunit-output.txt
       - name: Summarize failures
         if: always()
         working-directory: tests
@@ -162,6 +162,7 @@ jobs:
           name: windows-client-suite
           path: |
             tests/phpunit-*.xml
+            tests/teamcity-*.txt
             tests/phpunit-output.txt
           if-no-files-found: ignore
   linux-to-windows:
