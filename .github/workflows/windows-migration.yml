@@ -70,7 +70,7 @@ jobs:
       - name: Run link-placing client tests
         shell: pwsh
         run: |
-          $tests = 'PathFormatTest.php,Import/RemapSeamTest.php,Import/LocalLinkTest.php,Import/PullLinkBeforeTargetTest.php,Import/FilesPullLocalIndexTest.php,Import/PullFilterOptionTest.php,Import/MergeWpContentTest.php,Import/FlatDocrootWpConfigTest.php,Import/FlatDocrootCoreFilesCopyTest.php,--group windows-links Import/ProductionDropInRemovalTest.php'
+          $tests = 'PathFormatTest.php,Import/RemapSeamTest.php,Import/LocalLinkTest.php,Import/PullLinkBeforeTargetTest.php,Import/FilesPullLocalIndexTest.php,Import/PullFilterOptionTest.php,Import/MergeWpContentTest.php,Import/FlatDocrootWpConfigTest.php,Import/FlatDocrootCoreFilesCopyTest.php,--group windows-links Import/ProductionDropInRemovalTest.php,--filter testStartCmd Import/PhpBuiltinRuntimeRoutingTest.php,Import/PullStartModeTest.php'
           $php = (Get-Command php).Source
           $failed = 0
           foreach ($test in $tests.Split(',')) {

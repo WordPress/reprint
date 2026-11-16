@@ -106,6 +106,8 @@ Press `Ctrl+C` in the terminal running Reprint to stop serving the site. Your co
 bash state/runtime/start.sh
 ```
 
+On Windows, run `state\runtime\start.cmd` instead.
+
 Keep this working folder in place, including `reprint-key.pem`, `state/`, and `files/`. `state/` contains credentials, transfer progress, the SQL download, and generated server files. `files/` contains the downloaded site tree. With SQLite, it also contains the SQLite database. With MySQL, the database stays in your chosen MySQL server; keep that server running when using the copy. Keep both folders private.
 
 To resume an interrupted transfer, run the same `pull` command again with the same source address and folders. To only restart the development server, use `start.sh` instead. Running `pull` after completion can replace destination database changes with source data.

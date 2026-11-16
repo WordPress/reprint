@@ -273,7 +273,8 @@ class TerminalProgress
             return $this->terminal_width_cache;
         }
         $width = 80;
-        if (function_exists("exec")) {
+        // cmd.exe has no tput and reports the /dev/null redirect as a missing path.
+        if (function_exists("exec") && PHP_OS_FAMILY !== 'Windows') {
             $tput_cols = @exec("tput cols 2>/dev/null");
             if ($tput_cols && is_numeric($tput_cols)) {
                 $width = (int) $tput_cols;

@@ -71,14 +71,16 @@ class PullStartModeTest extends TestCase
 
     public static function stageProvider(): array
     {
+        // Playground's start.sh needs bash, so pull leaves it to WSL on Windows.
+        $can_start_playground = PHP_OS_FAMILY !== 'Windows';
         return [
             'php-builtin defaults to auto start' => [
                 ['runtime' => 'php-builtin'],
                 true,
             ],
-            'playground-cli defaults to auto start' => [
+            'playground-cli defaults to auto start where bash runs' => [
                 ['runtime' => 'playground-cli'],
-                true,
+                $can_start_playground,
             ],
             'start-runtime=none skips php-builtin start stage' => [
                 ['runtime' => 'php-builtin', 'start_runtime' => 'none'],
@@ -88,9 +90,9 @@ class PullStartModeTest extends TestCase
                 ['runtime' => 'playground-cli', 'start_runtime' => 'none'],
                 false,
             ],
-            'explicit playground-cli start is supported' => [
+            'explicit playground-cli start is supported where bash runs' => [
                 ['runtime' => 'playground-cli', 'start_runtime' => 'playground-cli'],
-                true,
+                $can_start_playground,
             ],
             'nginx-fpm never adds start stage' => [
                 ['runtime' => 'nginx-fpm'],
@@ -101,6 +103,9 @@ class PullStartModeTest extends TestCase
 
     public function testStartRuntimeCanSelectRuntimeWhenRuntimeIsOmitted(): void
     {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('Windows cannot start playground-cli.');
+        }
         $pull = $this->makePull();
         $reflection = new \ReflectionClass($pull);
         $method = $reflection->getMethod('validate_and_default_pull_options');
@@ -112,6 +117,24 @@ class PullStartModeTest extends TestCase
 
         $this->assertSame('playground-cli', $options['runtime']);
         $this->assertSame('playground-cli', $options['start_runtime']);
+    }
+
+    public function testWindowsRejectsStartingPlaygroundBeforeNetworkIO(): void
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            $this->markTestSkipped('Only Windows lacks the bash that starts playground-cli.');
+        }
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage(
+            'Windows cannot start playground-cli: its start.sh needs Bash. ' .
+            'Pass --start-runtime=none and run start.sh from WSL, or use --runtime=php-builtin.'
+        );
+
+        $client = new \ImportClient('https://example.invalid', $this->stateDir, $this->fsRoot);
+        $client->run([
+            'command' => 'pull',
+            'start_runtime' => 'playground-cli',
+        ]);
     }
 
     public function testInvalidStartRuntimeValueIsRejectedBeforeNetworkIO(): void
@@ -147,14 +170,14 @@ class PullStartModeTest extends TestCase
     {
         $this->expectException(\InvalidArgumentException::class);
         $this->expectExceptionMessage(
-            '--start-runtime=playground-cli requires matching --runtime=playground-cli, or omit --runtime to use playground-cli for both.'
+            '--start-runtime=php-builtin requires matching --runtime=php-builtin, or omit --runtime to use php-builtin for both.'
         );
 
         $client = new \ImportClient('https://example.invalid', $this->stateDir, $this->fsRoot);
         $client->run([
             'command' => 'pull',
-            'runtime' => 'php-builtin',
-            'start_runtime' => 'playground-cli',
+            'runtime' => 'playground-cli',
+            'start_runtime' => 'php-builtin',
         ]);
     }
 }

@@ -227,6 +227,85 @@ class PhpBuiltinRuntimeRoutingTest extends TestCase
         $this->assertSame("Starting PHP built-in server...\n  http://{$host}:8882\n\n", $output);
     }
 
+    /**
+     * Run the generated cmd.exe script and check the arguments received by PHP.
+     *
+     * @dataProvider startCmdHosts
+     */
+    public function testStartCmdPreservesArgumentsAndPrintedAddress(string $host): void
+    {
+        if (PHP_OS_FAMILY !== 'Windows') {
+            $this->markTestSkipped('start.cmd is written and run only on Windows.');
+        }
+        $command_dir = $this->tempDir . '/commands';
+        mkdir($command_dir);
+        // Record argv instead of starting a server which would keep the test running.
+        $recorder = $command_dir . '/record-arguments.php';
+        file_put_contents(
+            $recorder,
+            "<?php\n" . 'file_put_contents(__DIR__ . "/arguments.json", json_encode(array_slice($argv, 1)));' . "\n",
+        );
+
+        $manifest = new \RuntimeManifest('other');
+        $manifest->php_ini = [
+            'memory_limit' => '256M',
+            'include_path' => 'directory with spaces;%PATH%;C:\\trailing\\',
+            'error_log' => 'quote " ampersand & caret ^ pipe | angle <> percent % backslash-quote \\"',
+            'setting with spaces' => 'one argument',
+        ];
+        $filesystem_root = $this->docRoot . ' spaces & 100% ^';
+        $output_dir = $this->outputDir . ' spaces & 100% ^';
+        mkdir($filesystem_root);
+        $applier = new \PhpBuiltinApplier();
+        $applier->apply($manifest, $filesystem_root, $output_dir, ['host' => $host, 'port' => 8882]);
+        // PHP passes everything after a script to the script, so the recorder
+        // receives the server's arguments exactly as start.cmd gave them.
+        $start_cmd = $output_dir . '/start.cmd';
+        $script = str_replace('"' . PHP_BINARY . '"', '"' . PHP_BINARY . '" "' . $recorder . '"', file_get_contents($start_cmd), $replaced);
+        $this->assertSame(1, $replaced, 'start.cmd should run the PHP that wrote it');
+        file_put_contents($start_cmd, $script);
+
+        // pull runs start.cmd the same way.
+        $process = proc_open(
+            'cmd.exe /d /s /c ""' . str_replace('/', '\\', $start_cmd) . '""',
+            [0 => ['file', 'NUL', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            null,
+            null,
+            ['bypass_shell' => true],
+        );
+        $this->assertIsResource($process);
+        $output = stream_get_contents($pipes[1]);
+        $errors = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        $this->assertSame(0, proc_close($process), $errors);
+
+        $expected_arguments = [];
+        foreach ($manifest->php_ini as $key => $value) {
+            $expected_arguments[] = '-d';
+            $expected_arguments[] = $key . '=' . $value;
+        }
+        $expected_arguments = array_merge($expected_arguments, [
+            '-S',
+            $host . ':8882',
+            '-t',
+            str_replace('/', '\\', $filesystem_root),
+            str_replace('/', '\\', $output_dir . '/runtime.php'),
+        ]);
+        $this->assertSame($expected_arguments, json_decode(file_get_contents($command_dir . '/arguments.json'), true));
+        $this->assertSame("Starting PHP built-in server...\r\n  http://{$host}:8882\r\n\r\n", $output);
+    }
+
+    /** @return array<string, array{0: string}> Addresses whose text must be preserved. */
+    public static function startCmdHosts(): array
+    {
+        return [
+            'ordinary address' => ['localhost'],
+            'address with cmd.exe metacharacters' => ['local&host^|<>%PATH%'],
+        ];
+    }
+
     /** @return array<string, array{0: string}> Addresses whose text must be preserved. */
     public static function startScriptHosts(): array
     {

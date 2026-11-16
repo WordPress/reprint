@@ -715,7 +715,7 @@ class ImportClient
         // Detect TTY for progress display and terminal colors. In stdout mode
         // this is re-evaluated against STDERR in run() once the output mode is
         // known.
-        $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
+        $this->is_tty = reprint_stream_is_terminal(STDOUT);
         $this->progress_fd = STDOUT;
         $this->progress = new TerminalProgress($this->is_tty, $this->progress_fd);
         $this->pull = new Pull($this, $this->progress);
@@ -1573,7 +1573,7 @@ class ImportClient
         // go to STDERR to keep the streams separate.
         if ($this->sql_output_mode === "stdout") {
             $this->progress_fd = STDERR;
-            $this->is_tty = function_exists("posix_isatty") && posix_isatty(STDERR);
+            $this->is_tty = reprint_stream_is_terminal(STDERR);
             $this->progress->set_progress_fd($this->progress_fd);
             $this->progress->set_terminal_output_enabled($this->uses_terminal_progress());
         }
@@ -16053,6 +16053,23 @@ class ImportClient
 // ============================================================================
 
 /**
+ * Whether $stream is a terminal that shows progress, colors, and prompts.
+ *
+ * Windows PHP has no posix extension. Its consoles interpret the escape
+ * codes the terminal output writes only after a process asks for them, and
+ * a console that refuses gets plain JSONL like any other stream.
+ *
+ * @param resource $stream STDOUT or STDERR.
+ */
+function reprint_stream_is_terminal($stream): bool
+{
+    if (function_exists('sapi_windows_vt100_support')) {
+        return @sapi_windows_vt100_support($stream, true);
+    }
+    return function_exists('posix_isatty') && posix_isatty($stream);
+}
+
+/**
  * Append the invocation result in JSONL and compact output, never for an inner stage.
  *
  * A missing client means construction or lock acquisition failed. Reports do
@@ -16083,7 +16100,7 @@ function reprint_write_command_report(
         ? STDERR : STDOUT;
     $progress_output_mode = $options['progress'] ?? 'auto';
     if ($progress_output_mode === 'tty'
-        || ( $progress_output_mode === 'auto' && function_exists('posix_isatty') && posix_isatty($stream) )
+        || ( $progress_output_mode === 'auto' && reprint_stream_is_terminal($stream) )
     ) {
         return;
     }
@@ -16928,7 +16945,7 @@ if (
      */
     function _cli_render_main_help(array $option_defs, array $command_info): void
     {
-        $is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
+        $is_tty = reprint_stream_is_terminal(STDOUT);
         $re = $is_tty ? "\033[35m" : "";              // magenta (Re)
         $pr = $is_tty ? "\033[38;5;63m" : "";         // WP Blueberry ~#3858E9 (Print)
         $r  = $is_tty ? "\033[0m" : "";
@@ -17050,7 +17067,7 @@ if (
     {
         $version = get_importer_version();
         $is_dev = Utils::str_contains($version, '-trunk') || $version === 'v0.0.0';
-        $is_tty = function_exists("posix_isatty") && posix_isatty(STDOUT);
+        $is_tty = reprint_stream_is_terminal(STDOUT);
         $bold  = $is_tty ? "\033[1m" : "";
         $dim   = $is_tty ? "\033[2m" : "";
         $cyan  = $is_tty ? "\033[36m" : "";
@@ -17669,7 +17686,7 @@ if (
             "extra" =>
                 "Runtime modes:\n" .
                 "  nginx-fpm      — writes runtime.php + nginx.conf\n" .
-                "  php-builtin    — writes runtime.php + start.sh\n" .
+                "  php-builtin    — writes runtime.php + start.sh, and start.cmd on Windows\n" .
                 "  playground-cli — writes runtime.php + blueprint.json\n" .
                 "\n" .
                 "Database configuration:\n" .
@@ -17697,6 +17714,7 @@ if (
                 "Output files (php-builtin):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, routing, handlers)\n" .
                 "  (output-dir)/start.sh                Shell script to launch the server\n" .
+                "  (output-dir)/start.cmd               cmd.exe script to launch it on Windows\n" .
                 "\n" .
                 "Output files (playground-cli):\n" .
                 "  (output-dir)/runtime.php             PHP runtime (constants, route handlers)\n" .
@@ -17958,7 +17976,7 @@ if (
             // that carries the key and the same text.
             if (
                 $reprint_progress_output_mode === 'tty'
-                || ( $reprint_progress_output_mode === 'auto' && function_exists('posix_isatty') && posix_isatty(STDOUT) )
+                || ( $reprint_progress_output_mode === 'auto' && reprint_stream_is_terminal(STDOUT) )
             ) {
                 fwrite(STDOUT, $reprint_enrollment_instructions);
             }
@@ -18030,8 +18048,7 @@ if (
     } catch (\Throwable $e) {
         $reprint_progress_output_mode = $options['progress'] ?? 'auto';
         $reprint_progress_stream = ( $options['sql_output'] ?? null ) === 'stdout' ? STDERR : STDOUT;
-        $reprint_progress_stream_is_tty =
-            function_exists("posix_isatty") && posix_isatty($reprint_progress_stream);
+        $reprint_progress_stream_is_tty = reprint_stream_is_terminal($reprint_progress_stream);
         $reprint_uses_terminal_progress = $reprint_progress_output_mode === 'tty'
             || ( $reprint_progress_output_mode === 'auto' && $reprint_progress_stream_is_tty );
         $error_code = isset($client) ? $client->last_error_code : null;
