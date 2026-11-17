@@ -261,3 +261,59 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $callb
 		$sqlite_pdo->sqliteCreateFunction($name, $callback, $num_args);
 	}
 }
+
+/**
+ * Explain why Windows cannot store a path below the filesystem root, or
+ * return null when it can.
+ *
+ * Every component is checked, so a path below an unstorable directory is
+ * unstorable too. Both `/` and `\` separate components, because Windows PHP
+ * treats a backslash in a Unix name as a separator.
+ *
+ * Windows rejects control characters 0x01 to 0x1F and `<>:"|?*`, drops a
+ * trailing dot or space, and opens a device instead of a file for CON, PRN,
+ * AUX, NUL, COM1 to COM9 and LPT1 to LPT9, with or without an extension.
+ * Microsoft also reserves COM and LPT followed by a superscript one, two or
+ * three. Windows PHP converts names from UTF-8 to UTF-16 and rejects bytes
+ * which are not valid UTF-8.
+ *
+ * Examples:
+ *
+ *     windows_unstorable_path_reason('wp-content/uploads/photo.jpg'); // null
+ *     windows_unstorable_path_reason('notes/aux.txt');
+ *     // 'the name "aux.txt" uses the reserved device name AUX'
+ *
+ * @param string $relative_path Path below the filesystem root, as raw bytes.
+ * @return string|null Reason naming the first unstorable component, or null.
+ */
+function windows_unstorable_path_reason(string $relative_path): ?string
+{
+	foreach (preg_split('~[/\\\\]~', $relative_path) as $name) {
+		if ($name === '') {
+			continue;
+		}
+		$quoted_name = json_encode($name, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+		if (preg_match('//u', $name) !== 1) {
+			return "the name {$quoted_name} is not valid UTF-8";
+		}
+		if (preg_match('/[\x01-\x1F]/', $name, $control_character) === 1) {
+			return sprintf('the name %s contains the control character 0x%02X', $quoted_name, ord($control_character[0]));
+		}
+		if (preg_match('/[<>:"|?*]/', $name, $reserved_character) === 1) {
+			return "the name {$quoted_name} contains the character " . json_encode($reserved_character[0]);
+		}
+		if (substr($name, -1) === '.') {
+			return "the name {$quoted_name} ends in a dot";
+		}
+		if (substr($name, -1) === ' ') {
+			return "the name {$quoted_name} ends in a space";
+		}
+		// Spaces before the extension are ignored too, so a name such as
+		// "con .txt" is skipped rather than risk opening the device.
+		$device_name = strtoupper(rtrim(explode('.', $name, 2)[0], ' '));
+		if (preg_match('/^(?:CON|PRN|AUX|NUL|(?:COM|LPT)(?:[1-9]|\xC2[\xB9\xB2\xB3]))$/', $device_name) === 1) {
+			return "the name {$quoted_name} uses the reserved device name {$device_name}";
+		}
+	}
+	return null;
+}

@@ -130,6 +130,21 @@ A link whose target has not been downloaded yet is created after the file transf
 
 Running `flat-docroot` again keeps a copy that still matches its source. A copy that differs, because you edited it or because a later pull changed its source, stops the run. Pass `--force` to replace it with a fresh copy.
 
+### Names a Windows destination cannot store
+
+A Linux or macOS source can hold file names that Windows cannot store. A native Windows client skips a file, directory, or link when any name in its path:
+
+- contains a control character, such as a newline or tab, or one of `<`, `>`, `:`, `"`, `|`, `?`, `*`
+- ends in a dot or a space
+- is a reserved device name, such as `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, or `LPT1` to `LPT9`, with or without an extension (`nul.txt` is reserved too)
+- is not valid UTF-8, which Windows PHP cannot convert to a Windows name
+
+Skipping a directory skips everything under it. The rest of the pull continues, and each skipped path counts as processed with zero bytes. The audit log records every skipped path with the name and the reason. When the pull finishes, the terminal lists every skipped path. JSONL output emits one `windows_unstorable_path` record per path, followed by a `windows_unstorable_paths` count, and the final command report includes the count and the first 100 paths. See [Final command reports](https://developer.wordpress.org/reprint/reference/progress-and-results/#final-command-reports).
+
+A later catch-up or mirror pull does not download a skipped path again while its source entry is unchanged, and does not delete or restore anything for it locally. If the source changes the path, the next pull downloads it and skips it again. If the source deletes it, the pull forgets it. To copy such a file, rename it on the source, or pull from WSL, macOS, or Linux.
+
+Linux and macOS clients store these names unchanged. A Windows source already uses Windows names, so this check applies only to sources that report Unix paths.
+
 ## Rewrite asset URLs
 
 Pass `--new-site-url` or repeat `--rewrite-url FROM TO` before the first file pull when the destination address differs. `pull` applies its mappings to both CSS downloads and the database; `pull-files` accepts them too.

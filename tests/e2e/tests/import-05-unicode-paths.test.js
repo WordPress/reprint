@@ -15,6 +15,11 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
+// Windows cannot store a newline in a name, and Windows PHP cannot convert
+// bytes that are not UTF-8. The Windows client skips those two files.
+const isWindowsClient = PHP_BINARY.endsWith('/windows-php.sh');
+const windowsUnstorableNames = ['file\nwith\nnewlines.txt', 'invalid'];
+
 describe('Import: Unicode Paths', () => {
     const site = 'emoji-paths';
     let tempDir;
@@ -59,6 +64,21 @@ describe('Import: Unicode Paths', () => {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        const records = result.stdout.split('\n')
+            .filter(line => line.startsWith('{'))
+            .map(line => JSON.parse(line));
+        const finalReport = records.filter(record => record.type === 'reprint_report').pop();
+        const reportedPaths = (finalReport?.windows_unstorable_paths ?? [])
+            .map(entry => Buffer.from(entry.path_b64, 'base64'));
+        if (!isWindowsClient) {
+            assert.deepEqual(reportedPaths, [], 'Only a Windows client skips names');
+            return;
+        }
+        assert.equal(finalReport?.windows_unstorable_path_count, 2, `Expected two skipped paths in the final report: ${JSON.stringify(finalReport)}`);
+        const reportedNames = reportedPaths.map(path => path.subarray(path.lastIndexOf('/') + 1));
+        assert.equal(reportedNames.length, 2, `Expected two skipped names, got ${reportedNames.map(name => JSON.stringify(name.toString('latin1'))).join(', ')}`);
+        assert.ok(reportedNames.some(name => name.toString() === windowsUnstorableNames[0]), 'Expected the newline name in the final report');
+        assert.ok(reportedNames.some(name => name.toString('latin1').startsWith(windowsUnstorableNames[1])), 'Expected the invalid UTF-8 name in the final report');
     });
 
     it('files with emoji, accented chars, spaces, and Chinese chars exist', () => {
@@ -97,6 +117,10 @@ describe('Import: Unicode Paths', () => {
         const exclude = PHP_BINARY.endsWith('/playground-php.sh')
             ? ['test-data/invalid']
             : [];
+        // The Windows client skips the names it cannot store, and nothing else.
+        if (isWindowsClient) {
+            exclude.push(...windowsUnstorableNames.map(name => `test-data/${name}`));
+        }
         assertTreesMatch(getSiteDir(site), importedRoot, { exclude });
     });
 

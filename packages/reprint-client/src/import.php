@@ -51,6 +51,7 @@ use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\unsupported_media_type_error_detail;
 use function Reprint\Importer\is_older_plugin_authentication_refusal;
 use function Reprint\Importer\older_plugin_authentication_error_detail;
+use function Reprint\Importer\windows_unstorable_path_reason;
 use function Reprint\Importer\wordpress_admin_referer;
 use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
@@ -383,6 +384,9 @@ class ImportClient
 
     /** @var string Path to pull/deferred-symlinks.jsonl — Windows links whose targets had not arrived. */
     private $deferred_symlinks_file;
+
+    /** @var string Path to pull/windows-unstorable-paths.jsonl — remote paths this files-pull skipped because Windows cannot store their names. */
+    private $windows_unstorable_paths_file;
 
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
@@ -728,6 +732,7 @@ class ImportClient
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
         $this->deferred_symlinks_file = wp_join_unix_paths($this->pull_state_directory, "deferred-symlinks.jsonl");
+        $this->windows_unstorable_paths_file = wp_join_unix_paths($this->pull_state_directory, "windows-unstorable-paths.jsonl");
         $this->progress_reporter = new ProgressReporter(
             wp_join_unix_paths($this->state_dir, "progress.json")
         );
@@ -1187,6 +1192,162 @@ class ImportClient
             "path" => $path,
             "message" => "[skip] " . $path,
         ], true);
+    }
+
+    /**
+     * Explains why this Windows client cannot store a local path, or returns null.
+     *
+     * Only Unix sources are checked. A Windows source already stores its
+     * names on Windows, and its drive or share becomes a local path component
+     * such as `D:` that the mapper chose rather than the source. Linux and
+     * macOS clients store every Unix name and always get null.
+     *
+     * @param string $local_absolute_path Mapped local path below the filesystem root.
+     * @return string|null Reason naming the unstorable component, or null.
+     */
+    private function windows_unstorable_local_path_reason(string $local_absolute_path): ?string
+    {
+        if (
+            Utils::native_path_format() !== "windows"
+            || $this->get_state()->remote_path_format() !== "unix"
+        ) {
+            return null;
+        }
+        $local_relative_path = Utils::relative_path_under(
+            Utils::normalize_path_separators($local_absolute_path, "windows"),
+            Utils::normalize_path_separators($this->filesystem_root, "windows")
+        );
+        return $local_relative_path === null
+            ? null
+            : windows_unstorable_path_reason($local_relative_path);
+    }
+
+    /**
+     * Skips one remote path whose local name Windows cannot store.
+     *
+     * The remote index records the source entry without a local path, as
+     * preserve-local does for a kept directory. A later delta pull therefore
+     * fetches the path again only when its source entry changes, and a
+     * deletion at the source removes only the remote index entry. The local
+     * index never names the path, so mirror pulls neither restore nor delete it.
+     *
+     * The caller counts the path as processed with zero bytes.
+     *
+     * @param string $remote_absolute_path Remote path being skipped.
+     * @param string $remote_path_type     `file`, `dir`, or `link`.
+     * @param int    $remote_path_ctime    Source ctime, or 0 when the part has none.
+     * @param int    $remote_path_size     Source size in bytes.
+     * @param string $reason               Reason from windows_unstorable_local_path_reason().
+     */
+    private function skip_windows_unstorable_path(
+        string $remote_absolute_path,
+        string $remote_path_type,
+        int $remote_path_ctime,
+        int $remote_path_size,
+        string $reason
+    ): void {
+        $encoded_remote_path = json_encode($remote_absolute_path, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+        $this->audit_log("WINDOWS UNSTORABLE NAME | skipped {$remote_path_type} {$encoded_remote_path}: {$reason}", true);
+        $this->emit_skip_progress($remote_absolute_path);
+        if ($remote_path_ctime > 0) {
+            $this->pull_index_journal->record_remote_upsert(
+                $remote_absolute_path,
+                $remote_path_ctime,
+                $remote_path_size,
+                $remote_path_type
+            );
+        }
+        // A part replayed after an interruption can append the same path
+        // again. report_windows_unstorable_paths() removes those repeats.
+        $report_line = Utils::json_encode_or_throw([
+            "path" => base64_encode($remote_absolute_path),
+            "type" => $remote_path_type,
+            "reason" => $reason,
+        ]) . "\n";
+        if (@file_put_contents($this->windows_unstorable_paths_file, $report_line, FILE_APPEND | LOCK_EX) !== strlen($report_line)) {
+            $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
+            throw new RuntimeException("Could not append a skipped path to {$this->windows_unstorable_paths_file}: {$php_error}");
+        }
+    }
+
+    /** The final command report lists at most this many skipped paths. */
+    private const WINDOWS_UNSTORABLE_PATHS_IN_COMMAND_REPORT = 100;
+
+    /**
+     * Lists the remote paths this files-pull skipped because Windows cannot store their names.
+     *
+     * Sorting by path removes the repeats a replayed part may have appended,
+     * and lets the list be read one line at a time. The terminal, the audit
+     * log, and one JSONL record per path list every path. The final command
+     * report carries the count and the first paths in path order.
+     */
+    private function report_windows_unstorable_paths(): void
+    {
+        if (!is_file($this->windows_unstorable_paths_file) || filesize($this->windows_unstorable_paths_file) === 0) {
+            return;
+        }
+        if (!sort_index_file($this->windows_unstorable_paths_file)) {
+            return;
+        }
+        $count = $this->count_newlines($this->windows_unstorable_paths_file);
+        $message = "{$count} remote path(s) skipped because Windows cannot store their names";
+        $this->audit_log("WINDOWS UNSTORABLE NAME SUMMARY | {$message}", true);
+        $this->progress->show_lifecycle_line("{$message}:\n");
+        $paths_in_command_report = [];
+        $report_handle = fopen($this->windows_unstorable_paths_file, "r");
+        if ($report_handle === false) {
+            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
+            throw new RuntimeException("Could not read the skipped path report {$this->windows_unstorable_paths_file}.");
+        }
+        try {
+            while (true) {
+                $report_line = fgets($report_handle);
+                if ($report_line === false) {
+                    break;
+                }
+                $skipped_path = json_decode($report_line, true);
+                $encoded_remote_path = $skipped_path["path"] ?? null;
+                $remote_absolute_path = is_string($encoded_remote_path) ? base64_decode($encoded_remote_path, true) : false;
+                if (!is_string($remote_absolute_path) || !is_string($skipped_path["reason"] ?? null)) {
+                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
+                    throw new RuntimeException("Each line of {$this->windows_unstorable_paths_file} must hold a base64 path and a reason; observed: " . substr($report_line, 0, 200));
+                }
+                $this->progress->show_lifecycle_line(
+                    "  " . TerminalProgress::escape_text("{$remote_absolute_path} — {$skipped_path["reason"]}") . "\n"
+                );
+                if (count($paths_in_command_report) < self::WINDOWS_UNSTORABLE_PATHS_IN_COMMAND_REPORT) {
+                    $paths_in_command_report[] = [
+                        "path_b64" => $skipped_path["path"],
+                        "path_type" => $skipped_path["type"] ?? null,
+                        "reason" => $skipped_path["reason"],
+                    ];
+                }
+                $this->output_progress(
+                    [
+                        "type" => "windows_unstorable_path",
+                        "path" => $remote_absolute_path,
+                        "path_b64" => $skipped_path["path"],
+                        "path_type" => $skipped_path["type"] ?? null,
+                        "reason" => $skipped_path["reason"],
+                        "message" => "Skipped {$remote_absolute_path}: {$skipped_path["reason"]}",
+                    ],
+                    true,
+                );
+            }
+        } finally {
+            fclose($report_handle);
+        }
+        $this->command_report_details["windows_unstorable_path_count"] = $count;
+        $this->command_report_details["windows_unstorable_paths"] = $paths_in_command_report;
+        $this->output_progress(
+            [
+                "type" => "windows_unstorable_paths",
+                "count" => $count,
+                "message" => $message,
+            ],
+            true,
+        );
     }
 
     /**
@@ -4396,6 +4557,11 @@ class ImportClient
             $this->get_state()->files_pull_summary = new FilesPullSummaryState();
             $this->progress_reporter->reset_file_counters();
             $this->save_state();
+            // The final report lists only the paths this run skipped.
+            if (file_exists($this->windows_unstorable_paths_file)) {
+                @unlink($this->windows_unstorable_paths_file);
+                $this->audit_log("FILE DELETE | {$this->windows_unstorable_paths_file} | new files-pull");
+            }
 
             if ($is_delta) {
                 $remote_index_entry_count = $this->remote_index_entry_count();
@@ -4671,6 +4837,7 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
+        $this->report_windows_unstorable_paths();
     }
 
     /**
@@ -10591,6 +10758,14 @@ class ImportClient
             );
             return null;
         }
+        // Pull skipped this path, so nothing local belongs to it. On Windows a
+        // reserved name such as NUL opens a device, so do not touch it.
+        $windows_unstorable_reason = $this->windows_unstorable_local_path_reason($local_absolute_path);
+        if ($windows_unstorable_reason !== null) {
+            $encoded_remote_path = json_encode($remote_deletion_root, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+            $this->audit_log("WINDOWS UNSTORABLE NAME | source deleted {$encoded_remote_path}, which was never stored locally: {$windows_unstorable_reason}", false);
+            return null;
+        }
         if (!file_exists($local_absolute_path) && !LocalLink::is_link($local_absolute_path)) {
             return $local_absolute_path;
         }
@@ -12675,6 +12850,27 @@ class ImportClient
         // Skipped bodies do no local work. A new first chunk still needs its
         // own parent check even when the previous file was skipped.
         if ($is_first || !$context->skip_current_file) {
+            $windows_unstorable_reason = $this->windows_unstorable_local_path_reason($local_absolute_path);
+            if ($windows_unstorable_reason !== null) {
+                // A resumed request may begin inside a skipped file. Its first
+                // part already recorded the skip, so later parts only discard bytes.
+                if ($is_first) {
+                    $this->skip_windows_unstorable_path(
+                        $path,
+                        "file",
+                        (int) ( $headers["x-file-ctime"] ?? 0 ),
+                        $file_size,
+                        $windows_unstorable_reason
+                    );
+                }
+                $context->skip_current_file = true;
+                $context->remote_file_path = null;
+                $context->remote_file_size = null;
+                if ($is_last) {
+                    $this->progress_reporter->complete_path(0);
+                }
+                return;
+            }
             try {
                 $this->assert_local_path_within_root(dirname($local_absolute_path));
             } catch (RuntimeException $error) {
@@ -13217,6 +13413,12 @@ class ImportClient
             $remote_absolute_path
         );
 
+        $windows_unstorable_reason = $this->windows_unstorable_local_path_reason($local_absolute_path);
+        if ($windows_unstorable_reason !== null) {
+            $this->skip_windows_unstorable_path($remote_absolute_path, "dir", $ctime, 0, $windows_unstorable_reason);
+            return;
+        }
+
         // In preserve-local mode, if the directory already exists (as a real
         // directory or via a symlink to a directory), keep it as-is.
         // Also skip if any parent component is a symlink — we never create
@@ -13318,6 +13520,11 @@ class ImportClient
         }
 
         $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
+        $windows_unstorable_reason = $this->windows_unstorable_local_path_reason($local_absolute_path);
+        if ($windows_unstorable_reason !== null) {
+            $this->skip_windows_unstorable_path($path, "link", $ctime, 0, $windows_unstorable_reason);
+            return;
+        }
         $target_for_local = $this->rewrite_symlink_target_for_local_filesystem(
             $path,
             $local_absolute_path,
@@ -16071,7 +16278,7 @@ class ImportClient
                 'bytes' => $data['progress']['bytes'] ?? null,
             ];
             $is_attention = isset($data['error']) || isset($data['error_message'])
-                || in_array($type, ['warning', 'error', 'symlink_error', 'symlink_follow_rejected', 'volatile_files', 'interrupt', 'state_saved', 'state_save_error'], true);
+                || in_array($type, ['warning', 'error', 'symlink_error', 'symlink_follow_rejected', 'volatile_files', 'windows_unstorable_path', 'windows_unstorable_paths', 'interrupt', 'state_saved', 'state_save_error'], true);
             // Request-completion records have a phase and counters, but no
             // command or message. Omit those from compact output.
             $is_result = in_array($status, ['complete', 'partial', 'error', 'aborted', 'failed', 'interrupted', 'restart'], true)
