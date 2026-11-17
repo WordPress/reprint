@@ -27,7 +27,7 @@ class WindowsPathTest extends TestCase
     public function test_maps_portable_windows_filename_bytes(string $remote_path, string $expected_path): void
     {
         Utils::assert_valid_path($remote_path, 'windows');
-        $mapper = new RemoteToLocalPathMapper('/local', 'windows', []);
+        $mapper = new RemoteToLocalPathMapper('/local', 'windows', [], [], null, 'unix');
         $this->assertSame($expected_path, Utils::normalize_path_separators($remote_path, 'windows'));
         $this->assertSame($expected_path, Utils::normalize_path($remote_path, 'windows'));
         $this->assertSame('/local/' . $expected_path, $mapper->remote_path_to_local_path($remote_path));
@@ -66,11 +66,11 @@ class WindowsPathTest extends TestCase
         foreach (['default', 'remapped', 'followed'] as $placement) {
             $mapper = new RemoteToLocalPathMapper('/local', $path_format, [],
                 $placement === 'remapped' ? [Utils::trim_right_slash($remote_path, $path_format) => '/local/placed/'] : [],
-                $placement === 'followed' ? '/local/followed' : null);
+                $placement === 'followed' ? '/local/followed' : null, 'unix');
             $expected = $placement === 'remapped' ? '/local/placed' : '/local' . ( $placement === 'followed' ? '/followed' : '' ) . $expected_path;
             $this->assertSame($expected, $mapper->remote_path_to_local_path($remote_path), $placement);
         }
-        $root_mapper = new RemoteToLocalPathMapper('/', $path_format, [], [Utils::trim_right_slash($remote_path, $path_format) => '/']);
+        $root_mapper = new RemoteToLocalPathMapper('/', $path_format, [], [Utils::trim_right_slash($remote_path, $path_format) => '/'], null, 'unix');
         $this->assertSame('/', $root_mapper->remote_path_to_local_path($remote_path));
     }
 
@@ -111,10 +111,10 @@ class WindowsPathTest extends TestCase
     /** Drive names remain separate under the Linux destination root. */
     public function test_maps_windows_paths_into_linux_filesystem(): void
     {
-        $mapper = new RemoteToLocalPathMapper('/local', 'windows', ['D:/site']);
+        $mapper = new RemoteToLocalPathMapper('/local', 'windows', ['D:/site'], [], null, 'unix');
         $this->assertSame('/local/D:/site/upload.txt', $mapper->remote_path_to_local_path('D:\\site\\upload.txt'));
         $this->assertSame('/local/E:/site/upload.txt', $mapper->remote_path_to_local_path('E:/site/upload.txt'));
-        $mapper = new RemoteToLocalPathMapper('/local', 'windows', ['D:/site'], ['D:/site' => '/local/site']);
+        $mapper = new RemoteToLocalPathMapper('/local', 'windows', ['D:/site'], ['D:/site' => '/local/site'], null, 'unix');
         $this->assertSame('/local/site/upload.txt', $mapper->remote_path_to_local_path('D:\\site\\upload.txt'));
     }
 
@@ -142,7 +142,7 @@ class WindowsPathTest extends TestCase
         $this->assertTrue(Utils::path_is_same_as_or_descendant_of($remote, Utils::normalize_path_separators('\\\\server\\media\\', 'windows')));
         $this->assertFalse(Utils::path_is_same_as_or_descendant_of($remote, Utils::normalize_path_separators('\\\\server\\media-old', 'windows')));
         $this->assertSame('/Sites/photo.jpg', Utils::path_remainder_under($remote, Utils::normalize_path_separators('\\\\server\\media', 'windows')));
-        $mapper = new RemoteToLocalPathMapper('/local', 'windows', []);
+        $mapper = new RemoteToLocalPathMapper('/local', 'windows', [], [], null, 'unix');
         $this->assertSame('/local/UNC/SERVER/MEDIA/Sites/photo.jpg', $mapper->remote_path_to_local_path($remote));
         $this->assertSame('/local/C:/UNC/SERVER/MEDIA/Sites/photo.jpg', $mapper->remote_path_to_local_path('C:\\UNC\\SERVER\\MEDIA\\Sites\\photo.jpg'));
         $mapper = new RemoteToLocalPathMapper('/local', 'unix', []);
@@ -155,7 +155,7 @@ class WindowsPathTest extends TestCase
     {
         $path = '//server/share/photos';
         $unix_mapper = new RemoteToLocalPathMapper('/local', 'unix', []);
-        $windows_mapper = new RemoteToLocalPathMapper('/local', 'windows', []);
+        $windows_mapper = new RemoteToLocalPathMapper('/local', 'windows', [], [], null, 'unix');
         $this->assertSame('/local/server/share/photos', $unix_mapper->remote_path_to_local_path($path));
         $this->assertSame('/local/UNC/SERVER/SHARE/photos', $windows_mapper->remote_path_to_local_path($path));
         $this->expectException(InvalidArgumentException::class);
