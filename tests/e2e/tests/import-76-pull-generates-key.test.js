@@ -8,7 +8,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { runImporter, getSiteUrl, exportedKeyPath, readAuditLog } from '../lib/test-helpers.js';
+import {
+    runImporter, getSiteUrl, exportedKeyPath, readAuditLog, harnessPathFromClientPath,
+} from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 const EXIT_ENROLLMENT_NEEDED = 4;
@@ -38,7 +40,7 @@ describe('Import: pull generates a key when no credential exists', () => {
         assert.equal(report.type, 'reprint_report');
         assert.equal(report.status, 'enrollment_needed');
         assert.equal(report.exit_code, EXIT_ENROLLMENT_NEEDED);
-        assert.equal(report.key_path, exportedKeyPath(url, stateDir));
+        assert.equal(harnessPathFromClientPath(report.key_path), exportedKeyPath(url, stateDir));
         assert.match(report.key_id, /^[0-9a-f]{16}$/);
         assert.match(report.public_key, /^MII[A-Za-z0-9+/]+=*$/, 'one-line public key');
         assert.match(report.message, /No credential found for this site/);

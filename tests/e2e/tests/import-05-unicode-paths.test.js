@@ -11,14 +11,13 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
     assertRemoteIndexEntryCount, assertSiteMirror,
-    fsRootDir, PHP_BINARY, readAuditLog,
+    fsRootDir, PHP_BINARY, readAuditLog, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 // Windows cannot store a newline in a name, so the Windows client skips that
 // file. It still writes the invalid UTF-8 name, but Windows keeps names as
 // UTF-16, so WSL may read it back with other bytes.
-const isWindowsClient = PHP_BINARY.endsWith('/windows-php.sh');
 const windowsUnstorableName = 'file\nwith\nnewlines.txt';
 
 describe('Import: Unicode Paths', () => {
@@ -68,7 +67,7 @@ describe('Import: Unicode Paths', () => {
         // The audit log JSON-encodes each skipped path, so a newline appears as an escape.
         const skips = readAuditLog(tempDir).split('\n')
             .filter(line => line.includes('WINDOWS UNSTORABLE NAME | skipped'));
-        if (!isWindowsClient) {
+        if (!IS_WINDOWS_CLIENT) {
             assert.deepEqual(skips, [], 'Only a Windows client skips names');
             return;
         }
@@ -112,11 +111,11 @@ describe('Import: Unicode Paths', () => {
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         // Playground's mounted filesystem replaces invalid filename bytes.
         // Native PHP tests cover that path, so compare the remaining tree here.
-        const exclude = PHP_BINARY.endsWith('/playground-php.sh') || isWindowsClient
+        const exclude = PHP_BINARY.endsWith('/playground-php.sh') || IS_WINDOWS_CLIENT
             ? ['test-data/invalid']
             : [];
         // The Windows client skips the one name it cannot store, and nothing else.
-        if (isWindowsClient) {
+        if (IS_WINDOWS_CLIENT) {
             exclude.push(`test-data/${windowsUnstorableName}`);
         }
         assertTreesMatch(getSiteDir(site), importedRoot, { exclude });

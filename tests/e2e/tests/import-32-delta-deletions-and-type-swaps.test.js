@@ -9,13 +9,13 @@
  */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, readlinkSync, readFileSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, pullStateDirectory,
+    fsRootDir, pullStateDirectory, assertLinkValue,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -194,7 +194,7 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
 
         const fileToSymlink = join(base, 'file-to-symlink');
         assert.ok(lstatSync(fileToSymlink).isSymbolicLink(), 'Expected file-to-symlink to be a symlink');
-        assert.equal(readlinkSync(fileToSymlink), 'targets/new-link-file.txt');
+        assertLinkValue(fileToSymlink, 'targets/new-link-file.txt');
 
         const dirToFile = join(base, 'dir-to-file');
         assert.ok(lstatSync(dirToFile).isFile(), 'Expected dir-to-file to be a regular file');
@@ -202,7 +202,7 @@ chown -R nginx:nginx ${sh(remoteScenarioRoot)} ${sh(remotePreserveRoot)}
 
         const dirToSymlink = join(base, 'dir-to-symlink');
         assert.ok(lstatSync(dirToSymlink).isSymbolicLink(), 'Expected dir-to-symlink to be a symlink');
-        assert.equal(readlinkSync(dirToSymlink), 'targets/new-link-dir');
+        assertLinkValue(dirToSymlink, 'targets/new-link-dir');
         assert.equal(
             readFileSync(join(dirToSymlink, 'nested', 'linked.txt'), 'utf-8'),
             'linked-dir-content\n',

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     apiRequest, runImporter, createTempDir, cleanupTempDir, getSiteSecret, getSiteDir, createMysqlConnection, pullStateDirectory,
+    SITE_PHP_BINARY,
 } from '../lib/test-helpers.js';
 import { ensureMultisite, runWp } from '../lib/multisite-setup.js';
 
@@ -119,7 +120,7 @@ describe('Pull a selected site into a fresh single site', () => {
         assert.ok(inspection.new_url.startsWith(`${targetUrl}/wp-content/uploads/sites/7/`));
 
         let serverLog = '';
-        server = spawn(process.env.E2E_WP_CLI_PHP_BINARY || 'php', [
+        server = spawn(SITE_PHP_BINARY, [
             '-S', '127.0.0.1:9247', '-t', documentRoot, join(directory, 'runtime/runtime.php'),
         ], { stdio: ['ignore', 'pipe', 'pipe'] });
         server.stdout.on('data', data => { serverLog += data; });

@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, pullStateDirectory,
+    fsRootDir, pullStateDirectory, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -208,10 +208,13 @@ describe('Import: Flat Document Root (WP Cloud-like layout)', () => {
             // The symlink target should be relative (not absolute) and point
             // into the core directory, not ABSPATH
             const target = readlinkSync(wpAdminLink);
-            assert.ok(
-                !target.startsWith('/'),
-                `wp-admin symlink should be relative, got: ${target}`,
-            );
+            // A Windows client stores absolute link values.
+            if (!IS_WINDOWS_CLIENT) {
+                assert.ok(
+                    !target.startsWith('/'),
+                    `wp-admin symlink should be relative, got: ${target}`,
+                );
+            }
             assert.ok(
                 target.includes('e2e-wpcloud-core'),
                 `wp-admin symlink should point to core dir, got: ${target}`,
@@ -227,10 +230,13 @@ describe('Import: Flat Document Root (WP Cloud-like layout)', () => {
             );
 
             const target = readlinkSync(wpIncludesLink);
-            assert.ok(
-                !target.startsWith('/'),
-                `wp-includes symlink should be relative, got: ${target}`,
-            );
+            // A Windows client stores absolute link values.
+            if (!IS_WINDOWS_CLIENT) {
+                assert.ok(
+                    !target.startsWith('/'),
+                    `wp-includes symlink should be relative, got: ${target}`,
+                );
+            }
             assert.ok(
                 target.includes('e2e-wpcloud-core'),
                 `wp-includes symlink should point to core dir, got: ${target}`,

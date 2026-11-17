@@ -5,7 +5,9 @@ import { once } from 'node:events';
 import { cpSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { createMysqlConnection, createTempDir, getHarnessKey, runImporter } from '../lib/test-helpers.js';
+import {
+    createMysqlConnection, createTempDir, getHarnessKey, runImporter, SITE_PHP_BINARY,
+} from '../lib/test-helpers.js';
 import { ensureWpTemplate } from '../lib/site-setup.js';
 
 const nativePhp = process.env.E2E_WP_CLI_PHP_BINARY || 'php';
@@ -189,7 +191,7 @@ async function startServer(directory, router) {
     await once(listener, 'listening');
     const port = listener.address().port;
     await new Promise((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
-    const child = spawn(nativePhp, ['-S', `127.0.0.1:${port}`, '-t', directory, router], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(SITE_PHP_BINARY, ['-S', `127.0.0.1:${port}`, '-t', directory, router], { stdio: ['ignore', 'ignore', 'pipe'] });
     servers.push(child);
     let log = '';
     const url = await new Promise((resolve, reject) => {

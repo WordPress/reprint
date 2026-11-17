@@ -15,6 +15,7 @@ import { ensureSite } from '../lib/site-setup.js';
 import {
     runImporter, createTempDir, cleanupTempDir, fsRootDir, getSiteDir, getSiteUrl, getSiteSecret, getHarnessKey,
     pullStateDirectory, writeTestHooks, removeTestHooks, writeHookState, readHookState, clearHookState,
+    IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 
 describe('Import: generated CSS download failures', () => {
@@ -141,9 +142,10 @@ function test_hook_before_file_chunk($path, $offset, &$data) {
     }, 180000);
 
     // SIGKILL reaches the native PHP importer directly. With Playground it
-    // would kill the shell wrapper instead, so this case is native-only.
+    // would kill the shell wrapper instead, and a signal from WSL cannot
+    // reach a native Windows importer, so this case is native-only.
     // The HTTP response-cutoff case also runs with the Playground importer.
-    it.skipIf(phpBinary.endsWith('/playground-php.sh'))('a new CLI process resumes a saved CSS part after SIGKILL', async () => {
+    it.skipIf(phpBinary.endsWith('/playground-php.sh') || IS_WINDOWS_CLIENT)('a new CLI process resumes a saved CSS part after SIGKILL', async () => {
         const preflight = runImporter(importUrl, temporaryDirectory, 'preflight', { secret: getSiteSecret(site) });
         assert.equal(preflight.exitCode, 0, preflight.stdout + preflight.stderr);
         writeHookState(site, { action: 'pause', fired: false, release: false });

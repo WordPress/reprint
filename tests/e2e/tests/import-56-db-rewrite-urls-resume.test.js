@@ -13,7 +13,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
-    createTempDir, cleanupTempDir, createMysqlConnection, PHP_BINARY,
+    createTempDir, cleanupTempDir, createMysqlConnection, PHP_BINARY, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
@@ -105,7 +105,8 @@ describeWithSignals(
             await connection.end();
         });
 
-        it('resumes after SIGTERM without processing or updating content twice', async () => {
+        // A signal from WSL cannot reach a native Windows importer.
+        it.skipIf(IS_WINDOWS_CLIENT)('resumes after SIGTERM without processing or updating content twice', async () => {
             const firstProcess = startRewrite([
                 '--target-engine=mysql',
                 '--target-host=127.0.0.1',

@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    countJsonlLines, pullStateDirectory,
+    countJsonlLines, pullStateDirectory, harnessPathFromClientPath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -47,7 +47,7 @@ describe('Import: Files Index', () => {
                 }
             })
             .find(event => event?.command === 'files-index' && event?.event === 'complete');
-        assert.equal(completion?.next_remote_index_file, nextRemoteIndexFile);
+        assert.equal(harnessPathFromClientPath(completion?.next_remote_index_file), nextRemoteIndexFile);
         assert.ok(existsSync(nextRemoteIndexFile), 'Expected pull/remote-index.next.jsonl to exist');
 
         const lines = readFileSync(nextRemoteIndexFile, 'utf-8').trim().split('\n').filter(l => l);

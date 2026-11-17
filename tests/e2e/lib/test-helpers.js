@@ -5,9 +5,9 @@ import assert from 'node:assert/strict';
 import { execSync, execFileSync } from 'node:child_process';
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import {
-    readFileSync, readdirSync, existsSync, mkdirSync, lstatSync, writeFileSync, linkSync, unlinkSync,
+    readFileSync, readdirSync, existsSync, mkdirSync, lstatSync, writeFileSync, linkSync, unlinkSync, readlinkSync,
 } from 'node:fs';
-import { join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createConnection } from 'mysql2/promise';
 import { KeySigner } from './hmac-client.js';
@@ -20,6 +20,13 @@ const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
+// ci/windows-php.sh runs the native Windows client from WSL.
+const IS_WINDOWS_CLIENT = PHP_BINARY.endsWith('/windows-php.sh');
+// A pulled site's runtime names paths in the client's format, so the
+// client's own PHP must run it.
+const SITE_PHP_BINARY = IS_WINDOWS_CLIENT ? PHP_BINARY : (process.env.E2E_WP_CLI_PHP_BINARY || 'php');
+// Root reads files whatever their mode, but the source's web server does not.
+const RUNNING_AS_ROOT = process.getuid?.() === 0;
 const DB_HOST = REGISTRY.dbHost;
 const DB_USER = REGISTRY.dbUser;
 const DB_PASS = REGISTRY.dbPass;
@@ -515,6 +522,9 @@ export function hashDirectory(dirPath) {
             if (stat.isSymbolicLink()) {
                 continue; // Skip symlinks for hash comparison
             }
+            if (RUNNING_AS_ROOT && (stat.mode & 0o444) === 0) {
+                continue; // Unreadable to everyone but root, as to the source
+            }
 
             if (stat.isDirectory()) {
                 walk(fullPath);
@@ -991,4 +1001,33 @@ export function assertPullPipelineComplete(state, command = 'pull') {
     );
 }
 
-export { PHP_BINARY };
+/**
+ * Converts a path the Windows client reported, such as C:/dir or C:\dir,
+ * to the WSL path the harness reads. Other paths return unchanged.
+ */
+export function harnessPathFromClientPath(clientPath) {
+    const drivePath = /^([A-Za-z]):[\\/](.*)$/s.exec(clientPath);
+    if (drivePath === null) {
+        return clientPath;
+    }
+    return `/mnt/${drivePath[1].toLowerCase()}/${drivePath[2].replace(/\\/g, '/')}`;
+}
+
+/**
+ * Asserts the value a pulled link stores. A Windows client stores an
+ * absolute target, so for it only the path both values resolve to is compared.
+ */
+export function assertLinkValue(linkPath, expectedValue, message) {
+    const linkValue = readlinkSync(linkPath);
+    if (!IS_WINDOWS_CLIENT) {
+        assert.equal(linkValue, expectedValue, message);
+        return;
+    }
+    assert.equal(
+        harnessPathFromClientPath(linkValue),
+        resolve(dirname(linkPath), expectedValue),
+        message,
+    );
+}
+
+export { PHP_BINARY, IS_WINDOWS_CLIENT, SITE_PHP_BINARY };
