@@ -15,10 +15,11 @@ import {
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
-// Windows cannot store a newline in a name, and Windows PHP cannot convert
-// bytes that are not UTF-8. The Windows client skips those two files.
+// Windows cannot store a newline in a name, so the Windows client skips that
+// file. It still writes the invalid UTF-8 name, but Windows keeps names as
+// UTF-16, so WSL may read it back with other bytes.
 const isWindowsClient = PHP_BINARY.endsWith('/windows-php.sh');
-const windowsUnstorableNames = ['file\nwith\nnewlines.txt', 'invalid'];
+const windowsUnstorableName = 'file\nwith\nnewlines.txt';
 
 describe('Import: Unicode Paths', () => {
     const site = 'emoji-paths';
@@ -74,11 +75,9 @@ describe('Import: Unicode Paths', () => {
             assert.deepEqual(reportedPaths, [], 'Only a Windows client skips names');
             return;
         }
-        assert.equal(finalReport?.windows_unstorable_path_count, 2, `Expected two skipped paths in the final report: ${JSON.stringify(finalReport)}`);
-        const reportedNames = reportedPaths.map(path => path.subarray(path.lastIndexOf('/') + 1));
-        assert.equal(reportedNames.length, 2, `Expected two skipped names, got ${reportedNames.map(name => JSON.stringify(name.toString('latin1'))).join(', ')}`);
-        assert.ok(reportedNames.some(name => name.toString() === windowsUnstorableNames[0]), 'Expected the newline name in the final report');
-        assert.ok(reportedNames.some(name => name.toString('latin1').startsWith(windowsUnstorableNames[1])), 'Expected the invalid UTF-8 name in the final report');
+        assert.equal(finalReport?.windows_unstorable_path_count, 1, `Expected one skipped path in the final report: ${JSON.stringify(finalReport)}`);
+        const reportedNames = reportedPaths.map(path => path.subarray(path.lastIndexOf('/') + 1).toString());
+        assert.deepEqual(reportedNames, [windowsUnstorableName]);
     });
 
     it('files with emoji, accented chars, spaces, and Chinese chars exist', () => {
@@ -114,12 +113,12 @@ describe('Import: Unicode Paths', () => {
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         // Playground's mounted filesystem replaces invalid filename bytes.
         // Native PHP tests cover that path, so compare the remaining tree here.
-        const exclude = PHP_BINARY.endsWith('/playground-php.sh')
+        const exclude = PHP_BINARY.endsWith('/playground-php.sh') || isWindowsClient
             ? ['test-data/invalid']
             : [];
-        // The Windows client skips the names it cannot store, and nothing else.
+        // The Windows client skips the one name it cannot store, and nothing else.
         if (isWindowsClient) {
-            exclude.push(...windowsUnstorableNames.map(name => `test-data/${name}`));
+            exclude.push(`test-data/${windowsUnstorableName}`);
         }
         assertTreesMatch(getSiteDir(site), importedRoot, { exclude });
     });

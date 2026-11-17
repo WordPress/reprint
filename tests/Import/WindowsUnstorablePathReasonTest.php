@@ -33,6 +33,8 @@ final class WindowsUnstorablePathReasonTest extends TestCase
             'device name as a suffix' => ['my-aux.txt'],
             'device name as an extension' => ['notes.con'],
             'two-digit port number' => ['COM10'],
+            // Windows PHP still creates and reopens this name.
+            'invalid UTF-8' => ["test-data/invalid\xFF\xFEutf8.txt"],
             'empty path' => [''],
         ];
     }
@@ -50,7 +52,6 @@ final class WindowsUnstorablePathReasonTest extends TestCase
             'newline' => ["test-data/file\nwith\nnewlines.txt", 'the name "file\nwith\nnewlines.txt" contains the control character 0x0A'],
             'tab' => ["a\tb", 'the name "a\tb" contains the control character 0x09'],
             'unit separator' => ["a\x1Fb", 'the name "a\u001fb" contains the control character 0x1F'],
-            'invalid UTF-8' => ["test-data/invalid\xFF\xFEutf8.txt", 'the name "invalid��utf8.txt" is not valid UTF-8'],
             'trailing dot' => ['readme.', 'the name "readme." ends in a dot'],
             'trailing space' => ['readme ', 'the name "readme " ends in a space'],
             'directory ending in a dot' => ['photos./a.jpg', 'the name "photos." ends in a dot'],

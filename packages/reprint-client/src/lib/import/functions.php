@@ -274,8 +274,8 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $callb
  * trailing dot or space, and opens a device instead of a file for CON, PRN,
  * AUX, NUL, COM1 to COM9 and LPT1 to LPT9, with or without an extension.
  * Microsoft also reserves COM and LPT followed by a superscript one, two or
- * three. Windows PHP converts names from UTF-8 to UTF-16 and rejects bytes
- * which are not valid UTF-8.
+ * three. Bytes which are not valid UTF-8 pass: Windows PHP still creates and
+ * reopens such a name, which FilesPullLocalIndexTest checks on Windows.
  *
  * Examples:
  *
@@ -293,9 +293,6 @@ function windows_unstorable_path_reason(string $relative_path): ?string
 			continue;
 		}
 		$quoted_name = json_encode($name, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
-		if (preg_match('//u', $name) !== 1) {
-			return "the name {$quoted_name} is not valid UTF-8";
-		}
 		if (preg_match('/[\x01-\x1F]/', $name, $control_character) === 1) {
 			return sprintf('the name %s contains the control character 0x%02X', $quoted_name, ord($control_character[0]));
 		}
