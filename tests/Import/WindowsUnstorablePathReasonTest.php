@@ -64,7 +64,8 @@ final class WindowsUnstorablePathReasonTest extends TestCase
             'parallel port' => ['lpt9.log', 'the name "lpt9.log" uses the reserved device name LPT9'],
             'superscript port' => ["COM\u{b9}", "the name \"COM\u{b9}\" uses the reserved device name COM\u{b9}"],
             'device directory' => ['wp-content/con/index.php', 'the name "con" uses the reserved device name CON'],
-            'backslash makes a device component' => ['dir\\NUL', 'the name "NUL" uses the reserved device name NUL'],
+            // Windows would read a backslash as a separator, so b.txt would land in a directory named a.
+            'backslash' => ['uploads/a\\b.txt', 'the name "a\\\\b.txt" contains the character "\\\\"'],
         ];
         foreach (['<', '>', ':', '"', '|', '?', '*'] as $character) {
             $paths["character {$character}"] = [

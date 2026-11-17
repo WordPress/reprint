@@ -134,7 +134,7 @@ Running `flat-docroot` again keeps a copy that still matches its source. A copy 
 
 A Linux or macOS source can hold file names that Windows cannot store. A native Windows client skips a file, directory, or link when any name in its path:
 
-- contains a control character, such as a newline or tab, or one of `<`, `>`, `:`, `"`, `|`, `?`, `*`
+- contains a control character, such as a newline or tab, or one of `<`, `>`, `:`, `"`, `|`, `?`, `*`, `\`
 - ends in a dot or a space
 - is a reserved device name, such as `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, or `LPT1` to `LPT9`, with or without an extension (`nul.txt` is reserved too)
 

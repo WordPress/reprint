@@ -266,10 +266,10 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $callb
  * Explain why Windows cannot store a path, or return null when it can.
  *
  * Every component is checked, so a path below an unstorable directory is
- * unstorable too. Both `/` and `\` separate components, because Windows PHP
- * treats a backslash in a Unix name as a separator.
+ * unstorable too. Only `/` separates components of a Unix path. A backslash
+ * is part of the name, and Windows would read it as a separator instead.
  *
- * Windows rejects control characters 0x01 to 0x1F and `<>:"|?*`, drops a
+ * Windows rejects control characters 0x01 to 0x1F and `<>:"|?*\`, drops a
  * trailing dot or space, and opens a device instead of a file for CON, PRN,
  * AUX, NUL, COM1 to COM9 and LPT1 to LPT9, with or without an extension.
  * Microsoft also reserves COM and LPT followed by a superscript one, two or
@@ -287,7 +287,7 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $callb
  */
 function windows_unstorable_path_reason(string $path): ?string
 {
-	foreach (preg_split('~[/\\\\]~', $path) as $name) {
+	foreach (explode('/', $path) as $name) {
 		if ($name === '') {
 			continue;
 		}
@@ -295,7 +295,7 @@ function windows_unstorable_path_reason(string $path): ?string
 		if (preg_match('/[\x01-\x1F]/', $name, $control_character) === 1) {
 			return sprintf('the name %s contains the control character 0x%02X', $quoted_name, ord($control_character[0]));
 		}
-		if (preg_match('/[<>:"|?*]/', $name, $reserved_character) === 1) {
+		if (preg_match('/[<>:"|?*\\\\]/', $name, $reserved_character) === 1) {
 			return "the name {$quoted_name} contains the character " . json_encode($reserved_character[0]);
 		}
 		if (substr($name, -1) === '.') {
