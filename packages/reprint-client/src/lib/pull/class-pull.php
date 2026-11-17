@@ -974,6 +974,10 @@ class Pull
             "message" => "Starting server at {$url}",
         ], true);
 
+        // The server only serves the site, so another command can use the
+        // state directory, or Windows can delete it, while the server runs.
+        $this->client->release_state_directory();
+
         if (PHP_OS_FAMILY === 'Windows') {
             // With /s, cmd.exe removes only the outer quotes, so a path holding & or ^ stays quoted.
             $process = proc_open(

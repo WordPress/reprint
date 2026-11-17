@@ -368,6 +368,16 @@ class ImportClient
     /** @var string|null Path that $audit_log_handle has open. */
     private ?string $audit_log_handle_path = null;
 
+    /** @var ReprintProcessLock|null Lock that run() holds for this state directory. */
+    private ?ReprintProcessLock $process_lock = null;
+
+    /**
+     * @var bool True once release_state_directory() has handed the state
+     * directory to other processes. Later state, progress and audit writes
+     * are skipped, because another command may now own the directory.
+     */
+    private bool $state_directory_released = false;
+
     /** @var string Path to pull/volatile-files.json — files the server marks as frequently-changing. */
     private $volatile_files_file;
 
@@ -844,7 +854,7 @@ class ImportClient
         $timestamp = date("Y-m-d H:i:s");
         $log_line = "[{$timestamp}] {$message}\n";
 
-        if ($this->audit_log_handle_path !== $this->audit_log_file) {
+        if (!$this->state_directory_released && $this->audit_log_handle_path !== $this->audit_log_file) {
             // New logs start private; tighten older logs before appending.
             $previous_umask = umask(0077);
             try {
@@ -1200,12 +1210,37 @@ class ImportClient
         ?ReprintProcessLock $process_lock = null
     ): void
     {
+        $lock_acquired_by_run = $process_lock === null;
         $process_lock = $process_lock ?? new ReprintProcessLock($this->state_dir);
         if (!$process_lock->is_held()) {
             throw new InvalidArgumentException(
                 'ImportClient requires a held Reprint process lock.'
             );
         }
+        // This command owns the state directory again, even if an earlier
+        // pull on this client handed it to a server.
+        $this->process_lock = $process_lock;
+        $this->state_directory_released = false;
+        try {
+            $this->run_command($options, $process_lock);
+        } finally {
+            // The client may outlive the command or run another one, so the
+            // lock is held only while this command runs.
+            $this->process_lock = null;
+            if ($lock_acquired_by_run) {
+                $process_lock->close();
+            }
+        }
+    }
+
+    /**
+     * Runs one command for run() while the caller holds the process lock.
+     *
+     * @param array              $options      Options documented on run().
+     * @param ReprintProcessLock $process_lock Lock held for this state directory.
+     */
+    private function run_command(array $options, ReprintProcessLock $process_lock): void
+    {
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;
@@ -15753,6 +15788,9 @@ class ImportClient
      */
     public function save_state(): void
     {
+        if ($this->state_directory_released) {
+            return;
+        }
         // Keep the spinner alive between curl requests. save_state is
         // called frequently during streaming operations, so this fills
         // the gaps where curl's progress callback doesn't fire.
@@ -15823,7 +15861,34 @@ class ImportClient
     public function write_progress_file(?string $error = null): void
     {
         $this->progress_reporter->update($this->progress_context($error));
-        $this->progress_reporter->write_file(true);
+        if (!$this->state_directory_released) {
+            $this->progress_reporter->write_file(true);
+        }
+    }
+
+    /**
+     * Stop writing to the state directory for the rest of this process.
+     *
+     * pull calls this once its work is saved, before the development server
+     * takes over. Closing the audit log and releasing the process lock lets
+     * another command use the state directory while the server runs, and
+     * lets Windows delete it. Later state, progress and audit writes are
+     * skipped, so an interrupted server cannot overwrite that command's state.
+     */
+    public function release_state_directory(): void
+    {
+        $this->write_progress_file();
+        $this->state_directory_released = true;
+        $this->audit_log_handle = null;
+        $this->audit_log_handle_path = null;
+        if ($this->process_lock !== null) {
+            $this->process_lock->close();
+        }
+        // Nothing is left to save on Ctrl-C, so let the signal end the process.
+        if (function_exists('pcntl_signal')) {
+            pcntl_signal(SIGINT, SIG_DFL);
+            pcntl_signal(SIGTERM, SIG_DFL);
+        }
     }
 
     /** Writes an active progress snapshot at most once per second. */
@@ -15980,7 +16045,9 @@ class ImportClient
             : $this->progress_context();
         // Compact filtering must not prevent live snapshot updates.
         $this->progress_reporter->update($context, $data);
-        $this->progress_reporter->write_file();
+        if (!$this->state_directory_released) {
+            $this->progress_reporter->write_file();
+        }
 
         if (( $data['status'] ?? null ) === 'error') {
             $this->command_report_details = array_intersect_key($data, array_flip([
