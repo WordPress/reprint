@@ -263,8 +263,7 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $callb
 }
 
 /**
- * Explain why Windows cannot store a path below the filesystem root, or
- * return null when it can.
+ * Explain why Windows cannot store a path, or return null when it can.
  *
  * Every component is checked, so a path below an unstorable directory is
  * unstorable too. Both `/` and `\` separate components, because Windows PHP
@@ -279,16 +278,16 @@ function register_sqlite_function(PDO $sqlite_pdo, string $name, callable $callb
  *
  * Examples:
  *
- *     windows_unstorable_path_reason('wp-content/uploads/photo.jpg'); // null
- *     windows_unstorable_path_reason('notes/aux.txt');
+ *     windows_unstorable_path_reason('/srv/site/wp-content/uploads/photo.jpg'); // null
+ *     windows_unstorable_path_reason('/srv/site/notes/aux.txt');
  *     // 'the name "aux.txt" uses the reserved device name AUX'
  *
- * @param string $relative_path Path below the filesystem root, as raw bytes.
+ * @param string $path Unix source path, as raw bytes.
  * @return string|null Reason naming the first unstorable component, or null.
  */
-function windows_unstorable_path_reason(string $relative_path): ?string
+function windows_unstorable_path_reason(string $path): ?string
 {
-	foreach (preg_split('~[/\\\\]~', $relative_path) as $name) {
+	foreach (preg_split('~[/\\\\]~', $path) as $name) {
 		if ($name === '') {
 			continue;
 		}

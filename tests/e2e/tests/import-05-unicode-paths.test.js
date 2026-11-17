@@ -72,9 +72,11 @@ describe('Import: Unicode Paths', () => {
             assert.deepEqual(skips, [], 'Only a Windows client skips names');
             return;
         }
-        assert.equal(skips.length, 1, `Expected one skipped path in the audit log:\n${skips.join('\n')}`);
+        // A resumed index read can log the same skip again, so check every line.
+        assert.ok(skips.length > 0, 'Expected the newline file to be skipped');
         // Match the end of the quoted path, including its closing quote.
-        assert.ok(skips[0].includes(`/${JSON.stringify(windowsUnstorableName).slice(1)}`), skips[0]);
+        const quotedPathEnd = `/${JSON.stringify(windowsUnstorableName).slice(1)}:`;
+        assert.ok(skips.every(line => line.includes(quotedPathEnd)), skips.join('\n'));
     });
 
     it('files with emoji, accented chars, spaces, and Chinese chars exist', () => {
