@@ -75,6 +75,7 @@ class CssFileDownloadTest extends TestCase {
      */
     public function testCssDownloadResumesWithoutLosingOrRewritingBytesTwice(string $stop): void
     {
+        \skip_files_pull_from_this_machine_on_windows();
         $relative = '/wp-content/uploads/elementor/css/post-1.css';
         $css = str_repeat('/* https://old.example stays in this comment */'
             . '.a{background:url(https://\\6f ld.example/photo.jpg)}'

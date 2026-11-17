@@ -275,7 +275,9 @@ jobs:
         shell: pwsh
         run: (Get-Command php).Source | Out-File -Encoding ascii -NoNewline windows-php-path.txt
 
+      # A hung WSL install fails quickly, so the failed-job rerun can retry it.
       - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7
+        timeout-minutes: 10
         with:
           distribution: Ubuntu-24.04
           wsl-version: 2

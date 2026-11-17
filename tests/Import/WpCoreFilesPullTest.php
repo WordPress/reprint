@@ -36,6 +36,7 @@ final class WpCoreFilesPullTest extends TestCase {
         $this->fsRoot = $this->root . '/files';
         mkdir($this->fsRoot, 0700, true);
         $this->url = $this->startExporter();
+        \skip_files_pull_from_this_machine_on_windows();
     }
 
     protected function tearDown(): void

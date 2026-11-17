@@ -467,6 +467,9 @@ final class RetryLaterExitCodeTest extends TestCase {
      */
     private function start_command(string $command, string $progress = 'jsonl', array $extra_arguments = [])
     {
+        if (in_array($command, ['files-pull', 'pull-files'], true)) {
+            \skip_files_pull_from_this_machine_on_windows();
+        }
         $process = proc_open(
             [PHP_BINARY, __DIR__ . '/../../packages/reprint-client/bin/reprint-client',
                 $command, $this->remote_reprint_api_url, '--allow-unsafe-http',
