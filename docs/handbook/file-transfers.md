@@ -130,6 +130,18 @@ A link whose target has not been downloaded yet is created after the file transf
 
 Running `flat-docroot` again keeps a copy that still matches its source. A copy that differs, because you edited it or because a later pull changed its source, stops the run. Pass `--force` to replace it with a fresh copy.
 
+### Names a Windows destination cannot store
+
+A Linux or macOS source can hold file names that Windows cannot store. A native Windows client skips a file, directory, or link when any name in its path:
+
+- contains a control character, such as a newline or tab, or one of `<`, `>`, `:`, `"`, `|`, `?`, `*`, `\`
+- ends in a dot or a space
+- is a reserved device name, such as `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, or `LPT1` to `LPT9`, with or without an extension (`nul.txt` is reserved too)
+
+The client leaves these paths out when it reads the source's file list, so it never downloads them, and skipping a directory skips everything under it. The audit log records each skipped path with the name and the reason, in a line starting `WINDOWS UNSTORABLE NAME`. Every later pull checks the list again and skips the same paths, and they are not counted in progress totals. To copy such a file, rename it on the source, or pull from WSL, macOS, or Linux.
+
+Linux and macOS clients store these names unchanged. A Windows source already uses Windows names, so this check applies only to sources that report Unix paths.
+
 ## Rewrite asset URLs
 
 Pass `--new-site-url` or repeat `--rewrite-url FROM TO` before the first file pull when the destination address differs. `pull` applies its mappings to both CSS downloads and the database; `pull-files` accepts them too.

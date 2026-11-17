@@ -11,9 +11,15 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
     assertRemoteIndexEntryCount, assertSiteMirror,
-    fsRootDir, PHP_BINARY,
+    fsRootDir, PHP_BINARY, readAuditLog,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
+
+// Windows cannot store a newline in a name, so the Windows client skips that
+// file. It still writes the invalid UTF-8 name, but Windows keeps names as
+// UTF-16, so WSL may read it back with other bytes.
+const isWindowsClient = PHP_BINARY.endsWith('/windows-php.sh');
+const windowsUnstorableName = 'file\nwith\nnewlines.txt';
 
 describe('Import: Unicode Paths', () => {
     const site = 'emoji-paths';
@@ -59,6 +65,18 @@ describe('Import: Unicode Paths', () => {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
+        // The audit log JSON-encodes each skipped path, so a newline appears as an escape.
+        const skips = readAuditLog(tempDir).split('\n')
+            .filter(line => line.includes('WINDOWS UNSTORABLE NAME | skipped'));
+        if (!isWindowsClient) {
+            assert.deepEqual(skips, [], 'Only a Windows client skips names');
+            return;
+        }
+        // A resumed index read can log the same skip again, so check every line.
+        assert.ok(skips.length > 0, 'Expected the newline file to be skipped');
+        // Match the end of the quoted path, including its closing quote.
+        const quotedPathEnd = `/${JSON.stringify(windowsUnstorableName).slice(1)}:`;
+        assert.ok(skips.every(line => line.includes(quotedPathEnd)), skips.join('\n'));
     });
 
     it('files with emoji, accented chars, spaces, and Chinese chars exist', () => {
@@ -94,9 +112,13 @@ describe('Import: Unicode Paths', () => {
         const importedRoot = join(fsRootDir(tempDir), getSiteDir(site));
         // Playground's mounted filesystem replaces invalid filename bytes.
         // Native PHP tests cover that path, so compare the remaining tree here.
-        const exclude = PHP_BINARY.endsWith('/playground-php.sh')
+        const exclude = PHP_BINARY.endsWith('/playground-php.sh') || isWindowsClient
             ? ['test-data/invalid']
             : [];
+        // The Windows client skips the one name it cannot store, and nothing else.
+        if (isWindowsClient) {
+            exclude.push(`test-data/${windowsUnstorableName}`);
+        }
         assertTreesMatch(getSiteDir(site), importedRoot, { exclude });
     });
 

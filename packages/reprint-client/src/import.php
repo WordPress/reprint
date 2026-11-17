@@ -51,6 +51,7 @@ use function Reprint\Importer\sort_index_file;
 use function Reprint\Importer\unsupported_media_type_error_detail;
 use function Reprint\Importer\is_older_plugin_authentication_refusal;
 use function Reprint\Importer\older_plugin_authentication_error_detail;
+use function Reprint\Importer\windows_unstorable_path_reason;
 use function Reprint\Importer\wordpress_admin_referer;
 use function Reprint\Importer\write_file_index_processor_entry_to_local_index;
 use function Reprint\Importer\write_local_index_entry;
@@ -9715,6 +9716,11 @@ class ImportClient
             );
         }
 
+        // A Windows client cannot store some names that a Unix source allows.
+        // Leaving them out of the index means they are never downloaded.
+        $check_windows_names = Utils::native_path_format() === "windows"
+            && $this->get_state()->remote_path_format() === "unix";
+
         $next_remote_index_file_mode = file_exists($this->next_remote_index_file) ? "a" : "w";
         if ($next_remote_index_file_mode === "w") {
             $this->audit_log(
@@ -9802,7 +9808,8 @@ class ImportClient
             $next_remote_index_file_handle,
             $index_state,
             &$confirmed_entries_count,
-            $context
+            $context,
+            $check_windows_names
         ) {
             if ($this->shutdown_requested) {
                 throw new RuntimeException("Shutdown requested");
@@ -9843,6 +9850,12 @@ class ImportClient
                         ) {
                             continue 2;
                         }
+                    }
+                    $windows_unstorable_reason = $check_windows_names ? windows_unstorable_path_reason($path) : null;
+                    if ($windows_unstorable_reason !== null) {
+                        $quoted_path = json_encode($path, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+                        $this->audit_log("WINDOWS UNSTORABLE NAME | skipped {$quoted_path}: {$windows_unstorable_reason}", true);
+                        continue;
                     }
                     $ctime = (int) ($item["ctime"] ?? 0);
                     $size = (int) ($item["size"] ?? 0);
