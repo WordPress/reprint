@@ -22,6 +22,9 @@ const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'r
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 // ci/windows-php.sh runs the native Windows client from WSL.
 const IS_WINDOWS_CLIENT = PHP_BINARY.endsWith('/windows-php.sh');
+// A Windows client writes a full WordPress tree at under 1 MB/s on CI
+// runners, so its command time limits are three times as long.
+const WINDOWS_CLIENT_TIME_FACTOR = IS_WINDOWS_CLIENT ? 3 : 1;
 // Root reads files whatever their mode, but the source's web server does not.
 const RUNNING_AS_ROOT = process.getuid?.() === 0;
 const DB_HOST = REGISTRY.dbHost;
@@ -362,10 +365,8 @@ export function runImporter(url, outputDir, command, options = {}) {
         try {
             const result = execFileSync(PHP_BINARY, args, {
                 // WASM PHP startup overhead is ~12s per invocation, so the per-call
-                // budget needs to comfortably cover boot + the actual work. A
-                // Windows client writes a full WordPress tree at under 1 MB/s on
-                // CI runners, so it gets three times as long.
-                timeout: options.timeout || (IS_WINDOWS_CLIENT ? 360000 : 120000),
+                // budget needs to comfortably cover boot + the actual work.
+                timeout: (options.timeout || 120000) * WINDOWS_CLIENT_TIME_FACTOR,
                 encoding: 'utf-8',
                 env: { ...process.env },
                 maxBuffer: 50 * 1024 * 1024,
@@ -424,7 +425,7 @@ export function runImporter(url, outputDir, command, options = {}) {
     const commandExtraArgs = options.extraArgs || [];
     // Wall-clock budget across all resume attempts. Set high enough to cover several
     // WASM PHP invocations (~12s startup each) plus their actual work.
-    const wallTimeout = options.wallTimeout || (IS_WINDOWS_CLIENT ? 720000 : 240000);
+    const wallTimeout = (options.wallTimeout || 240000) * WINDOWS_CLIENT_TIME_FACTOR;
     const wallStart = Date.now();
     let result = command === 'preflight'
         ? runPreflight(commandExtraArgs)
