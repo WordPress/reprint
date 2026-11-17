@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import {
     createMysqlConnection, createTempDir, getDbName,
     getHarnessKey, getSiteDir, getSiteUrl, getSiteSecret, runImporter, rebuiltWordPressCacheFilter,
+    IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { createSqlFidelityData } from '../lib/sql-fidelity-data.js';
@@ -35,10 +36,11 @@ let sourceBaseline;
 let targetBaseline;
 let sequence = 0;
 
-// The streamed push client requires native PHP 8.1+, not PHP.wasm.
+// The streamed push client requires native PHP 8.1+, not PHP.wasm. Push
+// from a native Windows client is not supported yet.
 const nativePhpVersion = phpBinary.endsWith('/playground-php.sh')
     ? 0 : Number(execFileSync(phpBinary, ['-r', 'echo PHP_VERSION_ID;'], { encoding: 'utf8' }));
-const describeNative = nativePhpVersion >= 80100 ? describe : describe.skip;
+const describeNative = nativePhpVersion >= 80100 && !IS_WINDOWS_CLIENT ? describe : describe.skip;
 describeNative('Full database push: pull fixtures and live WordPress', { timeout: 600000 }, () => {
     beforeAll(async () => {
         directory = createTempDir('e2e-full-database-push');

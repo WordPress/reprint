@@ -31,6 +31,7 @@ import {
     getSiteUrl,
     pullStateDirectory,
     runImporter,
+    waitUntilClientCanConnect,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -85,6 +86,7 @@ describe('Import: Outbound application firewall compatibility', { timeout: 24000
         );
         const [readyMessage] = await once(firewallProcess, 'message');
         firewallOrigin = `http://127.0.0.1:${readyMessage.port}`;
+        waitUntilClientCanConnect(readyMessage.port);
         importUrl =
             `${firewallOrigin}/?reprint-api&directory=` +
             encodeURIComponent(getSiteDir(site));

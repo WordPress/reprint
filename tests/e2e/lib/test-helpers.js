@@ -1027,4 +1027,23 @@ export function assertLinkValue(linkPath, expectedValue, message) {
     );
 }
 
+/**
+ * Waits until the client's PHP can connect to a port the harness just opened.
+ * Windows reaches a WSL port through a relay that notices a new listener
+ * only after a short delay, so a client started at once is refused.
+ */
+export function waitUntilClientCanConnect(port) {
+    if (!IS_WINDOWS_CLIENT) {
+        return;
+    }
+    const connectScript = `for ($attempt = 0; $attempt < 100; ++$attempt) {
+        $connection = @fsockopen('127.0.0.1', ${Number(port)}, $error_number, $error_message, 0.2);
+        if ($connection) { fclose($connection); exit(0); }
+        usleep(100000);
+    }
+    fwrite(STDERR, "Windows PHP could not connect to 127.0.0.1:${Number(port)}: $error_message\n");
+    exit(1);`;
+    execFileSync(PHP_BINARY, ['-r', connectScript], { stdio: ['ignore', 'ignore', 'inherit'] });
+}
+
 export { PHP_BINARY, IS_WINDOWS_CLIENT };
