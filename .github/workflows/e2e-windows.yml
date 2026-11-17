@@ -119,7 +119,7 @@ jobs:
           export TMPDIR=/mnt/c/reprint-e2e-tmp
           cd /root/reprint/tests/e2e
           # wsl-bash runs with -e, so a failing run must not end the script.
-          timeout --kill-after=60 100m npx --no-install vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000 \
+          timeout --kill-after=60 100m npx --no-install vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000 --hook-timeout=1200000 \
             --reporter=default --reporter=json --outputFile.json="$workspace/e2e-windows-shard-${{ matrix.shard }}.json" \
             || echo "vitest exited $?"
 
