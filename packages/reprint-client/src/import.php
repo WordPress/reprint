@@ -1210,13 +1210,37 @@ class ImportClient
         ?ReprintProcessLock $process_lock = null
     ): void
     {
+        $lock_acquired_by_run = $process_lock === null;
         $process_lock = $process_lock ?? new ReprintProcessLock($this->state_dir);
         if (!$process_lock->is_held()) {
             throw new InvalidArgumentException(
                 'ImportClient requires a held Reprint process lock.'
             );
         }
+        // This command owns the state directory again, even if an earlier
+        // pull on this client handed it to a server.
         $this->process_lock = $process_lock;
+        $this->state_directory_released = false;
+        try {
+            $this->run_command($options, $process_lock);
+        } finally {
+            // The client may outlive the command or run another one, so the
+            // lock is held only while this command runs.
+            $this->process_lock = null;
+            if ($lock_acquired_by_run) {
+                $process_lock->close();
+            }
+        }
+    }
+
+    /**
+     * Runs one command for run() while the caller holds the process lock.
+     *
+     * @param array              $options      Options documented on run().
+     * @param ReprintProcessLock $process_lock Lock held for this state directory.
+     */
+    private function run_command(array $options, ReprintProcessLock $process_lock): void
+    {
         $this->verbose_mode = $options["verbose"] ?? false;
         $this->progress->set_verbose_mode($this->verbose_mode);
         $this->follow_symlinks = $options["follow_symlinks"] ?? true;

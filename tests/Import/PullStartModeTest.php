@@ -247,4 +247,31 @@ PHP
         $this->assertStringNotContainsString('After the server exits.', file_get_contents($this->stateDir . '/audit.log'));
         $this->assertSame($state_after_server, file_get_contents($state_file));
     }
+
+    /**
+     * A client whose pull handed the state directory to its server may run
+     * another command later. That command holds the lock only while it runs,
+     * and writes its audit log again.
+     */
+    public function testLaterRunOwnsTheStateDirectoryOnlyWhileItRuns(): void
+    {
+        $client = new \ImportClient('https://example.invalid', $this->stateDir, $this->fsRoot);
+        $client->release_state_directory();
+
+        ob_start();
+        try {
+            $client->run(['command' => 'pull-metadata']);
+        } finally {
+            ob_end_clean();
+        }
+        $client->audit_log('After a later run.', false);
+
+        $other_command_lock = new \ReprintProcessLock($this->stateDir);
+        $this->assertTrue($other_command_lock->is_held());
+        $other_command_lock->close();
+        $this->assertStringContainsString(
+            'After a later run.',
+            (string) @file_get_contents($this->stateDir . '/audit.log')
+        );
+    }
 }
