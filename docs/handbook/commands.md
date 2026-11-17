@@ -23,7 +23,7 @@ Reference pages write commands with three shell variables. Set them before pasti
 
 **Credentials.** Commands that contact the source need one credential flag: `--private-key-path=./reprint-key.pem` after creating and authorizing that key with `keygen`, or `--secret='TOKEN'` when the source uses a connection token. Never pass both. Local-only commands such as `db-apply`, `apply-runtime`, and `preflight-assert` take no credential. See [Authentication](https://developer.wordpress.org/reprint/reference/authentication/).
 
-**Directories.** Keep `$STATE_DIR` outside `$FS_ROOT` and outside every web-served directory. Use one state directory per filesystem root, and do not run two commands against the same state directory at once. A `pull` that has started its development server no longer uses the state directory, so other commands can run against it while the server runs. To continue an interrupted transfer, run the same command with the same source address, state directory, and filesystem root.
+**Directories.** Keep `$STATE_DIR` outside `$FS_ROOT` and outside every web-served directory. Use one state directory per filesystem root, and do not run two commands against the same state directory at once. To continue an interrupted transfer, run the same command with the same source address, state directory, and filesystem root.
 
 ## Complete workflows
 
