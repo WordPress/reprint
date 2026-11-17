@@ -80,17 +80,9 @@ jobs:
         shell: wsl-bash {0}
         run: printf '[boot]\nsystemd=true\n' > /etc/wsl.conf
 
-      # Mirrored networking lets the harness in WSL reach a pulled site that
-      # Windows PHP serves on 127.0.0.1, as well as the reverse.
-      - name: Use mirrored networking in WSL
+      - name: Restart WSL with systemd
         shell: pwsh
-        run: Set-Content -Path "$env:USERPROFILE\.wslconfig" -Value "[wsl2]`nnetworkingMode=mirrored"
-
-      # Networking is set for the whole WSL VM, so shut it down rather than
-      # only the distribution.
-      - name: Restart WSL with systemd and mirrored networking
-        shell: pwsh
-        run: wsl --shutdown
+        run: wsl --terminate Ubuntu-24.04
 
       - name: Copy the harness into WSL and install Node
         shell: wsl-bash {0}

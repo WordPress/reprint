@@ -22,9 +22,6 @@ const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'r
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 // ci/windows-php.sh runs the native Windows client from WSL.
 const IS_WINDOWS_CLIENT = PHP_BINARY.endsWith('/windows-php.sh');
-// A pulled site's runtime names paths in the client's format, so the
-// client's own PHP must run it.
-const SITE_PHP_BINARY = IS_WINDOWS_CLIENT ? PHP_BINARY : (process.env.E2E_WP_CLI_PHP_BINARY || 'php');
 // Root reads files whatever their mode, but the source's web server does not.
 const RUNNING_AS_ROOT = process.getuid?.() === 0;
 const DB_HOST = REGISTRY.dbHost;
@@ -1030,4 +1027,4 @@ export function assertLinkValue(linkPath, expectedValue, message) {
     );
 }
 
-export { PHP_BINARY, IS_WINDOWS_CLIENT, SITE_PHP_BINARY };
+export { PHP_BINARY, IS_WINDOWS_CLIENT };

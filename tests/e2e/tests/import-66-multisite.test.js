@@ -12,7 +12,7 @@ import { inspect } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir, getSiteDir, getSiteUrl, getSiteSecret,
-    createMysqlConnection, apiRequest, apiRequestWithFileList, SITE_PHP_BINARY,
+    createMysqlConnection, apiRequest, apiRequestWithFileList, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -71,7 +71,8 @@ define('BLOG_ID_CURRENT_SITE', 1);
     });
 
     for (const selectedId of [7, 1]) {
-        it(`migrates site ${selectedId} while keeping sibling data at the source`, async () => {
+        // Booting a pulled site under native Windows PHP is not a supported scenario.
+        it.skipIf(IS_WINDOWS_CLIENT)(`migrates site ${selectedId} while keeping sibling data at the source`, async () => {
             const selected = fixture.sites[selectedId];
             const directory = createTempDir(`e2e-multisite-${selectedId}`);
             const target = {
@@ -202,7 +203,7 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.ok(inspection.attachment.startsWith(inspection.upload_url + '/'));
 
             let serverLog = '';
-            target.server = spawn(SITE_PHP_BINARY, ['-S', `127.0.0.1:${target.port}`, '-t', target.documentRoot, join(directory, 'runtime/runtime.php')], { stdio: ['ignore', 'pipe', 'pipe'] });
+            target.server = spawn(php, ['-S', `127.0.0.1:${target.port}`, '-t', target.documentRoot, join(directory, 'runtime/runtime.php')], { stdio: ['ignore', 'pipe', 'pipe'] });
             target.server.stdout.on('data', data => { serverLog += data; });
             target.server.stderr.on('data', data => { serverLog += data; });
             // A refused connection after the server accepted a request hides

@@ -6,7 +6,7 @@ import { cpSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writ
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import {
-    createMysqlConnection, createTempDir, getHarnessKey, runImporter, SITE_PHP_BINARY,
+    createMysqlConnection, createTempDir, getHarnessKey, runImporter, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureWpTemplate } from '../lib/site-setup.js';
 
@@ -17,7 +17,8 @@ const databases = [];
 const servers = [];
 let root, sourceRoot, sourceUrl, snapshotDirectory;
 
-describe('WordPress after database cleanup', () => {
+// Booting a pulled site under native Windows PHP is not a supported scenario.
+describe.skipIf(IS_WINDOWS_CLIENT)('WordPress after database cleanup', () => {
     beforeAll(async () => {
         root = realpathSync(createTempDir('e2e-cache-behavior'));
         sourceRoot = join(root, 'source');
@@ -191,7 +192,7 @@ async function startServer(directory, router) {
     await once(listener, 'listening');
     const port = listener.address().port;
     await new Promise((resolve, reject) => listener.close(error => error ? reject(error) : resolve()));
-    const child = spawn(SITE_PHP_BINARY, ['-S', `127.0.0.1:${port}`, '-t', directory, router], { stdio: ['ignore', 'ignore', 'pipe'] });
+    const child = spawn(nativePhp, ['-S', `127.0.0.1:${port}`, '-t', directory, router], { stdio: ['ignore', 'ignore', 'pipe'] });
     servers.push(child);
     let log = '';
     const url = await new Promise((resolve, reject) => {

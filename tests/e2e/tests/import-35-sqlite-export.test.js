@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    apiRequest, createMysqlConnection, queryMysqlOnSqlite, IS_WINDOWS_CLIENT, SITE_PHP_BINARY,
+    apiRequest, createMysqlConnection, queryMysqlOnSqlite, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { convertToMultisite, ensureMultisite, runWp } from '../lib/multisite-setup.js';
@@ -339,7 +339,8 @@ describe.each([
         fixture = JSON.parse(readFileSync(join(getSiteDir(site), '.multisite-layer.json'), 'utf8'));
     });
 
-    it.each(['sqlite', 'mysql'])('migrates site 7 to a %s single-site target', async (engine) => {
+    // Booting a pulled site under native Windows PHP is not a supported scenario.
+    (IS_WINDOWS_CLIENT ? it.skip : it).each(['sqlite', 'mysql'])('migrates site 7 to a %s single-site target', async (engine) => {
         const directory = createTempDir(`e2e-${site}-to-${engine}`);
         const documentRoot = join(directory, 'site');
         const targetUrl = 'http://127.0.0.1:9697';
@@ -384,7 +385,7 @@ describe.each([
                     'values' => $wpdb->get_results("SELECT meta_key, meta_value FROM {$wpdb->postmeta} WHERE meta_key LIKE 'sqlite-probe-%' ORDER BY meta_key", ARRAY_A),
                 ]);
             `);
-            server = spawn(SITE_PHP_BINARY, [
+            server = spawn(process.env.E2E_WP_CLI_PHP_BINARY || 'php', [
                 '-S', '127.0.0.1:9697', '-t', documentRoot, join(directory, 'runtime/runtime.php'),
             ], { stdio: ['ignore', 'pipe', 'pipe'] });
             server.stdout.on('data', data => { serverLog = (serverLog + data).slice(-16000); });
