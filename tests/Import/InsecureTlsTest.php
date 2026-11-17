@@ -151,6 +151,7 @@ final class InsecureTlsTest extends TestCase {
     {
         $client = new \ImportClient($this->https_url, $this->root . '/state', $this->root . '/local', ['insecure' => true]);
         ( new \ReflectionProperty($client, 'hmac_client') )->setValue($client, new \Site_Export_HMAC_Client('tls-test-secret'));
+        \record_preflight_from_this_machine($client);
         $file_list = $this->root . '/file-list.json';
         file_put_contents($file_list, json_encode([['path' => base64_encode($this->root . '/remote/example.txt')]]));
         for ($request = 0; $request < 2; ++$request) {

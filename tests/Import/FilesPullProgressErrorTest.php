@@ -104,7 +104,7 @@ class FilesPullProgressErrorTest extends TestCase {
             $url = 'http://' . $address . '/';
             $client = new FileErrorProgressClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
             \write_current_pull_state($client, [
-                'preflight' => ['data' => ['ok' => true, 'wp_detect' => ['roots' => [['path' => $source]]]], 'http_code' => 200],
+                'preflight' => ['data' => ['ok' => true, 'path_format' => \WordPress\Reprint\Server\Utils::native_path_format(), 'wp_detect' => ['roots' => [['path' => $source]]]], 'http_code' => 200],
                 'active_resumable_command' => ['command_name' => 'files-pull', 'completion_state' => 'in_progress', 'current_stage' => 'fetch'],
             ]);
             ( new \ReflectionMethod($client, 'initialize_tuner') )->invoke($client, [

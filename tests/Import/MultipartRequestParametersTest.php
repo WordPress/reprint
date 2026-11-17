@@ -64,7 +64,7 @@ final class MultipartRequestParametersTest extends TestCase {
             $client, new \Site_Export_HMAC_Client('multipart-test-secret')
         );
         $client->get_state()->set_preflight_record([
-            'data' => ['capabilities' => [
+            'data' => ['path_format' => \WordPress\Reprint\Server\Utils::native_path_format(), 'capabilities' => [
                 'base64_path_parameters' => true,
                 'rot13_base64_request_values' => $branded_paths,
             ]],
@@ -182,7 +182,7 @@ final class MultipartRequestParametersTest extends TestCase {
         $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/local', ['allow_http' => true]);
         ( new \ReflectionProperty($client, 'hmac_client') )->setValue($client, new \Site_Export_HMAC_Client('multipart-test-secret'));
         $client->get_state()->set_preflight_record([
-            'data' => ['capabilities' => ['rot13_base64_request_values' => true]],
+            'data' => ['path_format' => \WordPress\Reprint\Server\Utils::native_path_format(), 'capabilities' => ['rot13_base64_request_values' => true]],
         ]);
         $downloaded = ( new \ReflectionMethod($client, 'fetch_files_into') )->invoke(
             $client, $this->root . '/runtime', [$remote_absolute_path]
