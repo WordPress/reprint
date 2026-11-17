@@ -118,15 +118,17 @@ class WindowsPathTest extends TestCase
         $this->assertSame('/local/site/upload.txt', $mapper->remote_path_to_local_path('D:\\site\\upload.txt'));
     }
 
-    /** Only a native Windows client is refused a Windows source, because it cannot name the drive directory. */
-    public function test_only_a_windows_client_is_refused_a_windows_source(): void
+    /** A native Windows client cannot create a drive directory such as D:, but can store shares and remapped drive paths. */
+    public function test_a_windows_client_rejects_only_unmapped_drive_paths(): void
     {
-        RemoteToLocalPathMapper::assert_local_filesystem_can_store_source('windows', 'unix');
-        RemoteToLocalPathMapper::assert_local_filesystem_can_store_source('unix', 'windows');
-        RemoteToLocalPathMapper::assert_local_filesystem_can_store_source('unix', 'unix');
+        $linux_client = new RemoteToLocalPathMapper('/local', 'windows', [], [], null, 'unix');
+        $this->assertSame('/local/D:/site/a.txt', $linux_client->remote_path_to_local_path('D:\\site\\a.txt'));
+        $windows_client = new RemoteToLocalPathMapper('C:/local', 'windows', [], ['D:/site' => 'C:/local/site'], null, 'windows');
+        $this->assertSame('C:/local/site/a.txt', $windows_client->remote_path_to_local_path('D:\\site\\a.txt'));
+        $this->assertSame('C:/local/UNC/SERVER/SHARE/a.txt', $windows_client->remote_path_to_local_path('\\\\server\\share\\a.txt'));
         $this->expectException(\InvalidArgumentException::class);
-        $this->expectExceptionMessage('A native Windows client cannot pull from a Windows source. The source reported path_format "windows".');
-        RemoteToLocalPathMapper::assert_local_filesystem_can_store_source('windows', 'windows');
+        $this->expectExceptionMessage('A native Windows client cannot store the Windows source path D:/other/b.txt under --fs-root. It would need a directory named D:, which Windows does not allow.');
+        $windows_client->remote_path_to_local_path('D:\\other\\b.txt');
     }
 
     /** UNC share roots must stay distinct from drive roots and Unix directories. */

@@ -12621,10 +12621,6 @@ class ImportClient
     private function path_mapper(): RemoteToLocalPathMapper
     {
         if ($this->remote_to_local_path_mapper === null) {
-            RemoteToLocalPathMapper::assert_local_filesystem_can_store_source(
-                $this->get_state()->remote_path_format(),
-                Utils::native_path_format()
-            );
             $this->remote_to_local_path_mapper = new RemoteToLocalPathMapper(
                 $this->filesystem_root,
                 $this->get_state()->remote_path_format(),
