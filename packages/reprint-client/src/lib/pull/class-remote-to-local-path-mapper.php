@@ -18,8 +18,7 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  *
  * Windows drive paths use forward slashes beneath the local root: D:\site\a.txt
  * becomes /local/D:/site/a.txt. The drive stays in the path so D: and E: do not
- * collide. Windows does not allow a directory named D:, so a native Windows
- * client rejects an unmapped drive path. A UNC path `\\SERVER\SHARE/file.txt` becomes
+ * collide. A UNC path `\\SERVER\SHARE/file.txt` becomes
  * /local/UNC/SERVER/SHARE/file.txt. Unix paths keep literal backslashes in names.
  *
  * Copied targets and rewritten symlink destinations both use this mapping, so
@@ -45,9 +44,6 @@ final class RemoteToLocalPathMapper
     /** Local root for followed targets outside the original pull scope. */
     private ?string $local_followed_symlinks_root;
 
-    /** This client's path format, which decides whether a drive directory such as D: can exist. */
-    private string $local_path_format;
-
     /**
      * Stores the resolved path settings used by one files pull.
      *
@@ -60,15 +56,13 @@ final class RemoteToLocalPathMapper
      * @param list<string>         $original_remote_absolute_path_roots Remote absolute path roots selected before following symlinks.
      * @param array<string,string> $resolved_path_mappings             Remote absolute prefix to local absolute prefix.
      * @param string|null          $local_followed_symlinks_root       Local root for followed targets outside the original scope.
-     * @param string|null          $local_path_format                  This client's path format. Defaults to the running system's.
      */
     public function __construct(
         string $filesystem_root,
         string $remote_path_format,
         array $original_remote_absolute_path_roots,
         array $resolved_path_mappings = [],
-        ?string $local_followed_symlinks_root = null,
-        ?string $local_path_format = null
+        ?string $local_followed_symlinks_root = null
     ) {
         $this->filesystem_root = $filesystem_root;
         Utils::assert_valid_path_format($remote_path_format);
@@ -76,8 +70,6 @@ final class RemoteToLocalPathMapper
         $this->original_remote_absolute_path_roots = $original_remote_absolute_path_roots;
         $this->resolved_path_mappings = $resolved_path_mappings;
         $this->local_followed_symlinks_root = $local_followed_symlinks_root;
-        $this->local_path_format = $local_path_format ?? Utils::native_path_format();
-        Utils::assert_valid_path_format($this->local_path_format);
     }
 
     /**
@@ -116,12 +108,6 @@ final class RemoteToLocalPathMapper
         $local_relative_path = $remote_absolute_path;
         if ($this->remote_path_format === 'windows' && substr($remote_absolute_path, 0, 2) === '\\\\') {
             $local_relative_path = 'UNC/' . str_replace('\\', '/', substr($remote_absolute_path, 2));
-        } elseif ($this->remote_path_format === 'windows' && $this->local_path_format === 'windows') {
-            throw new InvalidArgumentException(
-                "A native Windows client cannot store the Windows source path {$remote_absolute_path} under --fs-root. "
-                . 'It would need a directory named ' . substr($remote_absolute_path, 0, 2) . ', which Windows does not allow. '
-                . 'Map the path with --remap, or pull this source with a Linux, macOS, or WSL client.'
-            );
         }
 
         if (

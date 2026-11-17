@@ -2,8 +2,6 @@
 
 Follow [Clone your site](https://developer.wordpress.org/reprint/getting-started/copy-a-site/) using a Linux, macOS, or WSL client. Update both the source plugin and the client to versions with Windows path support. These notes explain source paths and checks before migration. To run the client in native Windows PHP, see [Requirements and downloads](https://developer.wordpress.org/reprint/getting-started/requirements/#check-the-destination-computer).
 
-A client running in native Windows PHP cannot store drive-letter paths in this layout, because Windows does not allow a directory named `D:`. It stops with an error that names the first such path. Network share paths work, and so do drive paths that `--remap` places elsewhere under the filesystem root. For other Windows-hosted sites, use a Linux, macOS, or WSL client.
-
 ## Choose source paths
 
 Source selections accept full drive-letter paths such as `D:\Sites\example.test` and network shares such as `\\server\share\site`. A share must name both the server and share. WordPress tokens, such as `:wp-content:/uploads`, avoid having to spell the host's absolute path.
