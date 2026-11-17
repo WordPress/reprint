@@ -385,9 +385,6 @@ class ImportClient
     /** @var string Path to pull/deferred-symlinks.jsonl — Windows links whose targets had not arrived. */
     private $deferred_symlinks_file;
 
-    /** @var string Path to pull/windows-unstorable-paths.jsonl — remote paths this files-pull skipped because Windows cannot store their names. */
-    private $windows_unstorable_paths_file;
-
     /** @var bool When true, emit detailed operation logs to stdout. Set via --verbose. */
     private $verbose_mode = false;
 
@@ -732,7 +729,6 @@ class ImportClient
         $this->audit_log_file = wp_join_unix_paths($this->state_dir, "audit.log");
         $this->volatile_files_file = wp_join_unix_paths($this->pull_state_directory, "volatile-files.json");
         $this->deferred_symlinks_file = wp_join_unix_paths($this->pull_state_directory, "deferred-symlinks.jsonl");
-        $this->windows_unstorable_paths_file = wp_join_unix_paths($this->pull_state_directory, "windows-unstorable-paths.jsonl");
         $this->progress_reporter = new ProgressReporter(
             wp_join_unix_paths($this->state_dir, "progress.json")
         );
@@ -1257,97 +1253,6 @@ class ImportClient
                 $remote_path_type
             );
         }
-        // A part replayed after an interruption can append the same path
-        // again. report_windows_unstorable_paths() removes those repeats.
-        $report_line = Utils::json_encode_or_throw([
-            "path" => base64_encode($remote_absolute_path),
-            "type" => $remote_path_type,
-            "reason" => $reason,
-        ]) . "\n";
-        if (@file_put_contents($this->windows_unstorable_paths_file, $report_line, FILE_APPEND | LOCK_EX) !== strlen($report_line)) {
-            $php_error = error_get_last()['message'] ?? 'PHP reported no reason';
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
-            throw new RuntimeException("Could not append a skipped path to {$this->windows_unstorable_paths_file}: {$php_error}");
-        }
-    }
-
-    /** The final command report lists at most this many skipped paths. */
-    private const WINDOWS_UNSTORABLE_PATHS_IN_COMMAND_REPORT = 100;
-
-    /**
-     * Lists the remote paths this files-pull skipped because Windows cannot store their names.
-     *
-     * Sorting by path removes the repeats a replayed part may have appended,
-     * and lets the list be read one line at a time. The terminal, the audit
-     * log, and one JSONL record per path list every path. The final command
-     * report carries the count and the first paths in path order.
-     */
-    private function report_windows_unstorable_paths(): void
-    {
-        if (!is_file($this->windows_unstorable_paths_file) || filesize($this->windows_unstorable_paths_file) === 0) {
-            return;
-        }
-        if (!sort_index_file($this->windows_unstorable_paths_file)) {
-            return;
-        }
-        $count = $this->count_newlines($this->windows_unstorable_paths_file);
-        $message = "{$count} remote path(s) skipped because Windows cannot store their names";
-        $this->audit_log("WINDOWS UNSTORABLE NAME SUMMARY | {$message}", true);
-        $this->progress->show_lifecycle_line("{$message}:\n");
-        $paths_in_command_report = [];
-        $report_handle = fopen($this->windows_unstorable_paths_file, "r");
-        if ($report_handle === false) {
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
-            throw new RuntimeException("Could not read the skipped path report {$this->windows_unstorable_paths_file}.");
-        }
-        try {
-            while (true) {
-                $report_line = fgets($report_handle);
-                if ($report_line === false) {
-                    break;
-                }
-                $skipped_path = json_decode($report_line, true);
-                $encoded_remote_path = $skipped_path["path"] ?? null;
-                $remote_absolute_path = is_string($encoded_remote_path) ? base64_decode($encoded_remote_path, true) : false;
-                if (!is_string($remote_absolute_path) || !is_string($skipped_path["reason"] ?? null)) {
-                    // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- CLI filesystem path, never HTML output.
-                    throw new RuntimeException("Each line of {$this->windows_unstorable_paths_file} must hold a base64 path and a reason; observed: " . substr($report_line, 0, 200));
-                }
-                $this->progress->show_lifecycle_line(
-                    "  " . TerminalProgress::escape_text("{$remote_absolute_path} — {$skipped_path["reason"]}") . "\n"
-                );
-                if (count($paths_in_command_report) < self::WINDOWS_UNSTORABLE_PATHS_IN_COMMAND_REPORT) {
-                    $paths_in_command_report[] = [
-                        "path_b64" => $skipped_path["path"],
-                        "path_type" => $skipped_path["type"] ?? null,
-                        "reason" => $skipped_path["reason"],
-                    ];
-                }
-                $this->output_progress(
-                    [
-                        "type" => "windows_unstorable_path",
-                        "path" => $remote_absolute_path,
-                        "path_b64" => $skipped_path["path"],
-                        "path_type" => $skipped_path["type"] ?? null,
-                        "reason" => $skipped_path["reason"],
-                        "message" => "Skipped {$remote_absolute_path}: {$skipped_path["reason"]}",
-                    ],
-                    true,
-                );
-            }
-        } finally {
-            fclose($report_handle);
-        }
-        $this->command_report_details["windows_unstorable_path_count"] = $count;
-        $this->command_report_details["windows_unstorable_paths"] = $paths_in_command_report;
-        $this->output_progress(
-            [
-                "type" => "windows_unstorable_paths",
-                "count" => $count,
-                "message" => $message,
-            ],
-            true,
-        );
     }
 
     /**
@@ -4557,11 +4462,6 @@ class ImportClient
             $this->get_state()->files_pull_summary = new FilesPullSummaryState();
             $this->progress_reporter->reset_file_counters();
             $this->save_state();
-            // The final report lists only the paths this run skipped.
-            if (file_exists($this->windows_unstorable_paths_file)) {
-                @unlink($this->windows_unstorable_paths_file);
-                $this->audit_log("FILE DELETE | {$this->windows_unstorable_paths_file} | new files-pull");
-            }
 
             if ($is_delta) {
                 $remote_index_entry_count = $this->remote_index_entry_count();
@@ -4837,7 +4737,6 @@ class ImportClient
         ], true);
 
         $this->report_volatile_files();
-        $this->report_windows_unstorable_paths();
     }
 
     /**
@@ -16278,7 +16177,7 @@ class ImportClient
                 'bytes' => $data['progress']['bytes'] ?? null,
             ];
             $is_attention = isset($data['error']) || isset($data['error_message'])
-                || in_array($type, ['warning', 'error', 'symlink_error', 'symlink_follow_rejected', 'volatile_files', 'windows_unstorable_path', 'windows_unstorable_paths', 'interrupt', 'state_saved', 'state_save_error'], true);
+                || in_array($type, ['warning', 'error', 'symlink_error', 'symlink_follow_rejected', 'volatile_files', 'interrupt', 'state_saved', 'state_save_error'], true);
             // Request-completion records have a phase and counters, but no
             // command or message. Omit those from compact output.
             $is_result = in_array($status, ['complete', 'partial', 'error', 'aborted', 'failed', 'interrupted', 'restart'], true)

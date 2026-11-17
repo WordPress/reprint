@@ -2,25 +2,11 @@
 
 // phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedNamespaceFound -- Shared importer test namespace.
 // phpcs:disable Generic.Classes.OpeningBraceSameLine.BraceOnNewLine -- Match importer test style.
-// phpcs:disable Generic.Files.OneObjectStructurePerFile.MultipleFound -- Test-only progress observer lives with its endpoint test.
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
 
 require_once __DIR__ . '/../../packages/reprint-client/src/import.php';
-
-/** Keeps the JSONL records the client emits, as a caller reading its output would. */
-class UnstorableNameProgressClient extends \ImportClient
-{
-    /** @var list<array<string,mixed>> */
-    public array $progress_records = [];
-
-    public function output_progress(array $data, bool $force = false): void
-    {
-        parent::output_progress($data, $force);
-        $this->progress_records[] = $data;
-    }
-}
 
 /**
  * A Unix source can hold names that Windows cannot store. A Windows client
@@ -96,9 +82,6 @@ final class PullWindowsUnstorableNameTest extends TestCase
             return base64_decode(json_decode($line, true)['path']);
         }, file(dirname($client->pull_state_directory) . '/local_index.jsonl', FILE_IGNORE_NEW_LINES));
         $audit_log = file_get_contents($client->state_dir . '/audit.log');
-        $report_records = array_values(array_filter($client->progress_records, static function (array $record): bool {
-            return ( $record['type'] ?? null ) === 'windows_unstorable_path';
-        }));
 
         if (DIRECTORY_SEPARATOR === '\\') {
             sort($local_index_paths);
@@ -115,16 +98,6 @@ final class PullWindowsUnstorableNameTest extends TestCase
                 'WINDOWS UNSTORABLE NAME | skipped link "/site/CON": the name "CON" uses the reserved device name CON',
                 $audit_log
             );
-            $this->assertSame(
-                ['/site/CON', '/site/bad:dir', '/site/bad:dir/inner.txt', $newline_name],
-                array_column($report_records, 'path')
-            );
-            $this->assertSame('the name "bad:dir" contains the character ":"', $report_records[2]['reason']);
-            $this->assertSame(4, $client->command_report_details['windows_unstorable_path_count']);
-            $this->assertSame(
-                array_map('base64_encode', ['/site/CON', '/site/bad:dir', '/site/bad:dir/inner.txt', $newline_name]),
-                array_column($client->command_report_details['windows_unstorable_paths'], 'path_b64')
-            );
             $this->assertSame(['good.txt'], array_values(array_diff(scandir($local_site), ['.', '..'])));
             return;
         }
@@ -134,9 +107,6 @@ final class PullWindowsUnstorableNameTest extends TestCase
         $this->assertSame('newline', file_get_contents($this->root . '/files' . $newline_name));
         $this->assertSame('good.txt', readlink($local_site . '/CON'));
         $this->assertStringNotContainsString('WINDOWS UNSTORABLE NAME', $audit_log);
-        $this->assertSame([], $report_records);
-        $this->assertArrayNotHasKey('windows_unstorable_paths', $client->command_report_details);
-        $this->assertFileDoesNotExist($client->pull_state_directory . '/windows-unstorable-paths.jsonl');
     }
 
     /**
@@ -148,7 +118,7 @@ final class PullWindowsUnstorableNameTest extends TestCase
     {
         $this->pull_source_once();
         $newline_name = "/site/file\nwith\nnewlines.txt";
-        $client = new UnstorableNameProgressClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
+        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         \write_current_pull_state($client, [
             'preflight' => ['http_code' => 200, 'data' => [
                 'ok' => true,
@@ -201,9 +171,9 @@ final class PullWindowsUnstorableNameTest extends TestCase
      * The source sends a directory and its file, a file split over two parts,
      * a link named after a device, and one ordinary file.
      */
-    private function pull_source_once(): UnstorableNameProgressClient
+    private function pull_source_once(): \ImportClient
     {
-        $client = new UnstorableNameProgressClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
+        $client = new \ImportClient($this->url, $this->root . '/state', $this->root . '/files', ['allow_http' => true]);
         ( new \ReflectionMethod($client, 'initialize_credential') )->invoke($client, true, ['secret' => 'test-secret']);
         // The source reports Unix paths, as a Linux host does.
         $client->get_state()->set_preflight_record(['data' => ['path_format' => 'unix']]);
@@ -225,7 +195,6 @@ final class PullWindowsUnstorableNameTest extends TestCase
         $this->assertTrue(( new \ReflectionMethod($client, 'fetch_file_batch') )->invoke($client, [], null));
         $journal = ( new \ReflectionProperty(\ImportClient::class, 'pull_index_journal') )->getValue($client);
         $journal->apply_pending_records('unix');
-        ( new \ReflectionMethod($client, 'report_windows_unstorable_paths') )->invoke($client);
         return $client;
     }
 

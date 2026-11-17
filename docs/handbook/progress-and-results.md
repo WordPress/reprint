@@ -55,8 +55,6 @@ The report goes to stdout, except when stdout carries SQL; then it goes to stder
 
 `failed_stage`, `error`, and `error_code` are null when unavailable. Failed commands which have no specific error code still provide their error message. HTTP and cURL details, including `http_code`, `curl_errno`, and `consecutive_failures_without_progress`, are included when the command reports them. Callers must not depend on every failure having those fields.
 
-When a native Windows client skips paths whose names Windows cannot store, the report of the command that finished the file pull adds `windows_unstorable_path_count` and `windows_unstorable_paths`. The list holds at most the first 100 paths in path order, each with `path_b64`, `path_type`, and `reason`. The `windows_unstorable_path` progress records and the audit log list every path. See [Names a Windows destination cannot store](https://developer.wordpress.org/reprint/reference/file-transfers/#names-a-windows-destination-cannot-store).
-
 `preflight-assert` keeps its existing `checks` in its command result, with `label`, `pass`, and `detail` for each check. These are not copied into the final report, and no per-check codes are added.
 
 Source progress in JSONL uses `type: "remote_progress"`. Its `phase` names the client phase reading the response. Optional `remote_message` and `remote_counters` describe the source scan; `file_bytes_total` and `file_bytes_read` are non-negative integer counts for its current file. These records do not change client screen counters, stages, or final report fields. Compact output omits them.

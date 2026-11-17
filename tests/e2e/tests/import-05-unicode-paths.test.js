@@ -11,7 +11,7 @@ import {
     getSiteUrl, getSiteSecret, getSiteDir,
     hashDirectory, assertTreesMatch,
     assertRemoteIndexEntryCount, assertSiteMirror,
-    fsRootDir, PHP_BINARY,
+    fsRootDir, PHP_BINARY, readAuditLog,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -65,19 +65,16 @@ describe('Import: Unicode Paths', () => {
             secret: getSiteSecret(site),
         });
         assert.equal(result.exitCode, 0, `Expected exit 0\nstderr: ${result.stderr}\nstdout: ${result.stdout}`);
-        const records = result.stdout.split('\n')
-            .filter(line => line.startsWith('{'))
-            .map(line => JSON.parse(line));
-        const finalReport = records.filter(record => record.type === 'reprint_report').pop();
-        const reportedPaths = (finalReport?.windows_unstorable_paths ?? [])
-            .map(entry => Buffer.from(entry.path_b64, 'base64'));
+        // The audit log JSON-encodes each skipped path, so a newline appears as an escape.
+        const skips = readAuditLog(tempDir).split('\n')
+            .filter(line => line.includes('WINDOWS UNSTORABLE NAME | skipped'));
         if (!isWindowsClient) {
-            assert.deepEqual(reportedPaths, [], 'Only a Windows client skips names');
+            assert.deepEqual(skips, [], 'Only a Windows client skips names');
             return;
         }
-        assert.equal(finalReport?.windows_unstorable_path_count, 1, `Expected one skipped path in the final report: ${JSON.stringify(finalReport)}`);
-        const reportedNames = reportedPaths.map(path => path.subarray(path.lastIndexOf('/') + 1).toString());
-        assert.deepEqual(reportedNames, [windowsUnstorableName]);
+        assert.equal(skips.length, 1, `Expected one skipped path in the audit log:\n${skips.join('\n')}`);
+        // Match the end of the quoted path, including its closing quote.
+        assert.ok(skips[0].includes(`/${JSON.stringify(windowsUnstorableName).slice(1)}`), skips[0]);
     });
 
     it('files with emoji, accented chars, spaces, and Chinese chars exist', () => {

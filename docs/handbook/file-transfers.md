@@ -138,7 +138,7 @@ A Linux or macOS source can hold file names that Windows cannot store. A native 
 - ends in a dot or a space
 - is a reserved device name, such as `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, or `LPT1` to `LPT9`, with or without an extension (`nul.txt` is reserved too)
 
-Skipping a directory skips everything under it. The rest of the pull continues, and each skipped path counts as processed with zero bytes. The audit log records every skipped path with the name and the reason. When the pull finishes, the terminal lists every skipped path. JSONL output emits one `windows_unstorable_path` record per path, followed by a `windows_unstorable_paths` count, and the final command report includes the count and the first 100 paths. See [Final command reports](https://developer.wordpress.org/reprint/reference/progress-and-results/#final-command-reports).
+Skipping a directory skips everything under it. The rest of the pull continues, and each skipped path counts as processed with zero bytes. The audit log records every skipped path with the name and the reason, in a line starting `WINDOWS UNSTORABLE NAME`. Progress output reports each one as a skipped path.
 
 A later catch-up or mirror pull does not download a skipped path again while its source entry is unchanged, and does not delete or restore anything for it locally. If the source changes the path, the next pull downloads it and skips it again. If the source deletes it, the pull forgets it. To copy such a file, rename it on the source, or pull from WSL, macOS, or Linux.
 
