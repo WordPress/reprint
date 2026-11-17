@@ -5,7 +5,9 @@ import { once } from 'node:events';
 import { cpSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { createMysqlConnection, createTempDir, getHarnessKey, runImporter } from '../lib/test-helpers.js';
+import {
+    createMysqlConnection, createTempDir, getHarnessKey, runImporter, IS_WINDOWS_CLIENT,
+} from '../lib/test-helpers.js';
 import { ensureWpTemplate } from '../lib/site-setup.js';
 
 const nativePhp = process.env.E2E_WP_CLI_PHP_BINARY || 'php';
@@ -15,7 +17,8 @@ const databases = [];
 const servers = [];
 let root, sourceRoot, sourceUrl, snapshotDirectory;
 
-describe('WordPress after database cleanup', () => {
+// Booting a pulled site under native Windows PHP is not a supported scenario.
+describe.skipIf(IS_WINDOWS_CLIENT)('WordPress after database cleanup', () => {
     beforeAll(async () => {
         root = realpathSync(createTempDir('e2e-cache-behavior'));
         sourceRoot = join(root, 'source');

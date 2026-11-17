@@ -12,7 +12,7 @@ import { inspect } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir, getSiteDir, getSiteUrl, getSiteSecret,
-    createMysqlConnection, apiRequest, apiRequestWithFileList,
+    createMysqlConnection, apiRequest, apiRequestWithFileList, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -71,7 +71,8 @@ define('BLOG_ID_CURRENT_SITE', 1);
     });
 
     for (const selectedId of [7, 1]) {
-        it(`migrates site ${selectedId} while keeping sibling data at the source`, async () => {
+        // Booting a pulled site under native Windows PHP is not a supported scenario.
+        it.skipIf(IS_WINDOWS_CLIENT)(`migrates site ${selectedId} while keeping sibling data at the source`, async () => {
             const selected = fixture.sites[selectedId];
             const directory = createTempDir(`e2e-multisite-${selectedId}`);
             const target = {

@@ -14,7 +14,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    apiRequest, createMysqlConnection, queryMysqlOnSqlite,
+    apiRequest, createMysqlConnection, queryMysqlOnSqlite, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 import { convertToMultisite, ensureMultisite, runWp } from '../lib/multisite-setup.js';
@@ -339,7 +339,8 @@ describe.each([
         fixture = JSON.parse(readFileSync(join(getSiteDir(site), '.multisite-layer.json'), 'utf8'));
     });
 
-    it.each(['sqlite', 'mysql'])('migrates site 7 to a %s single-site target', async (engine) => {
+    // Booting a pulled site under native Windows PHP is not a supported scenario.
+    (IS_WINDOWS_CLIENT ? it.skip : it).each(['sqlite', 'mysql'])('migrates site 7 to a %s single-site target', async (engine) => {
         const directory = createTempDir(`e2e-${site}-to-${engine}`);
         const documentRoot = join(directory, 'site');
         const targetUrl = 'http://127.0.0.1:9697';
@@ -463,7 +464,9 @@ describe.each([
 
     for (const stage of ['database-initialize', 'sql', 'database-cleanup']) {
         for (const when of ['before', 'after']) {
-            it(`resumes SQLite apply after process death ${when} saving ${stage}`, async () => {
+            // The pause fixture runs the importer in Linux PHP and kills it, and
+            // a signal from WSL cannot reach a native Windows importer.
+            it.skipIf(IS_WINDOWS_CLIENT)(`resumes SQLite apply after process death ${when} saving ${stage}`, async () => {
                 const directory = createTempDir('e2e-multisite-sqlite-resume');
                 const path = join(directory, 'target.sqlite');
                 const marker = join(directory, 'paused');

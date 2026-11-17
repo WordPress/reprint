@@ -1,11 +1,11 @@
 /** Test 64: `--only` preserves a selected symlinked directory. */
 import { describe, it, beforeAll, afterAll } from 'vitest';
 import assert from 'node:assert/strict';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
     runImporter, createTempDir, cleanupTempDir,
-    getSiteUrl, getSiteSecret, getSiteDir, fsRootDir,
+    getSiteUrl, getSiteSecret, getSiteDir, fsRootDir, assertLinkValue,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -54,7 +54,7 @@ describe('Import: files-pull --only <symlinked directory>', { timeout: 180000 },
         const link = join(importedRoot, 'wp-content', 'plugins', 'akismet');
         assert.ok(lstatSync(link).isSymbolicLink(), `Expected symlink at ${link}`);
         assert.equal(readFileSync(join(link, 'akismet.php'), 'utf-8'), '<?php // akismet\n');
-        assert.equal(readlinkSync(link), linkTarget);
+        assertLinkValue(link, linkTarget);
     });
 
     it('pulls the symlink target without unrelated site files', () => {

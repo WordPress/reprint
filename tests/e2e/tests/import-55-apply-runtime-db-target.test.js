@@ -18,7 +18,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir,
     getSiteUrl, getSiteSecret, getSiteDir,
-    fsRootDir, pullStateDirectory, PHP_BINARY,
+    fsRootDir, pullStateDirectory, PHP_BINARY, harnessPathFromClientPath,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -128,8 +128,13 @@ describe('Import: apply-runtime database target', { timeout: 300000 }, () => {
         const runtime = readFileSync(join(runtimeDir, 'runtime.php'), 'utf-8');
         assert.ok(runtime.includes(`define('DB_FILE', '.ht.sqlite')`),
             'runtime.php should define DB_FILE from the given path');
-        assert.ok(runtime.includes(join(fsRootDir(tempDir), getSiteDir(site), 'wp-content', 'database') + '/'),
-            'runtime.php should define DB_DIR from the given path');
+        // A Windows client writes its own path, escaped as a PHP string.
+        const databaseDirectory = /define\('DB_DIR',\s*'((?:[^'\\]|\\.)*)'\)/.exec(runtime)?.[1].replace(/\\(.)/g, '$1');
+        assert.equal(
+            harnessPathFromClientPath(databaseDirectory ?? '').replace(/\/?$/, '/'),
+            join(fsRootDir(tempDir), getSiteDir(site), 'wp-content', 'database') + '/',
+            'runtime.php should define DB_DIR from the given path',
+        );
         assert.ok(existsSync(join(runtimeDir, 'sqlite-database-integration')),
             'the SQLite integration plugin should be copied into the output directory');
     });

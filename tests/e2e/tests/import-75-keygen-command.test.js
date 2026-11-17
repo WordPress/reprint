@@ -7,7 +7,9 @@ import assert from 'node:assert/strict';
 import { existsSync, statSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { runImporter, getSiteUrl, exportedKeyPath } from '../lib/test-helpers.js';
+import {
+    runImporter, getSiteUrl, exportedKeyPath, harnessPathFromClientPath, IS_WINDOWS_CLIENT,
+} from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
 // keygen never sends a request, so the helper's automatic preflight is
@@ -29,7 +31,8 @@ describe('Import: keygen command', () => {
 
         const path = exportedKeyPath(url, stateDir);
         assert.ok(existsSync(path), `expected ${path}`);
-        if (process.platform !== 'win32') {
+        // Windows has no Unix file modes.
+        if (process.platform !== 'win32' && !IS_WINDOWS_CLIENT) {
             assert.equal(statSync(path).mode & 0o777, 0o600);
         }
     });
@@ -58,7 +61,7 @@ describe('Import: keygen command', () => {
         const report = JSON.parse(result.stdout.trim().split('\n').pop());
         assert.equal(report.type, 'reprint_report');
         assert.equal(report.status, 'complete');
-        assert.equal(report.key_path, exportedKeyPath(url, stateDir));
+        assert.equal(harnessPathFromClientPath(report.key_path), exportedKeyPath(url, stateDir));
         assert.match(report.key_id, /^[0-9a-f]{16}$/);
         assert.match(report.public_key, /^MII[A-Za-z0-9+/]+=*$/);
     });

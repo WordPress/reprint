@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createNodeFsMountHandler, loadNodeRuntime } from '@php-wasm/node';
 import { PHP } from '@php-wasm/universal';
+import { harnessPathFromClientPath } from '../lib/test-helpers.js';
 
 it('keeps pull state outside the generated Playground mounts', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'playground-local-files-')));
@@ -43,7 +44,10 @@ $manifest->routes[] = [
         assert.ok(!runtime.includes('REPRINT_PULL_STATE_FILE'));
         assert.ok(!runtime.includes('Remote upload proxy failed.'));
         const config = JSON.parse(readFileSync(join(root, 'runtime/start.json'), 'utf8'));
-        for (const { source, target } of [...config.mounts_before_install, ...config.mounts]) {
+        for (const mount of [...config.mounts_before_install, ...config.mounts]) {
+            // A Windows client writes its own paths into start.json.
+            const source = harnessPathFromClientPath(mount.source);
+            const target = mount.target;
             const resolvedSource = realpathSync(source);
             assert.ok(stateFile !== resolvedSource && !stateFile.startsWith(`${resolvedSource}/`),
                 'No generated mount may expose the pull state');

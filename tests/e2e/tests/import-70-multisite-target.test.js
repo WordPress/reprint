@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     apiRequest, runImporter, createTempDir, cleanupTempDir, getSiteSecret, getSiteDir, createMysqlConnection, pullStateDirectory,
+    IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureMultisite, runWp } from '../lib/multisite-setup.js';
 
@@ -67,7 +68,8 @@ describe('Pull a selected site into a fresh single site', () => {
         for (const directory of directories) cleanupTempDir(directory);
     });
 
-    it('boots source site 7 as a single site and serves old and new uploads', async () => {
+    // Booting a pulled site under native Windows PHP is not a supported scenario.
+    it.skipIf(IS_WINDOWS_CLIENT)('boots source site 7 as a single site and serves old and new uploads', async () => {
         const directory = createTempDir('e2e-multisite-boot');
         directories.push(directory);
         const connection = await createMysqlConnection();

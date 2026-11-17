@@ -13,7 +13,6 @@ import {
     lstatSync,
     mkdirSync,
     readdirSync,
-    readlinkSync,
     readFileSync,
     rmSync,
     statSync,
@@ -22,6 +21,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import {
+    assertLinkValue,
     assertTreesMatch,
     cleanupTempDir,
     clearHookState,
@@ -323,7 +323,7 @@ describe('Import: files-pull mirror and catch-up modes', { timeout: 300000 }, ()
         assert.ok(lstatSync(localEmptyDirectory).isDirectory());
         assert.deepEqual(readdirSync(localEmptyDirectory), []);
         assert.ok(lstatSync(localSymlink).isSymbolicLink());
-        assert.equal(readlinkSync(localSymlink), 'mirror-link-target.txt');
+        assertLinkValue(localSymlink, 'mirror-link-target.txt');
         assertTreesMatch(getSiteDir(site), localRoot);
     });
 
