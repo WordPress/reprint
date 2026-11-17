@@ -82,8 +82,8 @@ Save the two runs as `bench-pr.json` and `bench-trunk.json`, then run
 
 The same comment ends with one collapsed table for a native Windows client. On a Windows
 runner, the source site and MariaDB run in WSL. Windows PHP runs the PR build and
-then the trunk build through `tests/e2e/ci/windows-php.sh`, which converts Linux
-path arguments to Windows paths. The pulled tree and state stay on NTFS, as they
+then the trunk build through `tests/e2e/ci/windows-php.sh`, which converts path
+arguments under `/mnt/<drive>` to Windows paths. The pulled tree and state stay on NTFS, as they
 do for a Windows user. An untimed `preflight` and `files-pull` with the PR build
 runs first, because the first pull on a fresh runner is slower whichever build
 runs it. The report times `preflight`, `files-pull`, `db-pull`,

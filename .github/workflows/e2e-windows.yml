@@ -1,0 +1,190 @@
+name: E2E with the Windows client
+
+# Runs the E2E suite with the client on native Windows PHP. The source sites,
+# databases and the vitest harness run in WSL on the same runner, and the
+# client's state and pulled files live on NTFS, as they do for a Windows user.
+# The suite was written for a Linux client, so this workflow only reports
+# which scenarios fail and never fails the PR.
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-phar:
+    name: Build reprint.phar
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.2'
+          extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
+
+      - run: composer install --no-dev --no-interaction --prefer-dist
+
+      - run: ./bin/build-reprint-phar.sh
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: client-phar-windows-e2e
+          path: reprint.phar
+
+  e2e:
+    name: E2E with the Windows client (shard ${{ matrix.shard }}/4)
+    needs: [build-phar]
+    runs-on: windows-2025
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: true
+
+      # The extensions match what Studio's PHP provides to the client.
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, openssl, intl
+          coverage: none
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: client-phar-windows-e2e
+
+      - name: Record the Windows PHP path
+        shell: pwsh
+        run: (Get-Command php).Source | Out-File -Encoding ascii -NoNewline windows-php-path.txt
+
+      - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          additional-packages: php8.3-cli php8.3-fpm php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-sqlite3 php8.3-gd php8.3-intl composer jq curl xz-utils
+
+      # setup-infrastructure.sh starts its services with systemctl.
+      - name: Enable systemd in WSL
+        shell: wsl-bash {0}
+        run: printf '[boot]\nsystemd=true\n' > /etc/wsl.conf
+
+      - name: Restart WSL with systemd
+        shell: pwsh
+        run: wsl --terminate Ubuntu-24.04
+
+      - name: Copy the harness into WSL and install Node
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          mkdir -p /root/reprint
+          tar --exclude=.git --exclude=vendor -cf - . | tar -xf - -C /root/reprint
+          node_tarball=$(curl -fsSL https://nodejs.org/dist/latest-v24.x/SHASUMS256.txt | awk '/linux-x64.tar.xz/ { print $2 }')
+          curl -fsSL "https://nodejs.org/dist/latest-v24.x/$node_tarball" | tar -xJ -C /opt
+          ln -sf /opt/"${node_tarball%.tar.xz}"/bin/* /usr/local/bin/
+
+      - name: Set up the sources in WSL
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          cd /root/reprint
+          tests/e2e/ci/setup-infrastructure.sh 8.3
+          tests/e2e/setup.sh
+          tests/e2e/ci/download-wp-cli.sh
+          (cd tests/e2e && npm ci)
+
+      # Failing scenarios are the report, so this step succeeds whatever they do.
+      # The time limit stops the step if a Windows process keeps the output open.
+      - name: Run the E2E suite with the Windows client
+        shell: wsl-bash {0}
+        run: |
+          set -euo pipefail
+          workspace=$(pwd)
+          export WINDOWS_PHP=$(wslpath -u "$(cat windows-php-path.txt)")
+          export PHP_BINARY=/root/reprint/tests/e2e/ci/windows-php.sh
+          export CLIENT_PATH="$workspace/reprint.phar"
+          export E2E_SERVER_PROJECT_ROOT=/root/reprint
+          mkdir -p /mnt/c/reprint-e2e-tmp
+          export TMPDIR=/mnt/c/reprint-e2e-tmp
+          cd /root/reprint/tests/e2e
+          # wsl-bash runs with -e, so a failing run must not end the script.
+          timeout --kill-after=60 100m npx --no-install vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000 \
+            --reporter=default --reporter=json --outputFile.json="$workspace/e2e-windows-shard-${{ matrix.shard }}.json" \
+            || echo "vitest exited $?"
+
+      - name: Stop leftover Windows PHP processes
+        if: always()
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_Process -Filter "Name = 'php.exe'" | ForEach-Object { $_.CommandLine }
+          Get-Process php -ErrorAction SilentlyContinue | Stop-Process -Force
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: e2e-windows-shard-${{ matrix.shard }}
+          overwrite: true
+          path: e2e-windows-shard-${{ matrix.shard }}.json
+          if-no-files-found: ignore
+
+  summary:
+    name: Summarize the Windows client E2E run
+    needs: [e2e]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: e2e-windows-shard-*
+          merge-multiple: true
+          path: reports
+
+      - name: List failing scenarios
+        run: |
+          set -euo pipefail
+          {
+            echo '## E2E with the Windows client'
+            echo
+            echo '| Shard | Files failed | Tests passed | Tests failed | Tests skipped |'
+            echo '|---|---:|---:|---:|---:|'
+            for shard in 1 2 3 4; do
+              report="reports/e2e-windows-shard-$shard.json"
+              if [ -f "$report" ]; then
+                jq -r --arg shard "$shard" '"| \($shard) | \([.testResults[] | select(.status == "failed")] | length) of \(.testResults | length) | \(.numPassedTests) | \(.numFailedTests) | \(.numPendingTests + .numTodoTests) |"' "$report"
+              else
+                echo "| $shard | no report: the shard did not finish | | | |"
+              fi
+            done
+            echo
+            echo '| Scenario | Failed tests | First failure |'
+            echo '|---|---:|---|'
+            for report in reports/*.json; do
+              [ -f "$report" ] || continue
+              jq -r '.testResults[] | select(.status == "failed")
+                | (.assertionResults | map(select(.status == "failed"))) as $failed
+                | ((.message // "") | if . == "" then ($failed[0].failureMessages[0] // "") else . end) as $message
+                | "| `\(.name | split("/") | last)` | \($failed | length) | \(($message | split("\n") | first // "") | .[0:200] | gsub("\\|"; "\\|")) |"' "$report"
+            done | sort
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  ci-result:
+    name: E2E with the Windows client result
+    needs: [build-phar, e2e, summary]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every PR job to pass
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

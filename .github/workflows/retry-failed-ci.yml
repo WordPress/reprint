@@ -9,6 +9,7 @@ on:
       - 'E2E (Playground CLI PHP)'
       - 'Performance Report'
       - 'Windows migration'
+      - 'E2E with the Windows client'
       - 'Update build inputs'
       - 'Update Playground inputs'
     types: [completed]
