@@ -11800,7 +11800,9 @@ class ImportClient
     /**
      * Assert that a symlink target resolves to a path within $root.
      *
-     * For absolute targets, the target itself must be under $root.
+     * For absolute targets, the target itself must be under $root. On
+     * Windows, a target that starts with a separator but names no drive is
+     * absolute on the link's drive or share.
      * For relative targets, the resolved path (parent dir + target) must be
      * under $root. Resolve existing links before applying ".." segments,
      * without creating missing components. Dangling links are resolved through
@@ -11814,9 +11816,16 @@ class ImportClient
         string $root
     ): void {
         $path_format = Utils::native_path_format();
-        $absolute_target = Utils::is_absolute_path($target, $path_format)
-            ? $target
-            : wp_join_unix_paths($symlink_parent_dir, $target);
+        if (Utils::is_absolute_path($target, $path_format)) {
+            $absolute_target = $target;
+        } elseif ($path_format === 'windows' && in_array(substr($target, 0, 1), ['/', '\\'], true)) {
+            // Windows reads a target that starts with a separator, such as a
+            // Unix source's /srv/file, from the root of the link's drive or share.
+            $link_parent = Utils::normalize_path_separators($symlink_parent_dir, $path_format);
+            $absolute_target = ( Utils::windows_share_root($link_parent) ?? substr($link_parent, 0, 2) ) . $target;
+        } else {
+            $absolute_target = wp_join_unix_paths($symlink_parent_dir, $target);
+        }
         $resolved = $this->resolve_local_path_with_missing_tail($absolute_target);
         $root = Utils::normalize_path_separators($root, $path_format);
 

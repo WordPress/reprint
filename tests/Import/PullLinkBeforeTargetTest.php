@@ -120,6 +120,27 @@ final class PullLinkBeforeTargetTest extends TestCase
         gc_collect_cycles();
     }
 
+    /**
+     * A Unix source's absolute target outside the pull must not become a
+     * link or copy. Windows reads /outside/secret.txt from the root of the
+     * local drive, which is outside the filesystem root too.
+     */
+    public function testALinkToAnAbsoluteSourcePathOutsideThePullIsRefused(): void
+    {
+        $client = $this->receive([
+            ['headers' => ['X-Chunk-Type' => 'symlink', 'X-Symlink-Path' => base64_encode('/srv/htdocs/secret.txt'),
+                'X-Symlink-Target' => base64_encode('/outside/secret.txt'), 'X-Symlink-Ctime' => '7']],
+        ]);
+        ( new \ReflectionMethod($client, 'create_deferred_symlinks') )->invoke($client);
+        $audit_log = file_get_contents($client->state_dir . '/audit.log');
+        unset($client);
+        gc_collect_cycles();
+
+        $this->assertFalse(\LocalLink::is_link($this->root . '/files/srv/htdocs/secret.txt'));
+        $this->assertFileDoesNotExist($this->root . '/files/srv/htdocs/secret.txt');
+        $this->assertStringContainsString('Security: symlink target escapes filesystem root: /outside/secret.txt', $audit_log);
+    }
+
     /** Sends parts through the real multipart reader. */
     private function receive(array $parts): \ImportClient
     {
