@@ -1070,9 +1070,11 @@ final class Utils
      * An unrecognized reparse point that leads back to itself must fail rather
      * than become a fabricated self-link or disappear as an unknown file type.
      *
-     * Windows PHP exposes creation time as ctime. Keep that same convention in
-     * the index and post-read checks; changing clocks would invalidate existing
-     * change records. Same-size edits can escape these fields.
+     * Windows PHP exposes creation time as ctime, and an edit does not change
+     * it. On Windows, ctime is therefore the later of creation and modification
+     * time, so a same-size local edit still changes the index. A pulled file's
+     * modification time is set to the older source time, so its creation time
+     * stays the later one and its record survives this rule.
      *
      * @return array|false { PHP stat fields, or false on failure. Numeric keys 0-12
      *     repeat these fields in the same order, as in lstat().
@@ -1086,7 +1088,7 @@ final class Utils
      *     @type int $size    File size in bytes.
      *     @type int $atime   Access time.
      *     @type int $mtime   Modification time.
-     *     @type int $ctime   Change time on Unix; creation time on Windows.
+     *     @type int $ctime   Change time on Unix; later of creation and modification time on Windows.
      *     @type int $blksize Filesystem block size, or -1 when unavailable.
      *     @type int $blocks  Allocated blocks, or -1 when unavailable.
      * }
@@ -1101,6 +1103,10 @@ final class Utils
             }
             $stat['mode'] |= 0120000;
             $stat[2] = $stat['mode'];
+        }
+        if (PHP_OS === 'WINNT' && $stat !== false) {
+            $stat['ctime'] = max($stat['ctime'], $stat['mtime']);
+            $stat[10] = $stat['ctime'];
         }
         return $stat;
     }
