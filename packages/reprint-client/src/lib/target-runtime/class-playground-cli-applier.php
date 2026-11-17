@@ -247,7 +247,11 @@ class PlaygroundCliApplier implements RuntimeApplier
         // mount. For WPCloud-style sites, three mounts assemble a standard
         // layout from separate directories.
         foreach ($this->build_mounts($filesystem_root, $options) as $mount) {
-            [$source, $target] = explode(':', $mount, 2);
+            // Split at the last colon. A Windows source such as C:/site has
+            // a colon of its own, and a Playground target never does.
+            $separator = strrpos($mount, ':');
+            $source = substr($mount, 0, $separator);
+            $target = substr($mount, $separator + 1);
             $config['mounts_before_install'][] = [
                 'source' => $source,
                 'target' => $target,
