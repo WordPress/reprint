@@ -42,7 +42,7 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.3'
-          extensions: pdo_mysql, curl, mbstring
+          extensions: pdo_mysql, curl, mbstring, intl
           coverage: none
       - run: composer install --no-interaction --prefer-dist
       - name: Check received entry paths on a native Windows client
@@ -64,7 +64,7 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.3'
-          extensions: pdo_mysql, pdo_sqlite, curl, mbstring
+          extensions: pdo_mysql, pdo_sqlite, curl, mbstring, intl
           coverage: none
       - run: composer install --no-interaction --prefer-dist
       - name: Run link-placing client tests
@@ -100,7 +100,7 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.3'
-          extensions: mysqli, pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, gd, openssl
+          extensions: mysqli, pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, gd, openssl, intl
           ini-values: memory_limit=1G
           coverage: none
       - run: composer install --no-interaction --prefer-dist
@@ -186,7 +186,7 @@ jobs:
       - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
         with:
           php-version: '8.3'
-          extensions: pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, openssl
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, curl, mbstring, zip, openssl, intl
           coverage: none
       - run: composer install --no-dev --no-interaction --prefer-dist
       - uses: Vampire/setup-wsl@4c48163d9f981914dd8caa0fc335fe19cca5bff4 # v7
