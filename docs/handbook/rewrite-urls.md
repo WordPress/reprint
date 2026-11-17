@@ -46,3 +46,23 @@ https://example.com -> https://example.com/new
 ```
 
 The tradeoff is that a value written at the same time may still contain the old URL. If you need to catch every value, prevent the site from writing to the database while this command runs.
+
+## Find addresses left unchanged
+
+URL rewriting changes the old address in plain text, HTML, block markup, serialized PHP, and JSON, including escaped forms such as `https:\/\/old.example`. An address whose separators are percent-encoded usually keeps the old address. Reprint decodes those only in a few formats it recognizes, such as WPBakery shortcode links. Elsewhere it cannot tell which encoding rules the surrounding text uses, so it leaves the value unchanged.
+
+For example, this option value keeps the old address after a rewrite from `https://old.example` to `https://new.example`:
+
+```text
+https://new.example/wp-login.php?redirect_to=https%3A%2F%2Fold.example%2Fwp-admin%2F
+```
+
+After `db-apply` or `db-rewrite-urls`, search the database for the percent-encoded old address. Searching for `%2f%2fold.example` finds both the `http` and `https` forms. The query below works in MySQL and SQLite. Change the `wp_` table prefix to match your site, and run it against other tables such as `wp_postmeta` and `wp_posts` as needed:
+
+```sql
+SELECT option_name
+FROM wp_options
+WHERE INSTR(LOWER(option_value), '%2f%2fold.example') > 0;
+```
+
+Edit each value you find, or update it through the plugin that owns the setting. Then run the search again.
