@@ -653,6 +653,7 @@ final class WpCoreFilesPullTest extends TestCase {
                 'http_code' => 200,
                 'data' => array(
                     'ok' => true,
+                    'path_format' => \WordPress\Reprint\Server\Utils::native_path_format(),
                     'runtime' => array('document_root' => $paths_urls['abspath']),
                     'wp_detect' => array('roots' => array_map(
                         function (string $root_path): array {

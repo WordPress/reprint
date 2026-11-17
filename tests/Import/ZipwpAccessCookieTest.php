@@ -106,6 +106,7 @@ final class ZipwpAccessCookieTest extends TestCase {
     {
         $remote_reprint_api_url = 'http://demo.zipwp.to/?reprint-api';
         $client = $this->create_client($remote_reprint_api_url);
+        \record_preflight_from_this_machine($client);
         $fetch = new \ReflectionMethod($client, 'fetch_streaming');
         $file_list_path = $this->root . '/file-list.json';
         file_put_contents($file_list_path, json_encode([

@@ -191,6 +191,7 @@ final class EarlyOutputResponseTest extends TestCase {
     private function fetch_stream(string $endpoint, array $parameters = []): array
     {
         $client = $this->make_client();
+        \record_preflight_from_this_machine($client);
         $context = new StreamingContext();
         $chunks = [];
         $context->on_chunk = static function (array $chunk) use (&$chunks, $context): void {

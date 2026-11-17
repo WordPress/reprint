@@ -93,5 +93,20 @@ function write_current_pull_state(ImportClient $client, array $changes): void
     $client->save_state();
 }
 
+/**
+ * Records the preflight a source on this machine would send, so the client
+ * reads the source's paths in this machine's format.
+ *
+ * @param ImportClient $client Client that has not run preflight.
+ */
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Shared test helper.
+function record_preflight_from_this_machine(ImportClient $client): void
+{
+    $client->get_state()->set_preflight_record([
+        'http_code' => 200,
+        'data' => ['ok' => true, 'path_format' => \WordPress\Reprint\Server\Utils::native_path_format()],
+    ]);
+}
+
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

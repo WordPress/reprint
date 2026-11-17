@@ -58,10 +58,12 @@ if ($reprint_endpoint === file_get_contents('proxy-endpoint') && !in_array($repr
 // Supply site metadata without requiring a WordPress database. File indexes
 // and file contents below are produced by the real endpoint.
 if ($reprint_endpoint === 'preflight') {
+    require_once __DIR__ . '/../../../vendor/autoload.php';
     header('Content-Type: application/json');
     echo json_encode([
         'ok' => true,
         'protocol_version' => 3,
+        'path_format' => \WordPress\Reprint\Server\Utils::native_path_format(),
         'capabilities' => ['base64_path_parameters' => true],
         'runtime' => ['document_root' => getcwd() . '/remote', 'ini_get_all' => []],
         'wp_detect' => ['roots' => [['path' => getcwd() . '/remote']]],
