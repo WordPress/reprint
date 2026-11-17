@@ -56,6 +56,7 @@ class FilesPullProgressErrorTest extends TestCase {
 
     /** @dataProvider interruptedResponses */
     public function testNextFileHasItsOwnProgressAfterSourceFileDisappears(bool $interrupt_response): void {
+        \skip_files_pull_from_this_machine_on_windows();
         $root = sys_get_temp_dir() . '/file-progress-error-' . bin2hex(random_bytes(6));
         mkdir($root . '/source', 0700, true);
         $source = realpath($root . '/source');

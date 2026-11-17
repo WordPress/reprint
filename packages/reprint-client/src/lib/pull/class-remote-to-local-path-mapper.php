@@ -73,6 +73,27 @@ final class RemoteToLocalPathMapper
     }
 
     /**
+     * Rejects a Windows source on a native Windows client.
+     *
+     * The local layout keeps a Windows source's drive as a directory named
+     * D: beneath the filesystem root. Linux and macOS accept that name and
+     * Windows does not, so a native Windows client cannot store the tree.
+     *
+     * @param string $remote_path_format Source path format: 'unix' or 'windows'.
+     * @param string $local_path_format  This client's path format: 'unix' or 'windows'.
+     * @throws InvalidArgumentException When both formats are 'windows'.
+     */
+    public static function assert_local_filesystem_can_store_source(string $remote_path_format, string $local_path_format): void
+    {
+        if ($remote_path_format === 'windows' && $local_path_format === 'windows') {
+            throw new InvalidArgumentException(
+                'A native Windows client cannot pull from a Windows source. The source reported path_format "windows". '
+                . 'Pull this source with a Linux, macOS, or WSL client.'
+            );
+        }
+    }
+
+    /**
      * Maps one remote absolute path to its local absolute path.
      *
      * @param string $remote_absolute_path Remote absolute path.

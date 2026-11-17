@@ -149,6 +149,7 @@ final class CommandReportTest extends TestCase {
 
     public function testRealFileDownloadReportsCompleteAndAbortIsNotSuccess(): void
     {
+        \skip_files_pull_from_this_machine_on_windows();
         file_put_contents($this->root . '/remote/example.txt', 'download me');
         $this->run_command('preflight');
         for ($attempt = 0; $attempt < 5; $attempt++) {

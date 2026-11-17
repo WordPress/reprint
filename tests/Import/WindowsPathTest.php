@@ -118,6 +118,17 @@ class WindowsPathTest extends TestCase
         $this->assertSame('/local/site/upload.txt', $mapper->remote_path_to_local_path('D:\\site\\upload.txt'));
     }
 
+    /** Only a native Windows client is refused a Windows source, because it cannot name the drive directory. */
+    public function test_only_a_windows_client_is_refused_a_windows_source(): void
+    {
+        RemoteToLocalPathMapper::assert_local_filesystem_can_store_source('windows', 'unix');
+        RemoteToLocalPathMapper::assert_local_filesystem_can_store_source('unix', 'windows');
+        RemoteToLocalPathMapper::assert_local_filesystem_can_store_source('unix', 'unix');
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('A native Windows client cannot pull from a Windows source. The source reported path_format "windows".');
+        RemoteToLocalPathMapper::assert_local_filesystem_can_store_source('windows', 'windows');
+    }
+
     /** UNC share roots must stay distinct from drive roots and Unix directories. */
     public function test_maps_unc_share_paths_without_losing_the_share_root(): void
     {

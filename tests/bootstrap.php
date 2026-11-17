@@ -108,5 +108,18 @@ function record_preflight_from_this_machine(ImportClient $client): void
     ]);
 }
 
+/**
+ * Skips a test whose files pull reads a source on this machine, when this
+ * machine runs Windows. That source reports Windows paths, and a native
+ * Windows client refuses a Windows source.
+ */
+// phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedFunctionFound -- Shared test helper.
+function skip_files_pull_from_this_machine_on_windows(): void
+{
+    if (PHP_OS_FAMILY === 'Windows') {
+        \PHPUnit\Framework\Assert::markTestSkipped('This files pull reads a source on this Windows machine, and a native Windows client refuses a Windows source.');
+    }
+}
+
 // Load the test base class
 require_once __DIR__ . '/FileSyncProducer/FileSyncProducerTestBase.php';

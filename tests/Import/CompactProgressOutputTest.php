@@ -89,6 +89,7 @@ final class CompactProgressOutputTest extends TestCase {
     /** @dataProvider filenameOutputModes */
     public function testRemoteFilenameIsEscapedInSkipOutputButNotJson(string $mode): void
     {
+        \skip_files_pull_from_this_machine_on_windows();
         $name = "café\033[2J\007.txt";
         file_put_contents($this->root . '/remote/' . $name, 'remote');
         $local_directory = $this->root . '/files' . realpath($this->root . '/remote');
@@ -162,6 +163,7 @@ final class CompactProgressOutputTest extends TestCase {
 
     public function testCompactKeepsFilePullStagesWithoutSavingHiddenRecords(): void
     {
+        \skip_files_pull_from_this_machine_on_windows();
         $local_directory = $this->root . '/files' . realpath($this->root . '/remote');
         mkdir($local_directory, 0755, true);
         for ($index = 0; $index < 25; $index++) {
@@ -188,6 +190,7 @@ final class CompactProgressOutputTest extends TestCase {
 
     public function testFullJsonlStillPrintsIndividualSkips(): void
     {
+        \skip_files_pull_from_this_machine_on_windows();
         $local_directory = $this->root . '/files' . realpath($this->root . '/remote');
         mkdir($local_directory, 0755, true);
         file_put_contents($this->root . '/remote/keep.txt', 'remote');
