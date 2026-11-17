@@ -107,7 +107,7 @@ jobs:
       - name: Run the E2E suite with the Windows client
         shell: wsl-bash {0}
         run: |
-          set -uo pipefail
+          set -euo pipefail
           workspace=$(pwd)
           export WINDOWS_PHP=$(wslpath -u "$(cat windows-php-path.txt)")
           export PHP_BINARY=/root/reprint/tests/e2e/ci/windows-php.sh
@@ -116,10 +116,10 @@ jobs:
           mkdir -p /mnt/c/reprint-e2e-tmp
           export TMPDIR=/mnt/c/reprint-e2e-tmp
           cd /root/reprint/tests/e2e
+          # wsl-bash runs with -e, so a failing run must not end the script.
           timeout --kill-after=60 100m npx --no-install vitest run --shard=${{ matrix.shard }}/4 --test-timeout=600000 \
-            --reporter=default --reporter=json --outputFile.json="$workspace/e2e-windows-shard-${{ matrix.shard }}.json"
-          echo "vitest exited $?"
-          exit 0
+            --reporter=default --reporter=json --outputFile.json="$workspace/e2e-windows-shard-${{ matrix.shard }}.json" \
+            || echo "vitest exited $?"
 
       - name: Stop leftover Windows PHP processes
         if: always()
@@ -159,7 +159,7 @@ jobs:
             for shard in 1 2 3 4; do
               report="reports/e2e-windows-shard-$shard.json"
               if [ -f "$report" ]; then
-                jq -r --arg shard "$shard" '"| \($shard) | \(.numFailedTestSuites) of \(.numTotalTestSuites) | \(.numPassedTests) | \(.numFailedTests) | \(.numPendingTests + .numTodoTests) |"' "$report"
+                jq -r --arg shard "$shard" '"| \($shard) | \([.testResults[] | select(.status == "failed")] | length) of \(.testResults | length) | \(.numPassedTests) | \(.numFailedTests) | \(.numPendingTests + .numTodoTests) |"' "$report"
               else
                 echo "| $shard | no report: the shard did not finish | | | |"
               fi
@@ -172,7 +172,7 @@ jobs:
               jq -r '.testResults[] | select(.status == "failed")
                 | (.assertionResults | map(select(.status == "failed"))) as $failed
                 | ((.message // "") | if . == "" then ($failed[0].failureMessages[0] // "") else . end) as $message
-                | "| `\(.name | split("/") | last)` | \($failed | length) | \($message | split("\n")[0] | .[0:200] | gsub("\\|"; "\\|")) |"' "$report"
+                | "| `\(.name | split("/") | last)` | \($failed | length) | \(($message | split("\n") | first // "") | .[0:200] | gsub("\\|"; "\\|")) |"' "$report"
             done | sort
           } >> "$GITHUB_STEP_SUMMARY"
 

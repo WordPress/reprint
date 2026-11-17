@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Runs Windows php.exe from WSL so the e2e harness can time a native Windows
-# client. Absolute Linux path arguments, bare or as --option=value, become
-# Windows paths. WINDOWS_PHP names php.exe as a WSL path.
+# Runs Windows php.exe from WSL so the e2e harness can drive a native Windows
+# client. Arguments under a Windows drive mount such as /mnt/c, bare or as
+# --option=value, become Windows paths. Other absolute paths name files on the
+# source in WSL, such as --only=/srv/site/file.php, and pass through unchanged.
+# WINDOWS_PHP names php.exe as a WSL path.
 set -euo pipefail
 
 windows_path() {
@@ -17,8 +19,8 @@ windows_path() {
 arguments=()
 for argument in "$@"; do
     case "$argument" in
-        /*) arguments+=("$(windows_path "$argument")") ;;
-        --*=/*) arguments+=("${argument%%=*}=$(windows_path "${argument#*=}")") ;;
+        /mnt/[a-z]/*) arguments+=("$(windows_path "$argument")") ;;
+        --*=/mnt/[a-z]/*) arguments+=("${argument%%=*}=$(windows_path "${argument#*=}")") ;;
         *) arguments+=("$argument") ;;
     esac
 done
