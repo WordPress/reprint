@@ -83,6 +83,9 @@ final class PullWindowsUnstorableNameTest extends TestCase
             return base64_decode(json_decode($line, true)['path']);
         }, file($client->pull_state_directory . '/remote-index.next.jsonl', FILE_IGNORE_NEW_LINES));
         $audit_log = file_get_contents($client->state_dir . '/audit.log');
+        // Windows cannot remove the state directory while the client holds its files open.
+        unset($client);
+        gc_collect_cycles();
         if (DIRECTORY_SEPARATOR !== '\\') {
             // Linux and macOS clients store every name.
             $this->assertSame($source_paths, $indexed_paths);
