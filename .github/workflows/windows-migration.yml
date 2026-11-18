@@ -4,7 +4,6 @@ on:
   push:
     branches: [trunk]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 # A newer push to a pull request cancels its older run. Other events get a
@@ -18,8 +17,6 @@ permissions:
 
 jobs:
   php-reader:
-    # Windows runners are scarce, so draft pull requests skip this job.
-    if: ${{ !github.event.pull_request.draft }}
     name: Read Windows paths without FFI
     runs-on: windows-2025
     timeout-minutes: 10
@@ -41,8 +38,6 @@ jobs:
           ./tests/e2e/windows/prepare-path-namespaces.ps1 "$env:GITHUB_WORKSPACE/namespace-cases.json"
           php tests/e2e/windows/verify-source-reader.php
   received-paths:
-    # Windows runners are scarce, so draft pull requests skip this job.
-    if: ${{ !github.event.pull_request.draft }}
     name: Reject dot segments in received paths
     runs-on: windows-2025
     timeout-minutes: 10
@@ -60,8 +55,6 @@ jobs:
         working-directory: tests
         run: php ../vendor/bin/phpunit --group received-paths Import/RuntimeFilesRootPathTest.php
   windows-client:
-    # Windows runners are scarce, so draft pull requests skip this job.
-    if: ${{ !github.event.pull_request.draft }}
     name: Pull, merge, and flatten with a native Windows client (${{ matrix.account }})
     strategy:
       fail-fast: false
@@ -103,8 +96,6 @@ jobs:
   # failures can be fixed before this becomes a required check. No MySQL server
   # runs here, so tests that need one error with a connection failure.
   client-suite:
-    # Windows runners are scarce, so draft pull requests skip this job.
-    if: ${{ !github.event.pull_request.draft }}
     name: Report the full client test suite on Windows
     runs-on: windows-2025
     timeout-minutes: 60
@@ -187,8 +178,6 @@ jobs:
             tests/errors-*.txt
           if-no-files-found: ignore
   linux-to-windows:
-    # Windows runners are scarce, so draft pull requests skip this job.
-    if: ${{ !github.event.pull_request.draft }}
     name: Pull linked Linux WordPress into a native Windows client (${{ matrix.account }})
     strategy:
       fail-fast: false
@@ -255,8 +244,6 @@ jobs:
           Get-Content "$env:RUNNER_TEMP/source.stderr.log" -Tail 40 -ErrorAction SilentlyContinue
   windows-to-linux:
     needs: php-reader
-    # Windows runners are scarce, so draft pull requests skip this job.
-    if: ${{ !github.event.pull_request.draft }}
     name: Pull Windows WordPress into Linux (${{ matrix.source }})
     strategy:
       fail-fast: false
@@ -337,13 +324,9 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      # Skipped Windows jobs are expected on a draft pull request. Marking it
-      # ready for review starts a new run in which every job must pass.
       - name: Require every PR job to pass
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}
-          DRAFT_PULL_REQUEST: ${{ github.event.pull_request.draft == true }}
         run: |
           echo "$JOB_RESULTS"
-          jq --exit-status --argjson draft "$DRAFT_PULL_REQUEST" \
-            'all(.[]; .result == "success" or ($draft and .result == "skipped"))' <<< "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"

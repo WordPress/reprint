@@ -10,7 +10,6 @@ on:
   push:
     branches: [trunk]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 # A newer push to a pull request cancels its older run. Other events get a
@@ -25,9 +24,6 @@ permissions:
 jobs:
   build-phar:
     name: Build reprint.phar
-    # Windows runners are scarce, so draft pull requests skip this build and
-    # the Windows jobs that use it.
-    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -151,7 +147,7 @@ jobs:
   summary:
     name: Summarize the Windows client E2E run
     needs: [e2e]
-    if: ${{ always() && !github.event.pull_request.draft }}
+    if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -194,13 +190,9 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
-      # Skipped Windows jobs are expected on a draft pull request. Marking it
-      # ready for review starts a new run in which every job must pass.
       - name: Require every PR job to pass
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}
-          DRAFT_PULL_REQUEST: ${{ github.event.pull_request.draft == true }}
         run: |
           echo "$JOB_RESULTS"
-          jq --exit-status --argjson draft "$DRAFT_PULL_REQUEST" \
-            'all(.[]; .result == "success" or ($draft and .result == "skipped"))' <<< "$JOB_RESULTS"
+          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"
