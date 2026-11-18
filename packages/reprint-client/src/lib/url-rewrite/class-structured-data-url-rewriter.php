@@ -748,7 +748,7 @@ class StructuredDataUrlRewriter
      *     @type string $raw_url    Raw URL value.
      *     @type mixed  $parsed_url Parsed URL value.
      * }
-     * @phpstan-param false|array{raw_url: string, parsed_url: mixed} $value
+     * @phpstan-param false|array{raw_url: string|null, parsed_url: mixed} $value
      */
     private function set_cached_url_rewrite(string $cache_key, $value): void
     {
@@ -944,7 +944,9 @@ class StructuredDataUrlRewriter
                     $has_block_attribute_update = false;
                     while ( $p->next_raw_url_in_current_token() ) {
                         $rewritten = $this->rewrite_url_field($p->get_raw_url(), $p->get_url_base());
-                        if ($rewritten !== false) {
+                        if ($rewritten !== false && $rewritten['raw_url'] === null) {
+                            $p->keep_url_base_replacement_out_of_current_token();
+                        } elseif ($rewritten !== false) {
                             $p->set_url($rewritten['raw_url'], $rewritten['parsed_url']);
                             $has_block_attribute_update = '#block-comment' === $p->get_token_type();
                         }
@@ -1081,7 +1083,7 @@ class StructuredDataUrlRewriter
                 continue;
             }
             $rewritten = $this->rewrite_url_field($p->get_raw_url(), $field_base_url);
-            if ($rewritten !== false) {
+            if ($rewritten !== false && $rewritten['raw_url'] !== null) {
                 $p->set_raw_url($rewritten['raw_url']);
             }
         }
@@ -1096,9 +1098,12 @@ class StructuredDataUrlRewriter
      * child-path checks and bounded result cache.
      *
      * @return array|false {
-     *     A replacement, or false when the field must not change.
-     *     @type string $raw_url    Replacement in the original relative/absolute form.
-     *     @type mixed  $parsed_url Parsed absolute replacement for the URL reader.
+     *     A replacement, or false when no source base applies. The
+     *     replacement may equal the input. A null raw_url means a source base matched but
+     *     its spelling cannot be edited safely: keep the field, and keep the
+     *     raw-text pass away from it.
+     *     @type string|null $raw_url    Replacement in the original relative/absolute form.
+     *     @type mixed       $parsed_url Parsed absolute replacement for the URL reader.
      * }
      */
     private function rewrite_url_field(string $raw_url, ?string $field_base_url)
@@ -1116,6 +1121,30 @@ class StructuredDataUrlRewriter
             }
         }
 
+        // WHATWG URL parsing ignores leading and trailing C0 controls and
+        // spaces. A rewritten URL drops them: HTML attribute escaping would
+        // turn a kept trailing space into %20, a different path.
+        $reference = trim($raw_url, "\x00..\x20");
+
+        // An empty, fragment-only, query-only or path-relative reference
+        // resolves against the page that contains it, such as a placeholder
+        // `#` link. That page moves with the site, so the bytes stay correct.
+        // The rewriter knows only the site base: resolving against it would
+        // turn `#` into `/`. Moving one site out of a network still resolves
+        // path-relative links against its home below, so they can keep
+        // pointing at sibling sites left on the source.
+        $is_page_relative = $reference === '' || $reference[0] === '#' || $reference[0] === '?'
+            || (
+                !$this->is_multisite_to_single_site_migration
+                && 1 !== preg_match('~\A(?:[A-Za-z][A-Za-z0-9+.\-]*:|[/\\\\])~', $reference)
+            );
+        if ($is_page_relative) {
+            if ($url_cache_key !== null) {
+                $this->set_cached_url_rewrite($url_cache_key, false);
+            }
+            return false;
+        }
+
         // A complete HTTP(S) prefix needs no base. Shorthand such as
         // https:photo.jpg still resolves against the field's base directory.
         $has_absolute_prefix = 0 === strncasecmp($raw_url, 'https://', 8) || 0 === strncasecmp($raw_url, 'http://', 7);
@@ -1131,15 +1160,68 @@ class StructuredDataUrlRewriter
         // objects for every field instead of parsing each source and target
         // again for every leaf value.
         $converted = false;
+        $source_preserving_raw_url = null;
         if (!$this->is_multisite_to_single_site_migration) {
             foreach ($this->parsed_mapping as $mapping) {
                 if (is_child_url_of($parsed_url, $mapping['from_url'])) {
                     $converted = WPURL::replace_base_url($parsed_url, [
-                        'old_base_url' => $this->base_url,
+                        'old_base_url' => $mapping['from_url'],
                         'new_base_url' => $mapping['to_url'],
                         'raw_url' => $raw_url,
                         'is_relative' => !$is_absolute,
                     ]);
+                    if ($converted !== false) {
+                        // Replace only the mapped scheme, authority, and path
+                        // prefix. A fragment-only link such as `#` resolves
+                        // under the source base, but the page's own URL decides
+                        // what it means, so its bytes must not change.
+                        // HTTP(S) URL parsing reads `\` as `/` before the
+                        // query. Spell it that way so the edit can find the
+                        // base: browsers open https:\\old.example\a on the source.
+                        $editable_url = $reference;
+                        if (1 !== preg_match('~\A[A-Za-z][A-Za-z0-9+.\-]*:~', $editable_url)
+                            || 1 === preg_match('~\Ahttps?:~i', $editable_url)) {
+                            $before_query_bytes = strcspn($editable_url, '?#');
+                            $editable_url = strtr(substr($editable_url, 0, $before_query_bytes), '\\', '/')
+                                . substr($editable_url, $before_query_bytes);
+                        }
+                        $source_preserving_raw_url = StructuredBlockMarkupUrlProcessor::create_source_preserving_raw_url(
+                            $editable_url,
+                            $parsed_url,
+                            $converted,
+                            $mapping['from_url'],
+                            $mapping['to_url']
+                        );
+                        $path_text = substr($editable_url, 0, strcspn($editable_url, '?#'));
+                        if ($source_preserving_raw_url === null
+                            && 1 === preg_match('~(?:\A|/)(?:\.|%2e){1,2}(?=/|\z)~i', $path_text)
+                            && false === stripos($path_text, '%2f')) {
+                            // Mapping /blog to /news, the URL /blog/../blog/x
+                            // leads to /blog/x. create_source_preserving_raw_url()
+                            // replaces the first path segment, which gives
+                            // /news/../blog/x. That still leads to /blog/x, so it
+                            // refused. WPURL::parse() already resolved the URL to
+                            // /blog/x, so the rebuilt URL below, /news/x, is
+                            // correct. Not with %2F: is_child_url_of() would read
+                            // blog%2Fx as blog/x.
+                            break;
+                        }
+                        if ($source_preserving_raw_url === null) {
+                            // The source base matched, but its spelling cannot be
+                            // edited without guessing. Keep the field. When it
+                            // spells the source authority, keep the raw-text pass
+                            // away from the token too. A root-relative URL has no
+                            // authority for that pass to match, so other URLs in
+                            // the token are still rewritten.
+                            $cache_value = 1 === preg_match('~\A(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//~', $editable_url)
+                                ? ['raw_url' => null, 'parsed_url' => null]
+                                : false;
+                            if ($url_cache_key !== null) {
+                                $this->set_cached_url_rewrite($url_cache_key, $cache_value);
+                            }
+                            return $cache_value;
+                        }
+                    }
                     break;
                 }
             }
@@ -1189,7 +1271,14 @@ class StructuredDataUrlRewriter
         }
 
         $cache_value = false;
-        if ($converted !== false) {
+        if ($converted !== false && $source_preserving_raw_url !== null) {
+            // Return unchanged bytes too. A matched block attribute still
+            // selects the decoded attribute path instead of the raw pass.
+            $cache_value = [
+                'raw_url'    => $source_preserving_raw_url,
+                'parsed_url' => WPURL::parse($source_preserving_raw_url, $converted->new_url->toString()),
+            ];
+        } elseif ($converted !== false) {
             $cache_value = [
                 'raw_url'    => (string) $converted,
                 'parsed_url' => $converted->new_url,

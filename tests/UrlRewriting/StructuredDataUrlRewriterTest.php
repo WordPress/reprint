@@ -559,6 +559,233 @@ class StructuredDataUrlRewriterTest extends TestCase
     }
 
     /**
+     * Fragment, query and path-relative links resolve against the page that
+     * contains them. The rewriter only knows the site base, so it keeps
+     * their bytes. Before this, `#` in a post with a source URL became `/`.
+     *
+     * @see https://github.com/WordPress/reprint/issues/1003
+     */
+    #[DataProvider('pageRelativeLinkProvider')]
+    public function testKeepsPageRelativeLinksNextToSourceUrls(string $link): void
+    {
+        $rewriter = $this->createRewriter();
+        $image = "<!-- wp:image {\"id\":1} -->\n"
+            . '<figure class="wp-block-image"><img src="https://old-site.com/wp-content/uploads/logo.png" alt=""/></figure>'
+            . "\n<!-- /wp:image -->\n";
+        $paragraph = '<!-- wp:paragraph --><p><a href="' . $link . '">Privacy</a></p><!-- /wp:paragraph -->';
+
+        $this->assertSame(
+            str_replace('https://old-site.com/', 'https://new-site.com/', $image) . $paragraph,
+            $rewriter->rewrite($image . $paragraph, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /**
+     * @return array<string, array{0:string}>
+     */
+    public static function pageRelativeLinkProvider(): array
+    {
+        return [
+            'empty fragment'       => ['#'],
+            'named fragment'       => ['#top'],
+            'query only'           => ['?replytocom=5'],
+            'empty reference'      => [''],
+            'path-relative'        => ['privacy'],
+            'dot segment'          => ['./'],
+            'parent dot segment'   => ['../privacy'],
+        ];
+    }
+
+    /** A target path must not be added to a link that is relative to its page. */
+    #[DataProvider('basePathChangeProvider')]
+    public function testPathRelativeLinkIgnoresABasePathChange(string $source, string $target): void
+    {
+        $rewriter = $this->createRewriter([$source => $target]);
+        $input = '<p><a href="about">About</a><img src="https://old-site.com/blog/logo.png"/></p>';
+
+        $this->assertSame(
+            str_replace('https://old-site.com/blog/', rtrim($target, '/') . '/blog/', $input),
+            $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function basePathChangeProvider(): array
+    {
+        return [
+            'new target path'  => ['https://old-site.com', 'https://new-site.com/sub'],
+            'trailing slashes' => ['https://old-site.com/', 'https://new-site.com/sub/'],
+        ];
+    }
+
+    /** A kept page-relative link must not stop other URLs in its tag from changing. */
+    #[DataProvider('dotSegmentTagProvider')]
+    public function testDotSegmentLinkKeepsOtherUrlsInItsTagRewritable(string $input, string $expected): void
+    {
+        $this->assertSame(
+            $expected,
+            $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function dotSegmentTagProvider(): array
+    {
+        return [
+            'parent link' => [
+                '<a href="../privacy" data-bg="https://old-site.com/bg.png">x</a>',
+                '<a href="../privacy" data-bg="https://new-site.com/bg.png">x</a>',
+            ],
+            'current-directory image' => [
+                '<img src="./a.png" data-full="https://old-site.com/full.png">',
+                '<img src="./a.png" data-full="https://new-site.com/full.png">',
+            ],
+            'CSS url' => [
+                '<div style="background:url(../a.png)" data-x="https://old-site.com/q"></div>',
+                '<div style="background:url(../a.png)" data-x="https://new-site.com/q"></div>',
+            ],
+        ];
+    }
+
+    /**
+     * Browsers ignore spaces around a URL and read `\` as `/` before the
+     * query, so these spellings open the source site.
+     */
+    #[DataProvider('looselySpelledSourceUrlProvider')]
+    public function testRewritesLooselySpelledSourceUrls(string $source, string $target, string $href, string $expected): void
+    {
+        $this->assertSame(
+            '<a href="' . $expected . '">x</a>',
+            $this->createRewriter([$source => $target])->rewrite(
+                '<a href="' . $href . '">x</a>',
+                StructuredDataUrlRewriter::BLOCK_MARKUP
+            )
+        );
+    }
+
+    /** @return array<string, array{string, string, string, string}> */
+    public static function looselySpelledSourceUrlProvider(): array
+    {
+        return [
+            'leading space' => [
+                'https://old-site.com', 'https://new-site.com', ' https://old-site.com/lead', 'https://new-site.com/lead',
+            ],
+            'leading newline' => [
+                'https://old-site.com', 'https://new-site.com', "\nhttps://old-site.com/a", 'https://new-site.com/a',
+            ],
+            // A kept trailing space would be escaped as %20, a different path.
+            'trailing space' => [
+                'https://old-site.com', 'https://new-site.com', 'https://old-site.com/a ', 'https://new-site.com/a',
+            ],
+            'backslashes before the query' => [
+                'https://old-site.com', 'https://new-site.com', 'https:\\\\old-site.com\\a?q=\\b', 'https://new-site.com/a?q=\\b',
+            ],
+            'backslash after a mapped path' => [
+                'https://old-site.com/blog', 'https://new-site.com/news', 'https://old-site.com/blog\\x', 'https://new-site.com/news/x',
+            ],
+        ];
+    }
+
+    /**
+     * A source URL whose spelling cannot be edited safely stays unchanged,
+     * and so does the raw text of its tag.
+     */
+    public function testUneditableSourceUrlKeepsItsTagUnchanged(): void
+    {
+        $input = '<a href="http://old.example/media%2Fa" data-note="http://old.example/media/opaque"></a>';
+
+        $this->assertSame(
+            $input,
+            $this->createRewriter(['http://old.example/media' => 'https://new.example/assets'])
+                ->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /**
+     * In /blog/../blog/x the `..` cancels the first /blog, so no prefix edit
+     * keeps the URL's meaning. Write the rebuilt URL instead of leaving a link
+     * to a path that no longer exists on the target.
+     */
+    #[DataProvider('dotSegmentSourceUrlProvider')]
+    public function testRebuildsSourceUrlWhoseDotSegmentsCancelThePrefix(string $href, string $expected): void
+    {
+        $this->assertSame(
+            '<a href="' . $expected . '" data-x="https://new.example/news/d">',
+            $this->createRewriter(['https://old.example/blog' => 'https://new.example/news'])->rewrite(
+                '<a href="' . $href . '" data-x="https://old.example/blog/d">',
+                StructuredDataUrlRewriter::BLOCK_MARKUP
+            )
+        );
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function dotSegmentSourceUrlProvider(): array
+    {
+        return [
+            'absolute'            => ['https://old.example/blog/../blog/x', 'https://new.example/news/x'],
+            'root-relative'       => ['/blog/../blog/x', '/news/x'],
+            'outside, then in'    => ['/x/../blog/y?q=1#f', '/news/y?q=1#f'],
+            'encoded dot segment' => ['/blog/%2e%2e/blog/x', '/news/x'],
+        ];
+    }
+
+    /** An encoded slash keeps the dot-segment case uneditable: `blog%2Fx` is one segment. */
+    public function testDotSegmentWithEncodedSlashStaysUnchanged(): void
+    {
+        $input = '<a href="https://old.example/blog/../blog%2Fx" data-x="https://old.example/blog/d">';
+
+        $this->assertSame(
+            $input,
+            $this->createRewriter(['https://old.example/blog' => 'https://new.example/news'])
+                ->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /** A block attribute URL field keeps a page-relative value too. */
+    public function testKeepsPageRelativeBlockAttributeUrlNextToSourceUrls(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:image {"url":"https:\\/\\/old-site.com\\/logo.png"} --><img src="https://old-site.com/logo.png"/><!-- /wp:image -->'
+            . '<!-- wp:button {"url":"#"} --><a class="wp-block-button__link" href="#">Privacy</a><!-- /wp:button -->';
+
+        $this->assertSame(
+            str_replace('old-site.com', 'new-site.com', $input),
+            $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /** Moving one site out of a network keeps its page-only links too. */
+    public function testMultisiteExtractionKeepsPageOnlyLinks(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(
+            ['https://network.test/shop' => 'https://target.test'],
+            ['https://network.test' => ['/shop/news/']]
+        );
+        foreach (['#', '#top', '?replytocom=5', ''] as $link) {
+            $this->assertSame(
+                '<img src="https://target.test/logo.png"><a href="' . $link . '">Privacy</a>',
+                $rewriter->rewrite(
+                    '<img src="https://network.test/shop/logo.png"><a href="' . $link . '">Privacy</a>',
+                    StructuredDataUrlRewriter::BLOCK_MARKUP
+                ),
+                $link
+            );
+        }
+    }
+
+    /** A root-relative link names a site path, so a new base path still applies. */
+    public function testRootRelativeLinkFollowsANewBasePath(): void
+    {
+        $rewriter = $this->createRewriter(['https://old-site.com/blog' => 'https://new-site.com/news']);
+        $input = '<p><img src="https://old-site.com/blog/logo.png"/><a href="/blog/about#team">About</a><a href="#team">Team</a></p>';
+
+        $this->assertSame(
+            '<p><img src="https://new-site.com/news/logo.png"/><a href="/news/about#team">About</a><a href="#team">Team</a></p>',
+            $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /**
      * A percent-encoded nested URL is left alone by both content types — decoding it
      * would mean guessing the enclosing format's escaping rules.
      */
@@ -1936,6 +2163,54 @@ class StructuredDataUrlRewriterTest extends TestCase
         ];
     }
 
+    public function testStructuredReplacementUsesTheMatchedSourceBase(): void
+    {
+        $rewriter = $this->createRewriter([
+            'http://first.example/base' => 'https://first-new.example/root',
+            'http://old.example/media' => 'https://new.example/assets',
+        ]);
+        $input = '<a href="http://old.example/m%65dia/a/./b?raw=%2f">Link</a>';
+        $expected = '<a href="https://new.example/assets/a/./b?raw=%2f">Link</a>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    public function testStructuredMappingCacheDoesNotReuseRenderedUrlSpelling(): void
+    {
+        $rewriter = $this->createRewriter([
+            'http://old.example/media' => 'https://new.example/assets',
+        ]);
+        $input = '<a href="http://old.example/media/a/./b?raw=%2f">Dots</a>'
+            . '<a href="HTTP://OLD.EXAMPLE:80/media/a/b?raw=%2f">No dots</a>';
+        $expected = '<a href="https://new.example/assets/a/./b?raw=%2f">Dots</a>'
+            . '<a href="https://new.example/assets/a/b?raw=%2f">No dots</a>';
+
+        $this->assertSame($expected, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    #[DataProvider('ambiguous_structured_source_cases')]
+    public function testAmbiguousStructuredSourceIsNotRewritten(string $url): void
+    {
+        $rewriter = $this->createRewriter([
+            'http://old.example/media' => 'https://new.example/assets',
+        ]);
+        $input = '<a href="' . $url . '">Link</a>';
+
+        $this->assertSame($input, $rewriter->rewrite($input, 'block_markup'));
+    }
+
+    /**
+     * @return array<string, array{0:string}>
+     */
+    public static function ambiguous_structured_source_cases(): array
+    {
+        return [
+            'encoded slash crosses the mapped boundary' => [
+                'http://old.example/media%2Ffile',
+            ],
+        ];
+    }
+
     public function testBlockMarkupCautiouslyRewritesEncodedSiteOriginInputValue(): void
     {
         $rewriter = $this->createRewriter();
@@ -2001,7 +2276,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
         $this->assertStringContainsString('https://new-site.com/literal', $result);
-        $this->assertStringContainsString('https://new-site.com/case-variant', $result);
+        $this->assertStringContainsString('HTTPS://new-site.com/case-variant', $result);
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
@@ -2055,7 +2330,7 @@ class StructuredDataUrlRewriterTest extends TestCase
         $result = $rewriter->rewrite_known_block_markup_value($input);
 
         $this->assertStringContainsString('https:\/\/new-site.com\/img.jpg', $result);
-        $this->assertStringContainsString('src="https://new-site.com/img.jpg"', $result);
+        $this->assertStringContainsString('src="HTTPS://new-site.com/img.jpg"', $result);
         $this->assertStringNotContainsString('old-site.com', strtolower($result));
     }
 
@@ -2300,9 +2575,10 @@ class StructuredDataUrlRewriterTest extends TestCase
         $shapes = [
             'absolute'          => ['https://old-site.com/uploads/a.jpg', 'https://new-site.com/uploads/a.jpg'],
             'relative path'     => ['/uploads/b.jpg', '/uploads/b.jpg'],
-            'protocol-relative' => ['//old-site.com/uploads/c.jpg', '/uploads/c.jpg'],
-            'relative no-slash' => ['uploads/d.jpg', '/uploads/d.jpg'],
-            'relative dotted'   => ['../uploads/e.jpg', '/uploads/e.jpg'],
+            'protocol-relative' => ['//old-site.com/uploads/c.jpg', '//new-site.com/uploads/c.jpg'],
+            // Path-relative links resolve against the page, not the site root.
+            'relative no-slash' => ['uploads/d.jpg', 'uploads/d.jpg'],
+            'relative dotted'   => ['../uploads/e.jpg', '../uploads/e.jpg'],
             'query embedded'    => ['/page?ref=https://old-site.com/x', '/page?ref=https://new-site.com/x'],
         ];
 
