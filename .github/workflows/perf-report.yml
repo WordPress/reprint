@@ -281,7 +281,13 @@ jobs:
         with:
           distribution: Ubuntu-24.04
           wsl-version: 2
-          additional-packages: php8.3-cli php8.3-fpm php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-sqlite3 composer jq curl xz-utils
+
+      # MariaDB and nginx install here, in the same pass as PHP, so
+      # setup-infrastructure.sh finds them already installed.
+      - name: Install packages in WSL
+        timeout-minutes: 10
+        shell: wsl-bash {0}
+        run: bash tests/e2e/ci/install-wsl-packages.sh php8.3-cli php8.3-fpm php8.3-mysql php8.3-curl php8.3-mbstring php8.3-xml php8.3-zip php8.3-sqlite3 composer jq curl xz-utils mariadb-server nginx
 
       # setup-infrastructure.sh starts its services with systemctl.
       - name: Enable systemd in WSL
