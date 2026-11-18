@@ -23,8 +23,9 @@ const PHP_BINARY = process.env.PHP_BINARY || 'php';
 // ci/windows-php.sh runs the native Windows client from WSL.
 const IS_WINDOWS_CLIENT = PHP_BINARY.endsWith('/windows-php.sh');
 // A Windows client writes a full WordPress tree at under 1 MB/s on CI
-// runners, so its command time limits are three times as long.
-const WINDOWS_CLIENT_TIME_FACTOR = IS_WINDOWS_CLIENT ? 3 : 1;
+// runners. Its slowest commands took up to 113 s and sometimes passed the
+// 120 s default, so its command time limits are twice as long.
+const WINDOWS_CLIENT_TIME_FACTOR = IS_WINDOWS_CLIENT ? 2 : 1;
 // Root reads files whatever their mode, but the source's web server does not.
 const RUNNING_AS_ROOT = process.getuid?.() === 0;
 const DB_HOST = REGISTRY.dbHost;
