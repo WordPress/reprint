@@ -12695,8 +12695,13 @@ class ImportClient
 
         $local_absolute_path = $this->path_mapper()->remote_path_to_local_path($path);
         // Skipped bodies do no local work. A new first chunk still needs its
-        // own parent check even when the previous file was skipped.
-        if ($is_first || !$context->skip_current_file) {
+        // own parent check even when the previous file was skipped. Later
+        // chunks of an open file write through its handle, so a changed parent
+        // cannot redirect them. The close re-checks the path before touch().
+        $writes_to_open_handle = !$is_first
+            && $context->file_handle
+            && $context->file_path === $local_absolute_path;
+        if (( $is_first || !$context->skip_current_file ) && !$writes_to_open_handle) {
             try {
                 $this->assert_local_path_within_root(dirname($local_absolute_path));
             } catch (RuntimeException $error) {
@@ -13642,8 +13647,15 @@ class ImportClient
             } elseif ($path_format === 'windows' && preg_match('~^[A-Z]:/~', $absolute_path)) {
                 $path_root = substr($absolute_path, 0, 3);
             }
-            $components = explode('/', substr($absolute_path, strlen($path_root)));
-            $resolved = $path_root;
+            // The constructor resolved the filesystem root with realpath(), so
+            // no component up to and including the root is a link. Walk only
+            // the components below it.
+            $walk_start = $path_root;
+            if (Utils::path_is_same_as_or_descendant_of($absolute_path, $this->filesystem_root)) {
+                $walk_start = $this->filesystem_root;
+            }
+            $components = explode('/', ltrim(substr($absolute_path, strlen($walk_start)), '/'));
+            $resolved = $walk_start;
             foreach ($components as $index => $component) {
                 // Apply .. only after expanding the preceding link. Walk even
                 // a missing component: a later .. can return to existing paths.
