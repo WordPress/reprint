@@ -2,6 +2,12 @@ name: Performance Report
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# A newer push to a pull request cancels its older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -246,6 +252,8 @@ jobs:
   bench-windows:
     name: Pull pipeline benchmark (Windows client)
     needs: [build-pr-phar, build-trunk-phar]
+    # Windows runners are scarce, so draft pull requests skip this job.
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
@@ -473,9 +481,13 @@ jobs:
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
+      # Skipped Windows jobs are expected on a draft pull request. Marking it
+      # ready for review starts a new run in which every job must pass.
       - name: Require every PR job to pass
         env:
           JOB_RESULTS: ${{ toJSON(needs) }}
+          DRAFT_PULL_REQUEST: ${{ github.event.pull_request.draft == true }}
         run: |
           echo "$JOB_RESULTS"
-          jq --exit-status 'all(.[]; .result == "success")' <<< "$JOB_RESULTS"
+          jq --exit-status --argjson draft "$DRAFT_PULL_REQUEST" \
+            'all(.[]; .result == "success" or ($draft and .result == "skipped"))' <<< "$JOB_RESULTS"
