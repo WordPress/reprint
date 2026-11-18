@@ -45,6 +45,7 @@ Start with [Clone your site](https://developer.wordpress.org/reprint/getting-sta
 | `preflight-assert` | Checks of the saved preflight report without another request. |
 | `pull-metadata` | Saved pull lifecycle, artifacts, source details, and stored-key metadata; no network request. |
 | `files-stats` | File counts and sizes from the next remote index. |
+| `files-list` | Direct children of one saved remote directory as JSON, without network calls; `--path` defaults to `:wp-content:`. |
 | `db-index` | Database table metadata written to `db-tables.jsonl`. |
 
 See [Authentication](https://developer.wordpress.org/reprint/reference/authentication/), [Preflight](https://developer.wordpress.org/reprint/reference/preflight/), and [Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/).
