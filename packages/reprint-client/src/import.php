@@ -321,6 +321,8 @@ class ImportClient
 
     /** @var string Pull state file which persists command, cursor, and stage across invocations. */
     private $pull_state_file;
+    /** @var resource|null EXPERIMENT: state.json kept open and overwritten in place. */
+    private $pull_state_file_handle = null;
 
     /** @var ProgressReporter File-pull counters, screen snapshots, JSONL output and write throttling. */
     private ProgressReporter $progress_reporter;
@@ -15844,13 +15846,19 @@ class ImportClient
         if ($json === false) {
             throw new RuntimeException("Failed to encode state: " . json_last_error_msg());
         }
-        $tmp_file = $this->pull_state_file . '.tmp';
-        $bytes = file_put_contents($tmp_file, $json);
-        if ($bytes === false) {
-            throw new RuntimeException("Failed to write state file: $tmp_file (disk full?)");
+        // EXPERIMENT: overwrite one open handle instead of writing a new
+        // file and renaming it. A crash mid-write can tear state.json.
+        if ($this->pull_state_file_handle === null) {
+            $handle = fopen($this->pull_state_file, 'c');
+            if ($handle === false) {
+                throw new RuntimeException("Failed to open state file: {$this->pull_state_file}");
+            }
+            $this->pull_state_file_handle = $handle;
         }
-        if (!rename($tmp_file, $this->pull_state_file)) {
-            throw new RuntimeException("Failed to rename state file: $tmp_file -> {$this->pull_state_file}");
+        $handle = $this->pull_state_file_handle;
+        if (!ftruncate($handle, 0) || fseek($handle, 0) !== 0
+            || fwrite($handle, $json) !== strlen($json) || !fflush($handle)) {
+            throw new RuntimeException("Failed to overwrite state file: {$this->pull_state_file}");
         }
 
         $files_pulled = $this->progress_reporter->get_batch_files_done(); // Completed in this batch
@@ -15913,6 +15921,10 @@ class ImportClient
     {
         $this->write_progress_file();
         $this->state_directory_released = true;
+        if ($this->pull_state_file_handle !== null) {
+            fclose($this->pull_state_file_handle);
+            $this->pull_state_file_handle = null;
+        }
         $this->audit_log_handle = null;
         $this->audit_log_handle_path = null;
         if ($this->process_lock !== null) {
