@@ -46,3 +46,21 @@ https://example.com -> https://example.com/new
 ```
 
 The tradeoff is that a value written at the same time may still contain the old URL. If you need to catch every value, prevent the site from writing to the database while this command runs.
+
+## Find addresses left unchanged
+
+URL rewriting changes the old address in plain text, HTML, block markup, serialized PHP, and JSON, including escaped forms such as `https:\/\/old.example`. An address whose separators are percent-encoded usually keeps the old address. Reprint decodes those only in a few formats it recognizes, such as WPBakery shortcode links. Elsewhere it cannot tell which encoding rules the surrounding text uses, so it leaves the value unchanged.
+
+For example, take this rewrite:
+
+```text
+https://old.example -> https://new.example
+```
+
+Afterwards, a value like this one, in a post or a plugin setting, still contains the old address:
+
+```text
+https://new.example/wp-login.php?redirect_to=https%3A%2F%2Fold.example%2Fwp-admin%2F
+```
+
+To find these values, search the database for the encoded old address, such as `%2F%2Fold.example`.

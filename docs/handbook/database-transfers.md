@@ -77,7 +77,7 @@ php reprint.phar db-apply "$URL" --state-dir="$STATE_DIR" --fs-root="$FS_ROOT" \
     --rewrite-url https://old-site.com https://new-site.com
 ```
 
-This imports `db.sql` from the state directory and rewrites URLs in serialized PHP values, JSON, block markup, and plain text while keeping those formats valid. URLs inside deeply nested encoded strings may remain unchanged.
+This imports `db.sql` from the state directory and rewrites URLs in serialized PHP values, JSON, block markup, and plain text while keeping those formats valid. URLs inside deeply nested encoded strings may remain unchanged. Most percent-encoded URLs, such as `https%3A%2F%2Fold-site.com` in a query value, also keep the old address. See [Find addresses left unchanged](https://developer.wordpress.org/reprint/guides/rewrite-urls/#find-addresses-left-unchanged).
 
 ## WordPress cleanup after apply
 
