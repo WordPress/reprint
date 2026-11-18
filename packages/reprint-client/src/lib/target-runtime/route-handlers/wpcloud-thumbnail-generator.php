@@ -10,6 +10,7 @@
  * The generated code is a self-contained IIFE that:
  * - Checks $_SERVER['REQUEST_URI'] for thumbnail-pattern URLs
  * - Requires WP_CONTENT_DIR to be defined (by the bootstrap)
+ * - Accepts fixed square bounds and their aspect-ratio variants only
  * - Generates the resized image, caches it on disk, serves it
  * - Calls exit() — no need to boot WordPress
  * - Returns silently if the request doesn't match
@@ -25,7 +26,7 @@ function wpcloud_thumbnail_generator_code(): string
  * This intercepts requests for missing thumbnails inside /wp-content/uploads/,
  * generates a properly resized copy from the original using GD, caches it on
  * disk so subsequent requests are served directly, and exits before WordPress
- * boots — keeping it fast.
+ * boots — keeping it fast. Missing sizes outside the fixed bounds return 404.
  */
 (function() {
 	if (!defined('WP_CONTENT_DIR')) return;
@@ -57,6 +58,14 @@ function wpcloud_thumbnail_generator_code(): string
 	// If the thumbnail already exists on disk, let the server handle it
 	if (file_exists($thumb_path) || is_link($thumb_path)) return;
 
+	// Keep one spelling per size and a fixed set of bounds. The runtime runs
+	// before WordPress, so theme and plugin image-size registrations are unavailable.
+	if ($max_width < 1 || $max_height < 1 || $m[1] !== (string) $max_width || $m[2] !== (string) $max_height ||
+		!in_array(max($max_width, $max_height), [150, 300, 768, 1024, 1536, 2048], true)) {
+		http_response_code(404);
+		exit;
+	}
+
 	// Derive the original (unsized) file path
 	$original_path = realpath(preg_replace('/-\d+x\d+(\.\w+)$/', '$1', $thumb_path));
 	$uploads_directory = realpath(WP_CONTENT_DIR . '/uploads');
@@ -68,6 +77,31 @@ function wpcloud_thumbnail_generator_code(): string
 	$uploads_prefix = rtrim($uploads_directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
 	if (strpos($original_path, $uploads_prefix) !== 0) return;
 	if ($thumbnail_directory !== $uploads_directory && strpos($thumbnail_directory, $uploads_prefix) !== 0) return;
+
+	// Generated thumbnails must not become sources for another set of variants.
+	if (preg_match('/-\d+x\d+(\.\w+)$/', $original_path)) {
+		http_response_code(404);
+		exit;
+	}
+
+	$original_dimensions = @getimagesize($original_path);
+	if (!$original_dimensions || $original_dimensions[0] < 1 || $original_dimensions[1] < 1) return;
+
+	// Compute the fitted dimensions for the selected square bound,
+	// never enlarging beyond the original.
+	$orig_w = $original_dimensions[0];
+	$orig_h = $original_dimensions[1];
+	$scale  = min(max($max_width, $max_height) / max($orig_w, $orig_h), 1.0);
+	$new_w  = (int) round($orig_w * $scale);
+	$new_h  = (int) round($orig_h * $scale);
+
+	// Accept square bounds and the exact fitted dimensions only. Letting the
+	// other dimension vary freely would create many names for the same image.
+	if ($new_w < 1 || $new_h < 1 ||
+		($max_width !== $max_height && ($max_width !== $new_w || $max_height !== $new_h))) {
+		http_response_code(404);
+		exit;
+	}
 
 	// Load the original image with GD
 	$src = null;
@@ -89,14 +123,6 @@ function wpcloud_thumbnail_generator_code(): string
 			break;
 	}
 	if (!$src) return;
-
-	// Compute the scaled dimensions (fit inside max_width x max_height,
-	// never enlarge beyond the original)
-	$orig_w = imagesx($src);
-	$orig_h = imagesy($src);
-	$scale  = min($max_width / $orig_w, $max_height / $orig_h, 1.0);
-	$new_w  = (int) round($orig_w * $scale);
-	$new_h  = (int) round($orig_h * $scale);
 
 	$dst = imagecreatetruecolor($new_w, $new_h);
 
