@@ -183,6 +183,12 @@
     "files-pull-mirror": {
       "port": 8130
     },
+    "files-pull-mirror-filters": {
+      "port": 8197
+    },
+    "files-pull-mirror-local-changes": {
+      "port": 8198
+    },
     "open-basedir": {
       "port": 8131,
       "openBasedir": true
