@@ -210,6 +210,25 @@ class SqlStatementRewriterTest extends TestCase
         $this->assertStringNotContainsString('old-site.com', $values[0]);
     }
 
+    /**
+     * The issue's db-apply path: a post with a source URL reaches the block
+     * markup rewriter, and its placeholder link must stay a placeholder.
+     *
+     * @see https://github.com/WordPress/reprint/issues/1003
+     */
+    public function testPostContentKeepsFragmentLinksBesideSourceUrls(): void
+    {
+        $rewriter = $this->createRewriter();
+        $markup = '<!-- wp:image {"id":1} --><figure class="wp-block-image"><img src="https://old-site.com/wp-content/uploads/logo.png" alt=""/></figure><!-- /wp:image -->'
+            . '<!-- wp:paragraph --><p class="has-text-color"><a href="#">Privacy</a> <a href="#top">Top</a></p><!-- /wp:paragraph -->';
+        $encoded = base64_encode($markup);
+        $sql = "INSERT INTO `wp_posts` (`ID`, `post_content`) VALUES(1, FROM_BASE64('{$encoded}'));";
+
+        $values = $this->collectValues($rewriter->rewrite($sql));
+
+        $this->assertSame([str_replace('https://old-site.com/', 'https://new-site.com/', $markup)], $values);
+    }
+
     public function testPostContentRewritesUrlsThroughRegisteredWPBakeryCodecs(): void
     {
         $rewriter = $this->createRewriter();

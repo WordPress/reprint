@@ -559,6 +559,88 @@ class StructuredDataUrlRewriterTest extends TestCase
     }
 
     /**
+     * Fragment, query and path-relative links resolve against the page that
+     * contains them. The rewriter only knows the site base, so it must keep
+     * their bytes. Before this, `#` in a post with a source URL became `/`.
+     *
+     * @see https://github.com/WordPress/reprint/issues/1003
+     */
+    #[DataProvider('pageRelativeLinkProvider')]
+    public function testKeepsPageRelativeLinksNextToSourceUrls(string $link): void
+    {
+        $rewriter = $this->createRewriter();
+        $image = "<!-- wp:image {\"id\":1} -->\n"
+            . '<figure class="wp-block-image"><img src="https://old-site.com/wp-content/uploads/logo.png" alt=""/></figure>'
+            . "\n<!-- /wp:image -->\n";
+        $paragraph = '<!-- wp:paragraph --><p><a href="' . $link . '">Privacy</a></p><!-- /wp:paragraph -->';
+
+        $this->assertSame(
+            str_replace('https://old-site.com/', 'https://new-site.com/', $image) . $paragraph,
+            $rewriter->rewrite($image . $paragraph, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /**
+     * @return array<string, array{0:string}>
+     */
+    public static function pageRelativeLinkProvider(): array
+    {
+        return [
+            'empty fragment'       => ['#'],
+            'named fragment'       => ['#top'],
+            'query only'           => ['?replytocom=5'],
+            'empty reference'      => [''],
+            'path-relative'        => ['privacy'],
+            'dot segment'          => ['./'],
+            'parent dot segment'   => ['../privacy'],
+        ];
+    }
+
+    /** A block attribute URL field keeps a page-relative value too. */
+    public function testKeepsPageRelativeBlockAttributeUrlNextToSourceUrls(): void
+    {
+        $rewriter = $this->createRewriter();
+        $input = '<!-- wp:image {"url":"https:\\/\\/old-site.com\\/logo.png"} --><img src="https://old-site.com/logo.png"/><!-- /wp:image -->'
+            . '<!-- wp:button {"url":"#"} --><a class="wp-block-button__link" href="#">Privacy</a><!-- /wp:button -->';
+
+        $this->assertSame(
+            str_replace('old-site.com', 'new-site.com', $input),
+            $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /** Moving one site out of a network keeps its page-only links too. */
+    public function testMultisiteExtractionKeepsPageOnlyLinks(): void
+    {
+        $rewriter = new StructuredDataUrlRewriter(
+            ['https://network.test/shop' => 'https://target.test'],
+            ['https://network.test' => ['/shop/news/']]
+        );
+        foreach (['#', '#top', '?replytocom=5', ''] as $link) {
+            $this->assertSame(
+                '<img src="https://target.test/logo.png"><a href="' . $link . '">Privacy</a>',
+                $rewriter->rewrite(
+                    '<img src="https://network.test/shop/logo.png"><a href="' . $link . '">Privacy</a>',
+                    StructuredDataUrlRewriter::BLOCK_MARKUP
+                ),
+                $link
+            );
+        }
+    }
+
+    /** A root-relative link names a site path, so a new base path still applies. */
+    public function testRootRelativeLinkFollowsANewBasePath(): void
+    {
+        $rewriter = $this->createRewriter(['https://old-site.com/blog' => 'https://new-site.com/news']);
+        $input = '<p><img src="https://old-site.com/blog/logo.png"/><a href="/blog/about#team">About</a><a href="#team">Team</a></p>';
+
+        $this->assertSame(
+            '<p><img src="https://new-site.com/news/logo.png"/><a href="/news/about#team">About</a><a href="#team">Team</a></p>',
+            $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /**
      * A percent-encoded nested URL is left alone by both content types — decoding it
      * would mean guessing the enclosing format's escaping rules.
      */

@@ -1121,6 +1121,19 @@ class StructuredDataUrlRewriter
             }
         }
 
+        // An empty, fragment-only or query-only reference names the page
+        // that contains it, such as a placeholder `#` link. That page moves
+        // with the site, so the bytes stay correct; resolving them against
+        // the site base would turn `#` into `/`. WHATWG URL parsing trims
+        // leading C0 controls and spaces.
+        $reference = ltrim($raw_url, "\x00..\x20");
+        if ($reference === '' || $reference[0] === '#' || $reference[0] === '?') {
+            if ($url_cache_key !== null) {
+                $this->set_cached_url_rewrite($url_cache_key, false);
+            }
+            return false;
+        }
+
         // A complete HTTP(S) prefix needs no base. Shorthand such as
         // https:photo.jpg still resolves against the field's base directory.
         $has_absolute_prefix = 0 === strncasecmp($raw_url, 'https://', 8) || 0 === strncasecmp($raw_url, 'http://', 7);
