@@ -280,6 +280,45 @@ final class PullSymlinkScopeTest extends TestCase
         return ['file' => ['file'], 'directory' => ['directory'], 'symlink' => ['symlink']];
     }
 
+    /** A later part for another file is checked even while an earlier file is open. */
+    public function testPartForAnotherFileIsCheckedWhileAFileIsOpen(): void
+    {
+        symlink($this->root . '/outside', $this->root . '/files/alias');
+        $failure = null;
+        try {
+            $this->receive([
+                ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/open.txt'),
+                    'X-First-Chunk' => '1', 'X-Last-Chunk' => '0', 'X-File-Size' => '10'], 'body' => 'open'],
+                ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/alias/other.txt'),
+                    'X-First-Chunk' => '0', 'X-Last-Chunk' => '0', 'X-File-Size' => '10'], 'body' => 'other'],
+            ]);
+        } catch (\RuntimeException $error) {
+            $failure = $error;
+        }
+        $this->assertNotNull($failure, 'A part whose parent leaves the root must stop the request.');
+        $this->assertStringContainsString('outside filesystem root', $failure->getMessage());
+        $this->assertSame('open', file_get_contents($this->root . '/files/open.txt'));
+    }
+
+    /** A sibling whose name starts with the root's name is outside the root. */
+    public function testLinkToASiblingSharingTheRootNamePrefixIsRefused(): void
+    {
+        mkdir($this->root . '/files-outside');
+        symlink($this->root . '/files-outside', $this->root . '/files/alias');
+        $failure = null;
+        try {
+            $this->receive([
+                ['headers' => ['X-Chunk-Type' => 'file', 'X-File-Path' => base64_encode('/alias/new.txt'),
+                    'X-First-Chunk' => '1', 'X-Last-Chunk' => '1', 'X-File-Size' => '3'], 'body' => 'new'],
+            ]);
+        } catch (\RuntimeException $error) {
+            $failure = $error;
+        }
+        $this->assertFileDoesNotExist($this->root . '/files-outside/new.txt');
+        $this->assertNotNull($failure, 'A parent link to a sibling of the root must stop the request.');
+        $this->assertStringContainsString('outside filesystem root', $failure->getMessage());
+    }
+
     public function testIntermediateIndexLinksCheckTheirParentAsWellAsTheirTarget(): void
     {
         // A local directory alias may already point to a shared sibling tree.
