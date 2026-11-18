@@ -1121,13 +1121,24 @@ class StructuredDataUrlRewriter
             }
         }
 
-        // An empty, fragment-only or query-only reference names the page
-        // that contains it, such as a placeholder `#` link. That page moves
-        // with the site, so the bytes stay correct; resolving them against
-        // the site base would turn `#` into `/`. WHATWG URL parsing trims
-        // leading C0 controls and spaces.
-        $reference = ltrim($raw_url, "\x00..\x20");
-        if ($reference === '' || $reference[0] === '#' || $reference[0] === '?') {
+        // WHATWG URL parsing ignores leading and trailing C0 controls and
+        // spaces. A rewritten URL drops them: HTML attribute escaping would
+        // turn a kept trailing space into %20, a different path.
+        $reference = trim($raw_url, "\x00..\x20");
+
+        // An empty, fragment-only, query-only or path-relative reference
+        // resolves against the page that contains it, such as a placeholder
+        // `#` link. That page moves with the site, so the bytes stay correct.
+        // The rewriter knows only the site base: resolving against it would
+        // turn `#` into `/`. Moving one site out of a network still resolves
+        // path-relative links against its home below, so they can keep
+        // pointing at sibling sites left on the source.
+        $is_page_relative = $reference === '' || $reference[0] === '#' || $reference[0] === '?'
+            || (
+                !$this->is_multisite_to_single_site_migration
+                && 1 !== preg_match('~\A(?:[A-Za-z][A-Za-z0-9+.\-]*:|[/\\\\])~', $reference)
+            );
+        if ($is_page_relative) {
             if ($url_cache_key !== null) {
                 $this->set_cached_url_rewrite($url_cache_key, false);
             }
@@ -1164,8 +1175,18 @@ class StructuredDataUrlRewriter
                         // prefix. A fragment-only link such as `#` resolves
                         // under the source base, but the page's own URL decides
                         // what it means, so its bytes must not change.
+                        // HTTP(S) URL parsing reads `\` as `/` before the
+                        // query. Spell it that way so the edit can find the
+                        // base: browsers open https:\\old.example\a on the source.
+                        $editable_url = $reference;
+                        if (1 !== preg_match('~\A[A-Za-z][A-Za-z0-9+.\-]*:~', $editable_url)
+                            || 1 === preg_match('~\Ahttps?:~i', $editable_url)) {
+                            $before_query_bytes = strcspn($editable_url, '?#');
+                            $editable_url = strtr(substr($editable_url, 0, $before_query_bytes), '\\', '/')
+                                . substr($editable_url, $before_query_bytes);
+                        }
                         $source_preserving_raw_url = StructuredBlockMarkupUrlProcessor::create_source_preserving_raw_url(
-                            $raw_url,
+                            $editable_url,
                             $parsed_url,
                             $converted,
                             $mapping['from_url'],
@@ -1173,9 +1194,14 @@ class StructuredDataUrlRewriter
                         );
                         if ($source_preserving_raw_url === null) {
                             // The source base matched, but its spelling cannot be
-                            // edited without guessing. Keep the field, and keep
-                            // the raw-text pass away from it too.
-                            $cache_value = ['raw_url' => null, 'parsed_url' => null];
+                            // edited without guessing. Keep the field. When it
+                            // spells the source authority, keep the raw-text pass
+                            // away from the token too. A root-relative URL has no
+                            // authority for that pass to match, so other URLs in
+                            // the token are still rewritten.
+                            $cache_value = 1 === preg_match('~\A(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//~', $editable_url)
+                                ? ['raw_url' => null, 'parsed_url' => null]
+                                : false;
                             if ($url_cache_key !== null) {
                                 $this->set_cached_url_rewrite($url_cache_key, $cache_value);
                             }

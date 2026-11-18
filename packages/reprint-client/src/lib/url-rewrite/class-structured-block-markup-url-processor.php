@@ -591,7 +591,13 @@ class StructuredBlockMarkupUrlProcessor extends BlockMarkupProcessor {
 	 * edited string is reparsed and returned only when it matches the normal
 	 * semantic conversion.
 	 *
-	 * @return string|null
+	 * @param string $raw_url URL as spelled in its field.
+	 * @param URL $url $raw_url parsed against the field's base.
+	 * @param \WordPress\DataLiberation\URL\ConvertedUrl $converted_url WPURL::replace_base_url() result for $url.
+	 * @param URL $old_base_url Source base that $url is a child of.
+	 * @param URL $new_base_url Target base that replaces $old_base_url.
+	 * @return string|null $raw_url with its base components replaced, or null
+	 *                     when their boundaries cannot be located safely.
 	 */
 	public static function create_source_preserving_raw_url( $raw_url, $url, $converted_url, $old_base_url, $new_base_url ) {
 		$updated_url = $converted_url->new_url;

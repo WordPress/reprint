@@ -560,7 +560,7 @@ class StructuredDataUrlRewriterTest extends TestCase
 
     /**
      * Fragment, query and path-relative links resolve against the page that
-     * contains them. The rewriter only knows the site base, so it must keep
+     * contains them. The rewriter only knows the site base, so it keeps
      * their bytes. Before this, `#` in a post with a source URL became `/`.
      *
      * @see https://github.com/WordPress/reprint/issues/1003
@@ -594,6 +594,111 @@ class StructuredDataUrlRewriterTest extends TestCase
             'dot segment'          => ['./'],
             'parent dot segment'   => ['../privacy'],
         ];
+    }
+
+    /** A target path must not be added to a link that is relative to its page. */
+    #[DataProvider('basePathChangeProvider')]
+    public function testPathRelativeLinkIgnoresABasePathChange(string $source, string $target): void
+    {
+        $rewriter = $this->createRewriter([$source => $target]);
+        $input = '<p><a href="about">About</a><img src="https://old-site.com/blog/logo.png"/></p>';
+
+        $this->assertSame(
+            str_replace('https://old-site.com/blog/', rtrim($target, '/') . '/blog/', $input),
+            $rewriter->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function basePathChangeProvider(): array
+    {
+        return [
+            'new target path'  => ['https://old-site.com', 'https://new-site.com/sub'],
+            'trailing slashes' => ['https://old-site.com/', 'https://new-site.com/sub/'],
+        ];
+    }
+
+    /** A kept page-relative link must not stop other URLs in its tag from changing. */
+    #[DataProvider('dotSegmentTagProvider')]
+    public function testDotSegmentLinkKeepsOtherUrlsInItsTagRewritable(string $input, string $expected): void
+    {
+        $this->assertSame(
+            $expected,
+            $this->createRewriter()->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function dotSegmentTagProvider(): array
+    {
+        return [
+            'parent link' => [
+                '<a href="../privacy" data-bg="https://old-site.com/bg.png">x</a>',
+                '<a href="../privacy" data-bg="https://new-site.com/bg.png">x</a>',
+            ],
+            'current-directory image' => [
+                '<img src="./a.png" data-full="https://old-site.com/full.png">',
+                '<img src="./a.png" data-full="https://new-site.com/full.png">',
+            ],
+            'CSS url' => [
+                '<div style="background:url(../a.png)" data-x="https://old-site.com/q"></div>',
+                '<div style="background:url(../a.png)" data-x="https://new-site.com/q"></div>',
+            ],
+        ];
+    }
+
+    /**
+     * Browsers ignore spaces around a URL and read `\` as `/` before the
+     * query, so these spellings open the source site.
+     */
+    #[DataProvider('looselySpelledSourceUrlProvider')]
+    public function testRewritesLooselySpelledSourceUrls(string $source, string $target, string $href, string $expected): void
+    {
+        $this->assertSame(
+            '<a href="' . $expected . '">x</a>',
+            $this->createRewriter([$source => $target])->rewrite(
+                '<a href="' . $href . '">x</a>',
+                StructuredDataUrlRewriter::BLOCK_MARKUP
+            )
+        );
+    }
+
+    /** @return array<string, array{string, string, string, string}> */
+    public static function looselySpelledSourceUrlProvider(): array
+    {
+        return [
+            'leading space' => [
+                'https://old-site.com', 'https://new-site.com', ' https://old-site.com/lead', 'https://new-site.com/lead',
+            ],
+            'leading newline' => [
+                'https://old-site.com', 'https://new-site.com', "\nhttps://old-site.com/a", 'https://new-site.com/a',
+            ],
+            // A kept trailing space would be escaped as %20, a different path.
+            'trailing space' => [
+                'https://old-site.com', 'https://new-site.com', 'https://old-site.com/a ', 'https://new-site.com/a',
+            ],
+            'backslashes before the query' => [
+                'https://old-site.com', 'https://new-site.com', 'https:\\\\old-site.com\\a?q=\\b', 'https://new-site.com/a?q=\\b',
+            ],
+            'backslash after a mapped path' => [
+                'https://old-site.com/blog', 'https://new-site.com/news', 'https://old-site.com/blog\\x', 'https://new-site.com/news/x',
+            ],
+        ];
+    }
+
+    /**
+     * A source URL whose spelling cannot be edited safely stays unchanged,
+     * and so does the raw text of its tag.
+     */
+    public function testUneditableSourceUrlKeepsItsTagUnchanged(): void
+    {
+        $input = '<a href="http://old.example/media%2Fa" data-note="http://old.example/media/opaque"></a>';
+
+        $this->assertSame(
+            $input,
+            $this->createRewriter(['http://old.example/media' => 'https://new.example/assets'])
+                ->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
     }
 
     /** A block attribute URL field keeps a page-relative value too. */
