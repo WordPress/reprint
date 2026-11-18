@@ -145,8 +145,8 @@ describe('Import: Playground CLI runtime', () => {
             'start.sh should use do-not-attempt-installing');
         assert.ok(startSh.includes('--follow-symlinks'),
             'start.sh should enable follow-symlinks');
-        assert.ok(startSh.includes('--mount-before-install='),
-            'start.sh should have mount-before-install flags');
+        assert.ok(startSh.includes('--mount-dir-before-install '),
+            'start.sh should have mount-dir-before-install flags');
         assert.ok(startSh.includes(`--port=${port}`),
             'start.sh should use the configured port');
         assert.ok(startSh.includes('npx --yes @wp-playground/cli@'),
