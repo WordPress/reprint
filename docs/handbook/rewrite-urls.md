@@ -51,7 +51,13 @@ The tradeoff is that a value written at the same time may still contain the old 
 
 URL rewriting changes the old address in plain text, HTML, block markup, serialized PHP, and JSON, including escaped forms such as `https:\/\/old.example`. An address whose separators are percent-encoded usually keeps the old address. Reprint decodes those only in a few formats it recognizes, such as WPBakery shortcode links. Elsewhere it cannot tell which encoding rules the surrounding text uses, so it leaves the value unchanged.
 
-For example, this option value keeps the old address after a rewrite from `https://old.example` to `https://new.example`:
+For example, take this rewrite:
+
+```text
+https://old.example -> https://new.example
+```
+
+Afterwards, this option value still contains the old address:
 
 ```text
 https://new.example/wp-login.php?redirect_to=https%3A%2F%2Fold.example%2Fwp-admin%2F
