@@ -6,6 +6,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# A newer push to a pull request cancels its older run. Other events get a
+# group of their own, so no trunk run is cancelled or left pending.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
