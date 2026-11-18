@@ -35,6 +35,7 @@ import {
     pullStateDirectory,
     readAuditLog,
     runImporter,
+    waitUntilClientCanConnect,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -70,6 +71,7 @@ describe('Import: Application firewall compatibility', { timeout: 240000 }, () =
         );
         const [readyMessage] = await once(firewallProcess, 'message');
         firewallOrigin = `http://127.0.0.1:${readyMessage.port}`;
+        waitUntilClientCanConnect(readyMessage.port);
         importUrl = `${firewallOrigin}/?reprint-api`;
 
         const connection = await createMysqlConnection();

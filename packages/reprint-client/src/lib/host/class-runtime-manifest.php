@@ -71,7 +71,7 @@ class RuntimeManifest
      *
      * Populated from auto_prepend_file / auto_append_file INI values
      * during host analysis.  The target runtime applier decides how to
-     * surface these (e.g. --mount-before-install in Playground CLI).
+     * surface these (e.g. --mount-dir-before-install in Playground CLI).
      *
      * @var string[]  Absolute remote directory paths (e.g. ['/scripts'])
      */

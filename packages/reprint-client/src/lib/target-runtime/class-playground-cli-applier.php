@@ -13,7 +13,7 @@ use function WordPress\Filesystem\wp_join_unix_paths;
  *
  * Unlike nginx-fpm and php-builtin which write server config files,
  * Playground CLI handles most configuration through command-line flags.
- * The start.sh script uses --mount-before-install to place the imported
+ * The start.sh script uses --mount-dir-before-install to place the imported
  * files at /wordpress in the VFS, and --follow-symlinks to let Playground
  * resolve any symlinks within the mounted directories.
  *
@@ -160,8 +160,8 @@ class PlaygroundCliApplier implements RuntimeApplier
     }
 
     /**
-     * Build the list of --mount-before-install flags that assemble a
-     * standard WordPress layout at /wordpress in Playground's VFS.
+     * Build the mounts that assemble a standard WordPress layout at
+     * /wordpress in Playground's VFS, applied before installation.
      *
      * For standard WordPress sites where the document root IS the
      * WordPress directory, a single mount covers everything.
@@ -178,6 +178,8 @@ class PlaygroundCliApplier implements RuntimeApplier
      * Symlinks within wp-content (themes, plugins, mu-plugins pointing
      * to shared host directories) are resolved by Playground's
      * --follow-symlinks flag — no per-symlink mounts needed.
+     *
+     * @return array<int, array{source: string, target: string}> Host source and VFS target of each mount.
      */
     private function build_mounts(string $filesystem_root, array $options): array
     {
@@ -199,21 +201,21 @@ class PlaygroundCliApplier implements RuntimeApplier
         if ($wordpress_core_dir !== '' && $wordpress_core_dir !== $real_fs_root) {
             // WPCloud-style layout: WordPress core is separate from the
             // document root. Three mounts assemble the standard layout.
-            $mounts[] = $wordpress_core_dir . ':/wordpress';
+            $mounts[] = ['source' => $wordpress_core_dir, 'target' => self::VFS_ROOT];
 
             $wp_content = wp_join_unix_paths($real_fs_root, 'wp-content');
             if (is_dir($wp_content)) {
-                $mounts[] = $wp_content . ':/wordpress/wp-content';
+                $mounts[] = ['source' => $wp_content, 'target' => self::VFS_ROOT . '/wp-content'];
             }
 
             $wp_config = wp_join_unix_paths($real_fs_root, 'wp-config.php');
             if (file_exists($wp_config)) {
-                $mounts[] = $wp_config . ':/wordpress/wp-config.php';
+                $mounts[] = ['source' => $wp_config, 'target' => self::VFS_ROOT . '/wp-config.php'];
             }
         } else {
             // Standard layout: the document root IS the WordPress
             // directory. One mount covers everything.
-            $mounts[] = $real_fs_root . ':/wordpress';
+            $mounts[] = ['source' => $real_fs_root, 'target' => self::VFS_ROOT];
         }
 
         return $mounts;
@@ -235,24 +237,13 @@ class PlaygroundCliApplier implements RuntimeApplier
     ): array {
         $config = [
             'document_root' => self::VFS_ROOT,
-            'mounts_before_install' => [],
+            'mounts_before_install' => $this->build_mounts($filesystem_root, $options),
             'mounts' => [],
             'blueprint' => wp_join_unix_paths($output_dir, 'blueprint.json'),
             'port' => $port,
             'follow_symlinks' => true,
             'wordpress_install_mode' => 'do-not-attempt-installing',
         ];
-
-        // WordPress layout mounts. For standard sites this is a single
-        // mount. For WPCloud-style sites, three mounts assemble a standard
-        // layout from separate directories.
-        foreach ($this->build_mounts($filesystem_root, $options) as $mount) {
-            [$source, $target] = explode(':', $mount, 2);
-            $config['mounts_before_install'][] = [
-                'source' => $source,
-                'target' => $target,
-            ];
-        }
 
         // Runtime mu-plugin. The 0- prefix ensures it loads before other
         // mu-plugins. mu-plugins don't need a Plugin Name header.
@@ -296,14 +287,16 @@ class PlaygroundCliApplier implements RuntimeApplier
 
         // Mount the WordPress directory layout. For standard sites this
         // is a single mount. For WPCloud-style sites, three mounts
-        // assemble a standard layout from separate directories.
+        // assemble a standard layout from separate directories. The host
+        // path and VFS path are separate arguments because Playground
+        // rejects a joined source:target value that has a Windows drive.
         foreach ($config['mounts_before_install'] as $mount) {
-            $args[] = '--mount-before-install=' . escapeshellarg($mount['source'] . ':' . $mount['target']);
+            $args[] = '--mount-dir-before-install ' . escapeshellarg($mount['source']) . ' ' . escapeshellarg($mount['target']);
         }
 
         // Mount runtime.php as a mu-plugin (0- prefix ensures it loads first).
         foreach ($config['mounts'] as $mount) {
-            $args[] = '--mount=' . escapeshellarg($mount['source'] . ':' . $mount['target']);
+            $args[] = '--mount-dir ' . escapeshellarg($mount['source']) . ' ' . escapeshellarg($mount['target']);
         }
 
         // The site is already installed — don't run Playground's WordPress

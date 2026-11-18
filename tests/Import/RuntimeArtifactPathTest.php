@@ -113,6 +113,43 @@ class RuntimeArtifactPathTest extends TestCase
         );
     }
 
+    /**
+     * Playground splits a joined source:target mount at every colon, so a
+     * Windows drive in the source breaks it. Each path must arrive as its
+     * own argument.
+     */
+    public function testPlaygroundStartScriptPassesMountPathsAsSeparateArguments(): void
+    {
+        if (PHP_OS_FAMILY === 'Windows') {
+            $this->markTestSkipped('start.sh needs Bash.');
+        }
+        $filesystemRoot = $this->tempDir . '/C:/site';
+        mkdir($filesystemRoot, 0755, true);
+        $outputDir = $this->tempDir . '/playground';
+        $fakeBinDir = $this->tempDir . '/bin';
+        mkdir($fakeBinDir);
+        file_put_contents($fakeBinDir . '/npx', "#!/bin/sh\nprintf '%s\\n' \"\$@\"\n");
+        chmod($fakeBinDir . '/npx', 0755);
+
+        ( new \PlaygroundCliApplier() )->apply(new \RuntimeManifest('other'), $filesystemRoot, $outputDir);
+        exec(
+            'PATH=' . escapeshellarg($fakeBinDir . ':' . getenv('PATH')) . ' bash ' . escapeshellarg($outputDir . '/start.sh'),
+            $output,
+            $exitCode,
+        );
+
+        $this->assertSame(0, $exitCode, implode("\n", $output));
+        $arguments = array_slice($output, array_search('server', $output, true) + 1);
+        $this->assertSame(
+            ['--mount-dir-before-install', realpath($filesystemRoot), '/wordpress'],
+            array_slice($arguments, 0, 3),
+        );
+        $this->assertSame(
+            ['--mount-dir', $outputDir . '/runtime.php', '/wordpress/wp-content/mu-plugins/0-playground-runtime.php'],
+            array_slice($arguments, 3, 3),
+        );
+    }
+
     private function recursiveDelete(string $dir): void
     {
         if (!is_dir($dir)) {

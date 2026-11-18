@@ -13,9 +13,12 @@ import { createServer } from 'node:net';
 import { once } from 'node:events';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { ensureSite } from '../lib/site-setup.js';
-import { runImporter, createTempDir, cleanupTempDir, getSiteUrl, getSiteDir, getSiteSecret } from '../lib/test-helpers.js';
+import {
+    runImporter, createTempDir, cleanupTempDir, getSiteUrl, getSiteDir, getSiteSecret, IS_WINDOWS_CLIENT,
+} from '../lib/test-helpers.js';
 
-describe('Import: generated CSS asset URLs', () => {
+// Booting a pulled site under native Windows PHP is not a supported scenario.
+describe.skipIf(IS_WINDOWS_CLIENT)('Import: generated CSS asset URLs', () => {
     const site = 'generated-css-assets';
     const stylesheetPath = '/wp-content/uploads/elementor/css/post-7.css';
     const importedStylesheetPath = '/wp-content/uploads/bb-plugin/cache/layout.css';

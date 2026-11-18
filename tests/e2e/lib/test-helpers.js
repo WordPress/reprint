@@ -22,6 +22,10 @@ const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'r
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
 // ci/windows-php.sh runs the native Windows client from WSL.
 const IS_WINDOWS_CLIENT = PHP_BINARY.endsWith('/windows-php.sh');
+// A Windows client writes a full WordPress tree at under 1 MB/s on CI
+// runners. Its slowest commands took up to 113 s and sometimes passed the
+// 120 s default, so its command time limits are twice as long.
+const WINDOWS_CLIENT_TIME_FACTOR = IS_WINDOWS_CLIENT ? 2 : 1;
 // Root reads files whatever their mode, but the source's web server does not.
 const RUNNING_AS_ROOT = process.getuid?.() === 0;
 const DB_HOST = REGISTRY.dbHost;
@@ -363,7 +367,7 @@ export function runImporter(url, outputDir, command, options = {}) {
             const result = execFileSync(PHP_BINARY, args, {
                 // WASM PHP startup overhead is ~12s per invocation, so the per-call
                 // budget needs to comfortably cover boot + the actual work.
-                timeout: options.timeout || 120000,
+                timeout: (options.timeout || 120000) * WINDOWS_CLIENT_TIME_FACTOR,
                 encoding: 'utf-8',
                 env: { ...process.env },
                 maxBuffer: 50 * 1024 * 1024,
@@ -422,7 +426,7 @@ export function runImporter(url, outputDir, command, options = {}) {
     const commandExtraArgs = options.extraArgs || [];
     // Wall-clock budget across all resume attempts. Set high enough to cover several
     // WASM PHP invocations (~12s startup each) plus their actual work.
-    const wallTimeout = options.wallTimeout || 240000;
+    const wallTimeout = (options.wallTimeout || 240000) * WINDOWS_CLIENT_TIME_FACTOR;
     const wallStart = Date.now();
     let result = command === 'preflight'
         ? runPreflight(commandExtraArgs)
@@ -1025,6 +1029,25 @@ export function assertLinkValue(linkPath, expectedValue, message) {
         resolve(dirname(linkPath), expectedValue),
         message,
     );
+}
+
+/**
+ * Waits until the client's PHP can connect to a port the harness just opened.
+ * Windows reaches a WSL port through a relay that notices a new listener
+ * only after a short delay, so a client started at once is refused.
+ */
+export function waitUntilClientCanConnect(port) {
+    if (!IS_WINDOWS_CLIENT) {
+        return;
+    }
+    const connectScript = `for ($attempt = 0; $attempt < 100; ++$attempt) {
+        $connection = @fsockopen('127.0.0.1', ${Number(port)}, $error_number, $error_message, 0.2);
+        if ($connection) { fclose($connection); exit(0); }
+        usleep(100000);
+    }
+    fwrite(STDERR, "Windows PHP could not connect to 127.0.0.1:${Number(port)}: $error_message\n");
+    exit(1);`;
+    execFileSync(PHP_BINARY, ['-r', connectScript], { stdio: ['ignore', 'ignore', 'inherit'] });
 }
 
 export { PHP_BINARY, IS_WINDOWS_CLIENT };
