@@ -57,18 +57,10 @@ For example, take this rewrite:
 https://old.example -> https://new.example
 ```
 
-Afterwards, this option value still contains the old address:
+Afterwards, a value like this one, in a post or a plugin setting, still contains the old address:
 
 ```text
 https://new.example/wp-login.php?redirect_to=https%3A%2F%2Fold.example%2Fwp-admin%2F
 ```
 
-After `db-apply` or `db-rewrite-urls`, search the database for the percent-encoded old address. Searching for `%2f%2fold.example` finds both the `http` and `https` forms. The query below works in MySQL and SQLite. Change the `wp_` table prefix to match your site, and run it against other tables such as `wp_postmeta` and `wp_posts` as needed:
-
-```sql
-SELECT option_name
-FROM wp_options
-WHERE INSTR(LOWER(option_value), '%2f%2fold.example') > 0;
-```
-
-Edit each value you find, or update it through the plugin that owns the setting. Then run the search again.
+To find these values, search the database for the encoded old address, such as `%2F%2Fold.example`.
