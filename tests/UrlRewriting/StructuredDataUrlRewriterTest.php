@@ -701,6 +701,46 @@ class StructuredDataUrlRewriterTest extends TestCase
         );
     }
 
+    /**
+     * In /blog/../blog/x the `..` cancels the first /blog, so no prefix edit
+     * keeps the URL's meaning. Write the rebuilt URL instead of leaving a link
+     * to a path that no longer exists on the target.
+     */
+    #[DataProvider('dotSegmentSourceUrlProvider')]
+    public function testRebuildsSourceUrlWhoseDotSegmentsCancelThePrefix(string $href, string $expected): void
+    {
+        $this->assertSame(
+            '<a href="' . $expected . '" data-x="https://new.example/news/d">',
+            $this->createRewriter(['https://old.example/blog' => 'https://new.example/news'])->rewrite(
+                '<a href="' . $href . '" data-x="https://old.example/blog/d">',
+                StructuredDataUrlRewriter::BLOCK_MARKUP
+            )
+        );
+    }
+
+    /** @return array<string, array{string, string}> */
+    public static function dotSegmentSourceUrlProvider(): array
+    {
+        return [
+            'absolute'            => ['https://old.example/blog/../blog/x', 'https://new.example/news/x'],
+            'root-relative'       => ['/blog/../blog/x', '/news/x'],
+            'outside, then in'    => ['/x/../blog/y?q=1#f', '/news/y?q=1#f'],
+            'encoded dot segment' => ['/blog/%2e%2e/blog/x', '/news/x'],
+        ];
+    }
+
+    /** An encoded slash keeps the dot-segment case uneditable: `blog%2Fx` is one segment. */
+    public function testDotSegmentWithEncodedSlashStaysUnchanged(): void
+    {
+        $input = '<a href="https://old.example/blog/../blog%2Fx" data-x="https://old.example/blog/d">';
+
+        $this->assertSame(
+            $input,
+            $this->createRewriter(['https://old.example/blog' => 'https://new.example/news'])
+                ->rewrite($input, StructuredDataUrlRewriter::BLOCK_MARKUP)
+        );
+    }
+
     /** A block attribute URL field keeps a page-relative value too. */
     public function testKeepsPageRelativeBlockAttributeUrlNextToSourceUrls(): void
     {
@@ -2165,9 +2205,6 @@ class StructuredDataUrlRewriterTest extends TestCase
     public static function ambiguous_structured_source_cases(): array
     {
         return [
-            'parent segment hides a different lexical base' => [
-                'http://old.example/x/../media/file',
-            ],
             'encoded slash crosses the mapped boundary' => [
                 'http://old.example/media%2Ffile',
             ],

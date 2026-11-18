@@ -1192,6 +1192,20 @@ class StructuredDataUrlRewriter
                             $mapping['from_url'],
                             $mapping['to_url']
                         );
+                        $path_text = substr($editable_url, 0, strcspn($editable_url, '?#'));
+                        if ($source_preserving_raw_url === null
+                            && 1 === preg_match('~(?:\A|/)(?:\.|%2e){1,2}(?=/|\z)~i', $path_text)
+                            && false === stripos($path_text, '%2f')) {
+                            // Mapping /blog to /news, the URL /blog/../blog/x
+                            // leads to /blog/x. create_source_preserving_raw_url()
+                            // replaces the first path segment, which gives
+                            // /news/../blog/x. That still leads to /blog/x, so it
+                            // refused. WPURL::parse() already resolved the URL to
+                            // /blog/x, so the rebuilt URL below, /news/x, is
+                            // correct. Not with %2F: is_child_url_of() would read
+                            // blog%2Fx as blog/x.
+                            break;
+                        }
                         if ($source_preserving_raw_url === null) {
                             // The source base matched, but its spelling cannot be
                             // edited without guessing. Keep the field. When it
