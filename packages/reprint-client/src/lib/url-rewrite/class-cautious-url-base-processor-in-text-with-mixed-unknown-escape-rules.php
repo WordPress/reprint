@@ -91,7 +91,10 @@
  * hyphen. Scheme-less authorities use a stricter boundary so the scanner does
  * not mistake part of another URL or identifier for a match. A dot or colon
  * immediately after the configured base is rejected: it may continue the host
- * name or introduce a port which the mapping did not include.
+ * name or introduce a port which the mapping did not include. One or more dots
+ * are accepted when the text ends after them, or whitespace, a quote, or
+ * closing punctuation follows. They end a sentence, as in WordPress's default
+ * privacy policy: "Our website address is: https://source.example."
  *
  * Example usage:
  *
