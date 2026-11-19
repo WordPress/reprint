@@ -26,7 +26,7 @@ import { createConnection } from 'mysql2/promise';
 import { ensureSite } from '../lib/site-setup.js';
 import { runUrlRewriteBenchmarks } from './bench-url-rewrite.mjs';
 import {
-    getSiteUrl, getSiteSecret, getSiteDir, fsRootDir, getHarnessKey, createHmacClient,
+    getSiteUrl, getSiteSecret, getSiteDir, fsRootDir, getHarnessKey, createHmacClient, SOURCE_REQUEST_COMMANDS,
 } from '../lib/test-helpers.js';
 
 const SITE = 'large-directory';
@@ -55,6 +55,7 @@ const OPTIONS_BY_IMPORTER = new Map(
         return [importerPath, {
             httpOption,
             supportsPrivateKeyPath: help.includes('--private-key-path'),
+            supportsSourceLoad: help.includes('--source-load'),
         }];
     }),
 );
@@ -157,6 +158,7 @@ function runStage(stage, stateDir, extraArgs = [], { phpBinary = PHP_BINARY, env
         stage,
         url,
         ...importerConnectionArguments(importerPath, SITE),
+        ...sourceLoadArguments(importerPath, stage),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
         ...extraArgs,
@@ -547,6 +549,7 @@ function runPreflightForSite(site, stateDir) {
         'preflight',
         url,
         ...importerConnectionArguments(PREFLIGHT_IMPORTER_PATH, site),
+        ...sourceLoadArguments(PREFLIGHT_IMPORTER_PATH, 'preflight'),
         `--state-dir=${stateDir}`,
         `--fs-root=${fsRootDir(stateDir)}`,
     ];
@@ -581,6 +584,17 @@ function importerConnectionArguments(importerPath, site) {
         ? `--private-key-path=${getHarnessKey(secret).privateKeyPath}`
         : `--secret=${secret}`;
     return [...(httpOption ? [httpOption] : []), credential];
+}
+
+/**
+ * Benchmarks measure the client, not the rest it gives the source, so they
+ * ask for full source load. A client that predates the option, such as an
+ * older trunk baseline, would reject it, so it gets none and keeps its own
+ * sleeps between requests.
+ */
+function sourceLoadArguments(importerPath, stage) {
+    const { supportsSourceLoad } = OPTIONS_BY_IMPORTER.get(importerPath);
+    return supportsSourceLoad && SOURCE_REQUEST_COMMANDS.has(stage) ? ['--source-load=full'] : [];
 }
 
 function renderMarkdown(results, meta) {
