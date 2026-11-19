@@ -9644,9 +9644,21 @@ class ImportClient
             );
         } catch (TransientInterruptionException $e) {
             // A streaming body may have written bytes for a multipart part
-            // whose cursor is not durable yet. Keep the checkpoint saved by
-            // the last complete part; the next invocation truncates any later
-            // bytes before resuming.
+            // whose cursor is not durable yet. Keep the cursor of the last
+            // complete part; the next invocation truncates any later bytes
+            // before resuming.
+            //
+            // A part that ends inside a file is saved at once, so a complete
+            // part newer than the saved cursor ended at a file boundary.
+            // Finishing a file clears its open-file state, so a retry from the
+            // older saved cursor could not reopen that file to finish it.
+            if ($cursor !== $this->get_state()->fetch->cursor) {
+                $this->get_state()->fetch->cursor = $cursor;
+                $this->get_state()->current_file = null;
+                $this->get_state()->current_file_bytes = null;
+                $this->get_state()->current_css_cursor = null;
+                $this->progress_reporter->checkpoint_file_progress($this->get_state()->fetch);
+            }
             $durable_cursor = $this->get_state()->fetch->cursor;
             $this->progress_reporter->restore_file_progress($this->get_state()->fetch);
             if ($context->file_handle) {
