@@ -41,6 +41,11 @@ class StopDuringFileProgressClient extends \ImportClient {
                 ->getProperty('pull_index_journal')->getValue($this)->flush();
             $this->stop_at_current_progress();
         }
+        // Ctrl-C saves the state held in memory, which may be newer than the
+        // last saved cursor.
+        if ($this->stop_after === 'shutdown_between_saves' && strpos($message, '/' . $this->stop_before_file . ' (remote_size=') !== false) {
+            $this->handle_shutdown(SIGTERM);
+        }
     }
     /** Records live counters before process death without changing the pull checkpoint. */
     private function stop_at_current_progress(): void {
@@ -165,13 +170,13 @@ class FilesPullProgressResumeTest extends TestCase {
      * whole and recorded once in the local index.
      */
     public function testProcessDeathBetweenSavesRepeatsTheUnsavedParts(): void {
-        // a.bin spans five 16 KiB parts. The first four end inside the file
-        // and are saved. Its last part and the one-part files after it are not.
+        // a.bin spans five 16 KiB parts, and each of them is saved. The
+        // one-part files after it are not.
         $file_sizes = ['a.bin' => 64 * 1024 + 1, 'b.bin' => 1024, 'c.bin' => 1024, 'd.bin' => 1024, 'e.bin' => 1024, 'f.bin' => 1024];
         $this->with_source_files($file_sizes, function (string $root, string $url, string $source) use ($file_sizes): void {
             [$resumed, $list_file, $cursor] = $this->pull_until_death_before($root, $url, $source, $file_sizes, 16384, 'f.bin');
-            $this->assertSame($source . '/a.bin', base64_decode($cursor['path']), 'The last save is inside a.bin.');
-            $this->assertSame(64 * 1024, $cursor['bytes']);
+            $this->assertSame($source . '/a.bin', base64_decode($cursor['path']), 'The last save finished a.bin.');
+            $this->assertSame(0, $cursor['bytes']);
             $logged_names = [];
             foreach (file($resumed->pull_state_directory . '/index.wal', FILE_IGNORE_NEW_LINES) as $line) {
                 $record = json_decode($line, true, 512, JSON_THROW_ON_ERROR);
@@ -198,6 +203,30 @@ class FilesPullProgressResumeTest extends TestCase {
         });
     }
 
+    /**
+     * Ctrl-C after the last part of a file that spans several parts saves the
+     * state in memory. The resumed pull must still count that file's bytes.
+     */
+    public function testShutdownAfterAFileThatSpansPartsKeepsItsBytes(): void {
+        $file_sizes = ['a.bin' => 64 * 1024 + 1, 'b.bin' => 1024];
+        $this->with_source_files($file_sizes, function (string $root, string $url, string $source) use ($file_sizes): void {
+            [$resumed, $list_file] = $this->pull_until_death_before($root, $url, $source, $file_sizes, 16384, 'b.bin', 'shutdown_between_saves');
+            $reporter = ( new \ReflectionClass($resumed) )->getProperty('progress_reporter')->getValue($resumed);
+            $reporter->load_file_list($list_file, $resumed->get_state()->fetch);
+            $this->download_list($resumed, $list_file);
+            $resumed->write_progress_file();
+            $snapshot = json_decode(file_get_contents($root . '/state/progress.json'), true);
+            $this->assertSame(array_sum($file_sizes), $snapshot['progress']['bytes']['done']);
+            $this->assertSame(2, $snapshot['progress']['items']['done']);
+            foreach (array_keys($file_sizes) as $name) {
+                $this->assertSame(
+                    hash_file('sha256', $source . '/' . $name),
+                    hash_file('sha256', $root . '/local' . $source . '/' . $name)
+                );
+            }
+        });
+    }
+
     /** One-part files are saved again once their parts reach the part limit. */
     public function testManyOnePartFilesAreSavedAfterThePartLimit(): void {
         $file_sizes = [];
@@ -208,7 +237,12 @@ class FilesPullProgressResumeTest extends TestCase {
             [, , $cursor] = $this->pull_until_death_before($root, $url, $source, $file_sizes, 16384, 'file-59.bin');
             $this->assertIsArray($cursor, 'A save happened before the process died.');
             $this->assertSame(0, $cursor['bytes'], 'The save follows a finished file.');
-            $this->assertNotSame($source . '/file-59.bin', base64_decode($cursor['path']));
+            // A save after every file would leave the cursor at file-58.bin.
+            $this->assertNotContains(
+                base64_decode($cursor['path']),
+                [$source . '/file-58.bin', $source . '/file-59.bin'],
+                'The last save came from the part limit, not from a finished file.'
+            );
         });
     }
 
@@ -259,10 +293,11 @@ class FilesPullProgressResumeTest extends TestCase {
      *
      * @param array<string,int> $file_sizes Source file names and sizes, in fetch order.
      * @param string $stop_before_file Name of the file whose start ends the child.
+     * @param string $stop_after       How the child ends: killed, or after the shutdown handler.
      * @return array{0: \ImportClient, 1: string, 2: array<string,mixed>|null}
      *         Resuming client, fetch list path, and the saved fetch cursor.
      */
-    private function pull_until_death_before(string $root, string $url, string $source, array $file_sizes, int $chunk_size, string $stop_before_file): array {
+    private function pull_until_death_before(string $root, string $url, string $source, array $file_sizes, int $chunk_size, string $stop_before_file, string $stop_after = 'between_saves'): array {
         $client = new StopDuringFileProgressClient($url, $root . '/state', $root . '/local', ['allow_http' => true]);
         $client->observation_file = $root . '/before-stop.json';
         \write_current_pull_state($client, [
@@ -279,7 +314,7 @@ class FilesPullProgressResumeTest extends TestCase {
         $child_pid = pcntl_fork();
         $this->assertNotSame(-1, $child_pid);
         if ($child_pid === 0) {
-            $client->stop_after = 'between_saves';
+            $client->stop_after = $stop_after;
             $client->stop_before_file = $stop_before_file;
             $this->download_list($client, $list_file, $chunk_size);
             exit(1);

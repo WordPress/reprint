@@ -9373,6 +9373,7 @@ class ImportClient
         $complete = false;
         $chunks_since_save = 0;
         $file_bytes_since_save = 0;
+        $saved_cursor_is_inside_file = $this->get_state()->current_file !== null;
 
         // Crash recovery: if we have a tracked file that's larger than expected,
         // truncate it. This happens if we crashed after writing but before saving
@@ -9472,6 +9473,7 @@ class ImportClient
             &$complete,
             &$chunks_since_save,
             &$file_bytes_since_save,
+            &$saved_cursor_is_inside_file,
             $context
         ) {
             if ($this->shutdown_requested) {
@@ -9582,11 +9584,12 @@ class ImportClient
              * Not every complete part is saved. On Windows, each save creates
              * and renames a file, which cost more than the download for a
              * site of small files. A save follows 50 parts, 16 MiB of file
-             * bodies, or a part that ends inside a file. A stopped process
-             * therefore repeats fewer parts and bytes than those limits. A
-             * part that ends inside a file is always saved, so a resumed
-             * pull continues that file. Every later file restarts from its
-             * first part, and its WAL record replaces the earlier one.
+             * bodies, or any part of a file that spans several parts. A
+             * stopped process therefore repeats fewer parts and bytes than
+             * those limits, plus the part it was receiving. A part that ends
+             * inside a file is always saved, so a resumed pull continues
+             * that file. Every later file restarts from its first part, and
+             * its WAL record replaces the earlier one.
              */
             if ($chunk_type === "file") {
                 $file_bytes_since_save += strlen($chunk["body"] ?? "");
@@ -9598,8 +9601,13 @@ class ImportClient
                 $chunks_since_save++;
                 $part_ends_inside_file = $chunk_type === "file"
                     && ( $chunk["headers"]["x-last-chunk"] ?? "0" ) !== "1";
+                // Finishing a file clears its open-file state. If the saved
+                // cursor is still inside that file, a later save, such as on
+                // Ctrl-C, would pair that cursor with no open file. Save the
+                // part that finishes it instead.
                 if (
                     $part_ends_inside_file
+                    || $saved_cursor_is_inside_file
                     || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
                     || $file_bytes_since_save >= self::SAVE_FETCH_CURSOR_EVERY_N_BYTES
                 ) {
@@ -9629,6 +9637,7 @@ class ImportClient
                     $this->save_state();
                     $chunks_since_save = 0;
                     $file_bytes_since_save = 0;
+                    $saved_cursor_is_inside_file = $part_ends_inside_file;
                 }
             }
         };
