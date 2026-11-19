@@ -7,6 +7,7 @@
 namespace ImportTests;
 
 use PHPUnit\Framework\TestCase;
+use WordPress\Reprint\Server\Utils;
 
 require_once __DIR__ . '/../../packages/reprint-client/bin/reprint-client';
 
@@ -355,8 +356,11 @@ final class FilesPullLocalIndexTest extends TestCase
         $this->assertSame(0, $initial['exit'], $initial['output']);
 
         $samePath = $this->localTree . '/unchanged.txt';
-        $sameCtime = filectime($samePath);
-        $this->assertIsInt($sameCtime);
+        // Read the time the client compares. On Windows it is the later of
+        // the creation and modification times.
+        $sameStat = Utils::source_lstat($samePath);
+        $this->assertIsArray($sameStat);
+        $sameCtime = (int) $sameStat['ctime'];
         while (time() <= $sameCtime) {
             usleep(20000);
         }
@@ -1449,7 +1453,7 @@ final class FilesPullLocalIndexTest extends TestCase
 
     private function assertLocalIndexMatches(string $path): void
     {
-        $stat = lstat($this->localTree . '/' . $path);
+        $stat = Utils::source_lstat($this->localTree . '/' . $path);
         $this->assertIsArray($stat);
         $entry = $this->readIndex($this->localIndexPath())[
             $this->localIndexEntryPath($path)
@@ -1461,7 +1465,7 @@ final class FilesPullLocalIndexTest extends TestCase
     /** @return array{command:string,action:string,path_b64:string,type:string,size:int,ctime:int} */
     private function expectedPushRecord(string $path): array
     {
-        $stat = lstat($this->localTree . '/' . $path);
+        $stat = Utils::source_lstat($this->localTree . '/' . $path);
         $this->assertIsArray($stat);
         return [
             'command' => 'files-diff',
