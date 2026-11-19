@@ -148,14 +148,6 @@ class PullState
     public int $consecutive_interrupted_responses = 0;
     /** Adaptive tuner configuration and state. */
     public AdaptiveTuningState $tuning;
-    /**
-     * Unix time before which the client sends no request to the source.
-     *
-     * The rest the source earned with its last response. Saved so that a new
-     * process, such as the next pull stage, still waits it out. Null means
-     * no rest is pending.
-     */
-    public ?float $source_rest_until = null;
     /** Resume checkpoint for the user-facing pull pipeline. */
     public PullPipelineCheckpointState $pull_pipeline;
 
@@ -181,15 +173,12 @@ class PullState
         // State from clients predating CSS rewriting has neither CSS field.
         // An empty mapping keeps those downloads byte-for-byte copies. Starting
         // rewriting on resume could otherwise join raw and rewritten file bytes.
-        // State from clients that slept right after each response has no
-        // pending rest.
         $data += [
             'files_pull_mode' => 'catch-up',
             'include_host_plugins' => false,
             'css_url_mapping' => [],
             'current_css_cursor' => null,
             'wp_core_in_filesystem_root' => [],
-            'source_rest_until' => null,
         ];
         reprint_assert_state_keys($data, array_keys($state->to_array()), self::class);
         $state->active_resumable_command = ResumableCommandCheckpointState::from_array($data['active_resumable_command']);
@@ -233,12 +222,6 @@ class PullState
         $state->mysql_database = $data['mysql_database'];
         $state->consecutive_interrupted_responses = $data['consecutive_interrupted_responses'];
         $state->tuning = AdaptiveTuningState::from_array($data['tuning']);
-        if ($data['source_rest_until'] !== null && !is_int($data['source_rest_until']) && !is_float($data['source_rest_until'])) {
-            $observed_type = gettype($data['source_rest_until']);
-            // phpcs:ignore WordPress.Security.EscapeOutput.ExceptionNotEscaped -- A PHP type name in a CLI state error, never HTML output.
-            throw new UnexpectedValueException("PullState source_rest_until must be a number or null, got {$observed_type}.");
-        }
-        $state->source_rest_until = $data['source_rest_until'] === null ? null : (float) $data['source_rest_until'];
         $state->pull_pipeline = PullPipelineCheckpointState::from_array($data['pull_pipeline']);
         return $state;
     }
@@ -391,7 +374,6 @@ class PullState
             'mysql_database' => $this->mysql_database,
             'consecutive_interrupted_responses' => $this->consecutive_interrupted_responses,
             'tuning' => $this->tuning->to_array(),
-            'source_rest_until' => $this->source_rest_until,
             'pull_pipeline' => $this->pull_pipeline->to_array(),
         ];
     }

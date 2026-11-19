@@ -30,7 +30,7 @@ class SourceRestTest extends TestCase {
         $this->finish_request($client, 'complete', 0.3);
         $this->assertLessThan(0.2, microtime(true) - $started, 'The client must not rest right after the response.');
 
-        $rest_until = $client->get_state()->source_rest_until;
+        $rest_until = $this->pending_rest_until($client);
         $this->assertNotNull($rest_until, 'A complete response earns rest like a partial one.');
         $this->assertEqualsWithDelta(microtime(true) + 0.3, $rest_until, 0.1);
     }
@@ -63,13 +63,13 @@ class SourceRestTest extends TestCase {
     public function testFullSourceLoadNeverRestsAndDoesNotCarryOver(): void {
         $client = $this->client_with_tuner('full');
         $this->finish_request($client, 'partial', 2.0);
-        $this->assertNull($client->get_state()->source_rest_until, 'Full source load sends the next request at once.');
+        $this->assertNull($this->pending_rest_until($client), 'Full source load sends the next request at once.');
         $client->save_state();
 
         // A later invocation without --source-load=full is gentle again.
         $gentle = $this->client_with_tuner('gentle');
         $this->finish_request($gentle, 'partial', 0.3);
-        $this->assertNotNull($gentle->get_state()->source_rest_until);
+        $this->assertNotNull($this->pending_rest_until($gentle));
     }
 
     public function testRunRejectsAnUnknownSourceLoad(): void {
@@ -87,6 +87,12 @@ class SourceRestTest extends TestCase {
         $reflection->getProperty('source_load')->setValue($client, $source_load);
         $reflection->getMethod('initialize_tuner')->invoke($client, ['tuning_config' => ['min_sleep' => 0.0]]);
         return $client;
+    }
+
+    /** Unix time until which the source rests, as the tuner saves it. */
+    private function pending_rest_until(\ImportClient $client): ?float {
+        $tuner = ( new \ReflectionClass(\ImportClient::class) )->getProperty('tuner')->getValue($client);
+        return $tuner->get_state()['rest_until'];
     }
 
     /** Reports a finished file_fetch response whose source worked for $server_time seconds. */
@@ -109,7 +115,8 @@ class SourceRestTest extends TestCase {
                 $reflection->getMethod('fetch_streaming')->invoke($client, 'http://127.0.0.1:9/', new \Reprint\Importer\StreamingContext(), [], 'file_fetch');
             }
         } catch (\RuntimeException $error) {
-            // The refused connection is expected.
+            // The refused connection is expected. Only the wait before it matters.
+            return;
         }
     }
 

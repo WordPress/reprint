@@ -111,6 +111,25 @@ class AdaptiveTuner
     }
 
     /**
+     * Returns the rest the source still has from its last response, and
+     * marks that rest as taken. The client waits this long before its next
+     * request.
+     *
+     * The rest is saved with the tuner state, so a new process also waits
+     * out what remains. It never exceeds max_sleep, so a saved deadline
+     * cannot hold the client longer after a clock change.
+     */
+    public function take_pending_rest(): float
+    {
+        $rest_until = $this->state["rest_until"];
+        $this->state["rest_until"] = null;
+        if ($rest_until === null) {
+            return 0.0;
+        }
+        return $this->clamp($rest_until - microtime(true), 0.0, $this->config["max_sleep"]);
+    }
+
+    /**
      * Build query parameters for a specific exporter endpoint.
      *
      * @return array<string, mixed>
@@ -158,6 +177,7 @@ class AdaptiveTuner
      */
     public function tune_after_response(string $endpoint, array $metrics): array
     {
+        $this->state["rest_until"] = null;
         if (!$this->config["enabled"]) {
             return [
                 "decision" => "disabled",
@@ -184,6 +204,9 @@ class AdaptiveTuner
         // A complete response finishes only its own request. The client may
         // still send another request, so the source rests after it too.
         $sleep = $this->sleep_seconds($elapsed);
+        if ($sleep > 0) {
+            $this->state["rest_until"] = microtime(true) + $sleep;
+        }
 
         return array_merge($decision, [
             "sleep_seconds" => $sleep,
@@ -452,6 +475,10 @@ class AdaptiveTuner
 
         $state["duty"] = $this->clamp((float) $state["duty"], $config["duty_min"], $config["duty_max"]);
         $state["error_backoff_remaining"] = max(0, (int) ($state["error_backoff_remaining"] ?? 0));
+        // Unix time before which the source rests. State from older clients
+        // has none, because they slept right after each response.
+        $rest_until = $state["rest_until"] ?? null;
+        $state["rest_until"] = is_int($rest_until) || is_float($rest_until) ? (float) $rest_until : null;
 
         return $state;
     }

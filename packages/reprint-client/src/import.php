@@ -4180,8 +4180,12 @@ class ImportClient
     }
 
     /**
-     * Record request metrics, apply tuning decisions, and record the rest the
-     * source earned. The next request waits it out first.
+     * Record request metrics and apply tuning decisions.
+     *
+     * The tuner records the rest the source earned instead of the client
+     * sleeping now. wait_for_source_rest() waits it out before the next
+     * request, so work the client does in between counts toward the rest,
+     * and no rest is spent when no request follows.
      */
     private function finalize_tuned_request(
         string $endpoint,
@@ -4247,29 +4251,15 @@ class ImportClient
             sprintf("%.2f", $decision["sleep_seconds"] ?? 0) .
             "s";
         $this->audit_log(implode(" | ", $log), false);
-
-        // Rest before the next request rather than now. Work the client does
-        // in between counts toward the rest, and no rest is spent when no
-        // request follows.
-        $rest_seconds = (float) ($decision["sleep_seconds"] ?? 0);
-        $this->get_state()->source_rest_until = $rest_seconds > 0 ? microtime(true) + $rest_seconds : null;
     }
 
-    /**
-     * Waits until the rest the source earned with its last response is over.
-     *
-     * The wait never exceeds the tuner's longest sleep, so a saved deadline
-     * cannot hold the client for longer after a clock change.
-     */
+    /** Waits until the rest the source earned with its last response is over. */
     private function wait_for_source_rest(): void
     {
-        $rest_until = $this->get_state()->source_rest_until;
-        if ($rest_until === null) {
+        if (!$this->tuner instanceof AdaptiveTuner) {
             return;
         }
-        $this->get_state()->source_rest_until = null;
-        $longest_rest = $this->tuner instanceof AdaptiveTuner ? (float) $this->tuner->get_config()['max_sleep'] : 10.0;
-        $remaining = min($rest_until - microtime(true), $longest_rest);
+        $remaining = $this->tuner->take_pending_rest();
         if ($remaining <= 0) {
             return;
         }

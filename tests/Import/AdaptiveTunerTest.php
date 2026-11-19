@@ -482,6 +482,21 @@ class AdaptiveTunerTest extends TestCase
         $this->assertSame($results["partial"], $results["complete"]);
     }
 
+    public function testPendingRestIsTakenOnceAndNeverExceedsTheLongestSleep(): void
+    {
+        $tuner = $this->makeTuner(["duty" => 0.5, "min_sleep" => 0.0, "max_sleep" => 10.0]);
+        $this->runRequests($tuner, "file_fetch", 1, 2.0, 1000);
+        $this->assertEqualsWithDelta(2.0, $tuner->take_pending_rest(), 0.05);
+        $this->assertSame(0.0, $tuner->take_pending_rest(), 'The rest is taken once.');
+
+        // A deadline saved before a clock change still waits at most max_sleep.
+        $restored = $this->makeTuner(["max_sleep" => 10.0], ["rest_until" => microtime(true) + 3600]);
+        $this->assertSame(10.0, $restored->take_pending_rest());
+
+        // State from older clients has no pending rest.
+        $this->assertSame(0.0, $this->makeTuner([], ["rest_until" => "soon"])->take_pending_rest());
+    }
+
     public function testSetDutyReplacesASavedDuty(): void
     {
         // A saved duty must not outlive the invocation that chose it.
