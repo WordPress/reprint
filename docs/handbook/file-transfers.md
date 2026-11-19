@@ -9,6 +9,8 @@ php reprint.phar files-pull "$URL" \
   --private-key-path=./reprint-key.pem --state-dir="$STATE_DIR" --fs-root="$FS_ROOT"
 ```
 
+After an interruption, the resumed pull can download again up to about 16 MiB of files it had already received.
+
 Read [Progress, results, and exit codes](https://developer.wordpress.org/reprint/reference/progress-and-results/) for completion, continuation, and temporary-failure handling.
 
 ## File pull modes

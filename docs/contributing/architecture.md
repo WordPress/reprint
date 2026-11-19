@@ -18,6 +18,8 @@ The client starts each migration step and asks the source for data. The source a
 
 Suppose the client has downloaded part of a large image when the process stops. The next process needs to know which bytes are saved and which source to ask for the rest. A **cursor** is that saved position. It may contain a byte offset, a database key, or the position in an index.
 
+A file pull does not save its cursor after every file. On Windows each save creates and renames a file, and a site of small files spent more time saving than downloading. The client saves after 50 multipart parts, after 16 MiB of file content, after a part that ends inside a file, and at the end of every response. A process that stops between saves repeats fewer than 50 parts and less than 16 MiB on resume. The file that was open at the last save is cut back to its saved length and continued. Every later file is written again from its start, and its new pull index WAL record replaces the earlier one.
+
 Use one state directory for each local filesystem root. The filesystem root contains the downloaded site files. The state directory contains credentials, cursors, indexes, and logs. Keep state outside the downloaded files so a pull cannot replace the information needed to continue it.
 
 Within state, the remote Reprint API URL selects the records for that source. Changing the URL can select different records. Reusing the same state with a different filesystem root is rejected: its saved positions describe the first copy, not the new directory.

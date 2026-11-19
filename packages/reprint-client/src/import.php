@@ -240,6 +240,8 @@ class ImportClient
     public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl', 'compact'];
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
+    /** File body bytes a pull may receive before it saves its fetch cursor again. */
+    private const SAVE_FETCH_CURSOR_EVERY_N_BYTES = 16 * 1024 * 1024;
     private const STATE_PATH_ENCODING_PREFIX = "base64:";
     private const DATABASE_IMPORT_POSITION_TABLE_PREFIX = "__reprint_db_pull_progress_";
     // Change this UUID whenever the progress-table schema changes.
@@ -9370,6 +9372,7 @@ class ImportClient
         $cursor = $cursor ?? $fetch_state->cursor;
         $complete = false;
         $chunks_since_save = 0;
+        $file_bytes_since_save = 0;
 
         // Crash recovery: if we have a tracked file that's larger than expected,
         // truncate it. This happens if we crashed after writing but before saving
@@ -9468,6 +9471,7 @@ class ImportClient
             &$cursor,
             &$complete,
             &$chunks_since_save,
+            &$file_bytes_since_save,
             $context
         ) {
             if ($this->shutdown_requested) {
@@ -9574,14 +9578,31 @@ class ImportClient
              * before storing the cursor in pull/state.json. If the response
              * stops first, state retains the preceding cursor; resume truncates
              * the later bytes and requests the multipart part again.
+             *
+             * Not every complete part is saved. On Windows, each save creates
+             * and renames a file, which cost more than the download for a
+             * site of small files. A save follows 50 parts, 16 MiB of file
+             * bodies, or a part that ends inside a file. A stopped process
+             * therefore repeats fewer parts and bytes than those limits. A
+             * part that ends inside a file is always saved, so a resumed
+             * pull continues that file. Every later file restarts from its
+             * first part, and its WAL record replaces the earlier one.
              */
+            if ($chunk_type === "file") {
+                $file_bytes_since_save += strlen($chunk["body"] ?? "");
+            }
             if (!$is_streaming_body) {
                 if (isset($chunk["headers"]["x-cursor"])) {
                     $cursor = $chunk["headers"]["x-cursor"];
                 }
                 $chunks_since_save++;
-                $force_save = $is_streaming_close;
-                if ($force_save || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS) {
+                $part_ends_inside_file = $chunk_type === "file"
+                    && ( $chunk["headers"]["x-last-chunk"] ?? "0" ) !== "1";
+                if (
+                    $part_ends_inside_file
+                    || $chunks_since_save >= self::SAVE_STATE_EVERY_N_CHUNKS
+                    || $file_bytes_since_save >= self::SAVE_FETCH_CURSOR_EVERY_N_BYTES
+                ) {
                     if ($file_path_at_completed_part !== null) {
                         $this->get_state()->current_file =
                             $file_path_at_completed_part;
@@ -9607,6 +9628,7 @@ class ImportClient
                     $this->progress_reporter->checkpoint_file_progress($this->get_state()->fetch);
                     $this->save_state();
                     $chunks_since_save = 0;
+                    $file_bytes_since_save = 0;
                 }
             }
         };
