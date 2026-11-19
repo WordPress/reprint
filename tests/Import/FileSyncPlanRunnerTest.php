@@ -500,7 +500,7 @@ final class FileSyncPlanRunnerTest extends TestCase
         $this->expectException(RuntimeException::class);
         $this->expectExceptionMessage(
             'The planned deletion path '
-            . base64_encode('site')
+            . base64_encode('site/a.txt')
             . ' is outside the deletion path prefix '
             . base64_encode('other')
             . '.'

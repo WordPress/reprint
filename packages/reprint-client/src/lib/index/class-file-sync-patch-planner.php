@@ -1,8 +1,6 @@
 <?php
 
 use WordPress\Reprint\Server\Utils;
-use function WordPress\Filesystem\wp_join_unix_paths;
-use function WordPress\Filesystem\wp_unix_path_segments;
 
 require_once __DIR__ . '/class-file-index-diff-processor.php';
 
@@ -34,23 +32,29 @@ require_once __DIR__ . '/class-file-index-diff-processor.php';
  * - `replace` deletes a path, then copies the patch-head entry there.
  *
  * One path may need both actions. Replacing a directory tree with a file, for
- * example, deletes the tree and copies the file. The planner combines
- * a removed subtree into one deletion when the indexes allow it. It does not
- * detect renames or compare file contents. Here, minimizing means removing
- * redundant path operations, not finding the smallest possible patch.
+ * example, deletes the tree and copies the file. The planner does not detect
+ * renames or compare file contents. Here, minimizing means removing redundant
+ * path operations, not finding the smallest possible patch.
  *
  * ## Sparse directory entries
  *
  * Non-empty directories have no index entry. Their descendants imply that the
- * directory exists. The planner uses the paths preceding and following the
- * current position to decide whether a missing directory still has a head
- * descendant. When a whole directory disappeared, it emits the highest
- * missing directory instead of deleting every indexed descendant.
+ * directory exists, but nothing records whether the destination holds other
+ * entries in it. A destination may contain files the patch base never
+ * recorded, such as themes a host installed next to pushed ones. The planner
+ * therefore deletes each patch-base entry that the patch head lacks, never a
+ * directory the patch base did not record. A directory that only contained
+ * deleted entries stays at the destination. When the patch head records an
+ * empty directory where the patch base had descendants, that directory
+ * already exists at the destination, so the planner emits no operation for it.
  *
- * An append-only file keeps that deletion active while later base entries are
- * descendants of it. A sibling such as `tree-other` may sort between `tree`
- * and `tree/child`, so each active root links to the preceding one instead of
- * assuming all descendants are adjacent.
+ * Replacing a directory with a file or symlink still deletes the whole
+ * directory, because the new entry cannot be installed beside it. An
+ * append-only file keeps that deletion active while later base entries are
+ * descendants of it, so they need no operation of their own. A sibling such
+ * as `tree-other` may sort between `tree` and `tree/child`, so each active
+ * root links to the preceding one instead of assuming all descendants are
+ * adjacent.
  *
  * ## Selection
  *
@@ -319,14 +323,20 @@ final class FileSyncPatchPlanner
         if ($path_transition === "added") {
             // A NUL byte cannot occur in an index path. Use it when there is
             // no following patch-base path so the descendant test cannot match.
-            $patch_head_entry_replaces_patch_base_subtree =
+            $patch_base_has_descendant =
                 Utils::path_is_same_as_or_descendant_of(
                     $this->index_diff->get_following_path_in_old_index()
                         ?? "\0",
                     $index_path
                 );
+            // Patch-base descendants are deleted one by one, so a directory
+            // that still has them already exists at the destination.
+            $patch_head_directory_exists_at_destination =
+                $patch_base_has_descendant
+                && $patch_head_entry_shape === "empty_directory";
             if (
-                $patch_head_entry_replaces_patch_base_subtree
+                $patch_base_has_descendant
+                && !$patch_head_directory_exists_at_destination
                 && $this->path_may_change($index_path)
                 && !$this->active_deletion_root_covers_path($index_path)
             ) {
@@ -337,7 +347,10 @@ final class FileSyncPatchPlanner
                         $active_deletion_root_byte_offset
                     );
             }
-            if ($this->path_may_change($index_path)) {
+            if (
+                !$patch_head_directory_exists_at_destination
+                && $this->path_may_change($index_path)
+            ) {
                 $path_to_copy = $index_path;
             }
         } elseif ($path_transition === "deleted") {
@@ -348,47 +361,12 @@ final class FileSyncPatchPlanner
                     $this->index_diff->get_preceding_path_in_new_index(),
                     $this->index_diff->get_following_path_in_new_index()
                 );
-
-            // Find the highest patch-base directory without a patch-head
-            // entry below it. Only the adjacent head entries can neighbor
-            // each parent in byte order, so no index rescan is needed.
-            $candidate_path_to_delete = $index_path;
-            $index_path_components = wp_unix_path_segments($index_path);
-            $candidate_path_components = [];
-            for (
-                $index = 0,
-                $component_count = count($index_path_components) - 1;
-                $index < $component_count;
-                ++$index
-            ) {
-                $candidate_path_components[] = $index_path_components[$index];
-                $candidate_path = wp_join_unix_paths(
-                    ...$candidate_path_components
-                );
-                if (
-                    !$this->patch_head_index_contains_path_or_descendant(
-                        $candidate_path,
-                        $this->index_diff->get_preceding_path_in_new_index(),
-                        $this->index_diff->get_following_path_in_new_index()
-                    )
-                ) {
-                    $candidate_path_to_delete = $candidate_path;
-                    break;
-                }
-            }
             if (
                 !$patch_base_empty_directory_is_implied_by_patch_head_descendant
-                && $this->path_may_change($candidate_path_to_delete)
+                && $this->path_may_change($index_path)
                 && !$this->active_deletion_root_covers_path($index_path)
             ) {
-                $path_to_delete = $candidate_path_to_delete;
-                if ($candidate_path_to_delete !== $index_path) {
-                    $active_deletion_root_byte_offset =
-                        $this->append_active_deletion_root(
-                            $candidate_path_to_delete,
-                            $active_deletion_root_byte_offset
-                        );
-                }
+                $path_to_delete = $index_path;
             }
         } else {
             $patch_head_entry_is_file_or_symlink =

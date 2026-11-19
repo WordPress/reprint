@@ -450,7 +450,7 @@ final class PushPlanTest extends TestCase
         }
     }
 
-    public function testDeletedSubtreeEmitsOnlyItsRootAsALocalPathToDelete(): void
+    public function testDeletedSubtreeEmitsEachLocalIndexEntryAsALocalPathToDelete(): void
     {
         $this->saveLocalIndex($this->writeIndex([
             'gone/child.txt' => [1, 1, 'file'],
@@ -462,9 +462,9 @@ final class PushPlanTest extends TestCase
         $plan = $this->startPlan($current);
         $this->planToCompletion($plan);
 
-        $this->assertPathCounts(0, 1);
+        $this->assertPathCounts(0, 2);
         $this->assertSame([], $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
-        $this->assertSame("gone\0", file_get_contents($this->planPath('local_paths_to_delete')));
+        $this->assertSame("gone/child.txt\0gone/nested/leaf.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
     }
 
     public function testActiveDeletionRootsAppendWithoutGrowingTheCursor(): void
@@ -473,7 +473,8 @@ final class PushPlanTest extends TestCase
             'a/child.txt' => [1, 1, 'file'],
             'b.txt' => [1, 1, 'file'],
         ]));
-        $plan = $this->startPlan();
+        $current = $this->writeIndex(['a' => [2, 1, 'file']]);
+        $plan = $this->startPlan($current);
 
         $this->assertTrue($this->nextPlanStep($plan));
         $active_deletion_roots_bytes = filesize($this->planPath('deleted_directories_stack.jsonl'));
@@ -487,13 +488,14 @@ final class PushPlanTest extends TestCase
             ]['active_deletion_root_byte_offset']
         );
 
+        $this->assertTrue($this->nextPlanStep($plan));
         $this->assertFalse($this->nextPlanStep($plan));
         $complete_cursor = $this->planCursor();
         $this->assertSame(
             [
                 'phase' => 'complete',
-                'local_paths_to_push_count' => 0,
-                'local_file_bytes_to_push' => 0,
+                'local_paths_to_push_count' => 1,
+                'local_file_bytes_to_push' => 1,
             ],
             $complete_cursor
         );
@@ -503,12 +505,12 @@ final class PushPlanTest extends TestCase
         $this->assertSame("a\0b.txt\0", file_get_contents($this->planPath('local_paths_to_delete')));
     }
 
-    public function testSeenDeletedDirectorySurvivesAnInterleavedSiblingCursor(): void
+    public function testReplacementRootSurvivesAnInterleavedSiblingCursor(): void
     {
         $this->saveLocalIndex($this->writeIndex([
             'a/child.txt' => [1, 1, 'file'],
         ]));
-        $entries = [];
+        $entries = ['a' => [2, 1, 'file']];
         for ($index = 0; $index < 3; ++$index) {
             // `-` sorts before `/`, placing these siblings between a and a/child.txt.
             $entries[sprintf('a-%04d.txt', $index)] = [2, 1, 'file'];
@@ -521,9 +523,9 @@ final class PushPlanTest extends TestCase
         $resumedPlan = $this->resumePlan();
         $this->planToCompletion($resumedPlan);
 
-        $this->assertPathCounts(3, 1);
+        $this->assertPathCounts(4, 1);
         $this->assertSame("a\0", file_get_contents($this->planPath('local_paths_to_delete')));
-        $this->assertCount(3, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
+        $this->assertCount(4, $this->listPaths($this->planPath('local_paths_to_push.jsonl')));
     }
 
     public function testReplacementRootSurvivesLexicallyInterleavedSiblingPaths(): void
