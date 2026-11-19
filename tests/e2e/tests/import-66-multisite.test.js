@@ -12,7 +12,7 @@ import { inspect } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir, getSiteDir, getSiteUrl, getSiteSecret,
-    createMysqlConnection, apiRequest, apiRequestWithFileList, IS_WINDOWS_CLIENT,
+    createMysqlConnection, apiRequest, apiRequestWithFileList, pullStateDirectory, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -93,12 +93,14 @@ define('BLOG_ID_CURRENT_SITE', 1);
                     '--target-engine=mysql', '--target-host=127.0.0.1',
                     '--target-user=e2e_admin', '--target-pass=e2e_password',
                     `--target-db=${target.database}`, `--new-site-url=${targetUrl}`,
-                    `--site-admin=${selectedId === 7 ? 'chosen' : 'admin'}`,
+                    ...(selectedId === 1 ? ['--site-admin=commenter'] : []),
                     '--runtime=php-builtin', '--start-runtime=none',
                     `--flatten-to=${target.documentRoot}`,
                 ],
             });
             assert.equal(result.exitCode, 0, `${result.stderr}\n${result.stdout}`);
+            const state = JSON.parse(readFileSync(join(pullStateDirectory(directory, sourceUrl), 'state.json'), 'utf8'));
+            assert.equal(state.apply.site_admin, selectedId === 7 ? null : 'commenter');
 
             const imported = await createMysqlConnection(target.database);
             try {
@@ -159,7 +161,8 @@ define('BLOG_ID_CURRENT_SITE', 1);
                     'site_id' => get_current_blog_id(), 'prefix' => $GLOBALS['wpdb']->prefix,
                     'users_table' => $GLOBALS['wpdb']->users,
                     'usermeta_table' => $GLOBALS['wpdb']->usermeta,
-                    'is_admin' => user_can(get_user_by('login', '${selectedId === 7 ? 'chosen' : 'admin'}'), 'manage_options'),
+                    'is_admin' => user_can(get_user_by('login', '${selectedId === 7 ? 'empty-member' : 'commenter'}'), 'manage_options'),
+                    'chosen_roles' => ${selectedId === 7 ? "get_user_by('login', 'chosen')->roles" : 'null'},
                     'created_user' => wp_create_user('target-only', 'target-password', 'target-only@example.test'),
                     'network_plugin' => defined('MULTISITE_SHARED_NETWORK_PLUGIN'),
                     'mu_plugin' => defined('MULTISITE_SHARED_MU_PLUGIN'),
@@ -179,6 +182,9 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.equal(inspection.users_table, 'network_users');
             assert.equal(inspection.usermeta_table, 'network_usermeta');
             assert.equal(inspection.is_admin, true);
+            if (selectedId === 7) {
+                assert.deepEqual(inspection.chosen_roles, ['editor']);
+            }
             assert.equal(typeof inspection.created_user, 'number');
             const usersDatabase = await createMysqlConnection(target.database);
             try {
@@ -234,7 +240,7 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 const login = await fetch(`${targetUrl}/wp-login.php`, {
                     method: 'POST', redirect: 'manual',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-                    body: new URLSearchParams({ log: 'chosen', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
+                    body: new URLSearchParams({ log: 'empty-member', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
                 });
                 assert.equal(login.status, 302, await login.text());
                 const authCookies = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');

@@ -39,7 +39,7 @@ foreach (['chosen', 'empty-member', 'former-author', 'commenter', 'link-author',
 }
 add_user_to_blog($reprint_shop, $reprint_users['chosen'], 'editor');
 add_user_to_blog($reprint_sibling, $reprint_users['chosen'], 'administrator');
-add_user_to_blog($reprint_shop, $reprint_users['empty-member'], 'subscriber');
+add_user_to_blog($reprint_shop, $reprint_users['empty-member'], 'administrator');
 add_user_to_blog($reprint_shop, $reprint_users['former-author'], 'author');
 add_user_to_blog($reprint_sibling, $reprint_users['sibling-person'], 'author');
 add_user_to_blog($reprint_other, $reprint_users['other-person'], 'administrator');

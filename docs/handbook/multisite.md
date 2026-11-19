@@ -15,14 +15,14 @@ php reprint.phar keygen 'https://network.example/shop/?reprint-api' \
 
 ## 2. Copy into an empty destination
 
-Create the destination directories and an empty MySQL or SQLite target. Supply `--new-site-url` and `--site-admin=LOGIN`; LOGIN must identify a user included in the selected site's export. The example prepares files and SQLite data for https://shop.example without starting a development server (`--runtime=none --start-runtime=none`; see [runtime options on pull](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull)):
+Create the destination directories and an empty MySQL or SQLite target. Supply `--new-site-url`. The selected site's existing administrators keep their roles. If you want to grant administrator access to an imported user, add `--site-admin=LOGIN`; `LOGIN` must identify a user included in the selected site's export. The example prepares files and SQLite data for https://shop.example without starting a development server (`--runtime=none --start-runtime=none`; see [runtime options on pull](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull)):
 
 ```sh
 php reprint.phar pull 'https://network.example/shop/?reprint-api' \
   --private-key-path=./reprint-key.pem \
   --state-dir=./state --fs-root=./files \
   --target-engine=sqlite --target-sqlite-path=/srv/shop/database.sqlite \
-  --target-db=shop --new-site-url=https://shop.example --site-admin=alice \
+  --target-db=shop --new-site-url=https://shop.example \
   --runtime=none --start-runtime=none
 ```
 

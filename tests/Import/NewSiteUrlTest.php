@@ -166,8 +166,8 @@ class NewSiteUrlTest extends TestCase
         $this->assertNotEmpty($options['rewrite_url']);
     }
 
-    /** The apply command requires a login before any target connection or state change. */
-    public function testMultisiteApplyRequiresAnAdministrator(): void
+    /** An explicitly empty login is invalid even though the flag is optional. */
+    public function testMultisiteApplyRejectsAnEmptyAdministrator(): void
     {
         $client = $this->multisiteClient();
         file_put_contents($this->tempDir . '/db.sql', '');
@@ -175,7 +175,7 @@ class NewSiteUrlTest extends TestCase
         $this->expectExceptionMessage('--site-admin');
         $client->run_db_apply([
             'target_engine' => 'mysql', 'target_user' => 'unused', 'target_db' => 'unused',
-            'new_site_url' => 'https://target.test',
+            'new_site_url' => 'https://target.test', 'site_admin' => '',
         ]);
     }
 
