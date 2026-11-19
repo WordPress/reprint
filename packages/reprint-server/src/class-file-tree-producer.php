@@ -551,9 +551,11 @@ class FileTreeProducer
         $change_size = null;
         $error_type = "file_changed";
 
-        // Detect whether the file changed while we were reading it.
+        // Detect whether the file changed while we were reading it. Read the
+        // change time the way the index did: on Windows, source_lstat()
+        // reports the later of the creation and modification times.
         clearstatcache(true, $source_path);
-        $stat = @stat(Utils::source_io_path($source_path));
+        $stat = @Utils::source_lstat($source_path);
         if ($stat === false) {
             $changed = true;
             $error_type = "file_missing";
