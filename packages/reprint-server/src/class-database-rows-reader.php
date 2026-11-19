@@ -313,7 +313,6 @@ class DatabaseRowsReader {
         $query = $this->get_select_prefix() . " umeta_id, user_id, meta_key FROM `{$table}` WHERE umeta_id > {$this->last_scanned_usermeta_id} ORDER BY umeta_id LIMIT {$this->batch_size}";
         $last_id = $this->multisite_selection->collect_user_references($table, $query);
         if ($last_id === '0') {
-            $this->multisite_selection->collect_network_super_admins();
             return false;
         }
         $this->last_scanned_usermeta_id = $last_id;

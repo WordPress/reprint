@@ -27,8 +27,6 @@ class MultisiteDatabaseSelection {
 
     /** @var mixed Source connection retained for this request's lock and ID writes. */
     private $db;
-    /** @var string[]|null Selected network's super admin IDs, resolved once per request. */
-    private $network_super_admin_ids;
     /** @var string|null MySQL named lock held for this site's saved user table until close(). */
     private $lock_name;
     /** @var resource|null SQLite site lock; its file also stores the current export token. */
@@ -88,7 +86,7 @@ class MultisiteDatabaseSelection {
      */
     public function get_identity(): string
     {
-        return 'site-tables-v2:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
+        return 'site-tables-v1:' . $this->base_prefix . ':' . $this->network_id . ':' . $this->site_id;
     }
 
     /**
@@ -211,7 +209,6 @@ class MultisiteDatabaseSelection {
             $this->lock_handle = null;
         }
         $this->db = null;
-        $this->network_super_admin_ids = null;
     }
 
     /** Returns the saved user table's token for the cursor, or null before open_user_set(). */
@@ -319,84 +316,6 @@ class MultisiteDatabaseSelection {
         return $last_id;
     }
 
-    /** Save network administrators who were not already found in content or membership. */
-    public function collect_network_super_admins(): void
-    {
-        $values = [];
-        foreach ($this->get_network_super_admin_ids() as $user_id) {
-            $values[] = "({$user_id},5,0)";
-        }
-        if ($values) {
-            $this->db->exec("INSERT INTO `{$this->get_user_table_name()}` (user_id, reference_kind, reference_id) VALUES " . implode(',', $values) . ' ON DUPLICATE KEY UPDATE user_id=user_id');
-        }
-    }
-
-    /** @return string[] Positive decimal IDs of accounts in the selected network's roster. */
-    private function get_network_super_admin_ids(): array
-    {
-        if ($this->network_super_admin_ids !== null) {
-            return $this->network_super_admin_ids;
-        }
-        $value = $this->db->query("SELECT meta_value FROM `{$this->base_prefix}sitemeta` WHERE site_id = {$this->network_id} AND meta_key = 'site_admins' ORDER BY meta_id LIMIT 1")->fetchColumn();
-        $logins = is_string($value) ? $this->parse_network_super_admin_logins($value) : [];
-        $ids = [];
-        if ($logins) {
-            // Use the login index to find candidates. Compare the returned
-            // logins in PHP because WordPress matches the roster case-sensitively.
-            $statement = $this->db->prepare("SELECT ID, user_login FROM `{$this->base_prefix}users` WHERE user_login = ?");
-            foreach (array_unique($logins) as $login) {
-                $statement->execute([$login]);
-                $row = $statement->fetch(PdoConstants::fetch_assoc());
-                while ($row !== false) {
-                    $user_id = ltrim( (string) $row['ID'], '0');
-                    if ($row['user_login'] === $login && ctype_digit($user_id)) {
-                        $ids[] = $user_id;
-                    }
-                    $row = $statement->fetch(PdoConstants::fetch_assoc());
-                }
-            }
-        }
-        $this->network_super_admin_ids = $ids;
-        return $ids;
-    }
-
-    /**
-     * Reads WordPress's serialized array of login strings without invoking
-     * unserialize(), which cannot disable object creation on PHP 5.6.
-     *
-     * @return string[]
-     */
-    private function parse_network_super_admin_logins(string $value): array
-    {
-        if (!preg_match('/\Aa:([0-9]+):\{/', $value, $header)) {
-            return [];
-        }
-        $offset = strlen($header[0]);
-        $logins = [];
-        for ($index = 0; $index < (int) $header[1]; ++$index) {
-            // Array keys can be integers or strings; values must be strings.
-            for ($token = 0; $token < 2; ++$token) {
-                if ($token === 0 && preg_match('/\Gi:-?[0-9]+;/', $value, $key, 0, $offset)) {
-                    $offset += strlen($key[0]);
-                    continue;
-                }
-                if (!preg_match('/\Gs:([0-9]+):"/', $value, $string, 0, $offset)) {
-                    return [];
-                }
-                $offset += strlen($string[0]);
-                $length = (int) $string[1];
-                if ($length > strlen($value) - $offset - 2 || substr($value, $offset + $length, 2) !== '";') {
-                    return [];
-                }
-                if ($token === 1 && $length > 0) {
-                    $logins[] = substr($value, $offset, $length);
-                }
-                $offset += $length + 2;
-            }
-        }
-        return substr($value, $offset) === '}' ? $logins : [];
-    }
-
     /**
      * Returns a SQL expression that checks a row's link to the saved user set.
      *
@@ -427,14 +346,11 @@ class MultisiteDatabaseSelection {
             return "({$user_expression} = 0 OR " . $this->related_user_condition($user_expression) . ')';
         }
         $user_column = $table === $this->base_prefix . 'users' ? 'ID' : 'user_id';
-        $admin_ids = $this->get_network_super_admin_ids();
-        $admin_condition = $admin_ids ? 'saved.user_id IN (' . implode(',', $admin_ids) . ')' : '0';
         return "(SELECT CASE saved.reference_kind " .
             "WHEN 1 THEN EXISTS (SELECT 1 FROM `{$this->site_prefix}posts` WHERE ID=saved.reference_id AND post_author=saved.user_id) " .
             "WHEN 2 THEN EXISTS (SELECT 1 FROM `{$this->site_prefix}comments` WHERE comment_ID=saved.reference_id AND user_id=saved.user_id) " .
             "WHEN 3 THEN EXISTS (SELECT 1 FROM `{$this->site_prefix}links` WHERE link_id=saved.reference_id AND link_owner=saved.user_id) " .
             "WHEN 4 THEN EXISTS (SELECT 1 FROM `{$this->base_prefix}usermeta` WHERE umeta_id=saved.reference_id AND user_id=saved.user_id AND meta_key='{$this->site_prefix}capabilities') " .
-            "WHEN 5 THEN {$admin_condition} " .
             "ELSE 0 END FROM `{$this->get_user_table_name()}` saved WHERE saved.user_id=`{$table}`.`{$user_column}` LIMIT 1)";
     }
 
@@ -491,12 +407,12 @@ class MultisiteDatabaseSelection {
              * selected network record. These remain network metadata in the
              * dump, not automatically converted single-site options.
              */
-            // The target uses site_admins to turn network administrators into
-            // single-site administrators. Unrelated network settings stay behind.
+            // Counters, signups, source administrators, and unknown plugin settings
+            // describe the old network. The target supplies its own network identity.
             return "`site_id` = {$this->network_id} AND `meta_key` IN (" .
                 "'active_sitewide_plugins', 'allowedthemes', 'site_name', 'admin_email', " .
                 "'upload_filetypes', 'fileupload_maxk', 'upload_space_check_disabled', " .
-                "'blog_upload_space', 'WPLANG', 'site_admins')";
+                "'blog_upload_space', 'WPLANG')";
         }
         if ($table === $this->base_prefix . 'users') {
             return $this->related_user_condition("`{$table}`.`ID`");
@@ -581,7 +497,7 @@ class MultisiteDatabaseSelection {
      *
      *     @type string $primary_key Column name for the source row ID, such as ID.
      *     @type string $user_column Column name for its user ID, such as post_author.
-     *     @type int    $kind Saved reference_kind: 1 posts, 2 comments, 3 links, 4 usermeta (5 is reserved for network administrators).
+     *     @type int    $kind Saved reference_kind: 1 posts, 2 comments, 3 links, 4 usermeta.
      * }
      */
     public function get_reference_columns(string $table): ?array

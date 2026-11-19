@@ -93,7 +93,7 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
             $target->query('SELECT blog_id FROM network_blogs')->fetchAll(PDO::FETCH_COLUMN)));
         $this->assertSame(['1'], array_map('strval',
             $target->query('SELECT id FROM network_site')->fetchAll(PDO::FETCH_COLUMN)));
-        $this->assertSame(['active_sitewide_plugins', 'allowedthemes', 'site_admins'], $target->query(
+        $this->assertSame(['active_sitewide_plugins', 'allowedthemes'], $target->query(
             'SELECT meta_key FROM network_sitemeta ORDER BY meta_key')->fetchAll(PDO::FETCH_COLUMN));
         $this->assertSame(['first_name', 'network_7_capabilities', 'network_7_capabilities'], $target->query(
             'SELECT meta_key FROM network_usermeta ORDER BY umeta_id')->fetchAll(PDO::FETCH_COLUMN));
@@ -102,28 +102,6 @@ class MultisiteSelectionTest extends MySQLDumpProducerTestBase
         $this->assertSame(0, (int) $target->query('SELECT COUNT(*) FROM network_signups')->fetchColumn());
         $this->assertSame('selected', $target->query('SELECT meta_value FROM network_blogmeta')->fetchColumn());
         $this->assertSame('shop', $target->query('SELECT post_title FROM network_7_posts')->fetchColumn());
-    }
-
-    public function test_only_exact_super_admin_logins_from_the_selected_network_are_exported(): void
-    {
-        $this->create_network();
-        $this->pdo->exec("INSERT INTO network_users VALUES (7,'network-admin'),(8,'other-admin'),(9,'case-variant');
-            INSERT INTO network_usermeta VALUES (9,7,'first_name','Network administrator'),(10,7,'network_8_capabilities','editor'),
-                (11,7,'session_tokens','private-session'),(12,7,'_application_passwords','private-password')");
-        $roster = $this->pdo->prepare("UPDATE network_sitemeta SET meta_value = ? WHERE meta_id = 4");
-        $roster->execute([serialize(['member', 'network-admin', 'CASE-VARIANT'])]);
-        $other_roster = $this->pdo->prepare("INSERT INTO network_sitemeta VALUES (6,2,'site_admins',?)");
-        $other_roster->execute([serialize(['other-admin'])]);
-
-        $target = $this->executeDumpInNewDatabase($this->getDumpSQL([
-            'multisite_selection' => new MultisiteDatabaseSelection('network_', 7, 1),
-            'batch_size' => 2,
-        ]));
-        $this->assertSame(['member', 'empty-member', 'former-author', 'commenter', 'link-author', 'network-admin'],
-            $target->query('SELECT user_login FROM network_users ORDER BY ID')->fetchAll(PDO::FETCH_COLUMN));
-        $this->assertSame(['first_name'], $target->query('SELECT meta_key FROM network_usermeta WHERE user_id = 7')->fetchAll(PDO::FETCH_COLUMN));
-        $this->assertSame([serialize(['member', 'network-admin', 'CASE-VARIANT'])],
-            $target->query("SELECT meta_value FROM network_sitemeta WHERE meta_key = 'site_admins'")->fetchAll(PDO::FETCH_COLUMN));
     }
 
     /** Site 1 uses the base prefix without selecting the rest of the database. */
@@ -865,7 +843,7 @@ CHILD
             INSERT INTO network_site VALUES (1,'main.test','/'),(2,'other.test','/');
             CREATE TABLE network_sitemeta (meta_id bigint PRIMARY KEY, site_id bigint, meta_key varchar(255), meta_value longtext);
             INSERT INTO network_sitemeta VALUES (1,1,'active_sitewide_plugins','a:0:{}'),(2,1,'allowedthemes','a:0:{}'),
-                (3,2,'active_sitewide_plugins','private'),(4,1,'site_admins','a:0:{}'),(5,1,'plugin_secret','private');
+                (3,2,'active_sitewide_plugins','private'),(4,1,'site_admins','private'),(5,1,'plugin_secret','private');
             CREATE TABLE network_signups (signup_id bigint PRIMARY KEY, user_login varchar(60));
             INSERT INTO network_signups VALUES (1,'pending-private');
             CREATE TABLE network_shared_plugin (id bigint PRIMARY KEY, value text);

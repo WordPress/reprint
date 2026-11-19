@@ -16736,7 +16736,7 @@ if (
             'type' => 'value-or-next',
             'target' => 'site_admin',
             'placeholder' => 'LOGIN',
-            'help' => 'Grant an imported user administrator access on the new single site',
+            'help' => 'Optionally grant an imported user administrator access on the new single site',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [

@@ -12,7 +12,7 @@ import { inspect } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
     runImporter, createTempDir, cleanupTempDir, getSiteDir, getSiteUrl, getSiteSecret,
-    createMysqlConnection, apiRequest, apiRequestWithFileList, IS_WINDOWS_CLIENT,
+    createMysqlConnection, apiRequest, apiRequestWithFileList, pullStateDirectory, IS_WINDOWS_CLIENT,
 } from '../lib/test-helpers.js';
 import { ensureSite } from '../lib/site-setup.js';
 
@@ -54,7 +54,6 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.equal(fixture.sites[id].url, url, `Site ${id} must retain the local server port`);
             const preflight = await apiRequest(site, 'preflight', { multisite_mode: 'one-site-network-v1' }, { url: `${url}/?reprint-api` });
             assert.equal(preflight.status, 200, JSON.stringify(preflight.json));
-            assert.ok(preflight.json, `Expected JSON preflight for site ${id}; got ${inspect(preflight.headers)}: ${String(preflight.text ?? preflight.raw).slice(0, 500)}`);
             assert.equal(preflight.json.database.wp.multisite.selection.site_id, id);
         }
         assert.deepEqual(JSON.parse(wp(getSiteDir(site), ['eval', 'echo json_encode([get_locale(), get_option("WPLANG"), get_site_option("WPLANG")]);'], fixture.sites[7].url)), ['pl_PL', false, 'pl_PL']);
@@ -100,6 +99,8 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 ],
             });
             assert.equal(result.exitCode, 0, `${result.stderr}\n${result.stdout}`);
+            const state = JSON.parse(readFileSync(join(pullStateDirectory(directory, sourceUrl), 'state.json'), 'utf8'));
+            assert.equal(state.apply.site_admin, selectedId === 7 ? null : 'commenter');
 
             const imported = await createMysqlConnection(target.database);
             try {
@@ -116,10 +117,9 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 assert.deepEqual(networks.map(row => Number(row.id)), [1]);
                 if (selectedId === 7) {
                     const [users] = await imported.query('SELECT user_login FROM network_users ORDER BY user_login');
-                    assert.deepEqual(users.map(row => row.user_login), ['admin', 'chosen', 'commenter', 'empty-member', 'former-author', 'link-author', 'network-admin']);
+                    assert.deepEqual(users.map(row => row.user_login), ['chosen', 'commenter', 'empty-member', 'former-author', 'link-author']);
                     const [metadata] = await imported.query('SELECT meta_key, meta_value FROM network_usermeta');
                     assert.ok(metadata.some(row => row.meta_key === 'network_7_capabilities' && row.meta_value.includes('editor')));
-                    assert.ok(metadata.some(row => row.meta_key === 'first_name' && row.meta_value === 'Network administrator profile'));
                     assert.ok(metadata.every(row => !['network_8_capabilities', 'network_capabilities', 'session_tokens', '_application_passwords', 'source_plugin_private'].includes(row.meta_key)));
                 }
                 const [privateSettings] = await imported.query("SELECT * FROM network_sitemeta WHERE meta_key='private_network_plugin_setting'");
@@ -161,9 +161,8 @@ define('BLOG_ID_CURRENT_SITE', 1);
                     'site_id' => get_current_blog_id(), 'prefix' => $GLOBALS['wpdb']->prefix,
                     'users_table' => $GLOBALS['wpdb']->users,
                     'usermeta_table' => $GLOBALS['wpdb']->usermeta,
-                    'network_admin_roles' => get_user_by('login', 'network-admin')->roles,
-                    'network_admin_level' => get_user_meta(get_user_by('login', 'network-admin')->ID, '${selected.prefix}user_level', true),
-                    'is_admin' => user_can(get_user_by('login', '${selectedId === 7 ? 'network-admin' : 'commenter'}'), 'manage_options'),
+                    'is_admin' => user_can(get_user_by('login', '${selectedId === 7 ? 'empty-member' : 'commenter'}'), 'manage_options'),
+                    'chosen_roles' => ${selectedId === 7 ? "get_user_by('login', 'chosen')->roles" : 'null'},
                     'created_user' => wp_create_user('target-only', 'target-password', 'target-only@example.test'),
                     'network_plugin' => defined('MULTISITE_SHARED_NETWORK_PLUGIN'),
                     'mu_plugin' => defined('MULTISITE_SHARED_MU_PLUGIN'),
@@ -182,9 +181,10 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.equal(inspection.prefix, selected.prefix);
             assert.equal(inspection.users_table, 'network_users');
             assert.equal(inspection.usermeta_table, 'network_usermeta');
-            assert.deepEqual(inspection.network_admin_roles, selectedId === 7 ? ['administrator'] : ['subscriber', 'administrator']);
-            assert.equal(inspection.network_admin_level, '10');
             assert.equal(inspection.is_admin, true);
+            if (selectedId === 7) {
+                assert.deepEqual(inspection.chosen_roles, ['editor']);
+            }
             assert.equal(typeof inspection.created_user, 'number');
             const usersDatabase = await createMysqlConnection(target.database);
             try {
@@ -240,7 +240,7 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 const login = await fetch(`${targetUrl}/wp-login.php`, {
                     method: 'POST', redirect: 'manual',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-                    body: new URLSearchParams({ log: 'network-admin', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
+                    body: new URLSearchParams({ log: 'empty-member', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
                 });
                 assert.equal(login.status, 302, await login.text());
                 const authCookies = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');

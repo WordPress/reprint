@@ -30,7 +30,7 @@ foreach ([$reprint_shop, $reprint_sibling, $reprint_other] as $reprint_site_id) 
 }
 
 $reprint_users = [];
-foreach (['chosen', 'empty-member', 'former-author', 'commenter', 'link-author', 'sibling-person', 'other-person', 'network-admin'] as $reprint_login) {
+foreach (['chosen', 'empty-member', 'former-author', 'commenter', 'link-author', 'sibling-person', 'other-person'] as $reprint_login) {
     $reprint_id = wp_create_user($reprint_login, 'multisite-password', $reprint_login . '@example.test');
     if (is_wp_error($reprint_id)) {
         throw new RuntimeException($reprint_id->get_error_message());
@@ -39,7 +39,7 @@ foreach (['chosen', 'empty-member', 'former-author', 'commenter', 'link-author',
 }
 add_user_to_blog($reprint_shop, $reprint_users['chosen'], 'editor');
 add_user_to_blog($reprint_sibling, $reprint_users['chosen'], 'administrator');
-add_user_to_blog($reprint_shop, $reprint_users['empty-member'], 'subscriber');
+add_user_to_blog($reprint_shop, $reprint_users['empty-member'], 'administrator');
 add_user_to_blog($reprint_shop, $reprint_users['former-author'], 'author');
 add_user_to_blog($reprint_sibling, $reprint_users['sibling-person'], 'author');
 add_user_to_blog($reprint_other, $reprint_users['other-person'], 'administrator');
@@ -47,11 +47,6 @@ update_user_meta($reprint_users['chosen'], 'first_name', 'Shared profile');
 update_user_meta($reprint_users['chosen'], 'session_tokens', ['source-session-secret' => ['expiration' => time() + 86400]]);
 update_user_meta($reprint_users['chosen'], '_application_passwords', [['password' => 'source-application-secret']]);
 update_user_meta($reprint_users['chosen'], 'source_plugin_private', 'source-unknown-profile');
-grant_super_admin($reprint_users['network-admin']);
-add_user_to_blog($reprint_sibling, $reprint_users['network-admin'], 'editor');
-update_user_meta($reprint_users['network-admin'], 'first_name', 'Network administrator profile');
-update_user_meta($reprint_users['network-admin'], 'session_tokens', ['network-session-secret' => ['expiration' => time() + 86400]]);
-update_user_meta($reprint_users['network-admin'], '_application_passwords', [['password' => 'network-application-secret']]);
 
 mkdir(WP_PLUGIN_DIR . '/shared-network', 0755, true);
 file_put_contents(WP_PLUGIN_DIR . '/shared-network/shared.php', "<?php\n/*

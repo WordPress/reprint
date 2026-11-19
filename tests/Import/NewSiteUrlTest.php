@@ -166,8 +166,8 @@ class NewSiteUrlTest extends TestCase
         $this->assertNotEmpty($options['rewrite_url']);
     }
 
-    /** Omitting the login is allowed; passing an empty login is not. */
-    public function testMultisiteApplyRejectsAnExplicitEmptyAdministrator(): void
+    /** An explicitly empty login is invalid even though the flag is optional. */
+    public function testMultisiteApplyRejectsAnEmptyAdministrator(): void
     {
         $client = $this->multisiteClient();
         file_put_contents($this->tempDir . '/db.sql', '');
