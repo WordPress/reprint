@@ -464,18 +464,35 @@ class AdaptiveTunerTest extends TestCase
         $this->assertEqualsWithDelta(2.0, $r["sleep_seconds"], 0.01);
     }
 
-    public function testNoSleepOnComplete(): void
+    public function testCompleteResponseEarnsRestLikeAPartialOne(): void
     {
-        $tuner = $this->makeTuner(["duty" => 0.5]);
+        // A complete file_fetch response finishes one batch. The client sends
+        // the next batch afterwards, so the source must rest after it too.
+        $results = [];
+        foreach (["complete", "partial"] as $status) {
+            $results[$status] = $this->makeTuner(["duty" => 0.5, "min_sleep" => 0.0])->tune_after_response("file_fetch", [
+                "server_time" => 2.0,
+                "wall_time" => 2.1,
+                "status" => $status,
+                "bytes_processed" => 1000,
+            ])["sleep_seconds"];
+        }
 
-        $result = $tuner->tune_after_response("file_fetch", [
-            "server_time" => 2.0,
-            "wall_time" => 2.1,
-            "status" => "complete",
-            "bytes_processed" => 1000,
-        ]);
+        $this->assertEqualsWithDelta(2.0, $results["complete"], 0.01);
+        $this->assertSame($results["partial"], $results["complete"]);
+    }
 
-        $this->assertSame(0.0, $result["sleep_seconds"]);
+    public function testSetDutyReplacesASavedDuty(): void
+    {
+        // A saved duty must not outlive the invocation that chose it.
+        $tuner = $this->makeTuner([], ["duty" => 1.0]);
+        $tuner->set_duty(0.5);
+        [, $gentle] = $this->runRequests($tuner, "file_fetch", 1, 2.0, 1000);
+        $this->assertEqualsWithDelta(2.0, $gentle["sleep_seconds"], 0.01);
+
+        $tuner->set_duty(1.0);
+        [, $full] = $this->runRequests($tuner, "file_fetch", 1, 2.0, 1000);
+        $this->assertSame(0.0, $full["sleep_seconds"]);
     }
 
     public function testFullDutyNoSleep(): void

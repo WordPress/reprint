@@ -92,6 +92,7 @@ Each command's `--help` lists its complete options. These are the ones the handb
 | `--insecure` | Allow an HTTP address and skip HTTPS certificate checks. `REPRINT_INSECURE_TLS=1` does the same. | Every command. |
 | `--progress=MODE` | Progress output: `auto`, `tty`, `jsonl`, or `compact`. JSONL and compact append a final command report. | Every command. |
 | `--step=N`, `--steps=N` | Pipeline position written to `progress.json`. | Every command. |
+| `--source-load=LEVEL` | How hard to work the source. `gentle` (default) rests after every response as long as the source worked, up to 10 seconds, before the next request. `full` sends requests back to back. Use `full` only for a source that can serve them without slowing its visitors. Applies to that invocation only. | `pull`, `pull-files`, `pull-db`, `files-pull`, `files-index`, `db-pull`, `db-index`, `preflight` |
 | `--verbose` | Print detailed request and response logs, including audit-log entries. | Transfer and runtime commands. |
 | `--abort` | Discard the named command's unfinished work; its help says what is kept. | `pull`, `pull-files`, `pull-db`, `files-pull`, `files-index`, `db-pull`, `db-index`, `db-apply`, `db-rewrite-urls`, and the push commands. |
 | `--target-engine=ENGINE` | Destination database engine: `mysql` or `sqlite`. | `pull`, `pull-db`, `db-apply`, `db-rewrite-urls`, `apply-runtime` |

@@ -99,6 +99,18 @@ class AdaptiveTuner
     }
 
     /**
+     * Sets the share of time the source may spend serving requests.
+     *
+     * 1.0 means the source never rests between requests. Lower values make
+     * the client wait longer after each response. The value is clamped to
+     * duty_min and duty_max.
+     */
+    public function set_duty(float $duty): void
+    {
+        $this->state["duty"] = $this->clamp($duty, $this->config["duty_min"], $this->config["duty_max"]);
+    }
+
+    /**
      * Build query parameters for a specific exporter endpoint.
      *
      * @return array<string, mixed>
@@ -169,10 +181,9 @@ class AdaptiveTuner
         $decision = $this->tune_endpoint($endpoint, $metrics, $elapsed);
         $this->decay_error_backoff();
 
+        // A complete response finishes only its own request. The client may
+        // still send another request, so the source rests after it too.
         $sleep = $this->sleep_seconds($elapsed);
-        if (($metrics["status"] ?? null) === "complete") {
-            $sleep = 0.0;
-        }
 
         return array_merge($decision, [
             "sleep_seconds" => $sleep,

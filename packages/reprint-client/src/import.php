@@ -238,6 +238,12 @@ class ImportClient
 
     /** Progress output modes accepted by every command. */
     public const PROGRESS_OUTPUT_MODES = ['auto', 'tty', 'jsonl', 'compact'];
+    /**
+     * How much of the source's time requests may take. gentle lets the source
+     * rest after each response as long as it worked, up to 10 seconds. full
+     * sends the next request at once.
+     */
+    public const SOURCE_LOAD_LEVELS = ['gentle', 'full'];
 
     private const SAVE_STATE_EVERY_N_CHUNKS = 50;
     /** File body bytes a pull may receive before it saves its fetch cursor again. */
@@ -448,6 +454,12 @@ class ImportClient
      * Set via --on-fs-root-nonempty, persisted in state so it survives across invocations.
      */
     private $fs_root_nonempty_behavior = 'error';
+
+    /**
+     * One of SOURCE_LOAD_LEVELS, chosen for this invocation only. A resumed
+     * command without --source-load is gentle again.
+     */
+    private string $source_load = 'gentle';
 
     /**
      * Selects a path-filter preset for files-pull.
@@ -1301,6 +1313,15 @@ class ImportClient
                 . implode(', ', self::PROGRESS_OUTPUT_MODES)
             );
         }
+        $source_load = $options['source_load'] ?? 'gentle';
+        if (!is_string($source_load) || !in_array($source_load, self::SOURCE_LOAD_LEVELS, true)) {
+            $invalid_source_load = is_string($source_load) ? $source_load : gettype($source_load);
+            throw new InvalidArgumentException(
+                "Invalid --source-load value: {$invalid_source_load}. Valid values: "
+                . implode(', ', self::SOURCE_LOAD_LEVELS)
+            );
+        }
+        $this->source_load = $source_load;
         if ($this->verbose_mode && $progress_output_mode !== 'auto') {
             throw new InvalidArgumentException(
                 "{$command} does not accept --verbose with --progress={$progress_output_mode}. "
@@ -3335,6 +3356,7 @@ class ImportClient
         $config = array_merge($config, $cli_config);
 
         $this->tuner = new AdaptiveTuner($config, $state);
+        $this->tuner->set_duty($this->source_load === 'full' ? 1.0 : (float) $this->tuner->get_config()['duty']);
         $this->apply_reported_request_body_limit();
         $this->get_state()->tuning->config = $this->tuner->get_config();
         $this->get_state()->tuning->state = $this->tuner->get_state();
@@ -4158,7 +4180,8 @@ class ImportClient
     }
 
     /**
-     * Record request metrics, apply tuning decisions, and sleep if needed.
+     * Record request metrics, apply tuning decisions, and record the rest the
+     * source earned. The next request waits it out first.
      */
     private function finalize_tuned_request(
         string $endpoint,
@@ -4225,10 +4248,33 @@ class ImportClient
             "s";
         $this->audit_log(implode(" | ", $log), false);
 
-        $sleep = (float) ($decision["sleep_seconds"] ?? 0);
-        if ($sleep > 0) {
-            usleep((int) round($sleep * 1_000_000));
+        // Rest before the next request rather than now. Work the client does
+        // in between counts toward the rest, and no rest is spent when no
+        // request follows.
+        $rest_seconds = (float) ($decision["sleep_seconds"] ?? 0);
+        $this->get_state()->source_rest_until = $rest_seconds > 0 ? microtime(true) + $rest_seconds : null;
+    }
+
+    /**
+     * Waits until the rest the source earned with its last response is over.
+     *
+     * The wait never exceeds the tuner's longest sleep, so a saved deadline
+     * cannot hold the client for longer after a clock change.
+     */
+    private function wait_for_source_rest(): void
+    {
+        $rest_until = $this->get_state()->source_rest_until;
+        if ($rest_until === null) {
+            return;
         }
+        $this->get_state()->source_rest_until = null;
+        $longest_rest = $this->tuner instanceof AdaptiveTuner ? (float) $this->tuner->get_config()['max_sleep'] : 10.0;
+        $remaining = min($rest_until - microtime(true), $longest_rest);
+        if ($remaining <= 0) {
+            return;
+        }
+        $this->audit_log(sprintf("SOURCE REST | waiting %.2fs before the next request", $remaining), false);
+        usleep((int) round($remaining * 1_000_000));
     }
 
     /**
@@ -14907,6 +14953,7 @@ class ImportClient
      */
     private function fetch_json(string $url, array $post_data): array
     {
+        $this->wait_for_source_rest();
         $this->reset_request_error_state();
 
         $this->audit_log("HTTP_REQUEST | POST | " . self::mask_url_credentials($url), false);
@@ -15029,6 +15076,7 @@ class ImportClient
         ?array $post_data = null,
         ?string $endpoint = null
     ): void {
+        $this->wait_for_source_rest();
         $this->reset_request_error_state();
 
         // A pending batch may have been prepared by an older client. Encode
@@ -16452,6 +16500,16 @@ if (
             'help_section' => 'global',
             'commands' => ImportClient::COMMANDS,
             'valid_values' => ImportClient::PROGRESS_OUTPUT_MODES,
+        ],
+        [
+            'name' => 'source-load',
+            'type' => 'value',
+            'target' => 'source_load',
+            'placeholder' => 'LEVEL',
+            'help' => 'How hard to work the source (gentle|full, default: gentle). gentle rests between requests as long as the source worked, up to 10 seconds. full sends requests back to back; use it only for a source that can take it. Applies to this invocation only',
+            'help_section' => 'global',
+            'commands' => ImportClient::REMOTE_COMMANDS,
+            'valid_values' => ImportClient::SOURCE_LOAD_LEVELS,
         ],
         [
             'name' => 'abort',
