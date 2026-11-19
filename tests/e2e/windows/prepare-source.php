@@ -110,6 +110,8 @@ mkdir($upload_directory . '/empty directory');
 file_put_contents($upload_directory . '/large file.bin', str_repeat("Windows to Linux\0\xff\r\n", 300000));
 file_put_contents($upload_directory . '/exact chunks.bin', str_repeat('A', 10 * 1024 * 1024));
 file_put_contents($upload_directory . '/hello.txt', "Hello from Windows!\r\n");
+// An edited file has a modification time later than its creation time. The pull must still send it.
+touch($upload_directory . '/hello.txt', time() + 10);
 file_put_contents($upload_directory . '/zażółć 你好.txt', "Unicode filename on Windows\n");
 $portable_paths = [
     "[draft] #100% & dollar$ 'quote'.txt",
