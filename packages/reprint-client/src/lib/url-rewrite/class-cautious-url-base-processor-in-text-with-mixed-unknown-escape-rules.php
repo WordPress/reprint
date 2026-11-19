@@ -93,6 +93,14 @@
  * immediately after the configured base is rejected: it may continue the host
  * name or introduce a port which the mapping did not include.
  *
+ * The configured base ends at the end of the text, a slash, `?`, `#`,
+ * whitespace, `,`, `!`, `;`, a closing bracket, `<`, `>`, a quote, or a
+ * backtick. One or more dots also end it when one of those other than a slash,
+ * `?`, or `#` follows. They end a sentence, as in WordPress's default privacy
+ * policy: "Our website address is: https://source.example." A tag such as
+ * `<p>https://source.example.</p>` also ends the base in an option value,
+ * which is matched as text.
+ *
  * Example usage:
  *
  * ```php

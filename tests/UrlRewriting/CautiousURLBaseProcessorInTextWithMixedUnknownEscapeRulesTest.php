@@ -132,6 +132,19 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
         $this->assertLessThan(5, microtime(true) - $start);
     }
 
+    /** A long run of dots must not exhaust the PCRE backtrack limit and end the scan. */
+    public function testLongDotRunKeepsLaterUrlsRewritable(): void
+    {
+        $dots = str_repeat('.', 2000000);
+        $this->assertSame(
+            'https://source.example' . $dots . 'x https://destination.example/',
+            $this->rewrite(
+                'https://source.example' . $dots . 'x https://source.example/',
+                ['https://source.example' => 'https://destination.example']
+            )
+        );
+    }
+
     /**
      * These are opaque text leaves only. Do not add complete PHP serializations,
      * JSON documents, or known block markup: StructuredDataUrlRewriter handles
@@ -262,6 +275,84 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'https://source.example/media/logo.png',
                 'https://192.0.2.1/logo.png',
                 ['https://source.example/media' => 'https://192.0.2.1'],
+            ],
+            'full stop ends the text' => [
+                'Our website address is: https://source.example.',
+                'Our website address is: https://destination.example.',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop is followed by whitespace' => [
+                "Visit https://source.example. Then\nhttps://source.example.\tDone",
+                "Visit https://destination.example. Then\nhttps://destination.example.\tDone",
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop is followed by a quote' => [
+                '"See https://source.example." and \'source.example.\'',
+                '"See https://destination.example." and \'destination.example.\'',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop follows a scheme-less host' => [
+                'Visit source.example.',
+                'Visit destination.example.',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'ellipsis follows the host' => [
+                'Visit https://source.example... soon. Or https://source.example..',
+                'Visit https://destination.example... soon. Or https://destination.example..',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop is followed by closing punctuation' => [
+                '(https://source.example.) [https://source.example.] {https://source.example.} <https://source.example.> https://source.example., https://source.example.; https://source.example.!',
+                '(https://destination.example.) [https://destination.example.] {https://destination.example.} <https://destination.example.> https://destination.example., https://destination.example.; https://destination.example.!',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'backtick follows the host' => [
+                'Use `https://source.example` or `source.example`. See `https://source.example.`',
+                'Use `https://destination.example` or `destination.example`. See `https://destination.example.`',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'tag follows the host' => [
+                '<p>Visit https://source.example.</p><p>source.example</p><br>https://source.example<\\/p>',
+                '<p>Visit https://destination.example.</p><p>destination.example</p><br>https://destination.example<\\/p>',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop follows a protocol-relative or uppercase URL' => [
+                '//source.example. HTTPS://SOURCE.EXAMPLE.',
+                '//destination.example. HTTPS://destination.example.',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop follows an excluded URL' => [
+                'See https://source.example/keep. And https://source.example.',
+                'See https://source.example/keep. And https://destination.example.',
+                [
+                    'https://source.example/keep' => 'https://source.example/keep',
+                    'https://source.example' => 'https://destination.example',
+                ],
+            ],
+            'full stop follows a JSON-escaped URL when the target adds a path' => [
+                'https:\\/\\/source.example.',
+                'https:\\/\\/destination.example\\/site.',
+                ['https://source.example' => 'https://destination.example/site'],
+            ],
+            'full stop follows a JSON-escaped URL' => [
+                'https:\\/\\/source.example.',
+                'https:\\/\\/destination.example.',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop follows a source base path' => [
+                'See https://source.example/blog. Then https://source.example/blog.html',
+                'See https://destination.example. Then https://source.example/blog.html',
+                ['https://source.example/blog' => 'https://destination.example'],
+            ],
+            'full stop follows the host when the target adds a path' => [
+                'See https://source.example.',
+                'See https://destination.example/site.',
+                ['https://source.example' => 'https://destination.example/site'],
+            ],
+            'full stop follows the host when the target adds a port' => [
+                'See https://source.example.',
+                'See https://destination.example:8080.',
+                ['https://source.example' => 'https://destination.example:8080'],
             ],
             'target host ends in a dot' => [
                 'https://source.example/photo.png',
@@ -813,6 +904,71 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
             'candidate authority has a trailing dot' => [
                 'https://source.com./media/logo.png',
                 'https://source.com./media/logo.png',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is followed by a dot and another label' => [
+                'Visit https://source.com.evil.example today. https://source.com.x https://source.com.co.uk',
+                'Visit https://source.com.evil.example today. https://source.com.x https://source.com.co.uk',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'longer host ends a sentence' => [
+                'Visit https://source.com.org. Or source.com.org.',
+                'Visit https://source.com.org. Or source.com.org.',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is followed by several dots and a label' => [
+                'https://source.com...org source.com..x',
+                'https://source.com...org source.com..x',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'scheme-less host ends a sentence when the target adds a path' => [
+                'Visit source.com.',
+                'Visit source.com.',
+                ['https://source.com' => 'https://destination.com/site'],
+            ],
+            'configured host is followed by a dot without a space' => [
+                'Visit https://source.com.Thanks!',
+                'Visit https://source.com.Thanks!',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is followed by a dot and a non-ASCII label' => [
+                "https://source.com.\u{00E9}t\u{00E9} source.com.\u{4F8B}",
+                "https://source.com.\u{00E9}t\u{00E9} source.com.\u{4F8B}",
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is followed by a dot and an encoded dot' => [
+                'https://source.com.%2Eorg https://source.com.&#46;org',
+                'https://source.com.%2Eorg https://source.com.&#46;org',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is followed by a dot and a port' => [
+                'https://source.com.:8080/',
+                'https://source.com.:8080/',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is followed by a dot and userinfo' => [
+                'https://source.com.@evil.example/',
+                'https://source.com.@evil.example/',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'filename starts with the configured host' => [
+                'backup-source.com.sql source.com.zip',
+                'backup-source.com.sql source.com.zip',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'email address uses the configured host' => [
+                'admin@source.com. mailto:admin@source.com.',
+                'admin@source.com. mailto:admin@source.com.',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'source base path continues after a dot' => [
+                'https://source.com/blog.html https://source.com/blog.php.',
+                'https://source.com/blog.html https://source.com/blog.php.',
+                ['https://source.com/blog' => 'https://destination.com'],
+            ],
+            'configured host is followed by a dot and a backslash' => [
+                'https://source.com.\\nNext line',
+                'https://source.com.\\nNext line',
                 ['https://source.com' => 'https://destination.com'],
             ],
             'longer unrelated host appears in an outer query value' => [

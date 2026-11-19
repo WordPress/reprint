@@ -237,7 +237,8 @@ class CautiousURLBaseRewriteMapping {
         $candidate_boundary_pattern = '(?=
             $
             | ' . $separator_escape . '/
-            | [/?# \t\r\n,!;)\]}>"\']
+            | [/?# \t\r\n,!;)\]}<>"\'`]
+            | \.++(?=$|[ \t\r\n,!;)\]}<>"\'`])
         )';
         if ($requires_path_slash && $source_path === '') {
             $candidate_boundary_pattern = '(?(url_slash)
