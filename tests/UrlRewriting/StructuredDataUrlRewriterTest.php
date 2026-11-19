@@ -92,15 +92,28 @@ class StructuredDataUrlRewriterTest extends TestCase
         $this->assertSame('[vc_btn link=\'url:https%3A%2F%2Fold-site.com%2F%27|title:x data-extra=changed y\']', $html->get_attribute('title'));
     }
 
-    /** WordPress's default privacy policy ends this sentence with the site URL. */
-    public function testRewritesSourceUrlFollowedByAFullStop(): void
+    /**
+     * WordPress's default privacy policy ends this sentence with the site URL.
+     * Post content is parsed as HTML; an option holding the same markup is not.
+     */
+    #[DataProvider('htmlContentTypes')]
+    public function testRewritesSourceUrlFollowedByAFullStop(string $content_type): void
     {
         $paragraph = '<!-- wp:paragraph --><p><strong class="privacy-policy-tutorial">Suggested text: </strong>Our website address is: %s.</p><!-- /wp:paragraph -->';
 
         $this->assertSame(
             sprintf($paragraph, 'https://new-site.com'),
-            $this->createRewriter()->rewrite(sprintf($paragraph, 'https://old-site.com'), StructuredDataUrlRewriter::BLOCK_MARKUP)
+            $this->createRewriter()->rewrite(sprintf($paragraph, 'https://old-site.com'), $content_type)
         );
+    }
+
+    /** @return array<string, array{0: string}> */
+    public static function htmlContentTypes(): array
+    {
+        return [
+            'block markup' => [StructuredDataUrlRewriter::BLOCK_MARKUP],
+            'plain text' => [StructuredDataUrlRewriter::PLAIN_TEXT],
+        ];
     }
 
     /** Each opener should be visited once, even when closers do not match. */

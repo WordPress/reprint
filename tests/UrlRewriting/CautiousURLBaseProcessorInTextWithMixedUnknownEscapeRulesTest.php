@@ -132,6 +132,19 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
         $this->assertLessThan(5, microtime(true) - $start);
     }
 
+    /** A long run of dots must not exhaust the PCRE backtrack limit and end the scan. */
+    public function testLongDotRunKeepsLaterUrlsRewritable(): void
+    {
+        $dots = str_repeat('.', 2000000);
+        $this->assertSame(
+            'https://source.example' . $dots . 'x https://destination.example/',
+            $this->rewrite(
+                'https://source.example' . $dots . 'x https://source.example/',
+                ['https://source.example' => 'https://destination.example']
+            )
+        );
+    }
+
     /**
      * These are opaque text leaves only. Do not add complete PHP serializations,
      * JSON documents, or known block markup: StructuredDataUrlRewriter handles
@@ -297,6 +310,29 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'Use `https://source.example` or `source.example`. See `https://source.example.`',
                 'Use `https://destination.example` or `destination.example`. See `https://destination.example.`',
                 ['https://source.example' => 'https://destination.example'],
+            ],
+            'tag follows the host' => [
+                '<p>Visit https://source.example.</p><p>source.example</p><br>https://source.example<\\/p>',
+                '<p>Visit https://destination.example.</p><p>destination.example</p><br>https://destination.example<\\/p>',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop follows a protocol-relative or uppercase URL' => [
+                '//source.example. HTTPS://SOURCE.EXAMPLE.',
+                '//destination.example. HTTPS://destination.example.',
+                ['https://source.example' => 'https://destination.example'],
+            ],
+            'full stop follows an excluded URL' => [
+                'See https://source.example/keep. And https://source.example.',
+                'See https://source.example/keep. And https://destination.example.',
+                [
+                    'https://source.example/keep' => 'https://source.example/keep',
+                    'https://source.example' => 'https://destination.example',
+                ],
+            ],
+            'full stop follows a JSON-escaped URL when the target adds a path' => [
+                'https:\\/\\/source.example.',
+                'https:\\/\\/destination.example\\/site.',
+                ['https://source.example' => 'https://destination.example/site'],
             ],
             'full stop follows a JSON-escaped URL' => [
                 'https:\\/\\/source.example.',
@@ -879,6 +915,16 @@ class CautiousURLBaseProcessorInTextWithMixedUnknownEscapeRulesTest extends Test
                 'Visit https://source.com.org. Or source.com.org.',
                 'Visit https://source.com.org. Or source.com.org.',
                 ['https://source.com' => 'https://destination.com'],
+            ],
+            'configured host is followed by several dots and a label' => [
+                'https://source.com...org source.com..x',
+                'https://source.com...org source.com..x',
+                ['https://source.com' => 'https://destination.com'],
+            ],
+            'scheme-less host ends a sentence when the target adds a path' => [
+                'Visit source.com.',
+                'Visit source.com.',
+                ['https://source.com' => 'https://destination.com/site'],
             ],
             'configured host is followed by a dot without a space' => [
                 'Visit https://source.com.Thanks!',
