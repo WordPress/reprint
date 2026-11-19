@@ -27,6 +27,13 @@ class AdaptiveTuner
     private array $state;
 
     /**
+     * Whether the source rests between requests in this invocation. It is
+     * not saved, so a later invocation, or an older client that reads the
+     * saved state, rests the source again.
+     */
+    private bool $source_rests = true;
+
+    /**
      * Endpoint lookup table: maps endpoint name to its size state key,
      * throughput EMA state key, HTTP parameter name, AIMD increase config key,
      * min/max config keys, and work metric key.
@@ -111,6 +118,16 @@ class AdaptiveTuner
     }
 
     /**
+     * Sends requests back to back for this invocation, without resting the
+     * source. A rest saved by an earlier invocation is dropped too.
+     */
+    public function send_requests_back_to_back(): void
+    {
+        $this->source_rests = false;
+        $this->state["rest_until"] = null;
+    }
+
+    /**
      * Returns the rest the source still has from its last response, and
      * marks that rest as taken. The client waits this long before its next
      * request.
@@ -123,7 +140,7 @@ class AdaptiveTuner
     {
         $rest_until = $this->state["rest_until"];
         $this->state["rest_until"] = null;
-        if ($rest_until === null) {
+        if ($rest_until === null || !$this->config["enabled"]) {
             return 0.0;
         }
         return $this->clamp($rest_until - microtime(true), 0.0, $this->config["max_sleep"]);
@@ -203,7 +220,7 @@ class AdaptiveTuner
 
         // A complete response finishes only its own request. The client may
         // still send another request, so the source rests after it too.
-        $sleep = $this->sleep_seconds($elapsed);
+        $sleep = $this->source_rests ? $this->sleep_seconds($elapsed) : 0.0;
         if ($sleep > 0) {
             $this->state["rest_until"] = microtime(true) + $sleep;
         }

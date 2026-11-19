@@ -46,9 +46,10 @@ class SourceRestTest extends TestCase {
         $this->send_request_to_closed_port($next_process, 'streaming');
         $this->assertGreaterThan(0.3, microtime(true) - $started, 'The first request must wait out the saved rest.');
 
-        $started = microtime(true);
         $this->send_request_to_closed_port($next_process, 'json');
-        $this->assertLessThan(0.2, microtime(true) - $started, 'The rest is waited out once.');
+        // A refused connection takes a second or more on Windows, so count
+        // the waits instead of timing the second request.
+        $this->assertCount(1, $this->source_rest_waits(), 'The rest is waited out once.');
     }
 
     public function testJsonRequestsAlsoWaitOutTheRest(): void {
@@ -60,11 +61,23 @@ class SourceRestTest extends TestCase {
         $this->assertGreaterThan(0.3, microtime(true) - $started);
     }
 
+    public function testFullSourceLoadSkipsARestSavedByAGentleRun(): void {
+        $gentle = $this->client_with_tuner('gentle');
+        $this->finish_request($gentle, 'partial', 2.0);
+        $gentle->save_state();
+
+        $full = $this->client_with_tuner('full');
+        $this->send_request_to_closed_port($full, 'streaming');
+        $this->assertSame([], $this->source_rest_waits());
+    }
+
     public function testFullSourceLoadNeverRestsAndDoesNotCarryOver(): void {
         $client = $this->client_with_tuner('full');
         $this->finish_request($client, 'partial', 2.0);
         $this->assertNull($this->pending_rest_until($client), 'Full source load sends the next request at once.');
         $client->save_state();
+        $saved = json_decode(file_get_contents($this->root . '/state/remotes/' . md5('http://127.0.0.1:9/') . '/pull/state.json'), true);
+        $this->assertSame(0.5, $saved['tuning']['state']['duty'], 'An older client reading this state must still rest the source.');
 
         // A later invocation without --source-load=full is gentle again.
         $gentle = $this->client_with_tuner('gentle');
@@ -87,6 +100,14 @@ class SourceRestTest extends TestCase {
         $reflection->getProperty('source_load')->setValue($client, $source_load);
         $reflection->getMethod('initialize_tuner')->invoke($client, ['tuning_config' => ['min_sleep' => 0.0]]);
         return $client;
+    }
+
+    /** @return list<string> The SOURCE REST lines in the audit log. */
+    private function source_rest_waits(): array {
+        $log = (string) @file_get_contents($this->root . '/state/audit.log');
+        return array_values(array_filter(explode("\n", $log), static function (string $line): bool {
+            return strpos($line, 'SOURCE REST |') !== false;
+        }));
     }
 
     /** Unix time until which the source rests, as the tuner saves it. */

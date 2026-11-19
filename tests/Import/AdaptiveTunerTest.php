@@ -510,6 +510,27 @@ class AdaptiveTunerTest extends TestCase
         $this->assertSame(0.0, $full["sleep_seconds"]);
     }
 
+    public function testBackToBackRequestsNeverRestAndKeepTheSavedDuty(): void
+    {
+        // A rest saved by an earlier gentle invocation is dropped.
+        $tuner = $this->makeTuner(["duty" => 0.5, "min_sleep" => 0.0], ["rest_until" => microtime(true) + 5.0]);
+        $tuner->send_requests_back_to_back();
+        $this->assertSame(0.0, $tuner->take_pending_rest());
+
+        [, $result] = $this->runRequests($tuner, "file_fetch", 1, 2.0, 1000);
+        $this->assertSame(0.0, $result["sleep_seconds"]);
+        $this->assertSame(0.0, $tuner->take_pending_rest());
+
+        // An older client that reads this state must still rest the source.
+        $this->assertSame(0.5, $tuner->get_state()["duty"]);
+    }
+
+    public function testDisabledTunerIgnoresASavedRest(): void
+    {
+        $tuner = $this->makeTuner(["enabled" => false], ["rest_until" => microtime(true) + 5.0]);
+        $this->assertSame(0.0, $tuner->take_pending_rest());
+    }
+
     public function testFullDutyNoSleep(): void
     {
         $tuner = $this->makeTuner(["duty" => 1.0, "duty_min" => 1.0]);

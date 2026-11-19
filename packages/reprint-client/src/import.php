@@ -3356,7 +3356,12 @@ class ImportClient
         $config = array_merge($config, $cli_config);
 
         $this->tuner = new AdaptiveTuner($config, $state);
-        $this->tuner->set_duty($this->source_load === 'full' ? 1.0 : (float) $this->tuner->get_config()['duty']);
+        // A duty saved by an earlier invocation must not outlive it.
+        $configured_duty = (float) $this->tuner->get_config()['duty'];
+        $this->tuner->set_duty($configured_duty);
+        if ($this->source_load === 'full') {
+            $this->tuner->send_requests_back_to_back();
+        }
         $this->apply_reported_request_body_limit();
         $this->get_state()->tuning->config = $this->tuner->get_config();
         $this->get_state()->tuning->state = $this->tuner->get_state();
