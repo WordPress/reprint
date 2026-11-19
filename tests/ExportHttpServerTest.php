@@ -41,7 +41,7 @@ final class ExportHttpServerTest extends TestCase
         $server->normalize_config(['endpoint' => 'preflight']);
     }
 
-    /** Server context wins over any request-supplied site or table prefix. */
+    /** The server, not the request, chooses the site and the network whose administrators are exported. */
     public function testMultisiteModeUsesTheTrustedSite(): void
     {
         $context = ['site_id' => 7, 'network_id' => 1, 'base_prefix' => 'wp_'];
@@ -49,7 +49,7 @@ final class ExportHttpServerTest extends TestCase
         $config = $server->normalize_config([
             'endpoint' => 'sql_chunk',
             'multisite_mode' => 'one-site-network-v1',
-            '_multisite' => ['site_id' => 8, 'base_prefix' => 'other_'],
+            '_multisite' => ['site_id' => 8, 'network_id' => 2, 'base_prefix' => 'other_', 'site_admins' => ['unrelated-user']],
         ]);
         $this->assertSame($context, $config['_multisite']);
     }

@@ -24,9 +24,12 @@ final class MultisiteSqliteSelectionTest extends TestCase {
             $this->database->exec("CREATE TABLE wp_{$site}_links (link_id bigint PRIMARY KEY, link_owner bigint)");
         }
         $this->database->exec('CREATE TABLE wp_users (ID bigint PRIMARY KEY, user_login varchar(60))');
-        $this->database->exec("INSERT INTO wp_users VALUES (1,'member'),(2,'author'),(3,'sibling')");
+        $this->database->exec("INSERT INTO wp_users VALUES (1,'member'),(2,'author'),(3,'sibling'),(4,'network-admin')");
         $this->database->exec('CREATE TABLE wp_usermeta (umeta_id bigint PRIMARY KEY, user_id bigint, meta_key varchar(255), meta_value longtext)');
         $this->database->exec("INSERT INTO wp_usermeta VALUES (1,1,'wp_7_capabilities','member'),(2,3,'wp_8_capabilities','sibling'),(3,1,'session_tokens','secret')");
+        $this->database->exec("INSERT INTO wp_usermeta VALUES (4,4,'first_name','Network admin'),(5,4,'_application_passwords','private')");
+        $this->database->exec('CREATE TABLE wp_sitemeta (meta_id bigint PRIMARY KEY, site_id bigint, meta_key varchar(255), meta_value longtext)');
+        $this->database->exec("INSERT INTO wp_sitemeta VALUES (1,1,'site_admins','a:1:{i:0;s:13:\"network-admin\";}')");
         $this->database->exec("INSERT INTO wp_7_posts VALUES (1,2,'one'),(2,2,'two'),(3,2,'three')");
     }
 
@@ -76,9 +79,9 @@ final class MultisiteSqliteSelectionTest extends TestCase {
             $executed = '';
             $execute->invokeArgs($client, [$target_connection, $queries->get_query(), null, &$executed]);
         }
-        $this->assertSame(['member', 'author'], $target->query('SELECT user_login FROM wp_users ORDER BY ID')->fetchAll(PDO::FETCH_COLUMN));
-        $this->assertSame(['wp_7_capabilities'], $target->query('SELECT meta_key FROM wp_usermeta')->fetchAll(PDO::FETCH_COLUMN));
-        $this->assertSame(2, (int) $this->database->query('SELECT COUNT(*) FROM wp_7_reprint_users')->fetchColumn());
+        $this->assertSame(['member', 'author', 'network-admin'], $target->query('SELECT user_login FROM wp_users ORDER BY ID')->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertSame(['wp_7_capabilities', 'first_name'], $target->query('SELECT meta_key FROM wp_usermeta ORDER BY umeta_id')->fetchAll(PDO::FETCH_COLUMN));
+        $this->assertSame(3, (int) $this->database->query('SELECT COUNT(*) FROM wp_7_reprint_users')->fetchColumn());
         $this->assertGreaterThan(5, $steps);
     }
 

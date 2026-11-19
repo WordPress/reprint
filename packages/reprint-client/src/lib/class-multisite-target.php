@@ -126,39 +126,64 @@ class MultisiteTarget {
     /**
      * Idempotent cleanup: SQL import has completed, but WordPress has not booted yet.
      *
-     * @param string $site_admin Login chosen at the command boundary. Its existence
-     *     can only be checked now, against the users actually imported.
+     * @param string|null $site_admin Additional login chosen at the command boundary.
+     *     Its existence can only be checked now, against the users actually imported.
      */
-    public function configure_database(DatabaseConnection $database, string $site_admin): void
+    public function configure_database(DatabaseConnection $database, ?string $site_admin): void
     {
         $source = $this->source;
         $base_prefix = $source['base_prefix'];
         $site_prefix = $this->get_table_prefix();
-        $user = $database->query(
-            "SELECT ID FROM `{$base_prefix}users` WHERE user_login = ?",
-            [$site_admin]
-        )->fetch(\PDO::FETCH_ASSOC);
-        if (!$user) {
-            throw new InvalidArgumentException('The requested site administrator was not imported: ' . $site_admin . '. Choose a member or content author of the selected site.');
+        $administrators = [];
+        $find_user = "SELECT ID, user_login FROM `{$base_prefix}users` WHERE user_login = ?";
+        if ($site_admin !== null) {
+            $user = $database->query($find_user, [$site_admin])->fetch(\PDO::FETCH_ASSOC);
+            if (!$user) {
+                throw new InvalidArgumentException('The requested site administrator was not imported: ' . $site_admin . '. Choose an imported user.');
+            }
+            $administrators[$user['ID']] = $user['user_login'];
         }
 
-        // Capability keys already use the selected table prefix. Add the explicit
-        // administrator grant without removing this user's roles or direct caps.
-        $row = $database->query("SELECT meta_value FROM `{$base_prefix}usermeta` WHERE user_id = ? AND meta_key = ?", [
-            $user['ID'], $site_prefix . 'capabilities',
-        ])->fetch(\PDO::FETCH_NUM);
-        $capabilities = $row ? @unserialize($row[0], ['allowed_classes' => false]) : [];
-        if (!is_array($capabilities)) {
-            throw new InvalidArgumentException('The imported site administrator capabilities are not a serialized array: ' . $site_admin . '.');
+        // Older dumps lack this row. Keep existing site roles and do not guess a login.
+        $roster = $database->query(
+            "SELECT meta_value FROM `{$base_prefix}sitemeta` WHERE site_id = ? AND meta_key = 'site_admins' ORDER BY meta_id LIMIT 1",
+            [$source['network_id']]
+        )->fetchColumn();
+        $logins = is_string($roster) ? @unserialize($roster, ['allowed_classes' => false]) : [];
+        if (is_array($logins)) {
+            foreach ($logins as $login) {
+                if (!is_string($login) || $login === '') {
+                    continue;
+                }
+                $users = $database->query($find_user, [$login]);
+                $user = $users->fetch(\PDO::FETCH_ASSOC);
+                while ($user !== false) {
+                    // Unlike the explicit flag, the network roster is case-sensitive.
+                    if ($user['user_login'] === $login) {
+                        $administrators[$user['ID']] = $login;
+                    }
+                    $user = $users->fetch(\PDO::FETCH_ASSOC);
+                }
+            }
         }
-        $capabilities['administrator'] = true;
-        foreach (['capabilities' => serialize($capabilities), 'user_level' => '10'] as $suffix => $value) {
-            $key = $site_prefix . $suffix;
-            $exists = $database->query("SELECT 1 FROM `{$base_prefix}usermeta` WHERE user_id = ? AND meta_key = ?", [$user['ID'], $key])->fetchColumn();
-            if ($exists !== false) {
-                $database->execute("UPDATE `{$base_prefix}usermeta` SET meta_value = ? WHERE user_id = ? AND meta_key = ?", [$value, $user['ID'], $key]);
-            } else {
-                $database->execute("INSERT INTO `{$base_prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)", [$user['ID'], $key, $value]);
+        foreach ($administrators as $user_id => $login) {
+            // Add the grant without removing existing roles or direct capabilities.
+            $row = $database->query("SELECT meta_value FROM `{$base_prefix}usermeta` WHERE user_id = ? AND meta_key = ?", [
+                $user_id, $site_prefix . 'capabilities',
+            ])->fetch(\PDO::FETCH_NUM);
+            $capabilities = $row ? @unserialize($row[0], ['allowed_classes' => false]) : [];
+            if (!is_array($capabilities)) {
+                throw new InvalidArgumentException('The imported site administrator capabilities are not a serialized array: ' . $login . '.');
+            }
+            $capabilities['administrator'] = true;
+            foreach (['capabilities' => serialize($capabilities), 'user_level' => '10'] as $suffix => $value) {
+                $key = $site_prefix . $suffix;
+                $exists = $database->query("SELECT 1 FROM `{$base_prefix}usermeta` WHERE user_id = ? AND meta_key = ?", [$user_id, $key])->fetchColumn();
+                if ($exists !== false) {
+                    $database->execute("UPDATE `{$base_prefix}usermeta` SET meta_value = ? WHERE user_id = ? AND meta_key = ?", [$value, $user_id, $key]);
+                } else {
+                    $database->execute("INSERT INTO `{$base_prefix}usermeta` (user_id, meta_key, meta_value) VALUES (?, ?, ?)", [$user_id, $key, $value]);
+                }
             }
         }
         foreach ([

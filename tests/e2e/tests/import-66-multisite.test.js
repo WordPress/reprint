@@ -93,7 +93,7 @@ define('BLOG_ID_CURRENT_SITE', 1);
                     '--target-engine=mysql', '--target-host=127.0.0.1',
                     '--target-user=e2e_admin', '--target-pass=e2e_password',
                     `--target-db=${target.database}`, `--new-site-url=${targetUrl}`,
-                    `--site-admin=${selectedId === 7 ? 'chosen' : 'admin'}`,
+                    ...(selectedId === 1 ? ['--site-admin=commenter'] : []),
                     '--runtime=php-builtin', '--start-runtime=none',
                     `--flatten-to=${target.documentRoot}`,
                 ],
@@ -115,9 +115,10 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 assert.deepEqual(networks.map(row => Number(row.id)), [1]);
                 if (selectedId === 7) {
                     const [users] = await imported.query('SELECT user_login FROM network_users ORDER BY user_login');
-                    assert.deepEqual(users.map(row => row.user_login), ['chosen', 'commenter', 'empty-member', 'former-author', 'link-author']);
+                    assert.deepEqual(users.map(row => row.user_login), ['admin', 'chosen', 'commenter', 'empty-member', 'former-author', 'link-author', 'network-admin']);
                     const [metadata] = await imported.query('SELECT meta_key, meta_value FROM network_usermeta');
                     assert.ok(metadata.some(row => row.meta_key === 'network_7_capabilities' && row.meta_value.includes('editor')));
+                    assert.ok(metadata.some(row => row.meta_key === 'first_name' && row.meta_value === 'Network administrator profile'));
                     assert.ok(metadata.every(row => !['network_8_capabilities', 'network_capabilities', 'session_tokens', '_application_passwords', 'source_plugin_private'].includes(row.meta_key)));
                 }
                 const [privateSettings] = await imported.query("SELECT * FROM network_sitemeta WHERE meta_key='private_network_plugin_setting'");
@@ -159,7 +160,9 @@ define('BLOG_ID_CURRENT_SITE', 1);
                     'site_id' => get_current_blog_id(), 'prefix' => $GLOBALS['wpdb']->prefix,
                     'users_table' => $GLOBALS['wpdb']->users,
                     'usermeta_table' => $GLOBALS['wpdb']->usermeta,
-                    'is_admin' => user_can(get_user_by('login', '${selectedId === 7 ? 'chosen' : 'admin'}'), 'manage_options'),
+                    'network_admin_roles' => get_user_by('login', 'network-admin')->roles,
+                    'network_admin_level' => get_user_meta(get_user_by('login', 'network-admin')->ID, '${selected.prefix}user_level', true),
+                    'is_admin' => user_can(get_user_by('login', '${selectedId === 7 ? 'network-admin' : 'commenter'}'), 'manage_options'),
                     'created_user' => wp_create_user('target-only', 'target-password', 'target-only@example.test'),
                     'network_plugin' => defined('MULTISITE_SHARED_NETWORK_PLUGIN'),
                     'mu_plugin' => defined('MULTISITE_SHARED_MU_PLUGIN'),
@@ -178,6 +181,8 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.equal(inspection.prefix, selected.prefix);
             assert.equal(inspection.users_table, 'network_users');
             assert.equal(inspection.usermeta_table, 'network_usermeta');
+            assert.deepEqual(inspection.network_admin_roles, ['administrator']);
+            assert.equal(inspection.network_admin_level, '10');
             assert.equal(inspection.is_admin, true);
             assert.equal(typeof inspection.created_user, 'number');
             const usersDatabase = await createMysqlConnection(target.database);
@@ -234,7 +239,7 @@ define('BLOG_ID_CURRENT_SITE', 1);
                 const login = await fetch(`${targetUrl}/wp-login.php`, {
                     method: 'POST', redirect: 'manual',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie },
-                    body: new URLSearchParams({ log: 'chosen', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
+                    body: new URLSearchParams({ log: 'network-admin', pwd: 'multisite-password', testcookie: '1', redirect_to: `${targetUrl}/wp-admin/options-general.php` }),
                 });
                 assert.equal(login.status, 302, await login.text());
                 const authCookies = login.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');

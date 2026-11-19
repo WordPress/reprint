@@ -15,14 +15,14 @@ php reprint.phar keygen 'https://network.example/shop/?reprint-api' \
 
 ## 2. Copy into an empty destination
 
-Create the destination directories and an empty MySQL or SQLite target. Supply `--new-site-url` and `--site-admin=LOGIN`; LOGIN must identify a user included in the selected site's export. The example prepares files and SQLite data for https://shop.example without starting a development server (`--runtime=none --start-runtime=none`; see [runtime options on pull](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull)):
+Create the destination directories and an empty MySQL or SQLite target. Supply `--new-site-url`. Reprint makes the selected network's super admins administrators of the copied site. To grant administrator access to another imported user, add `--site-admin=LOGIN`. The example prepares files and SQLite data for https://shop.example without starting a development server (`--runtime=none --start-runtime=none`; see [runtime options on pull](https://developer.wordpress.org/reprint/reference/runtime/#runtime-options-on-pull)):
 
 ```sh
 php reprint.phar pull 'https://network.example/shop/?reprint-api' \
   --private-key-path=./reprint-key.pem \
   --state-dir=./state --fs-root=./files \
   --target-engine=sqlite --target-sqlite-path=/srv/shop/database.sqlite \
-  --target-db=shop --new-site-url=https://shop.example --site-admin=alice \
+  --target-db=shop --new-site-url=https://shop.example \
   --runtime=none --start-runtime=none
 ```
 
@@ -35,13 +35,15 @@ Configure the destination web server and database connection as described in [Mo
 | Included | Needs separate work |
 | --- | --- |
 | The selected site's posts, comments, media, theme, and plugin files. | Content belonging to other sites in the network. |
-| Site members and users referenced by core content, with core profile fields and roles. | Non-core user metadata and users referenced only by plugin tables. |
+| Site members, users referenced by core content, and the selected network's super admins, with core profile fields and selected-site roles. | Other sites' roles, non-core user metadata, and users referenced only by plugin tables. |
 | The site's options and supported network settings. | Unknown network settings and shared plugin configuration. |
 | Numbered site-local plugin tables, such as `network_7_wc_orders`. | Unnumbered plugin tables that may contain shared network data. |
 
 Post, attachment, and user IDs stay the same. The target keeps the selected site's table prefix; Reprint prepares the shared user-table configuration for single-site WordPress. Existing non-main-site media paths keep their `wp-content/uploads/sites/ID` layout, including for new uploads.
 
 Network-active plugins become active on the copied site. Reprint itself stays inactive. Host plugins are downloaded by default; see [host-plugin selection](https://developer.wordpress.org/reprint/reference/file-transfers/) if the destination does not need them. Sessions and WordPress application passwords are not copied.
+
+An older server may omit the super-admin roster from the export. Reprint still copies the site and preserves existing site administrators; it does not pick a new administrator on its own. Use `--site-admin=LOGIN` if you need to grant an imported account access in that case.
 
 Links to the selected site and its media are rewritten to the new address. Links to other network sites keep pointing to the source. Unsupported plugin fields can retain old URLs, so check those separately. A plugin that stores site IDs or depends on multisite APIs may need its own migration steps.
 

@@ -5576,7 +5576,7 @@ class ImportClient
             && !empty($this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'])) {
             throw new InvalidArgumentException(
                 'A selected multisite export does not support --sql-output=mysql. '
-                . 'Use pull-db with an empty MySQL target, --new-site-url, and --site-admin.'
+                . 'Use pull-db with an empty MySQL target and --new-site-url.'
             );
         }
         $state_command = $this->get_state()->active_resumable_command->command_name ?? null;
@@ -8281,8 +8281,8 @@ class ImportClient
         $selection = $this->get_state()->preflight_record()['data']['database']['wp']['multisite']['selection'] ?? null;
         $site_admin = $options['site_admin'] ?? ( $has_unfinished_apply ? $apply_state->site_admin : null );
         if (is_array($selection)) {
-            if (!is_string($site_admin) || $site_admin === '') {
-                throw new InvalidArgumentException('A multisite pull requires --site-admin=LOGIN naming an imported user; received ' . json_encode($site_admin) . '.');
+            if ($site_admin !== null && (!is_string($site_admin) || $site_admin === '')) {
+                throw new InvalidArgumentException('--site-admin must name an imported user; received ' . json_encode($site_admin) . '.');
             }
             $home_url = rtrim($selection['home_url'], '/');
             $url_mapping[$home_url] = $this->parse_multisite_target_url($url_mapping[$home_url] ?? '', '--rewrite-url');
@@ -16736,7 +16736,7 @@ if (
             'type' => 'value-or-next',
             'target' => 'site_admin',
             'placeholder' => 'LOGIN',
-            'help' => 'Imported user who will administer the new single site',
+            'help' => 'Grant an imported user administrator access on the new single site',
             'commands' => ['pull', 'pull-db', 'db-apply'],
         ],
         [

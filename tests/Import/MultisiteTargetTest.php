@@ -399,7 +399,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
         $this->assertLessThan(5, $seconds, 'URL searches must move forward instead of rescanning the remaining value.');
     }
 
-    /** Only an explicitly named, imported user may become the new site administrator. */
+    /** An explicit login must name an imported user. */
     public function test_an_unimported_site_administrator_is_rejected(): void
     {
         $this->pdo->exec("CREATE TABLE wp_users (ID bigint PRIMARY KEY, user_login varchar(60)); INSERT INTO wp_users VALUES (1,'source-admin')");
@@ -412,7 +412,7 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
     public function test_target_configuration_is_idempotent(): void
     {
         $this->pdo->exec("CREATE TABLE wp_users (ID bigint PRIMARY KEY, user_login varchar(60));
-            INSERT INTO wp_users VALUES (5,'chosen'), (6,'member');
+            INSERT INTO wp_users VALUES (5,'chosen'), (6,'member'), (8,'network-admin'), (9,'other-network-admin'), (10,'network-editor');
             CREATE TABLE wp_usermeta (umeta_id bigint AUTO_INCREMENT PRIMARY KEY, user_id bigint, meta_key varchar(255), meta_value longtext);
             CREATE TABLE wp_site (id bigint PRIMARY KEY, domain varchar(200), path varchar(100));
             INSERT INTO wp_site VALUES (1,'network.test','/');
@@ -423,12 +423,21 @@ class MultisiteTargetTest extends MySQLDumpProducerTestBase
         $statement = $this->pdo->prepare('INSERT INTO wp_usermeta (user_id, meta_key, meta_value) VALUES (?, ?, ?)');
         $statement->execute([5, 'wp_7_capabilities', serialize(['editor'=>true, 'custom_capability'=>true])]);
         $statement->execute([6, 'wp_7_capabilities', serialize(['subscriber'=>true])]);
+        $statement->execute([10, 'wp_7_capabilities', serialize(['editor'=>true])]);
         $statement = $this->pdo->prepare('INSERT INTO wp_sitemeta (site_id, meta_key, meta_value) VALUES (1, ?, ?)');
         $statement->execute(['active_sitewide_plugins', serialize(['same/shared.php'=>2, 'network/shared.php'=>1, 'reprint-server/reprint-server.php'=>3])]);
+        $statement->execute(['site_admins', serialize(['network-admin', 'missing-account', 'MEMBER', 'network-editor'])]);
+        $statement = $this->pdo->prepare("INSERT INTO wp_sitemeta (site_id, meta_key, meta_value) VALUES (2, 'site_admins', ?)");
+        $statement->execute([serialize(['other-network-admin'])]);
         $statement = $this->pdo->prepare('INSERT INTO wp_7_options (option_name, option_value, autoload) VALUES (?, ?, \'yes\')');
         $statement->execute(['active_plugins', serialize(['local/local.php', 'same/shared.php', 'reprint-exporter/export.php'])]);
         $database = new PdoDatabaseConnection($this->pdo);
         $target = $this->target();
+        $target->configure_database($database, null);
+        $this->assertSame(serialize(['administrator'=>true]), $this->pdo->query("SELECT meta_value FROM wp_usermeta WHERE user_id=8 AND meta_key='wp_7_capabilities'")->fetchColumn());
+        $this->assertSame('10', $this->pdo->query("SELECT meta_value FROM wp_usermeta WHERE user_id=8 AND meta_key='wp_7_user_level'")->fetchColumn());
+        $this->assertSame(0, (int) $this->pdo->query('SELECT COUNT(*) FROM wp_usermeta WHERE user_id=9')->fetchColumn());
+        $this->assertSame(serialize(['editor'=>true, 'administrator'=>true]), $this->pdo->query("SELECT meta_value FROM wp_usermeta WHERE user_id=10 AND meta_key='wp_7_capabilities'")->fetchColumn());
         $target->configure_database($database, 'chosen');
         $first = $this->pdo->query('SELECT * FROM wp_usermeta ORDER BY umeta_id')->fetchAll();
         $target->configure_database($database, 'chosen');
