@@ -95,7 +95,7 @@ jobs:
           php-version: '8.2'
           coverage: none
           ini-values: phar.readonly=0
-          tools: composer:2.9.7
+          tools: composer:2.11.2
 
       - name: Install client dependencies
         run: composer install --no-dev --no-interaction --prefer-dist

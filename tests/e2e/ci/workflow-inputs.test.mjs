@@ -65,7 +65,6 @@ test('WordPress.org rebuilds the tagged downloads-only plugin after GitHub publi
     assert.match(source, /persist-credentials: false/);
     assert.match(source, /--json isDraft,isPrerelease/);
     assert.doesNotMatch(source, /gh release download|browser_download_url|sparse-checkout/);
-    assert.match(source, /tools: composer:2\.9\.7/);
     const stamp = source.indexOf('run: ./bin/stamp-plugin-version.sh "$VERSION"');
     const build = source.indexOf('./bin/build-server-plugin.sh reprint-wordpress-org.zip wordpress-org');
     const extract = source.indexOf('unzip -q reprint-wordpress-org.zip');

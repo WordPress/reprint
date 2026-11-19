@@ -29,7 +29,7 @@ jobs:
 
       - run: ./bin/build-reprint-phar.sh
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: client-phar
           path: reprint.phar
@@ -47,13 +47,13 @@ jobs:
           php-version: '8.2'
           extensions: pdo, pdo_mysql, json, hash, zlib, mbstring
           coverage: none
-          tools: composer:2.9.7
+          tools: composer:2.11.2
 
       - run: composer install --no-dev --no-interaction --prefer-dist --working-dir=tools/php56-build
 
       - run: ./bin/build-server-plugin.sh
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: server-plugin
           path: reprint-exporter-wp.zip
@@ -95,11 +95,11 @@ jobs:
         with:
           submodules: true
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: client-phar
 
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         if: matrix.server_php == '5.6'
         with:
           name: server-plugin
@@ -115,7 +115,7 @@ jobs:
             -d "$artifact_root/reprint-server-wp"
           echo "E2E_SERVER_PROJECT_ROOT=$artifact_root" >> "$GITHUB_ENV"
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: "20"
 

@@ -169,7 +169,7 @@ jobs:
           $summary | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       - name: Upload the test reports
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: windows-client-suite
           path: |
@@ -310,7 +310,7 @@ jobs:
         run: |
           Get-Content "$env:RUNNER_TEMP/source.stderr.log" -ErrorAction SilentlyContinue
           wsl -d Ubuntu-24.04 --exec bash -c 'if [ -d /root/migration ]; then mkdir -p migration-logs; find /root/migration -name "*.log" -exec cp {} migration-logs/ \; -exec tail -100 {} \;; fi'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: windows-migration-logs-${{ matrix.source }}
