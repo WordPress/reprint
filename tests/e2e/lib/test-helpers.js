@@ -20,6 +20,13 @@ const SITE_ROOT = REGISTRY.siteRoot;
 const PROJECT_ROOT = join(import.meta.dirname, '..', '..', '..');
 const CLIENT_PATH = process.env.CLIENT_PATH || join(PROJECT_ROOT, 'packages', 'reprint-client', 'bin', 'reprint-client');
 const PHP_BINARY = process.env.PHP_BINARY || 'php';
+/**
+ * Commands that send requests to the source. CI passes --source-load=full to
+ * them, so tests do not wait for the source to rest between requests.
+ */
+export const SOURCE_REQUEST_COMMANDS = new Set([
+    'pull', 'pull-files', 'pull-db', 'files-pull', 'files-index', 'db-pull', 'db-index', 'preflight',
+]);
 // ci/windows-php.sh runs the native Windows client from WSL.
 const IS_WINDOWS_CLIENT = PHP_BINARY.endsWith('/windows-php.sh');
 // A Windows client writes a full WordPress tree at under 1 MB/s on CI
@@ -354,6 +361,9 @@ export function runImporter(url, outputDir, command, options = {}) {
             `--state-dir=${outputDir}`,
             `--fs-root=${fsRootDir(outputDir)}`,
         ];
+        if (SOURCE_REQUEST_COMMANDS.has(cmd)) {
+            args.push('--source-load=full');
+        }
         if (secret && options.useToken) {
             args.push(`--secret=${secret}`);
         } else if (secret) {

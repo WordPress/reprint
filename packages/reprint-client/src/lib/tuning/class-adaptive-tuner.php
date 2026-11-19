@@ -27,6 +27,13 @@ class AdaptiveTuner
     private array $state;
 
     /**
+     * Whether the source rests between requests in this invocation. It is
+     * not saved, so a later invocation, or an older client that reads the
+     * saved state, rests the source again.
+     */
+    private bool $source_rests = true;
+
+    /**
      * Endpoint lookup table: maps endpoint name to its size state key,
      * throughput EMA state key, HTTP parameter name, AIMD increase config key,
      * min/max config keys, and work metric key.
@@ -99,6 +106,47 @@ class AdaptiveTuner
     }
 
     /**
+     * Sets the share of time the source may spend serving requests.
+     *
+     * 1.0 means the source never rests between requests. Lower values make
+     * the client wait longer after each response. The value is clamped to
+     * duty_min and duty_max.
+     */
+    public function set_duty(float $duty): void
+    {
+        $this->state["duty"] = $this->clamp($duty, $this->config["duty_min"], $this->config["duty_max"]);
+    }
+
+    /**
+     * Sends requests back to back for this invocation, without resting the
+     * source. A rest saved by an earlier invocation is dropped too.
+     */
+    public function send_requests_back_to_back(): void
+    {
+        $this->source_rests = false;
+        $this->state["rest_until"] = null;
+    }
+
+    /**
+     * Returns the rest the source still has from its last response, and
+     * marks that rest as taken. The client waits this long before its next
+     * request.
+     *
+     * The rest is saved with the tuner state, so a new process also waits
+     * out what remains. It never exceeds max_sleep, so a saved deadline
+     * cannot hold the client longer after a clock change.
+     */
+    public function take_pending_rest(): float
+    {
+        $rest_until = $this->state["rest_until"];
+        $this->state["rest_until"] = null;
+        if ($rest_until === null || !$this->config["enabled"]) {
+            return 0.0;
+        }
+        return $this->clamp($rest_until - microtime(true), 0.0, $this->config["max_sleep"]);
+    }
+
+    /**
      * Build query parameters for a specific exporter endpoint.
      *
      * @return array<string, mixed>
@@ -146,6 +194,7 @@ class AdaptiveTuner
      */
     public function tune_after_response(string $endpoint, array $metrics): array
     {
+        $this->state["rest_until"] = null;
         if (!$this->config["enabled"]) {
             return [
                 "decision" => "disabled",
@@ -169,9 +218,11 @@ class AdaptiveTuner
         $decision = $this->tune_endpoint($endpoint, $metrics, $elapsed);
         $this->decay_error_backoff();
 
-        $sleep = $this->sleep_seconds($elapsed);
-        if (($metrics["status"] ?? null) === "complete") {
-            $sleep = 0.0;
+        // A complete response finishes only its own request. The client may
+        // still send another request, so the source rests after it too.
+        $sleep = $this->source_rests ? $this->sleep_seconds($elapsed) : 0.0;
+        if ($sleep > 0) {
+            $this->state["rest_until"] = microtime(true) + $sleep;
         }
 
         return array_merge($decision, [
@@ -441,6 +492,10 @@ class AdaptiveTuner
 
         $state["duty"] = $this->clamp((float) $state["duty"], $config["duty_min"], $config["duty_max"]);
         $state["error_backoff_remaining"] = max(0, (int) ($state["error_backoff_remaining"] ?? 0));
+        // Unix time before which the source rests. State from older clients
+        // has none, because they slept right after each response.
+        $rest_until = $state["rest_until"] ?? null;
+        $state["rest_until"] = is_int($rest_until) || is_float($rest_until) ? (float) $rest_until : null;
 
         return $state;
     }

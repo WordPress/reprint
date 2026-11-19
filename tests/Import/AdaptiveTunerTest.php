@@ -464,18 +464,71 @@ class AdaptiveTunerTest extends TestCase
         $this->assertEqualsWithDelta(2.0, $r["sleep_seconds"], 0.01);
     }
 
-    public function testNoSleepOnComplete(): void
+    public function testCompleteResponseEarnsRestLikeAPartialOne(): void
     {
-        $tuner = $this->makeTuner(["duty" => 0.5]);
+        // A complete file_fetch response finishes one batch. The client sends
+        // the next batch afterwards, so the source must rest after it too.
+        $results = [];
+        foreach (["complete", "partial"] as $status) {
+            $results[$status] = $this->makeTuner(["duty" => 0.5, "min_sleep" => 0.0])->tune_after_response("file_fetch", [
+                "server_time" => 2.0,
+                "wall_time" => 2.1,
+                "status" => $status,
+                "bytes_processed" => 1000,
+            ])["sleep_seconds"];
+        }
 
-        $result = $tuner->tune_after_response("file_fetch", [
-            "server_time" => 2.0,
-            "wall_time" => 2.1,
-            "status" => "complete",
-            "bytes_processed" => 1000,
-        ]);
+        $this->assertEqualsWithDelta(2.0, $results["complete"], 0.01);
+        $this->assertSame($results["partial"], $results["complete"]);
+    }
 
+    public function testPendingRestIsTakenOnceAndNeverExceedsTheLongestSleep(): void
+    {
+        $tuner = $this->makeTuner(["duty" => 0.5, "min_sleep" => 0.0, "max_sleep" => 10.0]);
+        $this->runRequests($tuner, "file_fetch", 1, 2.0, 1000);
+        $this->assertEqualsWithDelta(2.0, $tuner->take_pending_rest(), 0.05);
+        $this->assertSame(0.0, $tuner->take_pending_rest(), 'The rest is taken once.');
+
+        // A deadline saved before a clock change still waits at most max_sleep.
+        $restored = $this->makeTuner(["max_sleep" => 10.0], ["rest_until" => microtime(true) + 3600]);
+        $this->assertSame(10.0, $restored->take_pending_rest());
+
+        // State from older clients has no pending rest.
+        $this->assertSame(0.0, $this->makeTuner([], ["rest_until" => "soon"])->take_pending_rest());
+    }
+
+    public function testSetDutyReplacesASavedDuty(): void
+    {
+        // A saved duty must not outlive the invocation that chose it.
+        $tuner = $this->makeTuner([], ["duty" => 1.0]);
+        $tuner->set_duty(0.5);
+        [, $gentle] = $this->runRequests($tuner, "file_fetch", 1, 2.0, 1000);
+        $this->assertEqualsWithDelta(2.0, $gentle["sleep_seconds"], 0.01);
+
+        $tuner->set_duty(1.0);
+        [, $full] = $this->runRequests($tuner, "file_fetch", 1, 2.0, 1000);
+        $this->assertSame(0.0, $full["sleep_seconds"]);
+    }
+
+    public function testBackToBackRequestsNeverRestAndKeepTheSavedDuty(): void
+    {
+        // A rest saved by an earlier gentle invocation is dropped.
+        $tuner = $this->makeTuner(["duty" => 0.5, "min_sleep" => 0.0], ["rest_until" => microtime(true) + 5.0]);
+        $tuner->send_requests_back_to_back();
+        $this->assertSame(0.0, $tuner->take_pending_rest());
+
+        [, $result] = $this->runRequests($tuner, "file_fetch", 1, 2.0, 1000);
         $this->assertSame(0.0, $result["sleep_seconds"]);
+        $this->assertSame(0.0, $tuner->take_pending_rest());
+
+        // An older client that reads this state must still rest the source.
+        $this->assertSame(0.5, $tuner->get_state()["duty"]);
+    }
+
+    public function testDisabledTunerIgnoresASavedRest(): void
+    {
+        $tuner = $this->makeTuner(["enabled" => false], ["rest_until" => microtime(true) + 5.0]);
+        $this->assertSame(0.0, $tuner->take_pending_rest());
     }
 
     public function testFullDutyNoSleep(): void
