@@ -54,6 +54,7 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.equal(fixture.sites[id].url, url, `Site ${id} must retain the local server port`);
             const preflight = await apiRequest(site, 'preflight', { multisite_mode: 'one-site-network-v1' }, { url: `${url}/?reprint-api` });
             assert.equal(preflight.status, 200, JSON.stringify(preflight.json));
+            assert.ok(preflight.json, `Expected JSON preflight for site ${id}; got ${inspect(preflight.headers)}: ${String(preflight.text ?? preflight.raw).slice(0, 500)}`);
             assert.equal(preflight.json.database.wp.multisite.selection.site_id, id);
         }
         assert.deepEqual(JSON.parse(wp(getSiteDir(site), ['eval', 'echo json_encode([get_locale(), get_option("WPLANG"), get_site_option("WPLANG")]);'], fixture.sites[7].url)), ['pl_PL', false, 'pl_PL']);
@@ -181,7 +182,7 @@ define('BLOG_ID_CURRENT_SITE', 1);
             assert.equal(inspection.prefix, selected.prefix);
             assert.equal(inspection.users_table, 'network_users');
             assert.equal(inspection.usermeta_table, 'network_usermeta');
-            assert.deepEqual(inspection.network_admin_roles, ['administrator']);
+            assert.deepEqual(inspection.network_admin_roles, selectedId === 7 ? ['administrator'] : ['subscriber', 'administrator']);
             assert.equal(inspection.network_admin_level, '10');
             assert.equal(inspection.is_admin, true);
             assert.equal(typeof inspection.created_user, 'number');

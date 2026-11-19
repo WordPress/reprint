@@ -52,7 +52,7 @@ describe('Multisite database export over HTTP', () => {
             const [posts] = await connection.query(`SELECT ID, post_content FROM \`${database}\`.network_7_posts WHERE post_type='post'`);
             assert.deepEqual(posts.map(row => [Number(row.ID), row.post_content]), [[100, 'Only site 7']]);
             const [users] = await connection.query(`SELECT user_login FROM \`${database}\`.network_users ORDER BY user_login`);
-            assert.deepEqual(users.map(row => row.user_login), ['shared', 'shop-member']);
+            assert.deepEqual(users.map(row => row.user_login), ['admin', 'shared', 'shop-member']);
             const [blogs] = await connection.query(`SELECT blog_id FROM \`${database}\`.network_blogs`);
             assert.deepEqual(blogs.map(row => Number(row.blog_id)), [7]);
             const [metadata] = await connection.query(`SELECT meta_key, meta_value FROM \`${database}\`.network_usermeta`);

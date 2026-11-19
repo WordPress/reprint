@@ -27,8 +27,8 @@ class MultisiteDatabaseSelection {
 
     /** @var mixed Source connection retained for this request's lock and ID writes. */
     private $db;
-    /** @var string[]|null Selected network's stored super admin logins, read once per request. */
-    private $network_super_admin_logins;
+    /** @var string[]|null Selected network's super admin IDs, resolved once per request. */
+    private $network_super_admin_ids;
     /** @var string|null MySQL named lock held for this site's saved user table until close(). */
     private $lock_name;
     /** @var resource|null SQLite site lock; its file also stores the current export token. */
@@ -211,7 +211,7 @@ class MultisiteDatabaseSelection {
             $this->lock_handle = null;
         }
         $this->db = null;
-        $this->network_super_admin_logins = null;
+        $this->network_super_admin_ids = null;
     }
 
     /** Returns the saved user table's token for the cursor, or null before open_user_set(). */
@@ -322,40 +322,79 @@ class MultisiteDatabaseSelection {
     /** Save network administrators who were not already found in content or membership. */
     public function collect_network_super_admins(): void
     {
-        $logins = $this->get_network_super_admin_logins();
-        if (!$logins) {
-            return;
+        $values = [];
+        foreach ($this->get_network_super_admin_ids() as $user_id) {
+            $values[] = "({$user_id},5,0)";
         }
-        // Use the login index to find candidates, then match bytes as WordPress
-        // does when checking the roster, regardless of the column's collation.
-        $placeholders = implode(',', array_fill(0, count($logins), '?'));
-        $exact_match = $this->get_network_super_admin_login_condition($logins);
-        $statement = $this->db->prepare("INSERT INTO `{$this->get_user_table_name()}` (user_id, reference_kind, reference_id)
-            SELECT ID, 5, 0 FROM `{$this->base_prefix}users` WHERE user_login IN ({$placeholders}) AND {$exact_match}
-            ON DUPLICATE KEY UPDATE user_id=user_id");
-        $statement->execute(array_values($logins));
+        if ($values) {
+            $this->db->exec("INSERT INTO `{$this->get_user_table_name()}` (user_id, reference_kind, reference_id) VALUES " . implode(',', $values) . ' ON DUPLICATE KEY UPDATE user_id=user_id');
+        }
     }
 
-    /** @return string[] Stored logins for the selected network only. */
-    private function get_network_super_admin_logins(): array
+    /** @return string[] Positive decimal IDs of accounts in the selected network's roster. */
+    private function get_network_super_admin_ids(): array
     {
-        if ($this->network_super_admin_logins === null) {
-            $value = $this->db->query("SELECT meta_value FROM `{$this->base_prefix}sitemeta` WHERE site_id = {$this->network_id} AND meta_key = 'site_admins' ORDER BY meta_id LIMIT 1")->fetchColumn();
-            $logins = is_string($value) ? @unserialize($value, ['allowed_classes' => false]) : [];
-            $this->network_super_admin_logins = is_array($logins) ? array_unique(array_filter($logins, static function ($login): bool {
-                return is_string($login) && $login !== '';
-            })) : [];
+        if ($this->network_super_admin_ids !== null) {
+            return $this->network_super_admin_ids;
         }
-        return $this->network_super_admin_logins;
+        $value = $this->db->query("SELECT meta_value FROM `{$this->base_prefix}sitemeta` WHERE site_id = {$this->network_id} AND meta_key = 'site_admins' ORDER BY meta_id LIMIT 1")->fetchColumn();
+        $logins = is_string($value) ? $this->parse_network_super_admin_logins($value) : [];
+        $ids = [];
+        if ($logins) {
+            // Use the login index to find candidates. Compare the returned
+            // logins in PHP because WordPress matches the roster case-sensitively.
+            $statement = $this->db->prepare("SELECT ID, user_login FROM `{$this->base_prefix}users` WHERE user_login = ?");
+            foreach (array_unique($logins) as $login) {
+                $statement->execute([$login]);
+                $row = $statement->fetch(PdoConstants::fetch_assoc());
+                while ($row !== false) {
+                    $user_id = ltrim( (string) $row['ID'], '0');
+                    if ($row['user_login'] === $login && ctype_digit($user_id)) {
+                        $ids[] = $user_id;
+                    }
+                    $row = $statement->fetch(PdoConstants::fetch_assoc());
+                }
+            }
+        }
+        $this->network_super_admin_ids = $ids;
+        return $ids;
     }
 
-    /** @param string[] $logins Nonempty list of the selected network's super admin logins. */
-    private function get_network_super_admin_login_condition(array $logins): string
+    /**
+     * Reads WordPress's serialized array of login strings without invoking
+     * unserialize(), which cannot disable object creation on PHP 5.6.
+     *
+     * @return string[]
+     */
+    private function parse_network_super_admin_logins(string $value): array
     {
-        $encoded_logins = array_map(static function (string $login): string {
-            return "'" . strtoupper(bin2hex($login)) . "'";
-        }, $logins);
-        return 'HEX(CONVERT(user_login USING utf8mb4)) IN (' . implode(',', $encoded_logins) . ')';
+        if (!preg_match('/\Aa:([0-9]+):\{/', $value, $header)) {
+            return [];
+        }
+        $offset = strlen($header[0]);
+        $logins = [];
+        for ($index = 0; $index < (int) $header[1]; ++$index) {
+            // Array keys can be integers or strings; values must be strings.
+            for ($token = 0; $token < 2; ++$token) {
+                if ($token === 0 && preg_match('/\Gi:-?[0-9]+;/', $value, $key, 0, $offset)) {
+                    $offset += strlen($key[0]);
+                    continue;
+                }
+                if (!preg_match('/\Gs:([0-9]+):"/', $value, $string, 0, $offset)) {
+                    return [];
+                }
+                $offset += strlen($string[0]);
+                $length = (int) $string[1];
+                if ($length > strlen($value) - $offset - 2 || substr($value, $offset + $length, 2) !== '";') {
+                    return [];
+                }
+                if ($token === 1 && $length > 0) {
+                    $logins[] = substr($value, $offset, $length);
+                }
+                $offset += $length + 2;
+            }
+        }
+        return substr($value, $offset) === '}' ? $logins : [];
     }
 
     /**
@@ -388,12 +427,8 @@ class MultisiteDatabaseSelection {
             return "({$user_expression} = 0 OR " . $this->related_user_condition($user_expression) . ')';
         }
         $user_column = $table === $this->base_prefix . 'users' ? 'ID' : 'user_id';
-        $admin_logins = $this->get_network_super_admin_logins();
-        $admin_condition = '0';
-        if ($admin_logins) {
-            $exact_match = $this->get_network_super_admin_login_condition($admin_logins);
-            $admin_condition = "EXISTS (SELECT 1 FROM `{$this->base_prefix}users` WHERE ID=saved.user_id AND {$exact_match})";
-        }
+        $admin_ids = $this->get_network_super_admin_ids();
+        $admin_condition = $admin_ids ? 'saved.user_id IN (' . implode(',', $admin_ids) . ')' : '0';
         return "(SELECT CASE saved.reference_kind " .
             "WHEN 1 THEN EXISTS (SELECT 1 FROM `{$this->site_prefix}posts` WHERE ID=saved.reference_id AND post_author=saved.user_id) " .
             "WHEN 2 THEN EXISTS (SELECT 1 FROM `{$this->site_prefix}comments` WHERE comment_ID=saved.reference_id AND user_id=saved.user_id) " .
