@@ -71,11 +71,11 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
     public function testGeneratesNormalThumbnails(string $name): void
     {
         $this->write_image($this->uploads_directory . '/' . $name . '.png');
-        $request_path = '/wp-content/uploads/' . str_replace('%2F', '/', rawurlencode($name)) . '-2x2.png?version=1';
+        $request_path = '/wp-content/uploads/' . str_replace('%2F', '/', rawurlencode($name)) . '-300x150.png?version=1';
         [$status, $body] = $this->request($request_path);
         $this->assertSame(200, $status);
-        $this->assertSame([2, 1], array_slice(getimagesizefromstring($body), 0, 2));
-        $thumbnail_path = $this->uploads_directory . '/' . $name . '-2x2.png';
+        $this->assertSame([300, 150], array_slice(getimagesizefromstring($body), 0, 2));
+        $thumbnail_path = $this->uploads_directory . '/' . $name . '-300x150.png';
         $this->assertFileExists($thumbnail_path);
         $this->assertSame(file_get_contents($thumbnail_path), $body);
     }
@@ -92,7 +92,77 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
         $this->write_image($this->uploads_directory . '/photo-2x2.png');
         [$status, $body] = $this->request('/wp-content/uploads/photo-2x2.png');
         $this->assertSame(200, $status);
-        $this->assertSame([8, 4], array_slice(getimagesizefromstring($body), 0, 2));
+        $this->assertSame([800, 400], array_slice(getimagesizefromstring($body), 0, 2));
+    }
+
+    /** @dataProvider supportedSizes */
+    public function testGeneratesSupportedSizes(string $size, int $width, int $height): void
+    {
+        $image = imagecreatetruecolor($width < $height ? 1600 : 3200, $width < $height ? 3200 : 1600);
+        imagepng($image, $this->uploads_directory . '/photo.png');
+        imagedestroy($image);
+        [$status, $body] = $this->request('/wp-content/uploads/photo-' . $size . '.png');
+        $this->assertSame(200, $status);
+        $this->assertSame([$width, $height], array_slice(getimagesizefromstring($body), 0, 2));
+        $this->assertFileExists($this->uploads_directory . '/photo-' . $size . '.png');
+    }
+
+    /** @return array<string,array{string,int,int}> Fixed bounds and their aspect-ratio variants. */
+    public static function supportedSizes(): array
+    {
+        $sizes = [];
+        foreach ([150, 300, 768, 1024, 1536, 2048] as $width) {
+            $height = (int) ( $width / 2 );
+            $sizes['square-' . $width] = [$width . 'x' . $width, $width, $height];
+            $sizes['landscape-' . $width] = [$width . 'x' . $height, $width, $height];
+            $sizes['portrait-' . $width] = [$height . 'x' . $width, $height, $width];
+        }
+        return $sizes;
+    }
+
+    public function testFittedDimensionsAreRoundedFromTheSquareBound(): void
+    {
+        $image = imagecreatetruecolor(3000, 14);
+        imagepng($image, $this->uploads_directory . '/photo.png');
+        imagedestroy($image);
+        [$status, $body] = $this->request('/wp-content/uploads/photo-300x1.png');
+        $this->assertSame(200, $status);
+        $this->assertSame([300, 1], array_slice(getimagesizefromstring($body), 0, 2));
+    }
+
+    /** @dataProvider unsupportedSizes */
+    public function testUnsupportedSizesReturn404WithoutCreatingFiles(string $size): void
+    {
+        $this->write_image($this->uploads_directory . '/photo.png');
+        [$status, $body] = $this->request('/wp-content/uploads/photo-' . $size . '.png');
+        $this->assertFileDoesNotExist($this->uploads_directory . '/photo-' . $size . '.png');
+        $this->assertSame(404, $status, bin2hex($body));
+    }
+
+    /** @return array<string,array{string}> Request-supplied dimensions outside the supported sizes. */
+    public static function unsupportedSizes(): array
+    {
+        return [
+            'custom' => ['301x150'],
+            'wrong aspect ratio' => ['300x149'],
+            'full-size copy' => ['5000x5000'],
+            'another full-size copy' => ['5001x5000'],
+            'zero width' => ['0x300'],
+            'zero height' => ['300x0'],
+            'padded width' => ['0300x150'],
+            'padded height' => ['300x0150'],
+            'integer overflow' => [str_repeat('9', 100) . 'x300'],
+        ];
+    }
+
+    public function testGeneratedThumbnailCannotBecomeAnotherSource(): void
+    {
+        $this->write_image($this->uploads_directory . '/photo.png');
+        [$status] = $this->request('/wp-content/uploads/photo-300x150.png');
+        $this->assertSame(200, $status);
+        [$status, $body] = $this->request('/wp-content/uploads/photo-300x150-150x150.png');
+        $this->assertFileDoesNotExist($this->uploads_directory . '/photo-300x150-150x150.png');
+        $this->assertSame(404, $status, bin2hex($body));
     }
 
     /** @dataProvider dotSegmentPaths */
@@ -101,17 +171,17 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
         $this->write_image($this->root . '/outside/photo.png');
         [$status, $body] = $this->request($path);
         $this->assertSame(404, $status, bin2hex($body));
-        $this->assertFileDoesNotExist($this->root . '/outside/photo-2x2.png');
+        $this->assertFileDoesNotExist($this->root . '/outside/photo-300x150.png');
     }
 
     /** @return array<string,array{string}> Raw request targets sent without client normalization. */
     public static function dotSegmentPaths(): array
     {
         return [
-            'literal' => ['/wp-content/uploads/../../../outside/photo-2x2.png'],
-            'encoded' => ['/wp-content/uploads/%2e%2e/%2e%2e/%2e%2e/outside/photo-2x2.png'],
-            'backslashes' => ['/wp-content/uploads/..%5c..%5c..%5coutside/photo-2x2.png'],
-            'NUL' => ['/wp-content/uploads/%00/photo-2x2.png'],
+            'literal' => ['/wp-content/uploads/../../../outside/photo-300x150.png'],
+            'encoded' => ['/wp-content/uploads/%2e%2e/%2e%2e/%2e%2e/outside/photo-300x150.png'],
+            'backslashes' => ['/wp-content/uploads/..%5c..%5c..%5coutside/photo-300x150.png'],
+            'NUL' => ['/wp-content/uploads/%00/photo-300x150.png'],
         ];
     }
 
@@ -119,9 +189,9 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
     {
         $this->write_image($this->root . '/outside/photo.png');
         symlink($this->root . '/outside/photo.png', $this->uploads_directory . '/photo.png');
-        [$status, $body] = $this->request('/wp-content/uploads/photo-2x2.png');
+        [$status, $body] = $this->request('/wp-content/uploads/photo-300x150.png');
         $this->assertSame(404, $status, bin2hex($body));
-        $this->assertFileDoesNotExist($this->uploads_directory . '/photo-2x2.png');
+        $this->assertFileDoesNotExist($this->uploads_directory . '/photo-300x150.png');
     }
 
     public function testLinkedDirectoryWithSameRootPrefixIsNotWritten(): void
@@ -130,16 +200,16 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
         mkdir($outside_directory);
         $this->write_image($outside_directory . '/photo.png');
         symlink($outside_directory, $this->uploads_directory . '/linked');
-        [$status, $body] = $this->request('/wp-content/uploads/linked/photo-2x2.png');
+        [$status, $body] = $this->request('/wp-content/uploads/linked/photo-300x150.png');
         $this->assertSame(404, $status, bin2hex($body));
-        $this->assertFileDoesNotExist($outside_directory . '/photo-2x2.png');
+        $this->assertFileDoesNotExist($outside_directory . '/photo-300x150.png');
     }
 
     public function testDanglingThumbnailLinkIsNotWritten(): void
     {
         $this->write_image($this->uploads_directory . '/photo.png');
-        symlink($this->root . '/outside/new.png', $this->uploads_directory . '/photo-2x2.png');
-        [$status, $body] = $this->request('/wp-content/uploads/photo-2x2.png');
+        symlink($this->root . '/outside/new.png', $this->uploads_directory . '/photo-300x150.png');
+        [$status, $body] = $this->request('/wp-content/uploads/photo-300x150.png');
         $this->assertSame(404, $status, bin2hex($body));
         $this->assertFileDoesNotExist($this->root . '/outside/new.png');
     }
@@ -148,24 +218,24 @@ final class WpcloudThumbnailRuntimeTest extends TestCase {
     {
         $this->write_image($this->uploads_directory . '/2026/photo.png');
         symlink($this->uploads_directory . '/2026/photo.png', $this->uploads_directory . '/photo.png');
-        [$status, $body] = $this->request('/wp-content/uploads/photo-2x2.png');
+        [$status, $body] = $this->request('/wp-content/uploads/photo-300x150.png');
         $this->assertSame(200, $status);
-        $this->assertSame([2, 1], array_slice(getimagesizefromstring($body), 0, 2));
+        $this->assertSame([300, 150], array_slice(getimagesizefromstring($body), 0, 2));
     }
 
     public function testRepeatedWpContentSegmentCannotSelectAnotherDirectory(): void
     {
         mkdir($this->root . '/site/wp-content/private');
         $this->write_image($this->root . '/site/wp-content/private/photo.png');
-        [$status, $body] = $this->request('/wp-content/uploads/a/wp-content/private/photo-2x2.png');
+        [$status, $body] = $this->request('/wp-content/uploads/a/wp-content/private/photo-300x150.png');
         $this->assertSame(404, $status, bin2hex($body));
-        $this->assertFileDoesNotExist($this->root . '/site/wp-content/private/photo-2x2.png');
+        $this->assertFileDoesNotExist($this->root . '/site/wp-content/private/photo-300x150.png');
     }
 
     /** Writes a small real source image for the handler to decode. */
     private function write_image(string $path): void
     {
-        $image = imagecreatetruecolor(8, 4);
+        $image = imagecreatetruecolor(800, 400);
         imagepng($image, $path);
         imagedestroy($image);
     }
