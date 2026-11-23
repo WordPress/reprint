@@ -2120,6 +2120,63 @@ final class PushEndpointsTest extends TestCase {
     }
 
     /**
+     * Keeps unindexed target files when a local directory becomes empty.
+     */
+    public function testHighLevelSenderKeepsUnindexedTargetFilesWhenLocalDirectoryBecomesEmpty(): void
+    {
+        $local_docroot = $this->root . '/emptied-directory-local-docroot';
+        mkdir($local_docroot . '/wp-content/themes', 0700, true);
+        mkdir($this->docroot . '/wp-content/themes/mine', 0700, true);
+        mkdir($this->docroot . '/wp-content/themes/host-theme', 0700, true);
+        file_put_contents($this->docroot . '/wp-content/themes/mine/style.css', 'old');
+        file_put_contents($this->docroot . '/wp-content/themes/host-theme/style.css', 'host');
+        $local_index_fixture_file = $this->root . '/emptied-directory-local-index.jsonl';
+        $this->writeIndex($local_index_fixture_file, [
+            'wp-content/themes/mine/style.css' => [1, 3, 'file'],
+        ]);
+        $push_state_directory = $this->root . '/emptied-directory-state';
+        $this->seedLocalIndex($push_state_directory, $local_index_fixture_file);
+
+        $result = $this->runSender($local_docroot, $push_state_directory);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertFileDoesNotExist($this->docroot . '/wp-content/themes/mine/style.css');
+        $this->assertSame('host', file_get_contents($this->docroot . '/wp-content/themes/host-theme/style.css'));
+    }
+
+    /**
+     * Keeps unindexed target files when a local directory is removed.
+     */
+    public function testHighLevelSenderKeepsUnindexedTargetFilesWhenLocalDirectoryIsRemoved(): void
+    {
+        $local_docroot = $this->root . '/removed-directory-local-docroot';
+        mkdir($local_docroot . '/wp-content/themes/mine', 0700, true);
+        file_put_contents($local_docroot . '/wp-content/themes/mine/style.css', 'old');
+        mkdir($this->docroot . '/wp-content/themes/mine', 0700, true);
+        mkdir($this->docroot . '/wp-content/plugins/mine', 0700, true);
+        mkdir($this->docroot . '/wp-content/plugins/host-plugin', 0700, true);
+        file_put_contents($this->docroot . '/wp-content/themes/mine/style.css', 'old');
+        file_put_contents($this->docroot . '/wp-content/plugins/mine/mine.php', 'old');
+        file_put_contents($this->docroot . '/wp-content/plugins/host-plugin/host-plugin.php', 'host');
+        clearstatcache();
+        $local_style_stat = stat($local_docroot . '/wp-content/themes/mine/style.css');
+        $this->assertIsArray($local_style_stat);
+        $local_index_fixture_file = $this->root . '/removed-directory-local-index.jsonl';
+        $this->writeIndex($local_index_fixture_file, [
+            'wp-content/plugins/mine/mine.php' => [1, 3, 'file'],
+            'wp-content/themes/mine/style.css' => [$local_style_stat['ctime'], 3, 'file'],
+        ]);
+        $push_state_directory = $this->root . '/removed-directory-state';
+        $this->seedLocalIndex($push_state_directory, $local_index_fixture_file);
+
+        $result = $this->runSender($local_docroot, $push_state_directory);
+
+        $this->assertSame('complete', $result['status'], (string) json_encode($result));
+        $this->assertFileDoesNotExist($this->docroot . '/wp-content/plugins/mine/mine.php');
+        $this->assertSame('host', file_get_contents($this->docroot . '/wp-content/plugins/host-plugin/host-plugin.php'));
+    }
+
+    /**
      * Retains one open PushPlan while storing its cursor after each planning step.
      */
     public function testHighLevelSenderRetainsPushPlanAcrossPlanningSteps(): void

@@ -193,10 +193,11 @@ final class FileSyncPatchPlannerTest extends TestCase
         $planner->close();
     }
 
-    public function testCollapsesADeletedSubtreeToItsRoot(): void
+    public function testDeletesEachPatchBaseEntryOfARemovedSubtree(): void
     {
         $patch_base_index = $this->write_index('base.jsonl', [
             'gone/child.txt' => $this->entry('gone/child.txt'),
+            'gone/empty' => $this->entry('gone/empty', 1, 0, 'dir'),
             'gone/nested/leaf.txt' => $this->entry('gone/nested/leaf.txt'),
             'stays.txt' => $this->entry('stays.txt'),
         ]);
@@ -211,9 +212,37 @@ final class FileSyncPatchPlannerTest extends TestCase
 
         $this->assertSame(
             [
-                $this->delete_operation('gone'),
+                $this->delete_operation('gone/child.txt'),
+                $this->delete_operation('gone/empty'),
+                $this->delete_operation('gone/nested/leaf.txt'),
                 null,
+            ],
+            $this->collect_operations($planner)
+        );
+        $planner->close();
+    }
+
+    public function testKeepsADirectoryWhosePatchBaseDescendantsWereDeleted(): void
+    {
+        $patch_base_index = $this->write_index('base.jsonl', [
+            'themes/mine/style.css' => $this->entry('themes/mine/style.css'),
+            'themes/mine/templates/index.html' =>
+                $this->entry('themes/mine/templates/index.html'),
+        ]);
+        $patch_head_index = $this->write_index('head.jsonl', [
+            'themes' => $this->entry('themes', 2, 0, 'dir'),
+        ]);
+        $planner = FileSyncPatchPlanner::create(
+            $patch_base_index,
+            $patch_head_index,
+            $this->active_deletion_roots_file()
+        );
+
+        $this->assertSame(
+            [
                 null,
+                $this->delete_operation('themes/mine/style.css'),
+                $this->delete_operation('themes/mine/templates/index.html'),
             ],
             $this->collect_operations($planner)
         );

@@ -408,8 +408,8 @@ selects uncolored machine-readable output. Each JSONL change record has
 push record also has the local path `type`, `size`, and `ctime`; its type is
 `file`, `dir`, or `link`. These records form a local minimized push operation
 plan before remote exclusions: descendants represent a new non-empty
-directory, one deleted subtree root covers its descendants, and metadata-only
-changes to non-empty directories select no operation. The final JSONL record
+directory, each deleted local index entry has its own delete record, and
+metadata-only changes to non-empty directories select no operation. The final JSONL record
 has `status: "complete"`, `local_paths_to_push`, and
 `local_paths_to_delete`.
 
