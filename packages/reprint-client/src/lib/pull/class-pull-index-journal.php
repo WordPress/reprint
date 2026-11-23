@@ -4,7 +4,7 @@ use WordPress\Reprint\Server\FileIndexProcessor;
 use WordPress\Reprint\Server\Utils;
 
 use function Reprint\Importer\merge_local_index_mutations;
-use function Reprint\Importer\sort_index_file;
+use function Reprint\Importer\sort_index_updates_keeping_last;
 use function Reprint\Importer\write_local_index_update;
 
 require_once __DIR__ . '/../class-local-link.php';
@@ -491,9 +491,10 @@ class PullIndexJournal
             "INDEX MERGE START | merging pull index WAL into {$this->remote_index_path}",
         );
 
+        $remote_index_updates_path = $this->write_sorted_remote_index_updates();
         $remote_index_reader = new RemoteIndexReader($this->remote_index_path, $remote_path_format);
         $remote_index_reader->open();
-        $pull_index_wal_file_handle = fopen($this->pull_index_wal_path, "r");
+        $pull_index_wal_file_handle = fopen($remote_index_updates_path, "r");
         $remote_index_replacement_file_handle = fopen($remote_index_replacement_file, "w");
 
         if (!$pull_index_wal_file_handle || !$remote_index_replacement_file_handle) {
@@ -586,6 +587,7 @@ class PullIndexJournal
         $remote_index_reader->close();
         fclose($pull_index_wal_file_handle);
         fclose($remote_index_replacement_file_handle);
+        @unlink($remote_index_updates_path);
 
         if (!rename($remote_index_replacement_file, $this->remote_index_path)) {
             throw new RuntimeException("Failed to replace the remote index file.");
@@ -646,7 +648,7 @@ class PullIndexJournal
         fclose($local_index_updates_handle);
 
         if ($local_index_updates_written > 0) {
-            sort_index_file($local_index_updates_path);
+            sort_index_updates_keeping_last($local_index_updates_path, "path");
             merge_local_index_mutations(
                 $this->local_index_path,
                 $local_index_updates_path
@@ -662,6 +664,47 @@ class PullIndexJournal
         ($this->log_audit_message)(
             "FILE TRUNCATE | {$this->pull_index_wal_path} | pull index WAL batch applied"
         );
+    }
+
+    /**
+     * Copies the WAL's remote index updates into a file sorted by path.
+     *
+     * The WAL follows completion order. Windows creates links only once the
+     * fetch completes, so their records follow paths which sort after them.
+     * The remote index merge walks both inputs in path order, and an unsorted
+     * input would leave the remote index unsorted. The next pull would then
+     * read the misplaced entries as deletions.
+     *
+     * @return string Path of the sorted copy, with the last update per path.
+     * @throws RuntimeException When the WAL or the copy cannot be accessed.
+     */
+    private function write_sorted_remote_index_updates(): string
+    {
+        $remote_index_updates_path = $this->pull_index_wal_path . ".remote";
+        $pull_index_wal_file_handle = fopen($this->pull_index_wal_path, "r");
+        $remote_index_updates_handle = fopen($remote_index_updates_path, "w");
+        if (!$pull_index_wal_file_handle || !$remote_index_updates_handle) {
+            throw new RuntimeException("Failed to prepare the remote index updates.");
+        }
+        while (($remote_index_update = $this->read_raw_remote_index_update($pull_index_wal_file_handle)) !== null) {
+            $remote_index_update_record = $remote_index_update["delete"]
+                ? ["op" => "-"]
+                : [
+                    "op" => "+",
+                    "remote_path_ctime" => $remote_index_update["ctime"],
+                    "remote_path_size" => $remote_index_update["size"],
+                    "remote_path_type" => $remote_index_update["type"],
+                ];
+            $remote_index_update_record["remote_absolute_path_b64"] = base64_encode($remote_index_update["path"]);
+            fwrite(
+                $remote_index_updates_handle,
+                Utils::json_encode_or_throw($remote_index_update_record) . "\n"
+            );
+        }
+        fclose($pull_index_wal_file_handle);
+        fclose($remote_index_updates_handle);
+        sort_index_updates_keeping_last($remote_index_updates_path, "remote_absolute_path_b64");
+        return $remote_index_updates_path;
     }
 
     /**

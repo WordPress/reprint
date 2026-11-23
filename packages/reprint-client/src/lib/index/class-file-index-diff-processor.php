@@ -155,6 +155,12 @@ final class FileIndexDiffProcessor
     /** Closest consumed new-index path which sorts before the current path. */
     private ?string $preceding_path_in_new_index = null;
 
+    /** Last old-index path consumed by this processor, for the order check. */
+    private ?string $consumed_old_index_path = null;
+
+    /** Last new-index path consumed by this processor, for the order check. */
+    private ?string $consumed_new_index_path = null;
+
     /** Whether both indexes reached EOF. */
     private bool $complete = false;
 
@@ -291,6 +297,7 @@ final class FileIndexDiffProcessor
                     throw new RuntimeException("Failed to read the old file-index byte offset.");
                 }
                 $this->cursor["old_index_byte_offset"] = $old_index_byte_offset;
+                $this->consumed_old_index_path = $this->old_index_entry["path"];
                 $this->old_index_entry = null;
                 $this->old_index_entry_loaded = false;
             }
@@ -303,6 +310,7 @@ final class FileIndexDiffProcessor
                 $this->cursor["preceding_new_index_entry_path_b64"] = base64_encode(
                     $this->new_index_entry["path"]
                 );
+                $this->consumed_new_index_path = $this->new_index_entry["path"];
                 $this->new_index_entry = null;
                 $this->new_index_entry_loaded = false;
             }
@@ -318,6 +326,7 @@ final class FileIndexDiffProcessor
                 $this->decode_old_index_line
             );
             $this->old_index_entry_loaded = true;
+            $this->assert_sorted_after($this->consumed_old_index_path, $this->old_index_entry, "old");
         }
         if (!$this->new_index_entry_loaded) {
             $this->new_index_entry = $this->read_next_index_entry(
@@ -325,6 +334,7 @@ final class FileIndexDiffProcessor
                 $this->decode_new_index_line
             );
             $this->new_index_entry_loaded = true;
+            $this->assert_sorted_after($this->consumed_new_index_path, $this->new_index_entry, "new");
         }
         if ($this->old_index_entry === null && $this->new_index_entry === null) {
             $this->complete = true;
@@ -712,6 +722,30 @@ final class FileIndexDiffProcessor
      * @phpstan-param callable(string):IndexEntry $decode_index_line
      * @phpstan-return IndexEntry|null
      */
+    /**
+     * Refuses an index whose paths do not strictly ascend.
+     *
+     * The single-pass merge reads an out-of-order entry as a path missing
+     * from the other index, so an unsorted old index would turn present
+     * paths into deletions.
+     *
+     * @param string|null     $consumed_path Path consumed before the entry.
+     * @param IndexEntry|null $index_entry   Entry just read, or null at EOF.
+     * @param 'old'|'new'     $index_name    Index which supplied the entry.
+     * @throws UnexpectedValueException When the entry does not sort after the consumed path.
+     */
+    private function assert_sorted_after(?string $consumed_path, ?array $index_entry, string $index_name): void
+    {
+        if ($consumed_path === null || $index_entry === null) {
+            return;
+        }
+        if (strcmp($consumed_path, $index_entry["path"]) >= 0) {
+            throw new UnexpectedValueException(
+                "The {$index_name} file index is not sorted by path: {$index_entry["path"]} follows {$consumed_path}."
+            );
+        }
+    }
+
     private function read_next_index_entry(
         $index_handle,
         callable $decode_index_line

@@ -195,3 +195,70 @@ function try_exec_sort_index_file(
     }
     return true;
 }
+
+/**
+ * Sort a JSONL file of index updates by path, keeping the last update for
+ * each path.
+ *
+ * The pull index WAL lists updates in completion order, while the index
+ * merges walk both inputs in path order. Updates to one path keep their WAL
+ * order through the sort, so the surviving line is the one written last.
+ *
+ * @param string $path       The JSONL update file to sort in place.
+ * @param string $path_field Name of the field which holds the base64 path.
+ */
+function sort_index_updates_keeping_last(string $path, string $path_field): void
+{
+    $keyed = $path . '.keyed';
+    $input = fopen($path, 'r');
+    $output = fopen($keyed, 'w');
+    if (!$input || !$output) {
+        throw new RuntimeException("Failed to prepare the index updates in {$path} for sorting.");
+    }
+    $sequence = 0;
+    while (($line = fgets($input)) !== false) {
+        $line = rtrim($line, "\r\n");
+        if ($line === '') {
+            continue;
+        }
+        $update_path = base64_decode((string) (json_decode($line, true)[$path_field] ?? ''), true);
+        if (!is_string($update_path) || $update_path === '') {
+            throw new RuntimeException("Invalid index update path in {$path}.");
+        }
+        // A space sorts before every hex digit, so a path sorts before the
+        // paths it prefixes, matching strcmp() on the raw path bytes.
+        fwrite($output, bin2hex($update_path) . ' ' . sprintf('%020d', $sequence++) . "\t" . $line . "\n");
+    }
+    fclose($input);
+    fclose($output);
+
+    $sorter = new \ExternalMergeSort(
+        static fn(string $line): string => substr($line, 0, (int) strpos($line, "\t")),
+        32 * 1024 * 1024,
+        false,
+        dirname($path),
+    );
+    $sorter->sort($keyed);
+
+    $input = fopen($keyed, 'r');
+    $output = fopen($path, 'w');
+    if (!$input || !$output) {
+        throw new RuntimeException("Failed to write the sorted index updates to {$path}.");
+    }
+    $pending_path_key = null;
+    $pending_line = null;
+    while (($line = fgets($input)) !== false) {
+        $path_key = substr($line, 0, (int) strpos($line, ' '));
+        if ($pending_line !== null && $path_key !== $pending_path_key) {
+            fwrite($output, $pending_line);
+        }
+        $pending_path_key = $path_key;
+        $pending_line = substr($line, (int) strpos($line, "\t") + 1);
+    }
+    if ($pending_line !== null) {
+        fwrite($output, $pending_line);
+    }
+    fclose($input);
+    fclose($output);
+    @unlink($keyed);
+}

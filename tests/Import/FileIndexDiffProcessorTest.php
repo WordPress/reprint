@@ -71,6 +71,24 @@ final class FileIndexDiffProcessorTest extends TestCase
         $processor->close();
     }
 
+    /**
+     * The merge would read the misplaced old entry as absent from the new
+     * index, and files-pull would delete it locally.
+     */
+    public function testRefusesAnOldIndexWhosePathsDoNotAscend(): void
+    {
+        $paths = ['wp-content/index.php', 'wp-content/z.txt', 'wp-content/a-link'];
+        $old_index_file = $this->write_index('old.jsonl', array_map(fn($path) => $this->entry($path), $paths));
+        $new_index_file = $this->write_index('new.jsonl', array_map(fn($path) => $this->entry($path), $paths));
+        $processor = FileIndexDiffProcessor::create($old_index_file, $new_index_file);
+
+        $this->expectException(UnexpectedValueException::class);
+        $this->expectExceptionMessage('The old file index is not sorted by path: wp-content/a-link follows wp-content/z.txt.');
+        while ($processor->next_path()) {
+            $this->assertSame('unchanged', $processor->get_path_transition());
+        }
+    }
+
     public function testClassifiesAddedDeletedModifiedAndUnchangedPaths(): void
     {
         $old_index_file = $this->write_index('old.jsonl', [

@@ -73,6 +73,36 @@ final class PullIndexWalTest extends TestCase
         $this->assertFileDoesNotExist($pullIndexWalPath);
     }
 
+    /**
+     * Windows defers links until the fetch completes, so their records reach
+     * the WAL after paths which sort later. A later diff walks the remote
+     * index as a sorted list and reads an out-of-order entry as a deletion.
+     */
+    public function testOutOfOrderRecordsKeepTheRemoteIndexSortedWithTheLastRecordWinning(): void
+    {
+        $journal = $this->journal($this->client());
+        $journal->record_remote_upsert('/site/b.txt', 1, 1, 'file');
+        $journal->apply_pending_records('unix');
+
+        $journal->record_remote_upsert('/site/c.txt', 1, 1, 'file');
+        $journal->record_remote_upsert('/site/d/link', 1, 0, 'link');
+        $journal->record_remote_upsert('/site/a/link', 1, 0, 'link');
+        $journal->record_remote_upsert('/site/b.txt', 2, 2, 'file');
+        $journal->record_remote_invalidation('/site/c.txt');
+        $journal->record_remote_upsert('/site/a/link', 3, 0, 'link');
+        $journal->apply_pending_records('unix');
+
+        $this->assertSame(
+            ['/site/a/link', '/site/b.txt', '/site/d/link'],
+            $this->remoteIndexEntryPaths()
+        );
+        $ctimes = array_map(
+            static fn(string $line): int => json_decode($line, true)['ctime'],
+            file($this->pullStateDirectory . '/remote-index.jsonl', FILE_IGNORE_NEW_LINES)
+        );
+        $this->assertSame([3, 2, 1], $ctimes);
+    }
+
     public function testRecordedMutationsUsePlusAndMinusOperations(): void
     {
         $journal = $this->journal($this->client());
