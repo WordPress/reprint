@@ -48,6 +48,13 @@ Run the same command to continue after interruption. See [Database transfer refe
 
 Configure the destination web server and `wp-config.php` for the destination paths and database. Do not reuse source-host database credentials. [Prepare a hosting destination](https://developer.wordpress.org/reprint/build-with-reprint/hosting/) covers cleanup and startup checks; [Runtime configuration](https://developer.wordpress.org/reprint/reference/runtime/) covers generated server configuration.
 
+With the default linked layout created above, `/srv/site/wp-load.php` and `/srv/site/wp-config.php` are symlinks pointing into `/srv/reprint-files`. Because PHP resolves `wp-load.php` through its symlink to the pulled core directory inside `/srv/reprint-files`, WordPress looks for `wp-config.php` next to that target (or one directory above it) rather than in `/srv/site`. If an editor or deployment step replaces `/srv/site/wp-config.php` with a regular file while core files remain linked, WordPress continues loading the untouched `wp-config.php` inside `/srv/reprint-files`.
+
+Choose one of two ways to configure `wp-config.php`:
+
+- **Keep linked core (default):** Edit the `wp-config.php` file that the `/srv/site/wp-config.php` symlink resolves to inside `/srv/reprint-files`, and keep the symlink in `/srv/site` intact rather than replacing it with a regular file.
+- **Write a regular `wp-config.php` in `/srv/site`:** Add `--core-files=copy` to the `pull` command (or run `flat-docroot` with `--core-files=copy` and `--flatten-to=/srv/site`) so WordPress core—including `index.php` and `wp-load.php`—is copied as real files in `/srv/site`. Because `--core-files=copy` still creates `wp-config.php` as a symlink alongside `wp-content` and other non-core site files, remove `/srv/site/wp-config.php` first before writing a regular `wp-config.php` file there. Running `pull` or `flat-docroot` again against `/srv/site` will stop on that regular `wp-config.php` unless `--force` is passed (which replaces it with a symlink again).
+
 Before opening the copy, disable outgoing mail, scheduled jobs, payments, and other production service connections that must not run from a second site. These settings are specific to your site and are not all handled by Reprint.
 
 Test pages, assets, administrator login, forms, and the plugins your site needs. Use a host preview or local DNS override to test the destination before changing public DNS. A successful transfer alone does not confirm that every service works.
